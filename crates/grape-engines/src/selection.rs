@@ -2,19 +2,15 @@
 //! that reads the disk on the planner's behalf (`grape-core` stays pure).
 
 use std::collections::{BTreeSet, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use grape_core::{DirSnapshot, OutputLocation, Selection, SelectionItem, Settings};
 
-use crate::output::unique_suffix;
+use crate::output::create_unique;
 
 /// Prefix of the writability probe files.
 const PROBE_PREFIX: &str = ".grape-probe-";
-
-/// How many probe names are tried when one is (improbably) taken.
-const PROBE_ATTEMPTS: usize = 3;
 
 /// Builds the [`Selection`] that `grape_core::plan` needs for `paths`.
 ///
@@ -89,16 +85,11 @@ fn snapshot(dir: &Path) -> DirSnapshot {
 
 /// True when a new file can be created in `dir` and removed again.
 fn probe_writable(dir: &Path) -> bool {
-    for _ in 0..PROBE_ATTEMPTS {
-        let probe = dir.join(format!("{PROBE_PREFIX}{}", unique_suffix()));
-        match OpenOptions::new().write(true).create_new(true).open(&probe) {
-            Ok(file) => {
-                drop(file);
-                return fs::remove_file(&probe).is_ok();
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return false,
+    match create_unique(dir, PROBE_PREFIX, "") {
+        Ok((probe, file)) => {
+            drop(file);
+            fs::remove_file(probe).is_ok()
         }
+        Err(_) => false,
     }
-    false
 }
