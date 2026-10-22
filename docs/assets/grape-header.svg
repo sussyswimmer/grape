@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320" role="img" aria-label="Grape: drag a file, tap a key, drop it on the wheel">
+  <!-- README header for Grape. Original artwork. -->
+  <defs>
+    <clipPath id="banner">
+      <rect width="1280" height="320" rx="28"/>
+    </clipPath>
+  </defs>
+  <rect width="1280" height="320" rx="28" fill="#EEE6FB"/>
+  <g clip-path="url(#banner)">
+    <circle cx="1230" cy="-10" r="150" fill="#E3D6F8"/>
+    <circle cx="860" cy="330" r="90" fill="#E7DCF9"/>
+  </g>
+
+  <!-- App mark (same shapes as apps/desktop/src-tauri/icons/grape-icon.svg) -->
+  <g transform="translate(72 60) scale(0.1953125)">
+    <rect width="1024" height="1024" rx="228" fill="#5E2B97"/>
+    <path d="M512 300 C 510 250, 520 205, 548 168" fill="none" stroke="#3F7A49" stroke-width="34" stroke-linecap="round"/>
+    <path d="M548 176 C 610 92, 742 74, 820 118 C 766 206, 648 244, 548 176 Z" fill="#5FA36A"/>
+    <path d="M574 172 C 640 142, 712 126, 790 124" fill="none" stroke="#4A8A55" stroke-width="12" stroke-linecap="round"/>
+    <g fill="#C4A6F1" stroke="#5E2B97" stroke-width="16">
+      <circle cx="282" cy="410" r="122"/>
+      <circle cx="742" cy="410" r="122"/>
+      <circle cx="512" cy="400" r="126"/>
+      <circle cx="397" cy="605" r="122"/>
+      <circle cx="627" cy="605" r="122"/>
+      <circle cx="512" cy="795" r="120"/>
+    </g>
+    <g fill="#F1E9FD" opacity="0.85">
+      <ellipse cx="240" cy="364" rx="34" ry="24" transform="rotate(-35 240 364)"/>
+      <ellipse cx="700" cy="364" rx="34" ry="24" transform="rotate(-35 700 364)"/>
+      <ellipse cx="468" cy="352" rx="36" ry="25" transform="rotate(-35 468 352)"/>
+      <ellipse cx="355" cy="559" rx="34" ry="24" transform="rotate(-35 355 559)"/>
+      <ellipse cx="585" cy="559" rx="34" ry="24" transform="rotate(-35 585 559)"/>
+      <ellipse cx="470" cy="750" rx="33" ry="23" transform="rotate(-35 470 750)"/>
+    </g>
+  </g>
+
+  <!-- Wordmark and tagline -->
+  <g font-family="'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif">
+    <text x="310" y="172" font-size="112" font-weight="700" fill="#5E2B97" letter-spacing="-2">Grape</text>
+    <text x="314" y="222" font-size="30" font-weight="600" fill="#4B1F7A">Drag a file. Tap a key. Drop it on the wheel.</text>
+    <text x="314" y="260" font-size="22" fill="#6A5884">Offline file conversion. Free and open source.</text>
+  </g>
+
+  <!-- A wheel of six segments around a dragged file -->
+  <circle cx="1080" cy="160" r="134" fill="#FFFFFF" fill-opacity="0.7" stroke="#B596E6" stroke-width="2"/>
+  <g fill="#B596E6" fill-opacity="0.55">
+    <path d="M1019.7 49.3 A126.0 126.0 0 0 1 1140.3 49.3 L1102.4 114.9 A50.4 50.4 0 0 0 1057.6 114.9 Z"/>
+    <path d="M1206.0 163.1 A126.0 126.0 0 0 1 1145.7 267.5 L1107.9 202.0 A50.4 50.4 0 0 0 1130.3 163.2 Z"/>
+    <path d="M1140.3 270.7 A126.0 126.0 0 0 1 1019.7 270.7 L1057.6 205.1 A50.4 50.4 0 0 0 1102.4 205.1 Z"/>
+    <path d="M1014.3 267.5 A126.0 126.0 0 0 1 954.0 163.2 L1029.7 163.2 A50.4 50.4 0 0 0 1052.1 202.0 Z"/>
+    <path d="M954.0 156.8 A126.0 126.0 0 0 1 1014.3 52.5 L1052.1 118.0 A50.4 50.4 0 0 0 1029.7 156.8 Z"/>
+  </g>
+  <path d="M1145.7 52.5 A126.0 126.0 0 0 1 1206.0 156.8 L1130.3 156.8 A50.4 50.4 0 0 0 1107.9 118.0 Z" fill="#7442B8"/>
+
+  <!-- The dragged file -->
+  <g transform="translate(1062 136)">
+    <path d="M0 4 Q0 0 4 0 H24 L36 12 V44 Q36 48 32 48 H4 Q0 48 0 44 Z" fill="#FFFFFF" stroke="#5E2B97" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M24 0 V12 H36" fill="none" stroke="#5E2B97" stroke-width="3" stroke-linejoin="round"/>
+    <rect x="7" y="24" width="22" height="4" rx="2" fill="#B596E6"/>
+    <rect x="7" y="33" width="15" height="4" rx="2" fill="#B596E6"/>
+  </g>
+</svg>
