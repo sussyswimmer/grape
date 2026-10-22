@@ -125,7 +125,9 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 ## D15: Overlay ↔ Rust messages (2026-10-22, proposed, confirm)
 - **`@tauri-apps/api` 2.12.1** (Apache-2.0 OR MIT), pinned to match `tauri` 2.12.1 and over 14 days old (D9). The overlay uses it to listen for `wheel://open`, `wheel://highlight` and `wheel://close`, and to call one command.
 - **`wheel_painted(seq)`:** the overlay reports when a wheel is on screen, so the log shows how long it took from the key (ROADMAP M1: under 100 ms). `build.rs` lists the app's commands, so each gets its own permission, and `capabilities/overlay.json` grants only `allow-wheel-painted`, only to the overlay. Unlisted commands can't be called.
-- **App crate dependencies:** `grape-core` (wheel layout, hit test, anchor clamping) and `serde` (event payloads), both already in the workspace (D9).
+- **App crate dependencies:** `grape-core` (wheel layout, hit test, anchor clamping) and `serde` (event payloads), both already in the workspace (D9); `serde_json` dev-only, to check payloads against the UI's golden JSON.
+- **`toast_clicked(id)`:** granted only to the toast window (`capabilities/toast.json`, with event listen/unlisten). The page sends the toast's id, never a path; Rust looks up what to reveal.
+- **WebView2 flags:** every window uses the same `additionalBrowserArgs` (`ui_windows::BROWSER_ARGS`, repeated in `tauri.conf.json`; a test checks they match), because WebView2 won't start windows with different flags in one profile. Setting flags replaces wry's defaults, so the string keeps wry's `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection` and adds `--autoplay-policy=no-user-gesture-required` so the overlay's tick plays without a click.
 
 ---
 

@@ -17,12 +17,13 @@ use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
-use grape_core::SelectionItem;
+use grape_core::{SelectionItem, WheelEntry};
 use grape_platform::{DisplayBounds, DragMonitor, DragSignal, DropEvent, PlatformError, Rect};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
 use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
+use crate::toast::{self, Toaster};
 use crate::ui_windows::OVERLAY;
 
 /// Inputs buffered for the controller thread.
@@ -199,20 +200,38 @@ fn apply(app: &AppHandle, effect: Effect) {
                 }
             }
         }
-        Effect::Run(request) => run(&request),
+        Effect::Run(request) => run(app, &request),
         Effect::Log(line) => log::info!("{line}"),
     }
 }
 
-/// Runs a drop's job. Conversions arrive with the engines; until then the
-/// request is only logged.
-fn run(request: &RunRequest) {
+/// Runs a drop's job. Conversions arrive with the engines; until then each
+/// drop gets an info toast saying so.
+fn run(app: &AppHandle, request: &RunRequest) {
     log::info!(
-        "wheel {}: would run {:?} on {} item(s); engines aren't wired yet",
+        "wheel {}: run {:?} on {} item(s)",
         request.seq,
         request.entry,
         request.items.len()
     );
+    let id = app.state::<Toaster>().next_id();
+    let toast = match request.entry {
+        WheelEntry::Convert(to) => {
+            let from = request
+                .items
+                .first()
+                .and_then(SelectionItem::format)
+                .map_or("This file", |format| format.display_name());
+            toast::not_yet(
+                id,
+                "Not in this build yet",
+                Some(format!("{from} to {} is coming.", to.display_name())),
+            )
+        }
+        WheelEntry::Tool(_) => toast::not_yet(id, "Tools arrive in a later build.", None),
+        WheelEntry::Action(_) => toast::not_yet(id, "File actions arrive in a later build.", None),
+    };
+    toast::show(app, toast, request.anchor, &request.display);
 }
 
 /// Frames the overlay on the monitor and shows it. The wheel was already

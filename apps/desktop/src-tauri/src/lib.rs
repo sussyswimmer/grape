@@ -6,6 +6,7 @@
 
 pub mod controller;
 pub mod events;
+mod toast;
 mod tray;
 mod ui_windows;
 mod wheel;
@@ -53,7 +54,11 @@ pub fn run() -> anyhow::Result<()> {
                 .build(),
         )
         .manage(GrapeState::default())
-        .invoke_handler(tauri::generate_handler![wheel::wheel_painted])
+        .manage(toast::Toaster::default())
+        .invoke_handler(tauri::generate_handler![
+            wheel::wheel_painted,
+            toast::toast_clicked
+        ])
         .on_window_event(wheel::on_overlay_window_event)
         .setup(|app| {
             // A menu-bar app on macOS: no Dock icon, no app menu.
@@ -67,6 +72,9 @@ pub fn run() -> anyhow::Result<()> {
             // Not fatal: the tray still works, the wheel just won't show.
             if let Err(err) = ui_windows::prepare_overlay(app.handle()) {
                 log::error!("could not prepare the overlay window: {err:#}");
+            }
+            if let Err(err) = ui_windows::prepare_toast(app.handle()) {
+                log::error!("could not prepare the toast window: {err:#}");
             }
             wheel::start(app.handle());
             log::info!("Grape {} is running", env!("CARGO_PKG_VERSION"));

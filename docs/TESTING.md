@@ -35,9 +35,10 @@ App shell
 
 Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: drag a PNG from Explorer, tap Shift → a ring appears at the cursor, then fills in with PNG's targets (JPG, WEBP, HEIC, TIFF, AVIF, BMP, PDF; JPG at the top). The log shows `wheel 1 open: Conversions at (x, y)…`, `1 item(s) entered; 7 segment(s)` and `overlay drop target on N of M window(s)`.
-- [ ] win: hover the segments → each one highlights and the middle shows its title. Drop on JPG (the top) → the log shows `drop on the Conversions wheel: segment 0 (Convert(Jpg)) …` with the file's full path, then `would run Convert(Jpg)` (conversions arrive with the engines), and the file is still where it was.
+- [ ] win: hover the segments → each one highlights with a soft tick, and the middle shows its title. Drop on JPG (the top) → the log shows `drop on the Conversions wheel: segment 0 (Convert(Jpg)) …` with the file's full path, a toast under the wheel says "Not in this build yet / PNG to JPG is coming." and fades after a few seconds, and the file is still where it was.
+- [ ] win: the toast never takes the keyboard from the window you were in, has no taskbar or Alt-Tab entry, and dropping a file on it does nothing.
 - [ ] win: tap Ctrl, then Alt, mid-drag → the wheel swaps in place to the tools (COMPRESS, METADATA) and then the six file actions.
-- [ ] win: drag a folder and tap Shift → no segments, and a message under the wheel says there's nothing to convert and names the Alt key.
+- [ ] win: drag a folder and tap Shift → no segments; the wheel says there's nothing to convert and names the Alt key for file actions.
 - [ ] win: drop in the middle circle or off the ring, including far from the wheel on the same monitor → the log says `no segment (cancel)`, nothing moves, and the file doesn't land in the window underneath.
 - [ ] win: drop a scratch file onto the Settings window with Shift held → nothing happens (no drop cursor), and the file stays where it was.
 - [ ] win: Esc mid-drag → the ring hides; Explorer cancels its drag too. The file is untouched.

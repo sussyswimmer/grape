@@ -1,5 +1,5 @@
-//! Grape's webview windows: the hidden overlay (declared in tauri.conf.json)
-//! and the settings window (created on first use).
+//! Grape's webview windows: the hidden overlay and toast (declared in
+//! tauri.conf.json) and the settings window (created on first use).
 
 use std::sync::{Mutex, PoisonError};
 
@@ -10,6 +10,15 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 pub const OVERLAY: &str = "overlay";
 /// Label of the settings window.
 pub const SETTINGS: &str = "settings";
+
+/// WebView2 flags for every Grape window. They must be identical across
+/// windows that share a WebView2 profile, so tauri.conf.json repeats this
+/// exact string (a test checks). Setting any flags replaces wry's defaults,
+/// so its `--disable-features=…` is kept, and autoplay is allowed so the
+/// overlay's tick can play without a click (`docs/design/m1-drag-wheel.md`
+/// §0.6). Ignored off Windows.
+pub const BROWSER_ARGS: &str =
+    "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required";
 
 /// Held while Settings is looked up and, if needed, built. Tauri rejects a
 /// duplicate label only once the first window is registered, which happens
@@ -37,6 +46,21 @@ pub fn prepare_overlay(app: &AppHandle) -> anyhow::Result<()> {
     #[cfg(not(target_os = "windows"))]
     let _ = overlay;
 
+    Ok(())
+}
+
+/// Gets the toast ready at startup: the overlay's tool-window, no-activate
+/// styles, and a drop target that refuses everything. Main thread only.
+///
+/// # Errors
+/// Fails if the toast window from tauri.conf.json doesn't exist.
+pub fn prepare_toast(app: &AppHandle) -> anyhow::Result<()> {
+    let toast = app
+        .get_webview_window(crate::toast::TOAST)
+        .context("the toast window from tauri.conf.json is missing")?;
+    #[cfg(target_os = "windows")]
+    windows_overlay::harden(&toast);
+    refuse_drops(app, &toast);
     Ok(())
 }
 
@@ -69,16 +93,18 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(560.0, 420.0)
         .min_inner_size(420.0, 320.0)
         .center()
+        .additional_browser_args(BROWSER_ARGS)
         .build()?;
     refuse_drops(app, &window);
     window.set_focus()?;
     Ok(())
 }
 
-/// Settings takes no drops. On Windows, wry's and tao's drop handlers would
-/// accept a file there without setting the drop effect, which Explorer can
-/// read as a move (DECISIONS D13), so a refusing target replaces them. Runs
-/// on the main thread, which owns the window; failures are logged.
+/// Settings and the toast take no drops. On Windows, wry's and tao's drop
+/// handlers would accept a file there without setting the drop effect,
+/// which Explorer can read as a move (DECISIONS D13), so a refusing target
+/// replaces them. Runs on the main thread, which owns the window; failures
+/// are logged.
 fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -87,21 +113,22 @@ fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
             let hwnd = match window.hwnd() {
                 Ok(hwnd) => hwnd.0 as isize,
                 Err(err) => {
-                    log::error!("settings drop guard: no window handle: {err}");
+                    log::error!("{} drop guard: no window handle: {err}", window.label());
                     return;
                 }
             };
             match grape_platform::windows::refuse_drops(hwnd) {
                 Ok(coverage) => log::info!(
-                    "settings refuses drops on {} of {} window(s)",
+                    "{} refuses drops on {} of {} window(s)",
+                    window.label(),
                     coverage.registered,
                     coverage.windows
                 ),
-                Err(err) => log::error!("settings drop guard: {err}"),
+                Err(err) => log::error!("{} drop guard: {err}", window.label()),
             }
         });
         if let Err(err) = queued {
-            log::error!("settings drop guard: could not reach the main thread: {err}");
+            log::error!("drop guard: could not reach the main thread: {err}");
         }
     }
     #[cfg(not(target_os = "windows"))]
@@ -189,6 +216,58 @@ mod windows_overlay {
                 grape_platform::windows::describe_ex_style(style)
             ),
             Err(err) => log::warn!("overlay ex-style ({when}): unreadable: {err}"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn config_windows() -> Vec<Value> {
+        let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        config["app"]["windows"].as_array().cloned().unwrap()
+    }
+
+    /// WebView2 refuses to start a second window with other flags in the
+    /// same profile, so every window must use exactly BROWSER_ARGS.
+    #[test]
+    fn every_configured_window_uses_the_shared_browser_args() {
+        let windows = config_windows();
+        assert!(!windows.is_empty());
+        for window in windows {
+            assert_eq!(
+                window["additionalBrowserArgs"].as_str(),
+                Some(BROWSER_ARGS),
+                "{}",
+                window["label"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_toast_is_hidden_topmost_and_never_focused() {
+        let windows = config_windows();
+        let toast = windows
+            .iter()
+            .find(|w| w["label"] == crate::toast::TOAST)
+            .unwrap();
+        assert_eq!(toast["url"], "toast.html");
+        assert_eq!(
+            (toast["width"].as_f64(), toast["height"].as_f64()),
+            (Some(320.0), Some(64.0))
+        );
+        for (key, value) in [
+            ("visible", false),
+            ("transparent", true),
+            ("decorations", false),
+            ("alwaysOnTop", true),
+            ("skipTaskbar", true),
+            ("focus", false),
+            ("focusable", false),
+        ] {
+            assert_eq!(toast[key].as_bool(), Some(value), "{key}");
         }
     }
 }
