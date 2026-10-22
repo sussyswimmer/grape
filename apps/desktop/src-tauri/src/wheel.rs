@@ -5,22 +5,24 @@
 //!   [`DropEvent`]s (DECISIONS D13). wry's handler is replaced; if it ever
 //!   reports an event anyway, that's logged as a gap in coverage.
 //! - Both feed one channel. A controller thread handles each input and
-//!   applies the [`Effect`]s: overlay frame and visibility, and the
-//!   `wheel://open`, `wheel://highlight` and `wheel://close` events.
+//!   applies the [`Effect`]s: overlay frame and visibility, the
+//!   `wheel://open`, `wheel://highlight` and `wheel://close` events
+//!   ([`crate::events`]), and run requests.
 //! - The overlay calls `wheel_painted` once a wheel is on screen, for the
 //!   latency log.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
 use std::sync::{Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
-use grape_core::{wheel_layout, Geometry, Point, Segment, WheelMode, GEOMETRY};
-use grape_platform::{DragMonitor, DragSignal, DropEvent, PlatformError};
+use grape_core::SelectionItem;
+use grape_platform::{DisplayBounds, DragMonitor, DragSignal, DropEvent, PlatformError, Rect};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
-use crate::controller::{Effect, Input, KeyMap, WheelController, WheelView};
+use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
 use crate::ui_windows::OVERLAY;
 
 /// Inputs buffered for the controller thread.
@@ -51,34 +53,35 @@ struct Monitor(Mutex<Option<Box<dyn DragMonitor>>>);
 #[derive(Clone)]
 struct DropSink(SyncSender<DropEvent>);
 
-/// `wheel://open` payload: what to draw and where.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct OpenPayload {
-    seq: u64,
-    mode: WheelMode,
-    /// Logical pixels from the overlay's top-left.
-    anchor: Point,
-    segments: Vec<Segment>,
-    geometry: Geometry,
-}
+/// The real OS for the controller: display bounds from `grape-platform`,
+/// and the filesystem to tell folders from files.
+struct OsEnv;
 
-impl OpenPayload {
-    fn new(view: &WheelView) -> Self {
-        Self {
-            seq: view.seq,
-            mode: view.mode,
-            anchor: view.anchor,
-            segments: wheel_layout(view.count),
-            geometry: GEOMETRY,
+impl Env for OsEnv {
+    fn display_at(&self, x: i32, y: i32) -> Option<DisplayBounds> {
+        match grape_platform::display_bounds_at(x, y) {
+            Ok(bounds) => Some(bounds),
+            Err(err) => {
+                log::warn!("no display bounds at ({x}, {y}): {err}");
+                None
+            }
         }
     }
-}
 
-/// `wheel://highlight` payload.
-#[derive(Debug, Clone, Serialize)]
-struct HighlightPayload {
-    index: Option<usize>,
+    fn classify(&self, paths: &[PathBuf]) -> Vec<SelectionItem> {
+        paths
+            .iter()
+            .map(|path| {
+                // Only metadata is read, never contents. A path that can't
+                // be read counts as a file; planning reports it later.
+                if path.is_dir() {
+                    SelectionItem::folder(path.clone())
+                } else {
+                    SelectionItem::file(path.clone())
+                }
+            })
+            .collect()
+    }
 }
 
 /// Starts drag detection and the controller. Call from `setup`, on the
@@ -165,14 +168,7 @@ fn forward<T: Send + 'static>(
 }
 
 fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
-    let screens = |x: i32, y: i32| match grape_platform::display_bounds_at(x, y) {
-        Ok(bounds) => Some(bounds),
-        Err(err) => {
-            log::warn!("no display bounds at ({x}, {y}): {err}");
-            None
-        }
-    };
-    let mut controller = WheelController::new(screens, KeyMap::for_this_os());
+    let mut controller = WheelController::new(OsEnv, ControllerConfig::for_this_os());
     loop {
         let input = match controller.next_deadline() {
             Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
@@ -192,25 +188,37 @@ fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
 
 fn apply(app: &AppHandle, effect: Effect) {
     match effect {
-        Effect::Open(view) => open_overlay(app, &view),
-        Effect::Swap(view) => emit(app, "wheel://open", OpenPayload::new(&view)),
-        Effect::Highlight(index) => emit(app, "wheel://highlight", HighlightPayload { index }),
-        Effect::Close => {
-            emit(app, "wheel://close", ());
+        Effect::Open(open) => emit(app, "wheel://open", open),
+        Effect::ShowOverlay { monitor } => show_overlay(app, monitor),
+        Effect::Highlight(highlight) => emit(app, "wheel://highlight", highlight),
+        Effect::Close(close) => emit(app, "wheel://close", close),
+        Effect::HideOverlay => {
             if let Some(overlay) = overlay(app) {
                 if let Err(err) = overlay.hide() {
                     log::error!("could not hide the overlay: {err}");
                 }
             }
         }
-        Effect::Dropped(report) => log::info!("{report}"),
+        Effect::Run(request) => run(&request),
         Effect::Log(line) => log::info!("{line}"),
     }
 }
 
-/// Frames the overlay on the monitor, sends the wheel and shows it. Never
-/// focuses it: the app under the cursor keeps the keyboard.
-fn open_overlay(app: &AppHandle, view: &WheelView) {
+/// Runs a drop's job. Conversions arrive with the engines; until then the
+/// request is only logged.
+fn run(request: &RunRequest) {
+    log::info!(
+        "wheel {}: would run {:?} on {} item(s); engines aren't wired yet",
+        request.seq,
+        request.entry,
+        request.items.len()
+    );
+}
+
+/// Frames the overlay on the monitor and shows it. The wheel was already
+/// sent, so it's drawn by the time the window appears. Never focuses it:
+/// the app under the cursor keeps the keyboard.
+fn show_overlay(app: &AppHandle, frame: Rect) {
     let Some(overlay) = overlay(app) else {
         return;
     };
@@ -222,7 +230,6 @@ fn open_overlay(app: &AppHandle, view: &WheelView) {
     // Position, size, position: moving to a monitor with another DPI makes
     // Windows rescale the window (WM_DPICHANGED), so the size is set after
     // the move, and the position again in case the rescale shifted it.
-    let frame = view.monitor;
     let position = PhysicalPosition::new(frame.x, frame.y);
     let framed = overlay
         .set_position(position)
@@ -236,8 +243,6 @@ fn open_overlay(app: &AppHandle, view: &WheelView) {
     if let Err(err) = framed {
         log::error!("could not frame the overlay on the monitor: {err}");
     }
-    // Draw while still hidden, so the wheel is there when the window shows.
-    emit(app, "wheel://open", OpenPayload::new(view));
     if let Err(err) = overlay.show() {
         log::error!("could not show the overlay: {err}");
         return;

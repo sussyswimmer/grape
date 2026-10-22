@@ -29,6 +29,10 @@ serde.workspace = true
 grape-core.workspace = true
 grape-platform.workspace = true
 
+[dev-dependencies]
+# Event payloads are checked against the UI's golden JSON (events.rs).
+serde_json.workspace = true
+
 [features]
 default = ["overlay-subclass"]
 # Subclass the overlay window on Windows so it keeps WS_EX_TOOLWINDOW and

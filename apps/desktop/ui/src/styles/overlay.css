@@ -54,9 +54,23 @@ body {
   font-weight: 600;
 }
 
+.wheel-label.is-dense {
+  font-size: 11px;
+}
+
+.wheel-pending {
+  fill: none;
+  stroke: var(--segment-fill);
+}
+
 .wheel-caption {
   font-size: 13px;
   fill: var(--color-text-muted);
+}
+
+.wheel-caption.is-empty {
+  font-size: 14px;
+  fill: var(--color-text);
 }
 
 /* Each label follows its segment, so it can flip for contrast. */

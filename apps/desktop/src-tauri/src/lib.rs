@@ -5,6 +5,7 @@
 //! area; on macOS it will be a menu-bar accessory app (M8).
 
 pub mod controller;
+pub mod events;
 mod tray;
 mod ui_windows;
 mod wheel;

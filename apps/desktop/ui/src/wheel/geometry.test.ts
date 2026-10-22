@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   edgeInset,
+  emptyMessage,
   modeCaption,
   polar,
-  segmentCaption,
   segmentPath,
   type Geometry,
   type Segment,
@@ -129,8 +129,14 @@ describe("captions", () => {
     expect(modeCaption("actions")).toBe("File actions");
   });
 
-  it("number placeholder segments from 1", () => {
-    expect(segmentCaption(0)).toBe("Segment 1");
-    expect(segmentCaption(5)).toBe("Segment 6");
+  it("name the user's own keys in empty states", () => {
+    const keys = { conversions: "Shift", tools: "Ctrl", actions: "Alt" };
+    expect(emptyMessage("noConversions", keys)).toBe(
+      "Nothing to convert here. Tap Alt for file actions.",
+    );
+    const remapped = { conversions: "F13", tools: "Ctrl", actions: "Caps Lock" };
+    expect(emptyMessage("noTools", remapped)).toBe(
+      "No tools fit this selection. Tap F13 to convert or Caps Lock for file actions.",
+    );
   });
 });

@@ -35,19 +35,57 @@ export interface Point {
 /** Which wheel is open. */
 export type WheelMode = "conversions" | "tools" | "actions";
 
+/** What a drop on a segment does. */
+export interface WheelEntry {
+  kind: "convert" | "tool" | "action";
+  key: string;
+}
+
+/** A segment with its title and item (`docs/design/m1-drag-wheel.md` §C). */
+export interface UiSegment extends Segment {
+  title: string;
+  entry: WheelEntry;
+}
+
+/** Which empty-state message to show. */
+export type EmptyState = "noConversions" | "noTools";
+
+/** What the wheel shows. */
+export type WheelContent =
+  | { kind: "pending" }
+  | { kind: "entries"; dense: boolean; segments: UiSegment[] }
+  | { kind: "empty"; state: EmptyState };
+
+/** The user's key names, e.g. "Shift". */
+export interface KeyNames {
+  conversions: string;
+  tools: string;
+  actions: string;
+}
+
 /** The wheel://open payload. */
 export interface WheelOpen {
   seq: number;
   mode: WheelMode;
   /** The wheel's center, in logical pixels from the overlay's top-left. */
   anchor: Point;
-  segments: Segment[];
+  scale: number;
   geometry: Geometry;
+  keys: KeyNames;
+  sounds: boolean;
+  content: WheelContent;
 }
 
 /** The wheel://highlight payload. */
 export interface WheelHighlight {
+  seq: number;
   index: number | null;
+}
+
+/** The wheel://close payload. */
+export interface WheelClose {
+  seq: number;
+  reason: string;
 }
 
 /** The point at radius `r` and math angle `angle`, as a screen offset. */
@@ -114,7 +152,12 @@ export function modeCaption(mode: WheelMode): string {
   }
 }
 
-/** The center label for a hovered placeholder segment. */
-export function segmentCaption(index: number): string {
-  return `Segment ${index + 1}`;
+/** The empty-state message, naming the user's own keys. */
+export function emptyMessage(state: EmptyState, keys: KeyNames): string {
+  switch (state) {
+    case "noConversions":
+      return `Nothing to convert here. Tap ${keys.actions} for file actions.`;
+    case "noTools":
+      return `No tools fit this selection. Tap ${keys.conversions} to convert or ${keys.actions} for file actions.`;
+  }
 }

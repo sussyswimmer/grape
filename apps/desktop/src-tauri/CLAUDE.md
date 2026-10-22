@@ -16,7 +16,8 @@ The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `
 - Implements the state machine in `docs/INTERACTION_SPEC.md` §1, exactly. Unit-test it with `grape_platform::mock` signal scripts. It's pure state, so it doesn't need a real OS.
 - Lives in `src/controller.rs` (pure) and `src/wheel.rs` (wiring to the monitor, the drop target and the overlay).
 - Inputs: `DragSignal`s (including `Escape`), the overlay's drop events (`grape_platform::DropEvent` from Grape's own drop target on Windows, `docs/DECISIONS.md` D13), Pause, and `wheel_painted` from the overlay.
-- Outputs: Tauri events `wheel://open {seq, mode, anchor, segments, geometry}`, `wheel://highlight {index|null}`, `wheel://close`, and later `job://progress`, `job://done`.
+- Outputs: the events in `src/events.rs`, which follow `docs/design/m1-drag-wheel.md` §C and are tested against the UI's golden JSON in `ui/src/shared/fixtures/`: `wheel://open {seq, mode, anchor, scale, geometry, keys, sounds, content}`, `wheel://highlight {seq, index|null}`, `wheel://close {seq, reason}`, and with the engines `toast://show`, `toast://hide`.
+- The wheel opens pending and fills in with `grape_core::wheel_content` when the drop target's Enter brings the paths. A drop on a segment becomes a `RunRequest`.
 - Hit testing uses `grape_core::hit_test` with the drop target's global physical positions, converted to logical offsets from the anchor.
 - **Watchdog:** if no drag signals or drop events arrive for 30 s while the overlay is visible, hide it.
 

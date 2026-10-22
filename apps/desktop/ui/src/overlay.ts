@@ -3,7 +3,7 @@ import "./styles/overlay.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { mustGetElementById } from "./shared/dom";
-import type { WheelHighlight, WheelOpen } from "./wheel/geometry";
+import type { WheelClose, WheelHighlight, WheelOpen } from "./wheel/geometry";
 import { clearWheel, drawWheel, highlight, type DrawnWheel } from "./wheel/render";
 
 // The overlay window starts hidden. Rust frames it on the monitor under the
@@ -25,21 +25,26 @@ function afterPaint(then: () => void): void {
 
 void listen<WheelOpen>("wheel://open", (event) => {
   const open = event.payload;
+  const first = drawn === null || drawn.seq !== open.seq;
   drawn = drawWheel(wheelRoot, open);
-  afterPaint(() => {
-    invoke("wheel_painted", { seq: open.seq }).catch((err: unknown) => {
-      console.warn("Grape: wheel_painted failed", err);
+  if (first) {
+    afterPaint(() => {
+      invoke("wheel_painted", { seq: open.seq }).catch((err: unknown) => {
+        console.warn("Grape: wheel_painted failed", err);
+      });
     });
-  });
+  }
 });
 
 void listen<WheelHighlight>("wheel://highlight", (event) => {
-  if (drawn !== null) {
+  if (drawn !== null && drawn.seq === event.payload.seq) {
     highlight(drawn, event.payload.index);
   }
 });
 
-void listen("wheel://close", () => {
-  drawn = null;
-  clearWheel(wheelRoot);
+void listen<WheelClose>("wheel://close", (event) => {
+  if (drawn === null || drawn.seq === event.payload.seq) {
+    drawn = null;
+    clearWheel(wheelRoot);
+  }
 });

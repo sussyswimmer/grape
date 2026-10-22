@@ -77,6 +77,7 @@ Plan:
   - `Over { … }`: hit test → highlight.
   - `Drop { paths, … }`: hit test → run or cancel.
   - `Leave`: the cursor left the display. Keep the wheel and wait.
+- The UI events (`wheel://open|highlight|close`, `toast://show|hide`) and their JSON are specified in `docs/design/m1-drag-wheel.md` §C; both sides test against the same golden fixtures. The wheel opens pending and fills in once `Enter` brings the paths.
 - During an OS drag the webview gets **no pointer events**. All highlighting is driven from `Over` positions sent to the UI. Don't rely on DOM `pointermove`.
 - **Known risk (spike in M1):** `Enter` may not fire until the cursor moves after the overlay appears. Until it does, the wheel shows a neutral ring (M1: the numbered placeholder ring). On macOS the drag pasteboard is readable *before* the overlay shows (see `PLATFORM_MACOS.md`), so the wheel can render immediately.
 - macOS full-screen Spaces may need a non-activating `NSPanel`. If a plain Tauri window can't float over full-screen apps, use the `tauri-nspanel` plugin and log it in DECISIONS.
