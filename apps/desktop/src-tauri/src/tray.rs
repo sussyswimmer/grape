@@ -6,6 +6,8 @@ use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuEvent, M
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 
+use crate::controller::Input;
+use crate::wheel::WheelInputs;
 use crate::{ui_windows, GrapeState};
 
 type PauseItem = CheckMenuItem<Wry>;
@@ -28,7 +30,7 @@ pub fn create(app: &AppHandle) -> tauri::Result<()> {
 
     let menu = MenuBuilder::new(app).item(&settings).item(&pause);
     // Debug builds only: lets the overlay's focus, taskbar and Alt-Tab
-    // behavior be checked by hand before M1 shows it for real.
+    // behavior be checked by hand without a drag.
     #[cfg(debug_assertions)]
     let menu = menu
         .separator()
@@ -66,6 +68,9 @@ fn toggle_pause(app: &AppHandle, pause: &PauseItem) {
     let paused = !state.paused.load(Ordering::Acquire);
     state.paused.store(paused, Ordering::Release);
     log::info!("{}", if paused { "paused" } else { "resumed" });
+    if let Some(inputs) = app.try_state::<WheelInputs>() {
+        inputs.send(Input::SetPaused(paused));
+    }
 
     if let Err(err) = pause.set_checked(paused) {
         log::warn!("could not update the Pause check mark: {err}");

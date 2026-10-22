@@ -25,6 +25,8 @@ tauri-plugin-single-instance = "=2.5.2"
 tauri-plugin-log = "=2.10.0"
 anyhow = "1.0.104"
 log = "0.4.34"
+serde.workspace = true
+grape-core.workspace = true
 grape-platform.workspace = true
 
 [features]

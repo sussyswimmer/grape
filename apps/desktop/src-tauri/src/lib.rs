@@ -1,11 +1,13 @@
-//! Grape's Tauri app: a tray icon, a hidden overlay window and, from M1, the
-//! wheel controller. See `CLAUDE.md` in this crate.
+//! Grape's Tauri app: a tray icon, a hidden overlay window and the wheel
+//! controller. See `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it will be a menu-bar accessory app (M8).
 
+pub mod controller;
 mod tray;
 mod ui_windows;
+mod wheel;
 
 use std::sync::atomic::AtomicBool;
 
@@ -13,7 +15,7 @@ use anyhow::Context as _;
 use tauri::RunEvent;
 use tauri_plugin_log::RotationStrategy;
 
-/// App-wide state, shared by the tray handlers and (from M1) the controller.
+/// App-wide state, shared by the tray handlers and the controller.
 #[derive(Debug, Default)]
 pub struct GrapeState {
     /// Set by tray → "Pause Grape". While paused, drags behave as if Grape
@@ -50,6 +52,8 @@ pub fn run() -> anyhow::Result<()> {
                 .build(),
         )
         .manage(GrapeState::default())
+        .invoke_handler(tauri::generate_handler![wheel::wheel_painted])
+        .on_window_event(wheel::on_overlay_window_event)
         .setup(|app| {
             // A menu-bar app on macOS: no Dock icon, no app menu.
             #[cfg(target_os = "macos")]
@@ -59,26 +63,26 @@ pub fn run() -> anyhow::Result<()> {
             tray::create(app.handle()).inspect_err(|err| {
                 log::error!("could not create the tray icon: {err}");
             })?;
-            // Not fatal: the tray still works, and until M1 nothing shows
-            // the overlay.
+            // Not fatal: the tray still works, the wheel just won't show.
             if let Err(err) = ui_windows::prepare_overlay(app.handle()) {
                 log::error!("could not prepare the overlay window: {err:#}");
             }
+            wheel::start(app.handle());
             log::info!("Grape {} is running", env!("CARGO_PKG_VERSION"));
             Ok(())
         })
         .build(tauri::generate_context!())
         .context("failed to build the Tauri app")?;
 
-    app.run(|_app, event| {
+    app.run(|app, event| match event {
         // A tray app keeps running when its last window closes. Only an
         // explicit exit (tray → Quit calls `app.exit(0)`) carries a code.
-        if let RunEvent::ExitRequested {
+        RunEvent::ExitRequested {
             code: None, api, ..
-        } = event
-        {
-            api.prevent_exit();
-        }
+        } => api.prevent_exit(),
+        // Unhook the mouse before the process goes.
+        RunEvent::Exit => wheel::stop(app),
+        _ => {}
     });
     Ok(())
 }

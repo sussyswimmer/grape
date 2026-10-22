@@ -1384,8 +1384,10 @@ name = "grape"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "grape-core",
  "grape-platform",
  "log",
+ "serde",
  "tauri",
  "tauri-build",
  "tauri-plugin-log",
