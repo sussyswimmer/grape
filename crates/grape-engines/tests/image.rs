@@ -5,7 +5,6 @@
 
 mod common;
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,7 @@ use grape_core::{
     pairs, plan, DirSnapshot, Features, Format, Job, JobOutput, Operation, Selection,
     SelectionItem, Settings, ToolKey,
 };
-use grape_engines::{run_job, supports, EngineCtx, ErrorKind, JobOutcome};
+use grape_engines::{build_selection, run_job, supports, EngineCtx, ErrorKind, JobOutcome};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{
@@ -89,36 +88,14 @@ impl SourceState {
     }
 }
 
-/// The selection the app would build for `paths`: each item's parent and
-/// the fallback folder, with their current names, writable.
-fn selection_for(paths: &[PathBuf], settings: &Settings) -> Selection {
-    let items = paths.iter().map(SelectionItem::file).collect();
-    let mut dirs: BTreeSet<PathBuf> = paths
-        .iter()
-        .filter_map(|p| p.parent().map(Path::to_path_buf))
-        .collect();
-    dirs.insert(settings.fallback_dir.clone());
-    let mut sel = Selection::new(items);
-    for dir in dirs {
-        let names: Vec<String> = fs::read_dir(&dir)
-            .map(|entries| {
-                entries
-                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-                    .collect()
-            })
-            .unwrap_or_default();
-        sel = sel.with_dir(dir, DirSnapshot::new(names, true));
-    }
-    sel
-}
-
-/// Writes `bytes` as `name` in `dir` and plans `op` for it (outputs next
-/// to the source, fallback `dir/fallback`). Returns the source and the job.
+/// Writes `bytes` as `name` in `dir` and plans `op` for it the way the app
+/// does (`build_selection`, outputs next to the source, fallback
+/// `dir/fallback`). Returns the source and the job.
 fn plan_one(dir: &TestDir, name: &str, bytes: &[u8], op: Operation) -> (PathBuf, Job) {
     let src = dir.join(name);
     fs::write(&src, bytes).unwrap();
     let settings = Settings::new(dir.join("fallback"));
-    let sel = selection_for(std::slice::from_ref(&src), &settings);
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
     let mut plan = plan(&sel, &op, &settings).unwrap();
     assert_eq!(plan.jobs.len(), 1);
     (src, plan.jobs.remove(0))

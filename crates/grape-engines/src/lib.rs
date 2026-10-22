@@ -2,9 +2,11 @@
 //! archives and subtitles (v2: documents).
 //!
 //! The public contract is the one in `docs/design/m1-drag-wheel.md` §E.1:
-//! the app builds a [`grape_core::JobPlan`], asks [`supports`] whether this
-//! build can execute it, and calls [`run_job`] once per job with an
-//! [`EngineCtx`]. The rules every engine follows (never touch the source,
+//! the app builds a [`grape_core::Selection`] with [`build_selection`]
+//! (which reads the disk so `grape-core` doesn't have to), plans it with
+//! [`grape_core::plan`], asks [`supports`] whether this build can execute
+//! it, and calls [`run_job`] once per job with an [`EngineCtx`]. The rules
+//! every engine follows (never touch the source,
 //! no network, sidecars via [`SidecarPaths`], cancellation and progress)
 //! are in `CLAUDE.md` in this crate.
 
@@ -13,6 +15,9 @@
 
 mod image;
 mod output;
+mod selection;
+
+pub use selection::build_selection;
 
 use std::path::{Path, PathBuf};
 use std::sync::{
