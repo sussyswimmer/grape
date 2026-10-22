@@ -7,23 +7,12 @@
   </head>
   <body>
     <!--
-      Placeholder ring for the M0/M1 overlay checks. From M3 the wheel is
-      drawn from the segments Rust sends in wheel://open, with sizes from
-      grape-core's GEOMETRY; these numbers go away then.
+      The overlay covers the whole monitor while the wheel is open. The
+      wheel is drawn into #wheel from wheel://open (M1: a placeholder ring
+      of numbered segments; M3: the real wheel).
     -->
-    <svg
-      id="wheel"
-      class="wheel"
-      viewBox="-128 -128 256 256"
-      width="256"
-      height="256"
-      role="img"
-      aria-label="Grape wheel"
-    >
-      <circle class="wheel-backdrop" r="126" />
-      <circle class="wheel-ring" r="84" stroke-width="72" />
-      <circle class="wheel-edge" r="48" />
-      <circle class="wheel-edge" r="120" />
+    <svg id="overlay" class="overlay" role="img" aria-label="Grape wheel">
+      <g id="wheel" hidden></g>
     </svg>
     <script type="module" src="/src/overlay.ts"></script>
   </body>
