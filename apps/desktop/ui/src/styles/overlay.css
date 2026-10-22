@@ -148,24 +148,3 @@ body {
     animation: none;
   }
 }
-
-/*
- * The M0 placeholder ring in overlay.html (still used by the debug
- * "flash overlay" item). Delete these rules when overlay.html mounts
- * #wheel-root instead.
- */
-body:has(> svg.wheel) {
-  display: grid;
-  place-items: center;
-}
-
-.wheel-ring {
-  fill: none;
-  stroke: var(--wheel-segment-fill);
-}
-
-.wheel-edge {
-  fill: none;
-  stroke: var(--wheel-segment-stroke);
-  stroke-width: 1.5;
-}

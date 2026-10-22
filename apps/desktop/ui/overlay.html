@@ -8,12 +8,9 @@
   <body>
     <!--
       The overlay covers the whole monitor while the wheel is open. The
-      wheel is drawn into #wheel from wheel://open (M1: a placeholder ring
-      of numbered segments; M3: the real wheel).
+      wheel is drawn into #wheel-root from wheel://open (src/wheel/).
     -->
-    <svg id="overlay" class="overlay" role="img" aria-label="Grape wheel">
-      <g id="wheel" hidden></g>
-    </svg>
+    <div id="wheel-root"></div>
     <script type="module" src="/src/overlay.ts"></script>
   </body>
 </html>

@@ -9,15 +9,15 @@ The TypeScript UI for Grape's windows: the wheel **overlay**, **settings**, and 
 
 ## The UI never decides behavior
 - Rust owns the state machine (`docs/INTERACTION_SPEC.md` §1), the hit test and the job runner. The UI renders what Rust sends and reports drops back.
-- Events in: `wheel://open`, `wheel://highlight`, `wheel://close`, `toast://show`, `toast://hide`, as specified in `docs/design/m1-drag-wheel.md` §C. The golden JSON in `src/shared/fixtures/` is shared with the Rust tests. Out: the `wheel_painted(seq)` command, once a wheel is on screen (`docs/DECISIONS.md` D15).
-- **No pointer events arrive during an OS drag.** Highlighting is driven by `wheel://highlight`, which comes from the drop target's `Over` positions. Don't use DOM `pointermove`. `isPointInFill` is only a second check that honors the rounded corners (§4).
+- Events in: `wheel://open`, `wheel://highlight`, `wheel://close`, `toast://show`, `toast://hide`, as specified in `docs/design/m1-drag-wheel.md` §C. The golden JSON in `src/shared/fixtures/` is shared with the Rust tests. Out: the `wheel_painted(seq)` command after each wheel render (`docs/DECISIONS.md` D15), and `toast_clicked(id)` when a revealable toast is clicked. Types and runtime guards live in `src/shared/events.ts`; every payload is guarded before use.
+- **No pointer events arrive during an OS drag.** Highlighting is driven by `wheel://highlight`, which comes from the drop target's `Over` positions. Don't use DOM `pointermove`. The UI can't re-check the rounded corners with `isPointInFill`, so `grape_core::hit_test` honors them itself (§4); `src/wheel/geometry.ts` draws the same shape.
 - Geometry comes from `grape-core`: the segments in `wheel://open`, and the exported `GEOMETRY` constants. Never hard-code radii, gaps or angles here.
 
 ## Wheel rendering
 - Draw `n` segments with the gap and corner rounding from `GEOMETRY`. At `DENSE_AT` items or more, use the compact label style.
 - The center label shows the hovered item's title, and hides when nothing is hovered.
 - Empty wheel: show a message instead of segments. Write it in **our own words**, and use the user's **current** key names from settings, never hard-coded "Shift"/"Ctrl".
-- Tick sound: a short, original sound, preloaded and played through WebAudio when the highlight moves to a new segment. Cancel any pending tick when the pointer leaves all segments. Respect the "sounds" setting.
+- Tick sound: a short, original sound synthesized with WebAudio (`src/wheel/tick.ts`, no audio file), played when the highlight moves to a new segment. Cancel any pending tick when the pointer leaves all segments. Respect the "sounds" setting.
 - Honor `prefers-reduced-motion`: no scale or opacity animation, the wheel just appears.
 - The glass follows the OS light/dark theme. Add accessible labels (`aria-label`, `<title>`) to segments.
 
