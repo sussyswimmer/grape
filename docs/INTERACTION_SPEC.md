@@ -80,6 +80,7 @@ These are Grape's values, in points/DIPs at 1Ã— scale. The site's values were â‰
 - **[observed]** Tools depend on selection size. Some tools are hidden for multi-selections, and some only make sense with several files (Create PDF, Merge PDFs, Join Videos, Collage). See `TOOLS_AND_ACTIONS.md`.
 - **[observed]** File actions work for folders, mixed selections, and files with no conversions.
 - **[Grape]** **Conversions** on a multi-selection show the *intersection* of each file's targets, and each file is converted on its own. If the intersection is empty, show the empty-state message.
+- **[Grape]** **Tools** on a multi-selection with mixed formats show the *intersection* of each format's tools. A tool must be enabled for every format in the selection, so in v1 a JPG plus a PDF drops Compress (it's v2 for PDF). If the intersection is empty, show the empty-state message.
 - **[Grape]** **Folders** only get the Actions wheel; Conversions and Tools show their empty state. Archives created from folders are v2.
 
 ## 8. Keyboard and touch (demo-only, informational)

@@ -12,6 +12,8 @@ pub mod geometry;
 pub mod matrix;
 pub mod naming;
 pub mod operation;
+pub mod plan;
+pub mod selection;
 pub mod tier;
 pub mod tools;
 
@@ -26,6 +28,11 @@ pub use naming::{
     tool_naming, tool_suffix, OutputExt, OutputKind, Suffix, ToolNaming,
 };
 pub use operation::{Channels, CompressPreset, Operation, Speed, ToolParams};
+pub use plan::{plan, Job, JobOutput, JobPlan, OutputLocation, PlanError, Settings};
+pub use selection::{
+    wheel_content, DirSnapshot, EmptyState, ItemKind, Selection, SelectionItem, WheelContent,
+    WheelEntry, WheelMode,
+};
 pub use tier::{Features, Tier};
 pub use tools::{
     tool_row, tool_tier, tools, tools_enabled, ToolInfo, ToolKey, ToolRow, TIER_OVERRIDES,
