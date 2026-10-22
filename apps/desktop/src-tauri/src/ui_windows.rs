@@ -1,6 +1,8 @@
 //! Grape's webview windows: the hidden overlay (declared in tauri.conf.json)
 //! and the settings window (created on first use).
 
+use std::sync::{Mutex, PoisonError};
+
 use anyhow::Context as _;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 
@@ -8,6 +10,13 @@ use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 pub const OVERLAY: &str = "overlay";
 /// Label of the settings window.
 pub const SETTINGS: &str = "settings";
+
+/// Held while Settings is looked up and, if needed, built. Tauri rejects a
+/// duplicate label only once the first window is registered, which happens
+/// after its native window exists. Without this, two quick requests (a
+/// double-click on the shortcut while Grape runs, or a second launch plus a
+/// tray click) could both build a Settings window.
+static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Gets the overlay ready at startup. On Windows this hardens the window
 /// (tool window, topmost, not activated when shown or moved) and logs its
@@ -45,6 +54,9 @@ pub fn request_settings(app: &AppHandle) {
 }
 
 fn show_settings(app: &AppHandle) -> tauri::Result<()> {
+    // The lock guards no data, so a panic in an earlier holder leaves
+    // nothing broken: keep using it.
+    let _creating = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(window) = app.get_webview_window(SETTINGS) {
         window.unminimize()?;
         window.show()?;
