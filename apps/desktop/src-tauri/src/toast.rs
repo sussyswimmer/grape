@@ -81,13 +81,6 @@ impl Toaster {
 
     /// Remembers what clicking toast `id` reveals. Only Rust knows paths;
     /// the page sends back the id.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "called when the engines report a job's outputs, wired next"
-        )
-    )]
     pub fn set_reveal(&self, id: u64, path: PathBuf) {
         let mut reveal = self.reveal.lock().unwrap_or_else(PoisonError::into_inner);
         // Only the recent toasts can still be clicked.

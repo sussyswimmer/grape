@@ -46,7 +46,7 @@
 - `DragMonitor` (`start(SyncSender<DragSignal>)`, `stop()`): emits `DragSignal::{Started{modifiers}, Moved{x,y}, Modifiers(Modifiers), Escape, Ended}` on a bounded channel, and drops signals rather than block. `Started` carries the keys already held, which don't open a wheel (`DECISIONS.md` D14). The pure `tracker::DragTracker` holds the drag rules; the Windows hook thread and worker feed it. `drag_monitor()` returns the one for this OS. `mock::ScriptedMonitor` replays scripts for tests.
 - `display_bounds_at(x, y) -> Result<DisplayBounds, PlatformError>`: the monitor under the point, as `DisplayBounds { monitor: Rect, work_area: Rect, scale: f64 }` in global physical pixels. The overlay is sized to `monitor` (`rcMonitor`), and the anchor is clamped to `work_area` (`rcWork`). Returns `Unsupported` on macOS until M8.
 - `windows::install_drop_target(hwnd, sink)`: Grape's own `IDropTarget` on the overlay and its child windows. It sends `DropEvent::{Enter{paths,x,y}, Over{x,y}, Leave, Drop{paths,x,y}}` and never reports a move (`DECISIONS.md` D13).
-- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window.
+- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built so far on Windows (M5): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir)` and `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved, of}}`. Each returns `Unsupported` elsewhere. The app's `actions.rs` runs them on a thread of their own and writes the toasts.
 - `haptics::tick()` is a no-op on Windows.
 - See `PLATFORM_MACOS.md` / `PLATFORM_WINDOWS.md`.
 

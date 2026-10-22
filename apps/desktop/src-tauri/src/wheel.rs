@@ -7,7 +7,8 @@
 //! - Both feed one channel. A controller thread handles each input and
 //!   applies the [`Effect`]s: overlay frame and visibility, the
 //!   `wheel://open`, `wheel://highlight` and `wheel://close` events
-//!   ([`crate::events`]), and run requests.
+//!   ([`crate::events`]), and run requests: file actions run now
+//!   ([`crate::actions`]), the rest wait for the engines.
 //! - The overlay calls `wheel_painted` once a wheel is on screen, for the
 //!   latency log.
 
@@ -22,6 +23,7 @@ use grape_platform::{DisplayBounds, DragMonitor, DragSignal, DropEvent, Platform
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
 
+use crate::actions;
 use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
 use crate::toast::{self, Toaster};
 use crate::ui_windows::OVERLAY;
@@ -205,8 +207,9 @@ fn apply(app: &AppHandle, effect: Effect) {
     }
 }
 
-/// Runs a drop's job. Conversions arrive with the engines; until then each
-/// drop gets an info toast saying so.
+/// Runs a drop's job. File actions run now ([`actions`]); conversions and
+/// tools arrive with the engines, and until then each drop gets an info
+/// toast saying so.
 fn run(app: &AppHandle, request: &RunRequest) {
     log::info!(
         "wheel {}: run {:?} on {} item(s)",
@@ -214,6 +217,10 @@ fn run(app: &AppHandle, request: &RunRequest) {
         request.entry,
         request.items.len()
     );
+    if let WheelEntry::Action(action) = request.entry {
+        actions::run(app, action, &request.items, request.anchor, request.display);
+        return;
+    }
     let id = app.state::<Toaster>().next_id();
     let toast = match request.entry {
         WheelEntry::Convert(to) => {
@@ -228,8 +235,9 @@ fn run(app: &AppHandle, request: &RunRequest) {
                 Some(format!("{from} to {} is coming.", to.display_name())),
             )
         }
-        WheelEntry::Tool(_) => toast::not_yet(id, "Tools arrive in a later build.", None),
-        WheelEntry::Action(_) => toast::not_yet(id, "File actions arrive in a later build.", None),
+        WheelEntry::Tool(_) | WheelEntry::Action(_) => {
+            toast::not_yet(id, "Tools arrive in a later build.", None)
+        }
     };
     toast::show(app, toast, request.anchor, &request.display);
 }

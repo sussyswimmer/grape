@@ -4,6 +4,7 @@
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it will be a menu-bar accessory app (M8).
 
+mod actions;
 pub mod controller;
 pub mod events;
 mod toast;

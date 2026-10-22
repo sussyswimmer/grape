@@ -67,7 +67,10 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Panels: compress presets, merge reorder list, channels toggle.
 
 ## M5: File actions on Windows (lane A)
-- [ ] share (Windows share sheet), float shelf (OLE drag-out works), copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.
+- [ ] copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.
+- [ ] share (Windows share sheet), float shelf (OLE drag-out works).
+
+*Status 2026-10-22:* copy, copyPath, terminal and move are built, with toasts. CI's Windows runner checks the clipboard contents and a real shell move. The picker, the terminals and undo still need the PC (`TESTING.md` → "File actions, M5"). Share and float aren't started.
 
 ## M6: Settings + polish (lane A)
 - [ ] Key remapping with conflict detection (defaults Shift / Ctrl / Alt). Output location and fallback. Sounds toggle. Launch at login.
