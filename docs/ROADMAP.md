@@ -20,14 +20,16 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 # Phase 1: Windows
 
 ## M0: Scaffold (lane A)
-- [ ] Cargo workspace with the three crates plus the Tauri app. `pnpm` workspace for the UI.
-- [ ] Tray icon with menu items Settings…, Pause Grape and Quit. No main window, no taskbar button.
-- [ ] Hidden overlay window created at startup with the flags from `ARCHITECTURE.md` + `PLATFORM_WINDOWS.md`.
-- [ ] `grape-platform` has a `windows` module and a stub `macos` module that compiles to "unsupported", so the workspace still builds on a Mac.
-- [ ] CI: `cargo fmt --check`, `clippy -D warnings`, `cargo test`, UI typecheck on a `windows-latest` runner.
-- [ ] README with a header image, one-line pitch and Windows build steps.
+- [x] Cargo workspace with the three crates plus the Tauri app. `pnpm` workspace for the UI.
+- [ ] Tray icon with menu items Settings…, Pause Grape and Quit. No main window, no taskbar button. *(Built; check on the PC.)*
+- [ ] Hidden overlay window created at startup with the flags from `ARCHITECTURE.md` + `PLATFORM_WINDOWS.md`. *(Built, and the style code passes its Windows tests in CI; check the running app on the PC.)*
+- [x] `grape-platform` has a `windows` module and a stub `macos` module that compiles to "unsupported", so the workspace still builds on a Mac.
+- [x] CI: `cargo fmt --check`, `clippy -D warnings`, `cargo test`, UI typecheck on a `windows-latest` runner.
+- [x] README with a header image, one-line pitch and Windows build steps.
 
 **Accept:** `pnpm tauri dev` on the Windows PC shows the Grape tray icon, Quit works, and CI is green.
+
+*Status 2026-10-22:* CI is green (Windows lint + tests, Windows UI, macOS check). The app hasn't run on the PC yet: `TESTING.md` → "App shell" lists what to check.
 
 ## M1: Drag + overlay spike on Windows (lane A) ⚠️ highest risk
 - [ ] Windows `DragMonitor`: `WH_MOUSE_LL` hook on a message-pumping thread + `GetAsyncKeyState` polling + Explorer/Desktop allowlist.
@@ -41,9 +43,11 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 **Accept:** drag a file from Explorer, tap Shift, see the ring at the cursor, drop on the top segment → log line with the correct path. Drop off-ring → nothing happens, and the file stays where it was.
 
 ## M2: Core model (lane B), runs in parallel with M1
-- [ ] `Format`, `targets()`, `tools()`, `actions()`, `output_name()`, `wheel_layout()`, `hit_test()`, `plan()`.
-- [ ] Tests from `FORMAT_MATRIX.md` → "Test assertions" (275 / 178 counts, naming table, tools table).
-- [ ] Property test: `hit_test` returns `None` for all points in the dead zone, in gaps and outside the ring.
+- [x] `Format`, `targets()`, `tools()`, `actions()`, `output_name()`, `wheel_layout()`, `hit_test()`, `plan()`.
+- [x] Tests from `FORMAT_MATRIX.md` → "Test assertions" (275 / 178 counts, naming table, tools table).
+- [x] Property test: `hit_test` returns `None` for all points in the dead zone, in gaps and outside the ring.
+
+*Status 2026-10-22:* done by Claude Code at Maxwell's request (API additions in `DECISIONS.md` D12). 242 tests, green on Linux and on CI's Windows runner. A doc-sync test fails the build if `FORMAT_MATRIX.md` or `TOOLS_AND_ACTIONS.md` and the code disagree.
 
 **Accept:** `cargo test -p grape-core` green with 100% coverage of the matrix and naming tables.
 
