@@ -67,6 +67,10 @@ const MAX_REPLANS: usize = 3;
 /// JPEG output quality.
 const JPEG_QUALITY: u8 = 90;
 
+/// The largest ICC profile a JPEG can hold: 255 APP2 segments of 65,519
+/// profile bytes each. The encoder refuses a larger one.
+const JPEG_MAX_ICC: usize = 255 * 65_519;
+
 /// The most memory one conversion may hold at its peak (see
 /// [`working_set`]). The decoded image alone is also held to the `image`
 /// crate's default 512 MiB limit.
@@ -124,7 +128,7 @@ pub(crate) fn convert(
         Some(img) if !cancel.is_cancelled() => img,
         _ => return Err(crate::cancelled(src)),
     };
-    let icc = icc.filter(|profile| icc_fits(profile, &img));
+    let icc = icc.filter(|profile| icc_fits(profile, &img, to));
 
     if job.used_fallback {
         // The fallback is Grape's own folder (Downloads\Grape); it may not
@@ -403,16 +407,19 @@ fn flatten_onto_white(img: &DynamicImage, cancel: &CancelToken) -> Option<RgbIma
 }
 
 /// True when an ICC profile describes the output's color model (`GRAY` for
-/// gray pixels, `RGB ` otherwise). A CMYK or gray profile on RGB pixels
-/// would make viewers show wrong colors, so such profiles are dropped.
-fn icc_fits(profile: &[u8], img: &DynamicImage) -> bool {
+/// gray pixels, `RGB ` otherwise) and `to` can hold it. A CMYK or gray
+/// profile on RGB pixels would make viewers show wrong colors, and a JPEG
+/// can't hold more than [`JPEG_MAX_ICC`] bytes, so such profiles are
+/// dropped and the conversion goes ahead without them.
+fn icc_fits(profile: &[u8], img: &DynamicImage, to: Format) -> bool {
     use ColorType::{La16, La8, L16, L8};
     let expected: &[u8] = if matches!(img.color(), L8 | L16 | La8 | La16) {
         b"GRAY"
     } else {
         b"RGB "
     };
-    profile.len() >= 128 && profile.get(16..20) == Some(expected)
+    let room = to != Format::Jpg || profile.len() <= JPEG_MAX_ICC;
+    room && profile.len() >= 128 && profile.get(16..20) == Some(expected)
 }
 
 /// Encodes `img` as `to` into the temp `file`, then flushes and syncs it.
@@ -443,6 +450,16 @@ fn encode(
     };
     match written {
         Ok(()) => {}
+        // Encoders report what they can't encode as these `io` errors;
+        // writing the temp file didn't fail.
+        Err(ImageError::IoError(e))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported
+            ) =>
+        {
+            return Err(names.encode_failed(format!("encode {}: {e}", to.key())));
+        }
         Err(ImageError::IoError(e)) => {
             return Err(names.write_failed(format!("write {}: {e}", temp.display())));
         }
@@ -677,12 +694,20 @@ mod tests {
         cmyk[16..20].copy_from_slice(b"CMYK");
         let color = DynamicImage::new_rgb8(1, 1);
         let luma = DynamicImage::new_luma8(1, 1);
-        assert!(icc_fits(&rgb, &color));
-        assert!(!icc_fits(&gray, &color));
-        assert!(!icc_fits(&cmyk, &color));
-        assert!(icc_fits(&gray, &luma));
-        assert!(!icc_fits(&rgb, &luma));
-        assert!(!icc_fits(&rgb[..64], &color));
+        let png = Format::Png;
+        assert!(icc_fits(&rgb, &color, png));
+        assert!(!icc_fits(&gray, &color, png));
+        assert!(!icc_fits(&cmyk, &color, png));
+        assert!(icc_fits(&gray, &luma, png));
+        assert!(!icc_fits(&rgb, &luma, png));
+        assert!(!icc_fits(&rgb[..64], &color, png));
+        // A JPEG holds at most 255 segments' worth of profile.
+        let mut big = rgb.clone();
+        big.resize(JPEG_MAX_ICC, 0);
+        assert!(icc_fits(&big, &color, Format::Jpg));
+        big.push(0);
+        assert!(!icc_fits(&big, &color, Format::Jpg));
+        assert!(icc_fits(&big, &color, png));
     }
 
     #[test]

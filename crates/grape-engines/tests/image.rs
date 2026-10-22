@@ -312,36 +312,71 @@ fn jpeg_output_flattens_alpha_onto_white() {
     assert!(solid[1] > 150 && solid[0] < 60, "opaque area {solid:?}");
 }
 
-#[test]
-fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
-    // A minimal RGB profile header; the codecs embed it as opaque bytes.
-    let mut profile = vec![0u8; 132];
-    profile[..4].copy_from_slice(&132u32.to_be_bytes());
+/// A minimal RGB profile header padded with zeros to `len` bytes; the
+/// codecs embed it as opaque bytes.
+fn rgb_profile(len: usize) -> Vec<u8> {
+    let mut profile = vec![0u8; len];
+    profile[..4].copy_from_slice(&u32::try_from(len).unwrap().to_be_bytes());
     profile[16..20].copy_from_slice(b"RGB ");
     profile[20..24].copy_from_slice(b"XYZ ");
     profile[36..40].copy_from_slice(b"acsp");
+    profile
+}
+
+/// The gradient as a PNG that embeds `profile`.
+fn png_with_profile(profile: &[u8]) -> Vec<u8> {
     let mut source = Vec::new();
     let mut encoder = PngEncoder::new(&mut source);
-    encoder.set_icc_profile(profile.clone()).unwrap();
+    encoder.set_icc_profile(profile.to_vec()).unwrap();
     gradient().write_with_encoder(encoder).unwrap();
+    source
+}
+
+/// The ICC profile embedded in an encoded image, if any.
+fn embedded_profile(bytes: Vec<u8>) -> Option<Vec<u8>> {
+    ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .unwrap()
+        .into_decoder()
+        .unwrap()
+        .icc_profile()
+        .unwrap()
+}
+
+#[test]
+fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
+    let profile = rgb_profile(132);
+    let source = png_with_profile(&profile);
 
     for to in [Format::Jpg, Format::Webp, Format::Tiff, Format::Bmp] {
         let dir = TestDir::new("icc");
         let (_src, job) = plan_one(&dir, "photo.png", &source, Operation::convert(to));
         let outcome = run(&job).unwrap();
-        let bytes = fs::read(&outcome.outputs[0]).unwrap();
-        let mut decoder = ImageReader::new(Cursor::new(bytes))
-            .with_guessed_format()
-            .unwrap()
-            .into_decoder()
-            .unwrap();
-        let carried = decoder.icc_profile().unwrap();
+        let carried = embedded_profile(fs::read(&outcome.outputs[0]).unwrap());
         if to == Format::Bmp {
             assert_eq!(carried, None, "BMP can't hold a profile");
         } else {
             assert_eq!(carried.as_deref(), Some(&profile[..]), "{to:?}");
         }
     }
+}
+
+#[test]
+fn a_profile_too_large_for_jpeg_is_left_out() {
+    // Over the 255 × 65,519 bytes a JPEG can hold (the zeros compress well
+    // in the PNG). PNG, WebP and TIFF could hold it.
+    let source = png_with_profile(&rgb_profile(17 * 1024 * 1024));
+    let dir = TestDir::new("icc-large");
+    let (src, job) = plan_one(&dir, "wide.png", &source, Operation::convert(Format::Jpg));
+    let before = SourceState::of(&src);
+
+    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+
+    let bytes = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(image::guess_format(&bytes).unwrap(), ImageFormat::Jpeg);
+    assert_eq!(embedded_profile(bytes), None);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
 }
 
 #[test]
