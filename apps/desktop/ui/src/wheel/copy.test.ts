@@ -20,29 +20,29 @@ function segment(index: number): UiSegment {
 describe("emptyMessage", () => {
   it("names the actions key when nothing converts", () => {
     expect(emptyMessage("noConversions", WINDOWS)).toBe(
-      "Nothing to convert here. Tap Alt for file actions.",
+      "Nothing to convert here. Switch to file actions with Alt.",
     );
   });
 
   it("names the conversions and actions keys when no tool fits", () => {
     expect(emptyMessage("noTools", WINDOWS)).toBe(
-      "No tools fit this selection. Tap Shift to convert or Alt for file actions.",
+      "No tools fit here. Switch to conversions with Shift or file actions with Alt.",
     );
   });
 
   it("uses whatever the user mapped, e.g. Caps", () => {
     const keys: KeyNames = { conversions: "Caps", tools: "Right Ctrl", actions: "Right Alt" };
     expect(emptyMessage("noConversions", keys)).toBe(
-      "Nothing to convert here. Tap Right Alt for file actions.",
+      "Nothing to convert here. Switch to file actions with Right Alt.",
     );
     expect(emptyMessage("noTools", keys)).toBe(
-      "No tools fit this selection. Tap Caps to convert or Right Alt for file actions.",
+      "No tools fit here. Switch to conversions with Caps or file actions with Right Alt.",
     );
   });
 
   it("uses the macOS names when Rust sends them", () => {
     const mac: KeyNames = { conversions: "Shift", tools: "Command", actions: "Control" };
-    expect(emptyMessage("noConversions", mac)).toContain("Tap Control for file actions.");
+    expect(emptyMessage("noConversions", mac)).toContain("Switch to file actions with Control.");
   });
 
   it("never hard-codes a key name in the templates", () => {

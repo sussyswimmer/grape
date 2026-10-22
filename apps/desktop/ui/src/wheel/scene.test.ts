@@ -252,7 +252,7 @@ describe("buildScene", () => {
     expect(lines.length).toBeGreaterThan(0);
     expect(lines.length).toBeLessThanOrEqual(3);
     expect(lines.join(" ")).toBe(
-      "No tools fit this selection. Tap Shift to convert or Alt for file actions.",
+      "No tools fit here. Switch to conversions with Shift or file actions with Alt.",
     );
     expect(s.label).toBe("Tools wheel, no choices");
   });
@@ -261,7 +261,7 @@ describe("buildScene", () => {
     const caps = { ...empty, keys: { conversions: "Caps", tools: "Ctrl", actions: "Right Alt" } };
     if (!isWheelOpenPayload(caps)) throw new Error("bad payload");
     const text = scene(opened(caps)).message?.lines.map((l) => l.text).join(" ");
-    expect(text).toBe("No tools fit this selection. Tap Caps to convert or Right Alt for file actions.");
+    expect(text).toBe("No tools fit here. Switch to conversions with Caps or file actions with Right Alt.");
   });
 
   it("draws one path per entry with its label at (labelX, labelY)", () => {

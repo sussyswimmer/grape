@@ -137,7 +137,7 @@ describe("open", () => {
     const lines = texts(oneByClass(svg, "wheel-message"));
     expect(lines.length).toBeLessThanOrEqual(3);
     expect(lines.join(" ")).toBe(
-      "No tools fit this selection. Tap Shift to convert or Alt for file actions.",
+      "No tools fit here. Switch to conversions with Shift or file actions with Alt.",
     );
   });
 
