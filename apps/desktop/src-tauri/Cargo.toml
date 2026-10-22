@@ -1,0 +1,38 @@
+[package]
+name = "grape"
+description = "Grape: drag a file, tap a key, drop on the wheel. The Tauri tray app."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+# Distinct from the package name so the binary's and the library's build
+# outputs don't clash on Windows (grape.pdb).
+name = "grape_app"
+
+[build-dependencies]
+tauri-build = { version = "=2.7.1", features = [] }
+
+[dependencies]
+# Exact pins: only releases at least 14 days old (DECISIONS D9). tauri,
+# tauri-build and @tauri-apps/cli move together.
+# `macos-private-api` must match `app.macOSPrivateApi` in tauri.conf.json,
+# or tauri-build fails the build.
+tauri = { version = "=2.12.1", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-single-instance = "=2.5.2"
+tauri-plugin-log = "=2.10.0"
+anyhow = "1.0.104"
+log = "0.4.34"
+grape-platform.workspace = true
+
+[features]
+default = ["overlay-subclass"]
+# Subclass the overlay window on Windows so it keeps WS_EX_TOOLWINDOW and
+# WS_EX_NOACTIVATE (DECISIONS D11). Build with `--no-default-features` to
+# turn it off if Windows misbehaves.
+overlay-subclass = []
+
+[lints]
+workspace = true
