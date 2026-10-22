@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Grape's app icon: original artwork, shapes only. Source for `pnpm tauri icon`. -->
+  <rect width="1024" height="1024" rx="228" fill="#5E2B97"/>
+
+  <!-- Stem and leaf -->
+  <path d="M512 300 C 510 250, 520 205, 548 168" fill="none" stroke="#3F7A49" stroke-width="34" stroke-linecap="round"/>
+  <path d="M548 176 C 610 92, 742 74, 820 118 C 766 206, 648 244, 548 176 Z" fill="#5FA36A"/>
+  <path d="M574 172 C 640 142, 712 126, 790 124" fill="none" stroke="#4A8A55" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- Grape cluster: three rows, drawn top to bottom so lower grapes overlap.
+       The purple outline keeps neighbours apart at small sizes. -->
+  <g fill="#C4A6F1" stroke="#5E2B97" stroke-width="16">
+    <circle cx="282" cy="410" r="122"/>
+    <circle cx="742" cy="410" r="122"/>
+    <circle cx="512" cy="400" r="126"/>
+    <circle cx="397" cy="605" r="122"/>
+    <circle cx="627" cy="605" r="122"/>
+    <circle cx="512" cy="795" r="120"/>
+  </g>
+
+  <!-- Highlights -->
+  <g fill="#F1E9FD" opacity="0.85">
+    <ellipse cx="240" cy="364" rx="34" ry="24" transform="rotate(-35 240 364)"/>
+    <ellipse cx="700" cy="364" rx="34" ry="24" transform="rotate(-35 700 364)"/>
+    <ellipse cx="468" cy="352" rx="36" ry="25" transform="rotate(-35 468 352)"/>
+    <ellipse cx="355" cy="559" rx="34" ry="24" transform="rotate(-35 355 559)"/>
+    <ellipse cx="585" cy="559" rx="34" ry="24" transform="rotate(-35 585 559)"/>
+    <ellipse cx="470" cy="750" rx="33" ry="23" transform="rotate(-35 470 750)"/>
+  </g>
+</svg>
