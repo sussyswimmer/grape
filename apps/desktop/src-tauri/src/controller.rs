@@ -21,9 +21,11 @@ pub const PLACEHOLDER_SEGMENTS: usize = 6;
 /// Hide the overlay if nothing happens for this long while it's open
 /// (`docs/INTERACTION_SPEC.md` §9).
 pub const WATCHDOG: Duration = Duration::from_secs(30);
-/// After the overlay opens, a drag that brings no file paths this long
-/// after the next pointer move isn't a file drag: close the wheel
-/// (`docs/PLATFORM_WINDOWS.md` → "Is it a file drag?").
+/// Once the overlay is on screen, a drag that brings no file paths this
+/// long after the next pointer move isn't a file drag: close the wheel
+/// (`docs/PLATFORM_WINDOWS.md` → "Is it a file drag?"). The clock starts
+/// only after the overlay reports it painted, so a slow first show can't
+/// close the wheel before the drag ever reached it.
 pub const NO_FILES_GRACE: Duration = Duration::from_millis(300);
 /// After the button goes up, how long to wait for the overlay's drop to
 /// arrive (it comes from another thread) before closing anyway.
@@ -225,7 +227,10 @@ struct OpenWheel {
     highlight: Option<usize>,
     /// From the drop target's Enter.
     paths: Option<Vec<PathBuf>>,
-    /// Set by the first pointer move after opening, cleared when files arrive.
+    /// The overlay reported it painted this wheel, so it's on screen.
+    painted: bool,
+    /// Set by the first pointer move once painted, cleared when files
+    /// arrive.
     files_deadline: Option<Instant>,
     /// When the button went up, if it has.
     ended_at: Option<Instant>,
@@ -334,7 +339,7 @@ impl<S: Screens> WheelController<S> {
                     State::Dragging { cursor, .. } => *cursor = Some((x, y)),
                     State::Open(open) => {
                         open.last_event = now;
-                        if open.paths.is_none() && open.files_deadline.is_none() {
+                        if open.painted && open.paths.is_none() && open.files_deadline.is_none() {
                             open.files_deadline = Some(now + NO_FILES_GRACE);
                         }
                     }
@@ -449,6 +454,7 @@ impl<S: Screens> WheelController<S> {
             held,
             highlight: None,
             paths: None,
+            painted: false,
             files_deadline: None,
             ended_at: None,
             last_event: now,
@@ -508,8 +514,9 @@ impl<S: Screens> WheelController<S> {
     }
 
     fn on_painted(&mut self, seq: u64, now: Instant) -> Vec<Effect> {
-        match &self.state {
+        match &mut self.state {
             State::Open(open) if open.view.seq == seq => {
+                open.painted = true;
                 let ms = now.saturating_duration_since(open.key_at).as_secs_f64() * 1000.0;
                 vec![Effect::Log(format!(
                     "wheel {seq} painted {ms:.0} ms after the key (target: under 100 ms)"
@@ -968,9 +975,30 @@ mod tests {
         assert_eq!(run.opens().len(), 1);
     }
 
+    fn painted(run: &mut Run) {
+        let seq = run.opens().last().map(|v| v.seq).unwrap_or_default();
+        run.input(Input::Painted { seq });
+    }
+
+    #[test]
+    fn the_no_files_clock_waits_for_the_overlay_to_paint() {
+        let mut run = open_at_400_300();
+        // Not on screen yet: moves don't start the clock, however long.
+        run.signals(vec![moved(410, 300)]);
+        run.wait(NO_FILES_GRACE * 3);
+        run.signals(vec![moved(420, 300)]);
+        run.wait(NO_FILES_GRACE * 3);
+        assert!(run.ctl.is_open());
+        painted(&mut run);
+        run.signals(vec![moved(430, 300)]);
+        run.wait(NO_FILES_GRACE * 2);
+        assert!(!run.ctl.is_open());
+    }
+
     #[test]
     fn no_enter_after_a_move_means_no_file_drag() {
         let mut run = open_at_400_300();
+        painted(&mut run);
         // No deadline until the pointer moves.
         run.wait(NO_FILES_GRACE * 3);
         assert!(run.ctl.is_open());
@@ -988,6 +1016,7 @@ mod tests {
     #[test]
     fn files_arriving_cancel_the_no_files_deadline() {
         let mut run = open_at_400_300();
+        painted(&mut run);
         run.signals(vec![moved(410, 300)]);
         run.drop_event(DropEvent::Enter {
             paths: file(),
