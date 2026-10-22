@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core permissions for Grape's overlay and settings windows.",
+  "description": "The overlay and settings pages may only listen for the events Rust sends them (wheel://*, job://*). They render what they're told and call nothing else.",
   "windows": ["overlay", "settings"],
-  "permissions": ["core:default"]
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
 }
