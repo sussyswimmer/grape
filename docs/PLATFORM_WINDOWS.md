@@ -36,17 +36,19 @@ Windows has no system-wide "drag in progress" signal, and the dragged data objec
    - `WM_MOUSEMOVE` with the button down past `SM_CXDRAG`/`SM_CYDRAG` → candidate drag.
    - `WM_LBUTTONUP` → `Ended`.
    - Keep the hook callback tiny: post to a channel and return `CallNextHookEx` immediately. Windows silently removes hooks that exceed `LowLevelHooksTimeout`.
+   - **[Grape, M1]** The callback only forwards presses, releases and moves-while-pressed to a worker thread. The worker does everything slower: the allowlist check below (`WindowFromPoint` can wait on another app's window), the drag threshold and the key polling. A missed release is caught by polling the mouse buttons, after three "up" readings in a row.
 2. **Modifiers:** `GetAsyncKeyState(VK_SHIFT / VK_CONTROL / VK_MENU)` polled at ~120 Hz while a candidate drag is live. This avoids a keyboard hook entirely. Add `WH_KEYBOARD_LL` only if polling misses fast taps in testing.
 3. **Is it a *file* drag?** Unknown until the overlay gets `DragDropEvent::Enter { paths }`.
    - **[Grape]** Reduce false positives: only arm when the window under the cursor at mouse-down (`WindowFromPoint` → `GetAncestor(GA_ROOT)` → class name) is Explorer (`CabinetWClass`, `ExploreWClass`) or the desktop (`Progman`, `WorkerW`), **or** the user enabled "Any app" in Settings.
    - If the overlay shows but `Enter` brings no paths within 300 ms of the next cursor movement, hide it.
-4. **Tap trigger:** in Explorer, holding Shift while dropping switches the drag to *move* and Ctrl to *copy*. Grape opens on the key going **down**. The drop then happens on Grape's overlay, so Explorer's effect choice no longer matters (see the next section).
+4. **Tap trigger:** in Explorer, holding Shift while dropping switches the drag to *move* and Ctrl to *copy*. Grape opens on the key going **down**. The drop then happens on Grape's overlay, so Explorer's effect choice no longer matters (see the next section). A key already held when the drag starts doesn't open a wheel (DECISIONS D14).
+5. **Esc** is polled with `GetAsyncKeyState` too. Explorer cancels its own drag when Esc is pressed (OLE's `QueryContinueDrag`), so on Windows Esc hides the wheel *and* ends the drag.
 
 ## The drop must never move the source
 
 Explorer's source-side behaviour depends on the drop effect the target reports. With Shift held, the user's intent looks like "move". If a target returns `DROPEFFECT_MOVE` and doesn't handle the move itself, Explorer can **delete the source** ("optimized move" / `CFSTR_PERFORMEDDROPEFFECT`).
 
-- Tauri/wry's drop handler is expected to return `DROPEFFECT_COPY`. **Verify this in M1** with a test that Shift-drags a file onto the overlay and asserts the source still exists. If wry returns anything else, register our own `IDropTarget` on the overlay HWND and always return `DROPEFFECT_COPY`. Log the choice in DECISIONS.
+- **M1 finding:** wry 0.57's drop handler returns `DROPEFFECT_COPY` from `DragEnter` and `DragOver`, but never sets the effect in `Drop`, and leaves it unset for drags without files. So Grape registers its own `IDropTarget` on the overlay HWND and all its child windows (`grape_platform::windows::install_drop_target`, DECISIONS D13). It reports `DROPEFFECT_COPY` for file drags and `DROPEFFECT_NONE` otherwise, in every callback. CI checks this with the shell's own data object and Shift, Ctrl and Alt held. The manual 10× test on the PC still applies.
 - This is golden rule 2, and it's the single most important Windows test.
 
 ## Overlay window

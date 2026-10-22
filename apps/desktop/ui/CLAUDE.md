@@ -9,8 +9,8 @@ The TypeScript UI for Grape's windows: the wheel **overlay**, **settings**, and 
 
 ## The UI never decides behavior
 - Rust owns the state machine (`docs/INTERACTION_SPEC.md` §1), the hit test and the job runner. The UI renders what Rust sends and reports drops back.
-- Events in: `wheel://open {anchor, mode, segments, labels}`, `wheel://highlight {index|null}`, `wheel://close`, `job://progress`, `job://done`.
-- **No pointer events arrive during an OS drag.** Highlighting is driven by `wheel://highlight`, which comes from `DragDropEvent::Over` positions. Don't use DOM `pointermove`. `isPointInFill` is only a second check that honors the rounded corners (§4).
+- Events in: `wheel://open {seq, mode, anchor, segments, geometry}`, `wheel://highlight {index|null}`, `wheel://close`, and later `job://progress`, `job://done`. Out: the `wheel_painted(seq)` command, once a wheel is on screen (`docs/DECISIONS.md` D15).
+- **No pointer events arrive during an OS drag.** Highlighting is driven by `wheel://highlight`, which comes from the drop target's `Over` positions. Don't use DOM `pointermove`. `isPointInFill` is only a second check that honors the rounded corners (§4).
 - Geometry comes from `grape-core`: the segments in `wheel://open`, and the exported `GEOMETRY` constants. Never hard-code radii, gaps or angles here.
 
 ## Wheel rendering

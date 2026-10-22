@@ -14,9 +14,10 @@ The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `
 
 ## WheelController
 - Implements the state machine in `docs/INTERACTION_SPEC.md` §1, exactly. Unit-test it with `grape_platform::mock` signal scripts. It's pure state, so it doesn't need a real OS.
-- Inputs: `DragSignal`s, overlay `WindowEvent::DragDrop` (`Enter`/`Over`/`Drop`/`Leave`), Esc.
-- Outputs: Tauri events `wheel://open {anchor, mode, segments, labels}`, `wheel://highlight {index|null}`, `wheel://close`, `job://progress`, `job://done`.
-- Hit testing uses `grape_core::hit_test` with positions from `DragDropEvent`, converted to logical coordinates relative to the anchor.
+- Lives in `src/controller.rs` (pure) and `src/wheel.rs` (wiring to the monitor, the drop target and the overlay).
+- Inputs: `DragSignal`s (including `Escape`), the overlay's drop events (`grape_platform::DropEvent` from Grape's own drop target on Windows, `docs/DECISIONS.md` D13), Pause, and `wheel_painted` from the overlay.
+- Outputs: Tauri events `wheel://open {seq, mode, anchor, segments, geometry}`, `wheel://highlight {index|null}`, `wheel://close`, and later `job://progress`, `job://done`.
+- Hit testing uses `grape_core::hit_test` with the drop target's global physical positions, converted to logical offsets from the anchor.
 - **Watchdog:** if no drag signals or drop events arrive for 30 s while the overlay is visible, hide it.
 
 ## Rules

@@ -32,13 +32,15 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 *Status 2026-10-22:* CI is green (Windows lint + tests, Windows UI, macOS check). The app hasn't run on the PC yet: `TESTING.md` → "App shell" lists what to check.
 
 ## M1: Drag + overlay spike on Windows (lane A) ⚠️ highest risk
-- [ ] Windows `DragMonitor`: `WH_MOUSE_LL` hook on a message-pumping thread + `GetAsyncKeyState` polling + Explorer/Desktop allowlist.
-- [ ] Controller opens the overlay full-monitor on the monitor under the cursor and draws a placeholder ring at the anchor.
-- [ ] `DragDropEvent::Enter/Over/Drop` → log paths, position and the hit-test result.
-- [ ] Esc closes the overlay and the OS drag continues to a normal drop.
-- [ ] **Shift-drop onto the overlay never deletes or moves the source.** Check wry's drop effect; add our own `IDropTarget` if needed. Manual test 10× plus a scripted check where possible.
-- [ ] Two monitors at different DPI scaling place the wheel correctly (if a second monitor is available).
-- [ ] Measure: modifier → overlay visible. Target under 100 ms.
+- [ ] Windows `DragMonitor`: `WH_MOUSE_LL` hook on a message-pumping thread + `GetAsyncKeyState` polling + Explorer/Desktop allowlist. *(Built; check on the PC.)*
+- [ ] Controller opens the overlay full-monitor on the monitor under the cursor and draws a placeholder ring at the anchor. *(Built; check on the PC.)*
+- [ ] `DragDropEvent::Enter/Over/Drop` → log paths, position and the hit-test result. *(Built, from Grape's own drop target; check on the PC.)*
+- [ ] Esc closes the overlay and the OS drag continues to a normal drop. *(Built. Explorer cancels its own drag on Esc, so on Windows the drag ends too: D14.)*
+- [ ] **Shift-drop onto the overlay never deletes or moves the source.** Check wry's drop effect; add our own `IDropTarget` if needed. Manual test 10× plus a scripted check where possible. *(wry never sets the effect in `Drop`, so Grape has its own target (D13), and a CI test checks it answers copy with Shift, Ctrl and Alt held. The manual 10× test is still to do.)*
+- [ ] Two monitors at different DPI scaling place the wheel correctly (if a second monitor is available). *(Built: per-monitor frame and scale; unit-tested with an offset 150 % monitor.)*
+- [ ] Measure: modifier → overlay visible. Target under 100 ms. *(Built: the log prints `painted N ms after the key`.)*
+
+*Status 2026-10-22:* everything is built and green in CI (Windows tests, including the drop target and the hook). None of it has run on the PC yet: `TESTING.md` → "Drag + wheel, M1 spike" lists what to try.
 
 **Accept:** drag a file from Explorer, tap Shift, see the ring at the cursor, drop on the top segment → log line with the correct path. Drop off-ring → nothing happens, and the file stays where it was.
 

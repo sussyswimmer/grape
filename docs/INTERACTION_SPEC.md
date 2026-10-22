@@ -28,6 +28,7 @@ WheelOpen(mode)
 - **[observed]** The user can release the key and keep dragging. The wheel stays open until drop or cancel.
 - **[Grape]** On Windows the defaults are Shift / Ctrl / Alt, because the Windows key opens the Start menu.
 - **[Grape]** The wheel opens on **key-down** during an active drag. The user can tap (press and release) or keep holding; both work. Some apps, like Explorer, change the drag's drop effect while a modifier is held. That stops mattering because the drop then lands on Grape's overlay (see `PLATFORM_WINDOWS.md`).
+- **[Grape]** A key already held when the drag starts isn't a key-down: holding Shift before dragging keeps Explorer's "move" and opens no wheel. Releasing it and pressing it again during the drag does (`DECISIONS.md` D14).
 - **[observed]** The wheel only counts as active after the pointer has moved more than 4 px since mouse-down. Grape uses 4 px on macOS and `GetSystemMetrics(SM_CXDRAG/SM_CYDRAG)` on Windows.
 
 ## 3. Anchor and placement
@@ -71,7 +72,7 @@ These are Grape's values, in points/DIPs at 1× scale. The site's values were �
 
 - **[observed]** Drop on a highlighted segment → run that conversion, tool or action.
 - **[observed]** Drop while the wheel is open but nothing is highlighted → cancel. **[Grape]** The overlay swallows the drop, so the file does *not* land in whatever app was underneath. That's why the overlay covers the whole display while the wheel is open (see `ARCHITECTURE.md`).
-- **[Grape]** Esc hides the overlay *without* ending the OS drag, so the user can still drop normally.
+- **[Grape]** Esc hides the overlay *without* ending the OS drag, so the user can still drop normally. On Windows the drag source itself (Explorer) also cancels the drag on Esc, so there the drag ends too and nothing is dropped (`DECISIONS.md` D14).
 - **[observed]** While a conversion runs, a placeholder shows "Making {name}…". When it finishes, a confirmation appears.
 - **[Grape]** In the real OS, show this as a small toast near the anchor plus the OS's own file appearance. The demo's ≈ 680 ms is fake latency; real jobs report progress.
 

@@ -105,6 +105,26 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Why:** lane A gets tier filtering, wheel contents, titles and geometry from core instead of re-deriving the rules in the UI, and the directory snapshot keeps core pure and deterministic. M2 was built by Claude Code at Maxwell's request, although ROADMAP gives `grape-core` to lane B.
 - **Revisit if:** planning needs more disk state than names and writability (e.g. free space), or lane A would rather pass `Features` straight into `targets` / `tools`.
 
+## D13: Grape's own drop target on the Windows overlay (2026-10-22, proposed, confirm)
+- **Decision:** Grape registers its own `IDropTarget` (`grape_platform::windows::install_drop_target`) on the overlay window and every child window, replacing wry's, at startup and again before each show. It reports `DROPEFFECT_COPY` for a file drag and `DROPEFFECT_NONE` for anything else, in `DragEnter`, `DragOver` and `Drop`, whatever keys are held and whatever the source allows. On Windows the controller gets its drop events (`grape_platform::DropEvent`, global physical pixels) from this target instead of Tauri's `WindowEvent::DragDrop`.
+- **Why:** wry 0.57.0 (`webview2/drag_drop.rs`) sets the effect in `DragEnter`/`DragOver` but never writes it in `Drop`, and leaves it unset for drags without files. What Explorer then acts on is whatever value OLE left there, and golden rule 2 can't rest on that (`PLATFORM_WINDOWS.md` → "The drop must never move the source"). The target's screen coordinates are also what the hit test wants.
+- **Kept:** `dragDropEnabled: true` in `tauri.conf.json`, so wry still turns off WebView2's own external drops (`SetAllowExternalDrop(false)`). A window Grape misses then refuses the drop instead of navigating. If wry's handler ever fires, the app logs it as a coverage gap.
+- **Dependencies:** `windows` 0.62.2 gains the features `Win32_Graphics_Gdi`, `Win32_System_Com`, `Win32_System_Com_StructuredStorage`, `Win32_System_LibraryLoader`, `Win32_System_Ole`, `Win32_System_SystemServices`, `Win32_UI_HiDpi` and `Win32_UI_Input_KeyboardAndMouse`, all of which wry already enables on the same version. `windows-core` 0.62.2 (MIT OR Apache-2.0) becomes a direct dependency of `grape-platform` because the COM `#[implement]` macro needs it by name; it was already in the build through wry and tao.
+- **Tested:** CI's Windows runner drives the target with the shell's own data object for a temporary file, with Shift, Ctrl, Alt and Shift+Ctrl held and every effect allowed. It always answers copy, and nothing for a drag without files. Not yet run against a real Explorer drag (`TESTING.md` → "Drag + wheel").
+- **Revisit if:** the PC shows drops that don't reach Grape's target (a WebView2 child window owned by another process can't be registered; the log says how many were), or wry starts setting the effect in `Drop`.
+
+## D14: Drag sources and keys on Windows (2026-10-22, proposed, confirm)
+- **Drag sources:** a press arms the wheel only if it lands in a top-level window of class `CabinetWClass` / `ExploreWClass` (File Explorer) or `Progman` / `WorkerW` (the Desktop), as `PLATFORM_WINDOWS.md` describes. This answers O5 with its default. An "Any app" setting can come with Settings in M6.
+- **Keys held before the drag don't count:** `DragSignal::Started` carries the modifiers already held, and only a change during the drag opens or swaps a wheel. Holding Shift before dragging keeps meaning "move" in Explorer.
+- **Exactly one key:** a wheel opens only when exactly one modifier is held and it's assigned to a wheel. The Windows key is tracked, so it counts towards "two keys", but opens nothing.
+- **Esc** is polled with `GetAsyncKeyState`, like the modifiers. An OLE drag source such as Explorer also cancels its own drag when Esc is pressed, so on Windows Esc ends the drag as well as hiding the wheel (`INTERACTION_SPEC.md` §6). To be confirmed on the PC.
+- **Revisit if:** users want the wheel from other apps (browsers, editors), or the held-key rule feels wrong in testing.
+
+## D15: Overlay ↔ Rust messages (2026-10-22, proposed, confirm)
+- **`@tauri-apps/api` 2.12.1** (Apache-2.0 OR MIT), pinned to match `tauri` 2.12.1 and over 14 days old (D9). The overlay uses it to listen for `wheel://open`, `wheel://highlight` and `wheel://close`, and to call one command.
+- **`wheel_painted(seq)`:** the overlay reports when a wheel is on screen, so the log shows how long it took from the key (ROADMAP M1: under 100 ms). `build.rs` lists the app's commands, so each gets its own permission, and `capabilities/overlay.json` grants only `allow-wheel-painted`, only to the overlay. Unlisted commands can't be called.
+- **App crate dependencies:** `grape-core` (wheel layout, hit test, anchor clamping) and `serde` (event payloads), both already in the workspace (D9).
+
 ---
 
 ## Open questions
@@ -113,6 +133,6 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **O2: Apple Pages support.** There's no open library and `NSAttributedString` can't read `.pages`. How Tangerine does it is unknown; the website doesn't reveal it. Options: (a) skip; (b) macOS-only via scripting the Pages app if installed; (c) parse the IWA format (large effort). Default: skip until users ask.
 - ~~**O3: Windows test hardware.**~~ Resolved: Maxwell has his own Windows PC (see D8).
 - **O4: Optional add-on downloads** (LibreOffice for slides/office in v2). This needs a network call outside the conversion path. Decide before v2.
-- **O5: Show the wheel for drags from any app on Windows,** or only Explorer and the Desktop (the default)?
+- ~~**O5: Show the wheel for drags from any app on Windows,** or only Explorer and the Desktop (the default)?~~ Answered by default in D14: Explorer and the Desktop only, with "Any app" as a possible setting in M6. Confirm or change.
 - **O6: MPL-2.0 crates linked by Tauri.** Tauri 2.12 statically links `option-ext` 0.2.0 (MPL-2.0) through `dirs` → `dirs-sys`. ENGINES rule 1 allows only MIT/Apache/BSD/ISC/Zlib, or LGPL linked dynamically. MPL-2.0 is file-level copyleft: linking it into an MIT app is fine as long as the MPL files' source stays available, which it does (unmodified on crates.io). Proposal: amend rule 1 to allow unmodified MPL-2.0 crates, list them in `THIRD_PARTY_NOTICES.md` in M7, and add a `cargo-deny` license check to CI.
 - **O7: Wheel titles.** `TOOLS_AND_ACTIONS.md` lists the wheel titles (METADATA, ADD BG, BLEEP, …) as **[observed]** from the demo, while golden rule 1 bans Tangerine's wording. `grape-core` encodes them exactly as the doc lists them, in one `match` checked by the doc-sync test, so rewording them later is a one-line change on each side. Keep them, or write our own?
