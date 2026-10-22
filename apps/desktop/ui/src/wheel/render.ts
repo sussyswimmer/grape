@@ -1,89 +1,267 @@
-// Draws the wheel into the overlay's SVG from a wheel://open payload. The
-// overlay fills the whole monitor, so the wheel is translated to the
-// anchor Rust picked. Nothing here decides behavior: highlight and close
-// come from Rust too. This is the interim renderer; the full one (rounded
-// corners, tick, reduced motion) replaces it in M3.
+/**
+ * Draws the wheel as SVG inside the overlay (docs/design/m1-drag-wheel.md
+ * §D.2). The decisions live in `scene.ts`; this file only turns a scene
+ * into DOM nodes, so it stays thin.
+ *
+ * - `svg#wheel` is absolutely positioned at `anchor − backdropR` in the
+ *   overlay's CSS px (the overlay window covers one monitor, and Rust sends
+ *   the anchor relative to it), with a viewBox centered on the anchor.
+ * - A new seq draws a fresh SVG that animates in (unless the user prefers
+ *   reduced motion). A key swap, the entries arriving or a highlight redraws
+ *   the same SVG in place, without animation.
+ * - A close removes every child at once, so the next show never flashes a
+ *   stale wheel.
+ * - After drawing an open, the next animation frame reports `wheel_painted`
+ *   to Rust (the M1 latency log). Errors there are swallowed.
+ */
 
-import { emptyMessage, modeCaption, segmentPath, type WheelOpen } from "./geometry";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  WHEEL_PAINTED,
+  type WheelClosePayload,
+  type WheelHighlightPayload,
+  type WheelOpenPayload,
+} from "../shared/events";
+import { formatNumber } from "./geometry";
+import {
+  applyClose,
+  applyHighlight,
+  applyOpen,
+  buildScene,
+  CLOSED,
+  type Sound,
+  type Step,
+  type TextBlock,
+  type WheelScene,
+  type WheelState,
+} from "./scene";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
-/** The drawn wheel, kept so highlight updates don't query the DOM. */
-export interface DrawnWheel {
-  seq: number;
-  idle: string;
-  titles: string[];
-  segments: SVGPathElement[];
-  caption: SVGTextElement;
+/** The wheel overlay: one method per `wheel://…` event. Payloads must already be guarded. */
+export interface WheelView {
+  open(payload: WheelOpenPayload): void;
+  highlight(payload: WheelHighlightPayload): void;
+  close(payload: WheelClosePayload): void;
 }
 
-/** Replaces whatever `root` held with the wheel described by `open`. */
-export function drawWheel(root: SVGGElement, open: WheelOpen): DrawnWheel {
+/** Calls a Rust command (Tauri's `invoke`, or a stand-in in tests). */
+export type InvokeFn = (command: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/** Plays or cancels the highlight tick. */
+export interface SoundSink {
+  /** The wheel opened or swapped; `sounds` is the payload's setting. */
+  opened(sounds: boolean): void;
+  play(): void;
+  cancel(): void;
+}
+
+/** Seams for tests. Production code passes nothing. */
+export interface WheelViewOptions {
+  readonly invoke?: InvokeFn;
+  readonly requestFrame?: (callback: () => void) => void;
+  readonly prefersReducedMotion?: () => boolean;
+  readonly sound?: SoundSink;
+}
+
+const SILENT: SoundSink = { opened: () => undefined, play: () => undefined, cancel: () => undefined };
+
+/**
+ * Mounts the wheel into `root` (the overlay's `#wheel-root`, which covers
+ * the window) and returns the view the event wiring drives. `root` is
+ * emptied first.
+ */
+export function mountWheel(root: HTMLElement, options: WheelViewOptions = {}): WheelView {
+  const doc = root.ownerDocument;
+  const win = doc.defaultView;
+  const callRust: InvokeFn = options.invoke ?? invoke;
+  const requestFrame =
+    options.requestFrame ??
+    ((callback: () => void): void => {
+      if (win === null) {
+        callback();
+      } else {
+        win.requestAnimationFrame(() => callback());
+      }
+    });
+  const prefersReducedMotion =
+    options.prefersReducedMotion ??
+    ((): boolean =>
+      win !== null &&
+      typeof win.matchMedia === "function" &&
+      win.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const sound = options.sound ?? SILENT;
+
+  let state: WheelState = CLOSED;
+  let svg: SVGSVGElement | null = null;
   root.replaceChildren();
-  root.setAttribute("transform", `translate(${open.anchor.x} ${open.anchor.y})`);
-  const { geometry, content } = open;
 
-  const backdrop = document.createElementNS(SVG_NS, "circle");
-  backdrop.setAttribute("class", "wheel-backdrop");
-  backdrop.setAttribute("r", String(geometry.backdropR));
-  root.append(backdrop);
+  function clear(): void {
+    root.replaceChildren();
+    svg = null;
+  }
 
-  let idle = modeCaption(open.mode);
-  const titles: string[] = [];
-  const segments: SVGPathElement[] = [];
-  if (content.kind === "pending") {
-    // Files not known yet: a neutral ring until the drop target's Enter.
-    const ring = document.createElementNS(SVG_NS, "circle");
-    ring.setAttribute("class", "wheel-pending");
-    ring.setAttribute("r", String((geometry.innerR + geometry.outerR) / 2));
-    ring.setAttribute("stroke-width", String(geometry.outerR - geometry.innerR));
-    root.append(ring);
-    idle = "…";
-  } else if (content.kind === "empty") {
-    idle = emptyMessage(content.state, open.keys);
-  } else {
-    for (const segment of content.segments) {
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("class", "wheel-segment");
-      path.setAttribute("d", segmentPath(segment, geometry));
-      path.setAttribute("aria-label", segment.title);
-      root.append(path);
-
-      const label = document.createElementNS(SVG_NS, "text");
-      label.setAttribute("class", content.dense ? "wheel-label is-dense" : "wheel-label");
-      label.setAttribute("x", String(segment.labelX));
-      label.setAttribute("y", String(segment.labelY));
-      label.textContent = segment.title;
-      root.append(label);
-      segments.push(path);
-      titles.push(segment.title);
+  function playSound(effect: Sound): void {
+    if (effect === "play") {
+      sound.play();
+    } else if (effect === "cancel") {
+      sound.cancel();
     }
   }
 
-  const caption = document.createElementNS(SVG_NS, "text");
-  caption.setAttribute("class", content.kind === "empty" ? "wheel-caption is-empty" : "wheel-caption");
-  if (content.kind === "empty") {
-    // The message sits under the wheel, where there's room for it.
-    caption.setAttribute("y", String(geometry.backdropR + 20));
+  function reportPainted(seq: number): void {
+    requestFrame(() => {
+      // Closed or replaced before it reached the screen: nothing to report.
+      if (state.shown?.seq !== seq) {
+        return;
+      }
+      try {
+        callRust(WHEEL_PAINTED, { seq }).catch(() => undefined);
+      } catch {
+        // Outside Tauri (a plain browser) there is no IPC; never break drawing.
+      }
+    });
   }
-  caption.textContent = idle;
-  root.append(caption);
 
-  root.removeAttribute("hidden");
-  return { seq: open.seq, idle, titles, segments, caption };
+  function apply(step: Step): WheelScene | null {
+    state = step.state;
+    playSound(step.sound);
+    if (step.paint === "none") {
+      return null;
+    }
+    const scene = buildScene(state);
+    if (step.paint === "clear" || scene === null) {
+      clear();
+      return null;
+    }
+    if (step.paint === "fresh" || svg === null) {
+      const fresh = doc.createElementNS(SVG_NS, "svg");
+      drawScene(fresh, scene);
+      if (!prefersReducedMotion()) {
+        fresh.classList.add("wheel-enter");
+      }
+      root.replaceChildren(fresh);
+      svg = fresh;
+    } else {
+      drawScene(svg, scene);
+    }
+    return scene;
+  }
+
+  return {
+    open(payload) {
+      sound.opened(payload.sounds);
+      const scene = apply(applyOpen(state, payload));
+      if (scene !== null) {
+        reportPainted(scene.seq);
+      }
+    },
+    highlight(payload) {
+      apply(applyHighlight(state, payload));
+    },
+    close(payload) {
+      apply(applyClose(state, payload));
+    },
+  };
 }
 
-/** Highlights segment `index`, or none. */
-export function highlight(wheel: DrawnWheel, index: number | null): void {
-  wheel.segments.forEach((path, i) => {
-    path.classList.toggle("is-highlighted", i === index);
-  });
-  wheel.caption.textContent =
-    index === null ? wheel.idle : (wheel.titles[index] ?? wheel.idle);
+// ---------------------------------------------------------------------------
+// Scene → SVG
+// ---------------------------------------------------------------------------
+
+function svgElement<K extends keyof SVGElementTagNameMap>(
+  doc: Document,
+  tag: K,
+  attributes: Readonly<Record<string, string>> = {},
+): SVGElementTagNameMap[K] {
+  const element = doc.createElementNS(SVG_NS, tag);
+  for (const [name, value] of Object.entries(attributes)) {
+    element.setAttribute(name, value);
+  }
+  return element;
 }
 
-/** Removes the wheel. */
-export function clearWheel(root: SVGGElement): void {
-  root.replaceChildren();
-  root.setAttribute("hidden", "");
+/** A `<text>` with one `<tspan>` per line. Text goes in via textContent only. */
+function textBlock(doc: Document, block: TextBlock, className: string): SVGTextElement {
+  const text = svgElement(doc, "text");
+  text.classList.add(className);
+  for (const line of block.lines) {
+    const span = svgElement(doc, "tspan", {
+      x: formatNumber(block.x),
+      y: formatNumber(line.y),
+    });
+    span.textContent = line.text;
+    text.append(span);
+  }
+  return text;
+}
+
+/** Redraws `svg` from `scene`, keeping the element (and any running entry animation). */
+function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
+  const doc = svg.ownerDocument;
+  svg.setAttribute("id", "wheel");
+  svg.classList.add("wheel");
+  svg.classList.toggle("dense", scene.dense);
+  svg.setAttribute("data-kind", scene.kind);
+  svg.setAttribute("data-seq", String(scene.seq));
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", scene.label);
+  svg.setAttribute("viewBox", scene.viewBox);
+  svg.setAttribute("width", formatNumber(scene.size));
+  svg.setAttribute("height", formatNumber(scene.size));
+  svg.style.setProperty("left", `${formatNumber(scene.left)}px`);
+  svg.style.setProperty("top", `${formatNumber(scene.top)}px`);
+
+  const title = svgElement(doc, "title");
+  title.textContent = scene.label;
+  const children: SVGElement[] = [
+    title,
+    svgElement(doc, "circle", {
+      class: "wheel-backdrop",
+      cx: "0",
+      cy: "0",
+      r: formatNumber(scene.backdropR),
+    }),
+  ];
+
+  if (scene.placeholders.length > 0) {
+    const pending = svgElement(doc, "g", { class: "wheel-pending", "aria-hidden": "true" });
+    for (const d of scene.placeholders) {
+      pending.append(svgElement(doc, "path", { class: "wheel-placeholder", d, "fill-rule": "evenodd" }));
+    }
+    children.push(pending);
+  }
+
+  if (scene.segments.length > 0) {
+    const segments = svgElement(doc, "g", { class: "wheel-segments" });
+    const labels = svgElement(doc, "g", { class: "wheel-labels", "aria-hidden": "true" });
+    for (const segment of scene.segments) {
+      const path = svgElement(doc, "path", {
+        d: segment.d,
+        "fill-rule": "evenodd",
+        "data-index": String(segment.index),
+        "aria-label": segment.title,
+      });
+      path.classList.add("wheel-segment");
+      path.classList.toggle("is-highlighted", segment.highlighted);
+      const tooltip = svgElement(doc, "title");
+      tooltip.textContent = segment.title;
+      path.append(tooltip);
+      segments.append(path);
+
+      const label = textBlock(doc, segment.label, "wheel-label");
+      label.classList.toggle("is-highlighted", segment.highlighted);
+      labels.append(label);
+    }
+    children.push(segments, labels);
+  }
+
+  if (scene.center !== null) {
+    children.push(textBlock(doc, scene.center, "wheel-center"));
+  }
+  if (scene.message !== null) {
+    children.push(textBlock(doc, scene.message, "wheel-message"));
+  }
+
+  svg.replaceChildren(...children);
 }

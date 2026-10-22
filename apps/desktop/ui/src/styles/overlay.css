@@ -1,9 +1,44 @@
 /*
- * The overlay window is transparent: only the wheel is drawn. The page
- * still gets a fill one step above invisible, so no part of the overlay
- * can count as see-through when Windows decides which window a drop lands
- * on: an off-ring drop must land here and cancel (INTERACTION_SPEC §6).
+ * The overlay window: transparent, the size of one monitor, and it only
+ * ever shows the wheel. These wheel tokens build on tokens.css (Grape's
+ * palette only) and follow the OS light/dark theme.
  */
+:root {
+  /*
+   * Near-invisible fill (about one level of 255) so every pixel of the
+   * overlay hit-tests as Grape's and a drop never falls through to the
+   * window below (design note D15). Set it to `transparent` only if the
+   * PC check proves it isn't needed.
+   */
+  --overlay-hit-fill: rgba(0, 0, 0, 0.004);
+
+  /* No backdrop blur in a transparent window, so the glass is denser. */
+  --wheel-glass-fill: rgba(248, 244, 253, 0.94);
+  --wheel-glass-stroke: var(--glass-stroke);
+  --wheel-shadow: rgba(27, 12, 46, 0.26);
+
+  --wheel-segment-fill: var(--segment-fill);
+  --wheel-segment-stroke: var(--segment-stroke);
+  --wheel-segment-highlight: var(--segment-highlight);
+  --wheel-placeholder-opacity: 0.45;
+
+  --wheel-label: var(--grape-900);
+  --wheel-label-highlight: #ffffff;
+  --wheel-center-label: var(--grape-700);
+  --wheel-message: var(--color-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wheel-glass-fill: rgba(27, 12, 46, 0.92);
+    --wheel-shadow: rgba(0, 0, 0, 0.45);
+
+    --wheel-label: var(--grape-100);
+    --wheel-label-highlight: var(--grape-950);
+    --wheel-center-label: var(--grape-100);
+  }
+}
+
 html,
 body {
   margin: 0;
@@ -13,67 +48,128 @@ body {
   background: var(--overlay-hit-fill);
   user-select: none;
   cursor: default;
-}
-
-body {
   font-family: var(--font-ui);
 }
 
-.overlay {
+/* The mount point covers the whole window; the wheel is placed inside it. */
+#wheel-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* Placed by render.ts at (anchor − backdropR) in CSS px. */
+#wheel-root > .wheel {
+  position: absolute;
   display: block;
-  width: 100%;
-  height: 100%;
+  overflow: visible;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 8px 22px var(--wheel-shadow));
 }
 
 .wheel-backdrop {
-  fill: var(--glass-fill);
-  stroke: var(--glass-stroke);
+  fill: var(--wheel-glass-fill);
+  stroke: var(--wheel-glass-stroke);
   stroke-width: 1;
 }
 
 .wheel-segment {
-  fill: var(--segment-fill);
-  stroke: var(--segment-stroke);
+  fill: var(--wheel-segment-fill);
+  stroke: var(--wheel-segment-stroke);
   stroke-width: 1;
 }
 
 .wheel-segment.is-highlighted {
-  fill: var(--segment-highlight);
+  fill: var(--wheel-segment-highlight);
+  stroke: var(--wheel-segment-highlight);
+}
+
+.wheel-placeholder {
+  fill: var(--wheel-segment-fill);
+  stroke: var(--wheel-segment-stroke);
+  stroke-width: 1;
+  opacity: var(--wheel-placeholder-opacity);
 }
 
 .wheel-label,
-.wheel-caption {
-  fill: var(--color-text);
+.wheel-center,
+.wheel-message {
   text-anchor: middle;
   dominant-baseline: central;
   pointer-events: none;
 }
 
+/* Sizes match TEXT in src/wheel/scene.ts (line heights and wrap widths). */
 .wheel-label {
-  font-size: 15px;
+  fill: var(--wheel-label);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.wheel.dense .wheel-label {
+  font-size: 10px;
   font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
-.wheel-label.is-dense {
-  font-size: 11px;
+.wheel-label.is-highlighted {
+  fill: var(--wheel-label-highlight);
 }
 
-.wheel-pending {
-  fill: none;
-  stroke: var(--segment-fill);
-}
-
-.wheel-caption {
+.wheel-center {
+  fill: var(--wheel-center-label);
   font-size: 13px;
-  fill: var(--color-text-muted);
+  font-weight: 650;
+  letter-spacing: 0.03em;
 }
 
-.wheel-caption.is-empty {
-  font-size: 14px;
-  fill: var(--color-text);
+.wheel-message {
+  fill: var(--wheel-message);
+  font-size: 13px;
+  font-weight: 500;
 }
 
-/* Each label follows its segment, so it can flip for contrast. */
-.wheel-segment.is-highlighted + .wheel-label {
-  fill: var(--color-surface);
+/* A new wheel scales and fades in; a swap or highlight redraws in place. */
+@keyframes wheel-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.wheel.wheel-enter {
+  animation: wheel-enter 90ms ease-out both;
+}
+
+/* render.ts skips the class too; this keeps reduced motion even if it didn't. */
+@media (prefers-reduced-motion: reduce) {
+  .wheel.wheel-enter {
+    animation: none;
+  }
+}
+
+/*
+ * The M0 placeholder ring in overlay.html (still used by the debug
+ * "flash overlay" item). Delete these rules when overlay.html mounts
+ * #wheel-root instead.
+ */
+body:has(> svg.wheel) {
+  display: grid;
+  place-items: center;
+}
+
+.wheel-ring {
+  fill: none;
+  stroke: var(--wheel-segment-fill);
+}
+
+.wheel-edge {
+  fill: none;
+  stroke: var(--wheel-segment-stroke);
+  stroke-width: 1.5;
 }
