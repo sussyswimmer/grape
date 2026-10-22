@@ -39,6 +39,8 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "sussyswimmer",
+    "copyright": "Copyright (c) 2026 sussyswimmer",
     "category": "Utility",
     "shortDescription": "Drag a file, tap a key, drop it on the wheel. Offline file conversion.",
     "license": "MIT",
