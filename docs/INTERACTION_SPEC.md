@@ -81,7 +81,7 @@ These are Grape's values, in points/DIPs at 1Ã— scale. The site's values were â‰
 - **[observed]** File actions work for folders, mixed selections, and files with no conversions.
 - **[Grape]** **Conversions** on a multi-selection show the *intersection* of each file's targets, and each file is converted on its own. If the intersection is empty, show the empty-state message.
 - **[Grape]** **Tools** on a multi-selection with mixed formats show the *intersection* of each format's tools. A tool must be enabled for every format in the selection, so in v1 a JPG plus a PDF drops Compress (it's v2 for PDF). If the intersection is empty, show the empty-state message.
-- **[Grape]** **Folders** only get the Actions wheel; Conversions and Tools show their empty state. Archives created from folders are v2.
+- **[Grape]** **Folders** only get the Actions wheel; Conversions and Tools show their empty state. Archives created from folders are v2, but their targets and naming aren't specified yet, so folders stay Actions-only even with v2 enabled until they are.
 
 ## 8. Keyboard and touch (demo-only, informational)
 

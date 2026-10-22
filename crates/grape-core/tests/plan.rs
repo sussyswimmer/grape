@@ -276,14 +276,20 @@ fn not_offered_combine_with_one_file() {
     );
 }
 
+/// Folders are Actions-only, even with v2: folder archives are v2 but not
+/// specified yet (`INTERACTION_SPEC.md` §7).
 #[test]
 fn not_offered_for_folders() {
     let sel = Selection::new(vec![SelectionItem::folder(p(PHOTOS, "album"))])
         .with_dir(PHOTOS, writable(&["album"]));
-    assert_eq!(
-        plan(&sel, &Operation::convert(Zip), &full()),
-        Err(PlanError::NotOffered)
-    );
+    for s in [settings(), full()] {
+        for to in [Zip, Tar, Gz] {
+            assert_eq!(
+                plan(&sel, &Operation::convert(to), &s),
+                Err(PlanError::NotOffered)
+            );
+        }
+    }
 }
 
 #[test]

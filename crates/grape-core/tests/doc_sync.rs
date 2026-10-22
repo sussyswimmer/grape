@@ -10,9 +10,9 @@ use std::collections::HashSet;
 
 use grape_core::geometry::{GEOMETRY, SCREEN_MARGIN};
 use grape_core::{
-    actions, pair_tier, pairs, targets, tool_naming, tool_suffix, tool_tier, tools, Category,
-    Channels, Features, Format, OutputExt, Platform, Suffix, Tier, ToolKey, ToolParams, INPUT_ONLY,
-    TOOL_ROWS,
+    actions, pair_tier, pairs, targets, tool_naming, tool_suffix, tool_tier, tools, wheel_content,
+    Category, Channels, EmptyState, Features, Format, OutputExt, Platform, SelectionItem, Suffix,
+    Tier, ToolKey, ToolParams, WheelContent, WheelMode, INPUT_ONLY, TOOL_ROWS,
 };
 
 const FORMAT_MATRIX: &str = include_str!(concat!(
@@ -508,4 +508,32 @@ fn geometry_table_matches() {
         .next()
         .unwrap();
     assert_eq!(margin.parse::<f64>().unwrap(), SCREEN_MARGIN);
+}
+
+#[test]
+fn folders_stay_actions_only() {
+    let line = line_with(INTERACTION_SPEC, "**Folders** only get the Actions wheel");
+    // If the spec ever defines folder archives, this pin fails and the
+    // folder rows have to be added to the code.
+    assert!(
+        line.contains("folders stay Actions-only even with v2 enabled"),
+        "{line}"
+    );
+    let folder = [SelectionItem::folder("/data/album")];
+    for features in [Features::V1_ONLY, Features::FULL] {
+        assert_eq!(
+            wheel_content(&folder, WheelMode::Conversions, features),
+            WheelContent::Empty(EmptyState::NoConversions)
+        );
+        assert_eq!(
+            wheel_content(&folder, WheelMode::Tools, features),
+            WheelContent::Empty(EmptyState::NoTools)
+        );
+        assert_eq!(
+            wheel_content(&folder, WheelMode::Actions, features)
+                .entries()
+                .len(),
+            6
+        );
+    }
 }

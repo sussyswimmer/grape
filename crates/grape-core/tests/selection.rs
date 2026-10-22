@@ -170,36 +170,45 @@ fn archives_extract_together() {
     assert_eq!(conversions(&items, V1), converts(&[Tar]));
 }
 
+/// §7: folders only get the Actions wheel. Folder archives are v2 but not
+/// specified yet, so v2 doesn't change that (`doc_sync` pins the wording).
 #[test]
 fn folder_only_gets_actions() {
     let items = vec![SelectionItem::folder("/data/photos")];
-    assert_eq!(
-        conversions(&items, FULL),
-        WheelContent::Empty(EmptyState::NoConversions)
-    );
-    assert_eq!(
-        tool_wheel(&items, FULL),
-        WheelContent::Empty(EmptyState::NoTools)
-    );
-    assert_eq!(
-        wheel_content(&items, WheelMode::Actions, FULL),
-        all_actions()
-    );
+    for features in [V1, FULL] {
+        assert_eq!(
+            conversions(&items, features),
+            WheelContent::Empty(EmptyState::NoConversions)
+        );
+        assert_eq!(
+            tool_wheel(&items, features),
+            WheelContent::Empty(EmptyState::NoTools)
+        );
+        assert_eq!(
+            wheel_content(&items, WheelMode::Actions, features),
+            all_actions()
+        );
+    }
 }
 
 #[test]
 fn folder_mixed_with_files_only_gets_actions() {
     let mut items = files(&["a.jpg"]);
     items.push(SelectionItem::folder("/data/photos"));
-    assert_eq!(
-        conversions(&items, FULL),
-        WheelContent::Empty(EmptyState::NoConversions)
-    );
-    assert_eq!(
-        tool_wheel(&items, FULL),
-        WheelContent::Empty(EmptyState::NoTools)
-    );
-    assert_eq!(wheel_content(&items, WheelMode::Actions, V1), all_actions());
+    for features in [V1, FULL] {
+        assert_eq!(
+            conversions(&items, features),
+            WheelContent::Empty(EmptyState::NoConversions)
+        );
+        assert_eq!(
+            tool_wheel(&items, features),
+            WheelContent::Empty(EmptyState::NoTools)
+        );
+        assert_eq!(
+            wheel_content(&items, WheelMode::Actions, features),
+            all_actions()
+        );
+    }
 }
 
 #[test]
