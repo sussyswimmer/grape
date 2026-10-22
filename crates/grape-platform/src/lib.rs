@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 
+pub mod file_actions;
 pub mod mock;
 pub mod tracker;
 

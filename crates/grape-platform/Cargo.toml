@@ -11,15 +11,19 @@ publish.workspace = true
 thiserror.workspace = true
 
 # Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
-# so this shares that build. wry already enables every feature below except
-# Win32_System_Threading, so they add no new code to the build (DECISIONS D13).
+# so this shares that build. wry and tao already enable every feature below
+# except Win32_System_Threading and Win32_Storage_FileSystem, so the rest add
+# no new code to the build (DECISIONS D9, D13).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
     "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_SystemServices",
     "Win32_System_Threading",

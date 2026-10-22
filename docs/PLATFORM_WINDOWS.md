@@ -62,10 +62,10 @@ No haptics on Windows. The tick plays via WebAudio in the overlay or `PlaySoundW
 
 ## File actions
 - Share: `IDataTransferManagerInterop::ShowShareUIForWindow` from the float/toast window. Populate `DataPackage.SetStorageItems` with the files. Nearby Share appears if the user enabled it.
-- Copy: `OleSetClipboard` with a data object carrying `CF_HDROP` + `Preferred DropEffect = DROPEFFECT_COPY`.
-- Move: `IFileOpenDialog` with `FOS_PICKFOLDERS`, then `IFileOperation::MoveItem` with `FOF_ALLOWUNDO` so Ctrl+Z in Explorer undoes it.
+- Copy: `CF_HDROP` + `Preferred DropEffect = DROPEFFECT_COPY` on the clipboard, so pasting in Explorer copies. Grape writes both with `SetClipboardData` from a message-only window it makes for the call, because `SetClipboardData` fails when the clipboard has no owner. The data is plain memory, not delayed rendering, so it stays after the window is gone, and there's no OLE data object to keep alive or flush.
+- Move: `IFileOpenDialog` with `FOS_PICKFOLDERS`, titled "Move {name} to…" or "Move {n} items to…", starting in the first item's folder. Then `IFileOperation::MoveItem` with `FOF_ALLOWUNDO | FOFX_ADDUNDORECORD`, so the shell shows its own progress and name-clash questions. Whether Ctrl+Z in Explorer undoes a move made by another process is still to check on the PC. Items already in the picked folder are skipped. If any item is on another volume than the folder (`GetVolumePathNameW`, or a volume that can't be read), a Yes/No box asks first, with No as the default. Everything runs on a thread of its own in a single-threaded COM apartment.
 - Copy Path: `CF_UNICODETEXT`, paths joined with `\r\n`.
-- Terminal: `wt.exe -d "<dir>"` if `wt` resolves; otherwise `powershell.exe -NoExit -Command "Set-Location -LiteralPath '<dir>'"`.
+- Terminal: `wt.exe -d "<dir>"` if `wt` starts; otherwise `powershell.exe -NoExit -Command "Set-Location -LiteralPath '<dir>'"` in a new console. PowerShell reads `'`, `‘`, `’`, `‚` and `‛` as the same quote, so each one in the path is doubled. wt splits its command line at `;`, so a path with `;` goes straight to PowerShell. Files open their parent folder.
 
 ## Conversions that use Windows components
 - **HEIC decode:** bundled libheif + libde265 (LGPL, as DLLs) so it works without the Store HEIF extension.

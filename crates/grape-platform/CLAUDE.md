@@ -7,8 +7,9 @@ OS glue: drag detection, modifier and cursor state, display bounds, file actions
 ## Shape
 ```
 src/
-  lib.rs              trait DragMonitor, DragSignal, DropEvent, FileActions, display_bounds_at
+  lib.rs              trait DragMonitor, DragSignal, DropEvent, display_bounds_at
   tracker.rs          the pure candidate-drag rules (threshold, baseline keys, Esc, missed release)
+  file_actions.rs     copy, copy path, terminal, move: the API the app calls, per-OS dispatch
   macos/
     drag.rs           drag-pasteboard changeCount + pressedMouseButtons + modifierFlags polling
     actions.rs        AirDrop, pasteboard, NSOpenPanel move, Terminal
@@ -19,7 +20,7 @@ src/
     display.rs        display_bounds_at (monitor, work area, DPI scale)
     drop_target.rs    Grape's own IDropTarget for the overlay: always copy, never move (D13)
     overlay.rs        tool-window and no-activate styles for the overlay (D11)
-    actions.rs        share sheet, CF_HDROP clipboard, IFileOperation move, wt/PowerShell
+    actions.rs        CF_HDROP and text clipboard, IFileOperation move, wt/PowerShell (share sheet later)
   mock.rs             scripted DragSignal sequences for app-level tests
 ```
 

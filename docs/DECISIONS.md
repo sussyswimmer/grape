@@ -58,6 +58,8 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 | proptest (dev) | 1.11.0 | MIT OR Apache-2.0 | Hit-test property tests |
 | serde_json (dev) | 1.0.151 | MIT OR Apache-2.0 | Serde shape tests and doc-sync parsing in `grape-core` |
 
+- **`windows` features** grow with the milestones, never as new crates. D13 lists M1's. The M5 file actions add `Win32_System_DataExchange` and `Win32_System_Memory`, which tao already enables on the same version, and `Win32_Storage_FileSystem` (bindings only, for `GetVolumePathNameW`).
+
 - **npm packages** (dev and build only; only the built UI files ship):
 
 | Package | Version | License | Why |

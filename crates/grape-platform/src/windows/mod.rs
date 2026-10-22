@@ -10,10 +10,13 @@
 //!   windows that take no drops ([`refuse_drops`]).
 //! - `overlay`: keeps the overlay out of the taskbar and Alt-Tab
 //!   ([`harden_overlay`]).
+//! - `actions`: the file actions behind [`crate::file_actions`]: the
+//!   clipboard, Windows Terminal or PowerShell, and the shell's move.
 //!
 //! Inside this crate, write the Win32 bindings as `::windows::…`: a bare
 //! `windows::…` can be confused with this module.
 
+mod actions;
 mod display;
 mod drag;
 mod drop_target;
@@ -22,6 +25,8 @@ mod overlay;
 
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{describe_ex_style, ex_style, harden_overlay};
+
+pub(crate) use actions::{copy_files, copy_text, move_to_chosen_folder, open_terminal};
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};
 
