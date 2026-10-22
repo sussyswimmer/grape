@@ -438,7 +438,7 @@ impl Format {
     }
 
     /// Resolve a file name (not a path) to a format by its extension, using
-    /// the same split as `naming::split_name`, so `x.tar.gz` and
+    /// the same split as [`crate::naming::split_name`], so `x.tar.gz` and
     /// `x.tgz` are `gz`. Names with no extension give `None`.
     pub fn from_file_name(name: &str) -> Option<Format> {
         let (_, ext) = split_name(name);
@@ -451,7 +451,7 @@ impl Format {
 const COMPOUND_EXTS: [&str; 1] = [".tar.gz"];
 
 /// Split a file name into `(stem, extension)`. Shared by format detection
-/// and output naming so both always agree. See `naming::split_name`.
+/// and output naming so both always agree. See [`crate::naming::split_name`].
 pub(crate) fn split_name(name: &str) -> (&str, Option<&str>) {
     for compound in COMPOUND_EXTS {
         let Some(cut) = name.len().checked_sub(compound.len()) else {

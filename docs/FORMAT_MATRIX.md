@@ -144,6 +144,9 @@ How "multi" is computed **[observed]**: take the multi list for that format, the
 - `stem` = filename minus the last extension. `.tar.gz` / `.tgz` are stripped as one unit.
 - Output = `{stem}.{ext}`. For `gz` the ext is `tar.gz`.
 - If that name exists (on disk, or already planned in this batch): `{stem} 2.{ext}`, `{stem} 3.{ext}`, …
+- **[Grape]** The collision check ignores case: an existing `A.PNG` blocks `a.png`.
+- **[Grape]** A name with no dot (`Makefile`), only a leading dot (`.env`) or a trailing dot (`notes.`) has no extension, so the whole name is the stem: `Makefile` → `Makefile.png`.
+- **[Grape]** Document → `jpg`/`png` with more than one page writes a new folder `{stem}` (same collision rule) holding `{stem} {n}.{ext}`, with `n` counting from 1 and zero-padded to the width of the page count (`report 01.png` … `report 12.png`). One page writes `{stem}.{ext}` as usual.
 
 ### Tools [observed]
 
@@ -173,6 +176,9 @@ Output = `{stem} {Suffix}.{ext}`, with the same ` 2`, ` 3` collision rule. A fol
 | createPDF / mergePDF / joinVideos / createCollage | **[Grape]** first file's stem + ` Combined` / ` Merged` / ` Joined` / ` Collage` | pdf / pdf / first file's container / png |
 
 The multi-file tools' naming was not shown in the demo, so those names are Grape's choice.
+
+- **[Grape]** "same" means the source's literal extension, case included: `Photo.JPG` → `Photo Compressed.JPG`. A source with no extension gives an output with none.
+- **[Grape]** `{N}` in `Speed {N}x` is the factor with at most two decimals and no trailing zeros: `Speed 2x`, `Speed 1.5x`, `Speed 0.25x`.
 
 ### Location [Grape]
 - Default: the same folder as the source.
