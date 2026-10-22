@@ -113,11 +113,16 @@ fn replay(
 pub mod scripts {
     use crate::{DragSignal, Modifiers};
 
+    /// A drag that starts with no modifier held.
+    const STARTED: DragSignal = DragSignal::Started {
+        modifiers: Modifiers::NONE,
+    };
+
     /// A drag with no key pressed: the wheel never opens and the OS handles
     /// the drop.
     pub fn plain_drag() -> Vec<DragSignal> {
         vec![
-            DragSignal::Started,
+            STARTED,
             DragSignal::Moved { x: 400, y: 300 },
             DragSignal::Moved { x: 520, y: 340 },
             DragSignal::Ended,
@@ -128,7 +133,7 @@ pub mod scripts {
     /// conversions wheel opens on key-down and stays open after key-up.
     pub fn shift_tap() -> Vec<DragSignal> {
         vec![
-            DragSignal::Started,
+            STARTED,
             DragSignal::Moved { x: 400, y: 300 },
             DragSignal::Modifiers(Modifiers::SHIFT),
             DragSignal::Modifiers(Modifiers::NONE),
@@ -141,7 +146,7 @@ pub mod scripts {
     /// at the same anchor (Windows default keys).
     pub fn key_swap() -> Vec<DragSignal> {
         vec![
-            DragSignal::Started,
+            STARTED,
             DragSignal::Moved { x: 400, y: 300 },
             DragSignal::Modifiers(Modifiers::SHIFT),
             DragSignal::Modifiers(Modifiers::NONE),
@@ -153,11 +158,40 @@ pub mod scripts {
         ]
     }
 
+    /// Shift is already held when the drag starts (Explorer's "move"), so
+    /// no wheel opens. Releasing it and pressing it again during the drag
+    /// does open the conversions wheel.
+    pub fn shift_held_from_start() -> Vec<DragSignal> {
+        vec![
+            DragSignal::Started {
+                modifiers: Modifiers::SHIFT,
+            },
+            DragSignal::Moved { x: 400, y: 300 },
+            DragSignal::Moved { x: 430, y: 310 },
+            DragSignal::Modifiers(Modifiers::NONE),
+            DragSignal::Modifiers(Modifiers::SHIFT),
+            DragSignal::Moved { x: 400, y: 220 },
+            DragSignal::Ended,
+        ]
+    }
+
+    /// Shift opens the wheel, then Esc closes it before the drop.
+    pub fn escape() -> Vec<DragSignal> {
+        vec![
+            STARTED,
+            DragSignal::Moved { x: 400, y: 300 },
+            DragSignal::Modifiers(Modifiers::SHIFT),
+            DragSignal::Escape,
+            DragSignal::Moved { x: 520, y: 340 },
+            DragSignal::Ended,
+        ]
+    }
+
     /// Shift and Ctrl held together: two modifiers mean "no mode", so no
     /// wheel opens.
     pub fn two_modifiers() -> Vec<DragSignal> {
         vec![
-            DragSignal::Started,
+            STARTED,
             DragSignal::Moved { x: 400, y: 300 },
             DragSignal::Modifiers(Modifiers {
                 shift: true,
@@ -183,6 +217,8 @@ mod tests {
             scripts::shift_tap(),
             scripts::key_swap(),
             scripts::two_modifiers(),
+            scripts::shift_held_from_start(),
+            scripts::escape(),
         ]
     }
 
@@ -235,7 +271,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(16);
         monitor.start(tx).unwrap();
         let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(first, DragSignal::Started);
+        assert!(matches!(first, DragSignal::Started { .. }));
         let begun = Instant::now();
         monitor.stop();
         assert!(begun.elapsed() < Duration::from_secs(1));
@@ -258,9 +294,12 @@ mod tests {
     #[test]
     fn every_script_starts_and_ends_a_drag() {
         for script in all_scripts() {
-            assert_eq!(script.first(), Some(&DragSignal::Started));
+            assert!(matches!(script.first(), Some(DragSignal::Started { .. })));
             assert_eq!(script.last(), Some(&DragSignal::Ended));
-            let starts = script.iter().filter(|s| **s == DragSignal::Started).count();
+            let starts = script
+                .iter()
+                .filter(|s| matches!(s, DragSignal::Started { .. }))
+                .count();
             let ends = script.iter().filter(|s| **s == DragSignal::Ended).count();
             assert_eq!((starts, ends), (1, 1));
         }
@@ -286,5 +325,10 @@ mod tests {
         let two = held(scripts::two_modifiers());
         assert_eq!(two.len(), 1);
         assert_eq!(two.first().map(|m| m.count()), Some(2));
+        assert_eq!(
+            held(scripts::shift_held_from_start()),
+            vec![Modifiers::SHIFT]
+        );
+        assert!(scripts::escape().contains(&DragSignal::Escape));
     }
 }

@@ -3,18 +3,21 @@
 //!
 //! Phase 1 is Windows first (DECISIONS D8). The entry points below dispatch
 //! by `cfg` to the `windows` module, the `macos` stub, or an `unsupported`
-//! fallback for other hosts (Linux dev machines and CI). Until milestone M1
-//! every entry point returns [`PlatformError::Unsupported`]; only the Windows
-//! overlay styling helpers in `windows` do real work today.
+//! fallback for other hosts (Linux dev machines and CI). Since milestone M1,
+//! Windows has a real drag monitor, display bounds and an overlay drop
+//! target; everywhere else the entry points return
+//! [`PlatformError::Unsupported`].
 //!
 //! Coordinates leaving this crate are global, top-left origin, physical
 //! pixels.
 
 #![warn(missing_docs)]
 
+use std::path::PathBuf;
 use std::sync::mpsc::SyncSender;
 
 pub mod mock;
+pub mod tracker;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -39,7 +42,13 @@ use crate::windows as imp;
 pub enum DragSignal {
     /// A candidate drag started: the primary button is down and the pointer
     /// moved past the OS drag threshold.
-    Started,
+    Started {
+        /// The modifiers already held when the drag started. They weren't
+        /// pressed *during* the drag, so they don't open a wheel on their
+        /// own (`docs/INTERACTION_SPEC.md` §2): holding Shift before
+        /// dragging keeps meaning "move" in Explorer.
+        modifiers: Modifiers,
+    },
     /// The pointer moved. Global, top-left origin, physical pixels.
     Moved {
         /// Horizontal position.
@@ -49,8 +58,48 @@ pub enum DragSignal {
     },
     /// The set of held modifier keys changed.
     Modifiers(Modifiers),
+    /// Esc went down during the drag.
+    Escape,
     /// The drag ended (the primary button was released).
     Ended,
+}
+
+/// What the overlay's drop target saw while a drag was over it.
+///
+/// On Windows these come from Grape's own `IDropTarget`
+/// ([`windows::install_drop_target`]), which always reports a copy, never a
+/// move (golden rule 2). Positions are global, top-left origin, physical
+/// pixels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropEvent {
+    /// A drag entered the overlay. `paths` is empty when the drag carries
+    /// no files (selected text, an image from a browser, …).
+    Enter {
+        /// The dragged files and folders.
+        paths: Vec<PathBuf>,
+        /// Horizontal position.
+        x: i32,
+        /// Vertical position (grows downwards).
+        y: i32,
+    },
+    /// A file drag moved over the overlay.
+    Over {
+        /// Horizontal position.
+        x: i32,
+        /// Vertical position (grows downwards).
+        y: i32,
+    },
+    /// The drag left the overlay without dropping.
+    Leave,
+    /// The files were dropped on the overlay.
+    Drop {
+        /// The dropped files and folders. Empty for a non-file drop.
+        paths: Vec<PathBuf>,
+        /// Horizontal position.
+        x: i32,
+        /// Vertical position (grows downwards).
+        y: i32,
+    },
 }
 
 /// Which modifier keys are held.
@@ -181,8 +230,8 @@ pub enum PlatformError {
 /// Creates the drag monitor for this OS.
 ///
 /// # Errors
-/// [`PlatformError::Unsupported`] everywhere until milestone M1 builds the
-/// Windows monitor; macOS stays unsupported until M8.
+/// [`PlatformError::Unsupported`] except on Windows; macOS stays
+/// unsupported until M8.
 pub fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
     imp::drag_monitor()
 }
@@ -190,7 +239,7 @@ pub fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
 /// The display under the global point (`x`, `y`), in physical pixels.
 ///
 /// # Errors
-/// [`PlatformError::Unsupported`] everywhere until milestone M1.
+/// [`PlatformError::Unsupported`] except on Windows, or an OS error.
 pub fn display_bounds_at(x: i32, y: i32) -> Result<DisplayBounds, PlatformError> {
     imp::display_bounds_at(x, y)
 }
@@ -223,7 +272,8 @@ mod tests {
     }
 
     #[test]
-    fn entry_points_are_unsupported_until_m1() {
+    #[cfg(not(target_os = "windows"))]
+    fn entry_points_are_unsupported_off_windows() {
         assert!(matches!(drag_monitor(), Err(PlatformError::Unsupported)));
         assert_eq!(display_bounds_at(0, 0), Err(PlatformError::Unsupported));
     }
