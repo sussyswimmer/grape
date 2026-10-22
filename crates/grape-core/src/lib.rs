@@ -6,10 +6,17 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod actions;
 pub mod format;
 pub mod matrix;
 pub mod tier;
+pub mod tools;
 
+pub use actions::{actions, ActionKey, Platform};
 pub use format::{Category, Format, INPUT_ONLY};
 pub use matrix::{pair_tier, pairs, targets, targets_enabled};
 pub use tier::{Features, Tier};
+pub use tools::{
+    tool_row, tool_tier, tools, tools_enabled, ToolInfo, ToolKey, ToolRow, TIER_OVERRIDES,
+    TOOL_ROWS,
+};
