@@ -3,12 +3,12 @@
  * holding one rounded glass pill. Grape's palette only, via tokens.css.
  */
 :root {
-  --toast-fill: rgba(248, 244, 253, 0.96);
+  --toast-fill: var(--glass-fill-pill);
   --toast-stroke: var(--glass-stroke);
-  --toast-shadow: rgba(27, 12, 46, 0.18);
+  --toast-shadow: var(--shadow-soft);
   --toast-title: var(--color-text);
   --toast-detail: var(--color-text-muted);
-  --toast-track: rgba(94, 43, 151, 0.14);
+  --toast-track: var(--track-fill);
   --toast-bar: var(--grape-500);
 
   --toast-dot-working: var(--grape-500);
@@ -19,9 +19,6 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --toast-fill: rgba(27, 12, 46, 0.94);
-    --toast-shadow: rgba(0, 0, 0, 0.4);
-    --toast-track: rgba(181, 150, 230, 0.2);
     --toast-bar: var(--grape-300);
     --toast-dot-working: var(--grape-300);
   }

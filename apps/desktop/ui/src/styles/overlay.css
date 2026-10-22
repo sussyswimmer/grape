@@ -13,9 +13,9 @@
   --overlay-hit-fill: rgba(0, 0, 0, 0.004);
 
   /* No backdrop blur in a transparent window, so the glass is denser. */
-  --wheel-glass-fill: rgba(248, 244, 253, 0.94);
+  --wheel-glass-fill: var(--glass-fill-solid);
   --wheel-glass-stroke: var(--glass-stroke);
-  --wheel-shadow: rgba(27, 12, 46, 0.26);
+  --wheel-shadow: var(--shadow-strong);
 
   --wheel-segment-fill: var(--segment-fill);
   --wheel-segment-stroke: var(--segment-stroke);
@@ -23,18 +23,14 @@
   --wheel-placeholder-opacity: 0.45;
 
   --wheel-label: var(--grape-900);
-  --wheel-label-highlight: #ffffff;
+  --wheel-label-highlight: var(--color-on-accent);
   --wheel-center-label: var(--grape-700);
   --wheel-message: var(--color-text);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --wheel-glass-fill: rgba(27, 12, 46, 0.92);
-    --wheel-shadow: rgba(0, 0, 0, 0.45);
-
     --wheel-label: var(--grape-100);
-    --wheel-label-highlight: var(--grape-950);
     --wheel-center-label: var(--grape-100);
   }
 }

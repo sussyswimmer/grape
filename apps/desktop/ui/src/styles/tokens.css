@@ -31,6 +31,8 @@
   --color-border: rgba(94, 43, 151, 0.18);
   --color-done: var(--leaf-600);
   --color-error: var(--wine-600);
+  /* Text drawn on the accent fill, e.g. a highlighted segment's label. */
+  --color-on-accent: #ffffff;
 
   /* The wheel's frosted glass. */
   --glass-fill: rgba(248, 244, 253, 0.74);
@@ -40,9 +42,20 @@
   --segment-stroke: rgba(94, 43, 151, 0.35);
   --segment-highlight: var(--grape-500);
 
-  /* Over the whole overlay while the wheel is open: 1/255 black, so it
-     can't be seen but every pixel takes the drop. */
-  --overlay-hit-fill: rgba(0, 0, 0, 0.004);
+  /*
+   * Glass in a transparent window (the wheel overlay, the toast), where
+   * backdrop blur doesn't apply, so the fill is denser. grape-50 here,
+   * grape-950 in dark mode.
+   */
+  --glass-fill-solid: rgba(248, 244, 253, 0.94);
+  --glass-fill-pill: rgba(248, 244, 253, 0.96);
+
+  /* Drop shadows, tinted with grape-950 instead of black. */
+  --shadow-strong: rgba(27, 12, 46, 0.26);
+  --shadow-soft: rgba(27, 12, 46, 0.18);
+
+  /* The track behind a progress bar (grape-600; grape-300 in dark mode). */
+  --track-fill: rgba(94, 43, 151, 0.14);
 
   /* System fonts only: nothing is downloaded (offline rule). */
   --font-ui: system-ui, "Segoe UI", sans-serif;
@@ -60,11 +73,18 @@
     --color-border: rgba(181, 150, 230, 0.2);
     --color-done: var(--leaf-500);
     --color-error: var(--wine-400);
+    --color-on-accent: var(--grape-950);
 
     --glass-fill: rgba(27, 12, 46, 0.7);
     --glass-stroke: rgba(181, 150, 230, 0.26);
     --segment-fill: rgba(181, 150, 230, 0.16);
     --segment-stroke: rgba(181, 150, 230, 0.38);
     --segment-highlight: var(--grape-300);
+
+    --glass-fill-solid: rgba(27, 12, 46, 0.92);
+    --glass-fill-pill: rgba(27, 12, 46, 0.94);
+    --shadow-strong: rgba(27, 12, 46, 0.55);
+    --shadow-soft: rgba(27, 12, 46, 0.5);
+    --track-fill: rgba(181, 150, 230, 0.2);
   }
 }

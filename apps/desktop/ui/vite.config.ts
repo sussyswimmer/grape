@@ -23,5 +23,9 @@ export default defineConfig({
   },
   test: {
     include: ["src/**/*.test.ts"],
+    // Vitest blanks every stylesheet by default. Let `?raw` imports through
+    // so src/styles/palette.test.ts can read the CSS text; plain CSS imports
+    // stay blank.
+    css: { include: [/\.css\?raw(?:&|$)/] },
   },
 });
