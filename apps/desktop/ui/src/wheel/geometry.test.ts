@@ -1,142 +1,583 @@
 import { describe, expect, it } from "vitest";
+import { type Geometry, isWheelOpenPayload, type UiSegment } from "../shared/events";
 import {
-  edgeInset,
-  emptyMessage,
-  modeCaption,
-  polar,
+  canDraw,
+  filletAngle,
+  filletRadius,
+  formatNumber,
+  labelAnchor,
+  segmentCorners,
   segmentPath,
-  type Geometry,
-  type Segment,
+  type SegmentCorners,
+  type Vec,
 } from "./geometry";
 
-// The values grape-core sends (INTERACTION_SPEC §4).
-const GEOMETRY: Geometry = {
-  innerR: 48,
-  outerR: 120,
-  backdropR: 126,
-  gap: 4,
-  corner: 20,
-  labelR: 84,
-  denseAt: 7,
-  screenMargin: 14,
-};
+// The geometry comes from the golden payload, so these tests use exactly
+// the numbers Rust sends (grape-core's GEOMETRY).
+const golden: unknown = JSON.parse(
+  Object.values(
+    import.meta.glob<string>("../shared/fixtures/wheel-open-entries.json", {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    }),
+  )[0] ?? "null",
+);
+if (!isWheelOpenPayload(golden)) {
+  throw new Error("golden payload failed its guard");
+}
+const G: Geometry = golden.geometry;
+const EPS = 1e-6;
 
-/** grape-core's wheel_layout(n), for test input. */
-function layout(n: number): Segment[] {
-  const step = (2 * Math.PI) / n;
-  const half = Math.PI / n;
+// ---------------------------------------------------------------------------
+// Test-only mirrors of grape-core, standing in for the data Rust sends.
+// ---------------------------------------------------------------------------
+
+/** grape-core `wheel_layout(n)`: item 0 at the top, or on the left for n = 3. */
+function layout(n: number, g: Geometry = G): UiSegment[] {
   const start = n === 3 ? Math.PI : Math.PI / 2;
   return Array.from({ length: n }, (_, index) => {
-    const center = start - step * index;
+    const center = start - (2 * Math.PI * index) / n;
     return {
       index,
       center,
-      start: center + half,
-      end: center - half,
-      labelX: 84 * Math.cos(center),
-      labelY: -84 * Math.sin(center),
+      start: center + Math.PI / n,
+      end: center - Math.PI / n,
+      labelX: g.labelR * Math.cos(center),
+      labelY: -g.labelR * Math.sin(center),
+      title: `ITEM ${index}`,
+      entry: { kind: "convert", key: `k${index}` },
     };
   });
 }
 
-/** The numbers in a path, in order. */
-function numbers(path: string): number[] {
-  return (path.match(/-?\d+(\.\d+)?/g) ?? []).map(Number);
+/** grape-core `hit_test(dx, dy, n)`. */
+function hitTest(dx: number, dy: number, n: number, g: Geometry = G): number | null {
+  const d = Math.hypot(dx, dy);
+  if (n === 0 || !(d >= g.innerR && d <= g.outerR)) return null;
+  const theta = Math.atan2(-dy, dx);
+  const step = (2 * Math.PI) / n;
+  const start = n === 3 ? Math.PI : Math.PI / 2;
+  const k = Math.round((start - theta) / step);
+  const index = Math.min(((k % n) + n) % n, n - 1);
+  const center = start - step * index;
+  const wrapped = ((((theta - center + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) - Math.PI;
+  return Math.abs(wrapped) > Math.PI / n - Math.asin(g.gap / 2 / d) ? null : index;
 }
 
-describe("polar", () => {
-  it("puts angle π/2 straight up, because screen y grows down", () => {
-    const top = polar(10, Math.PI / 2);
-    expect(top.x).toBeCloseTo(0);
-    expect(top.y).toBeCloseTo(-10);
-    const right = polar(10, 0);
-    expect(right.x).toBeCloseTo(10);
-    expect(right.y).toBeCloseTo(0);
+// ---------------------------------------------------------------------------
+// Vector helpers
+// ---------------------------------------------------------------------------
+
+function dist(a: Vec, b: Vec): number {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function norm(a: Vec): number {
+  return Math.hypot(a.x, a.y);
+}
+
+/** The screen direction of math angle β. */
+function dir(beta: number): Vec {
+  return { x: Math.cos(beta), y: -Math.sin(beta) };
+}
+
+/**
+ * Signed distance of `p` from the line through the origin along `beta`,
+ * positive counter-clockwise of the ray.
+ */
+function offsetFromRay(p: Vec, beta: number): number {
+  const d = dir(beta);
+  return p.x * d.y - p.y * d.x;
+}
+
+/** Distance along the ray. */
+function alongRay(p: Vec, beta: number): number {
+  const d = dir(beta);
+  return p.x * d.x + p.y * d.y;
+}
+
+function near(actual: number, expected: number, label: string): void {
+  expect(Math.abs(actual - expected), `${label}: ${actual} vs ${expected}`).toBeLessThan(EPS);
+}
+
+function corners(seg: UiSegment, n: number, g: Geometry = G): SegmentCorners {
+  const found = segmentCorners(seg, n, g);
+  if (found === null) throw new Error(`no corners for n=${n}`);
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// A tiny SVG path reader: M, L, A (circular, no rotation) and Z, flattened
+// to polygons so the tests can check what the path string really draws.
+// ---------------------------------------------------------------------------
+
+type Command =
+  | { op: "M" | "L"; to: Vec }
+  | { op: "A"; r: number; large: boolean; sweep: boolean; to: Vec }
+  | { op: "Z" };
+
+function parsePath(d: string): Command[] {
+  const tokens = d.trim().split(/\s+/);
+  const out: Command[] = [];
+  let i = 0;
+  const num = (): number => {
+    const token = tokens[i++];
+    if (token === undefined || !/^-?\d+(\.\d+)?$/.test(token)) {
+      throw new Error(`bad number "${String(token)}" in ${d}`);
+    }
+    return Number(token);
+  };
+  while (i < tokens.length) {
+    const op = tokens[i++];
+    if (op === "M" || op === "L") {
+      out.push({ op, to: { x: num(), y: num() } });
+    } else if (op === "A") {
+      const rx = num();
+      const ry = num();
+      const rotation = num();
+      const large = num();
+      const sweep = num();
+      if (rx !== ry || rotation !== 0 || (large !== 0 && large !== 1) || (sweep !== 0 && sweep !== 1)) {
+        throw new Error(`unexpected arc in ${d}`);
+      }
+      out.push({ op, r: rx, large: large === 1, sweep: sweep === 1, to: { x: num(), y: num() } });
+    } else if (op === "Z") {
+      out.push({ op });
+    } else {
+      throw new Error(`unexpected command "${String(op)}" in ${d}`);
+    }
+  }
+  return out;
+}
+
+interface ArcInfo {
+  center: Vec;
+  /** Start angle and signed sweep (screen space, positive = clockwise on screen). */
+  theta: number;
+  delta: number;
+  r: number;
+}
+
+/** SVG arc endpoint → center parameterization (SVG 1.1 §F.6.5) for circles. */
+function arcCenter(from: Vec, cmd: { r: number; large: boolean; sweep: boolean; to: Vec }): ArcInfo {
+  let r = cmd.r;
+  const x1 = (from.x - cmd.to.x) / 2;
+  const y1 = (from.y - cmd.to.y) / 2;
+  const lambda = (x1 * x1 + y1 * y1) / (r * r);
+  if (lambda > 1) r *= Math.sqrt(lambda);
+  const sign = cmd.large === cmd.sweep ? -1 : 1;
+  const num = r * r * r * r - r * r * y1 * y1 - r * r * x1 * x1;
+  const den = r * r * y1 * y1 + r * r * x1 * x1;
+  const coef = sign * Math.sqrt(Math.max(0, num / den));
+  const cx1 = coef * y1;
+  const cy1 = -coef * x1;
+  const center = { x: cx1 + (from.x + cmd.to.x) / 2, y: cy1 + (from.y + cmd.to.y) / 2 };
+  const theta = Math.atan2((y1 - cy1) / r, (x1 - cx1) / r);
+  let delta = Math.atan2((-y1 - cy1) / r, (-x1 - cx1) / r) - theta;
+  if (cmd.sweep && delta < 0) delta += 2 * Math.PI;
+  if (!cmd.sweep && delta > 0) delta -= 2 * Math.PI;
+  return { center, theta, delta, r };
+}
+
+/** The path as closed polygons (one per subpath), arcs sampled every ~0.5°. */
+function flatten(d: string): Vec[][] {
+  const polygons: Vec[][] = [];
+  let current: Vec[] = [];
+  let at: Vec = { x: 0, y: 0 };
+  for (const cmd of parsePath(d)) {
+    if (cmd.op === "M") {
+      if (current.length > 0) polygons.push(current);
+      current = [cmd.to];
+      at = cmd.to;
+    } else if (cmd.op === "L") {
+      current.push(cmd.to);
+      at = cmd.to;
+    } else if (cmd.op === "A") {
+      const info = arcCenter(at, cmd);
+      const steps = Math.max(2, Math.ceil(Math.abs(info.delta) / (Math.PI / 360)));
+      for (let s = 1; s <= steps; s += 1) {
+        const t = info.theta + (info.delta * s) / steps;
+        current.push({ x: info.center.x + info.r * Math.cos(t), y: info.center.y + info.r * Math.sin(t) });
+      }
+      at = cmd.to;
+    }
+  }
+  if (current.length > 0) polygons.push(current);
+  return polygons;
+}
+
+interface Box {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+const boxes = new WeakMap<Vec[], Box>();
+
+function boundingBox(poly: Vec[]): Box {
+  const cached = boxes.get(poly);
+  if (cached !== undefined) return cached;
+  const box = {
+    minX: Math.min(...poly.map((v) => v.x)),
+    maxX: Math.max(...poly.map((v) => v.x)),
+    minY: Math.min(...poly.map((v) => v.y)),
+    maxY: Math.max(...poly.map((v) => v.y)),
+  };
+  boxes.set(poly, box);
+  return box;
+}
+
+/** Even-odd point-in-polygon over every subpath (matches `fill-rule: evenodd`). */
+function insidePath(polygons: Vec[][], p: Vec): boolean {
+  let inside = false;
+  for (const poly of polygons) {
+    // Cheap bounding-box reject first; the sampled hit-test sweep is large.
+    const box = boundingBox(poly);
+    if (p.x < box.minX || p.x > box.maxX || p.y < box.minY || p.y > box.maxY) continue;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i, i += 1) {
+      const a = poly[i];
+      const b = poly[j];
+      if (a === undefined || b === undefined) continue;
+      if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+        inside = !inside;
+      }
+    }
+  }
+  return inside;
+}
+
+/** Every vertex the path moves, lines or arcs to (not the arc samples). */
+function vertices(d: string): Vec[] {
+  return parsePath(d).flatMap((cmd) => (cmd.op === "Z" ? [] : [cmd.to]));
+}
+
+const NS = Array.from({ length: 12 }, (_, i) => i + 1);
+
+// ---------------------------------------------------------------------------
+
+describe("canDraw", () => {
+  it("accepts the spec geometry for 1 to 12 segments", () => {
+    for (const n of NS) expect(canDraw(n, G), `n=${n}`).toBe(true);
+  });
+
+  it("rejects bad counts and geometry", () => {
+    expect(canDraw(0, G)).toBe(false);
+    expect(canDraw(-1, G)).toBe(false);
+    expect(canDraw(2.5, G)).toBe(false);
+    expect(canDraw(Number.NaN, G)).toBe(false);
+    expect(canDraw(4, { ...G, innerR: Number.NaN })).toBe(false);
+    expect(canDraw(4, { ...G, outerR: G.innerR })).toBe(false);
+    expect(canDraw(4, { ...G, gap: 2 * G.innerR })).toBe(false);
+    expect(canDraw(4, { ...G, corner: -1 })).toBe(false);
+    // So narrow that the inner corners would cross.
+    expect(canDraw(100, G)).toBe(false);
   });
 });
 
-describe("edgeInset", () => {
-  it("is the half-gap angle the hit test uses", () => {
-    expect(edgeInset(120, 4)).toBeCloseTo(Math.asin(2 / 120));
-    expect(edgeInset(48, 4)).toBeGreaterThan(edgeInset(120, 4));
+describe("filletRadius", () => {
+  it("is the full corner while it fits (n = 2..14 with the spec numbers)", () => {
+    for (let n = 2; n <= 14; n += 1) expect(filletRadius(n, G), `n=${n}`).toBe(G.corner);
   });
 
-  it("never asks asin for more than 1", () => {
-    expect(edgeInset(1, 4)).toBeCloseTo(Math.PI / 2);
+  it("shrinks once the fillets would cross (n ≥ 15 with the spec numbers)", () => {
+    expect(filletRadius(15, G)).toBeLessThan(G.corner);
+    expect(filletRadius(15, G)).toBeGreaterThan(0);
+  });
+
+  it("shrinks at n = 12 when the corner is too big for a twelfth of the ring", () => {
+    const big = { ...G, corner: 40 };
+    const rho = filletRadius(12, big);
+    expect(rho).toBeLessThan(40);
+    expect(rho).toBeGreaterThan(G.corner);
+    expect(filletAngle(rho, big)).toBeLessThanOrEqual(Math.PI / 12 - 1e-6);
+  });
+
+  it("never increases with n, and the fillets never cross the center line", () => {
+    let previous = Number.POSITIVE_INFINITY;
+    for (let n = 2; n <= 40; n += 1) {
+      if (!canDraw(n, G)) break;
+      const rho = filletRadius(n, G);
+      expect(rho, `n=${n}`).toBeLessThanOrEqual(previous);
+      expect(filletAngle(rho, G), `n=${n}`).toBeLessThanOrEqual(Math.PI / n - 1e-6);
+      previous = rho;
+    }
+  });
+
+  it("is within the 20-step search tolerance of the largest fitting radius", () => {
+    const rho = filletRadius(20, G);
+    const tolerance = G.corner / 2 ** 20;
+    expect(filletAngle(rho, G)).toBeLessThanOrEqual(Math.PI / 20 - 1e-6);
+    expect(filletAngle(rho + 2 * tolerance, G)).toBeGreaterThan(Math.PI / 20 - 1e-6);
+  });
+
+  it("is 0 for a full ring, a zero corner or bad geometry", () => {
+    expect(filletRadius(1, G)).toBe(0);
+    expect(filletRadius(4, { ...G, corner: 0 })).toBe(0);
+    expect(filletRadius(0, G)).toBe(0);
+  });
+});
+
+describe("segmentCorners", () => {
+  it("puts every vertex on its circle or gap line (n = 2..12, within 1e-6)", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      for (const seg of layout(n)) {
+        const c = corners(seg, n);
+        for (const [name, edge, side] of [
+          ["start", c.start, -1],
+          ["end", c.end, 1],
+        ] as const) {
+          const where = `n=${n} i=${seg.index} ${name}`;
+          const half = G.gap / 2;
+          // On the circles.
+          near(norm(edge.outer), G.outerR, `${where} outer`);
+          near(norm(edge.inner), G.innerR, `${where} inner`);
+          // On the gap line: gap/2 from the boundary ray, on the segment's side
+          // (offsetFromRay is positive counter-clockwise of the ray).
+          near(offsetFromRay(edge.edge, edge.beta), side * half, `${where} edge`);
+          near(offsetFromRay(edge.inner, edge.beta), side * half, `${where} inner gap`);
+          expect(alongRay(edge.edge, edge.beta), where).toBeGreaterThan(
+            alongRay(edge.inner, edge.beta),
+          );
+          // The fillet touches both the edge and the outer circle.
+          near(dist(edge.filletCenter, edge.edge), c.rho, `${where} fillet/edge`);
+          near(dist(edge.filletCenter, edge.outer), c.rho, `${where} fillet/outer`);
+          near(norm(edge.filletCenter), G.outerR - c.rho, `${where} fillet center`);
+          near(offsetFromRay(edge.filletCenter, edge.beta), side * (half + c.rho), where);
+        }
+      }
+    }
+  });
+
+  it("uses square inner corners at center ± (π/n − asin(gap/2 / innerR))", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      const [seg] = layout(n);
+      if (seg === undefined) throw new Error("no segment");
+      const c = corners(seg, n);
+      const expected = Math.PI / n - Math.asin(G.gap / 2 / G.innerR);
+      const angleOf = (p: Vec): number => Math.atan2(-p.y, p.x);
+      const wrap = (a: number): number => Math.atan2(Math.sin(a), Math.cos(a));
+      expect(Math.abs(wrap(angleOf(c.start.inner) - seg.center) - expected)).toBeLessThan(EPS);
+      expect(Math.abs(wrap(angleOf(c.end.inner) - seg.center) + expected)).toBeLessThan(EPS);
+    }
+  });
+
+  it("keeps neighbours exactly one gap apart along each boundary ray", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      const segs = layout(n);
+      segs.forEach((seg, i) => {
+        const next = segs[(i + 1) % n];
+        if (next === undefined) throw new Error("no neighbour");
+        const a = corners(seg, n).end;
+        const b = corners(next, n).start;
+        const where = `n=${n} between ${i} and ${next.index}`;
+        // Both edges are parallel to the same ray…
+        expect(Math.abs(Math.cos(a.beta - b.beta) - 1), where).toBeLessThan(EPS);
+        // …and the matching points sit `gap` apart, straight across it.
+        for (const [p, q] of [
+          [a.inner, b.inner],
+          [a.edge, b.edge],
+        ] as const) {
+          expect(Math.abs(dist(p, q) - G.gap), where).toBeLessThan(EPS);
+          expect(Math.abs(alongRay(p, a.beta) - alongRay(q, a.beta)), where).toBeLessThan(EPS);
+          expect(Math.abs(offsetFromRay(p, a.beta) + offsetFromRay(q, a.beta)), where).toBeLessThan(EPS);
+        }
+      });
+    }
+  });
+
+  it("is null for a full ring or bad input", () => {
+    const [seg] = layout(1);
+    if (seg === undefined) throw new Error("no segment");
+    expect(segmentCorners(seg, 1, G)).toBeNull();
+    expect(segmentCorners({ center: Number.NaN }, 4, G)).toBeNull();
+    expect(segmentCorners({ center: 0 }, 4, { ...G, outerR: 10 })).toBeNull();
   });
 });
 
 describe("segmentPath", () => {
-  it("draws a closed annular sector with two arcs", () => {
-    const [top] = layout(6);
-    expect(top).toBeDefined();
-    if (top === undefined) return;
-    const path = segmentPath(top, GEOMETRY);
-    expect(path.startsWith("M ")).toBe(true);
-    expect(path.endsWith("Z")).toBe(true);
-    expect(path.match(/ A /g)).toHaveLength(2);
-    expect(path).toContain("A 120 120 0 0 1");
-    expect(path).toContain("A 48 48 0 0 0");
-  });
-
-  it("puts every corner on the inner or outer radius", () => {
-    for (const segment of layout(6)) {
-      const n = numbers(segmentPath(segment, GEOMETRY));
-      // M x y | A rx ry rot large sweep x y | L x y | A rx ry rot large sweep x y
-      const corners: [number, number][] = [
-        [n[0] ?? NaN, n[1] ?? NaN],
-        [n[7] ?? NaN, n[8] ?? NaN],
-        [n[9] ?? NaN, n[10] ?? NaN],
-        [n[16] ?? NaN, n[17] ?? NaN],
-      ];
-      const radii = corners.map(([x, y]) => Math.hypot(x, y));
-      expect(radii[0]).toBeCloseTo(120, 2);
-      expect(radii[1]).toBeCloseTo(120, 2);
-      expect(radii[2]).toBeCloseTo(48, 2);
-      expect(radii[3]).toBeCloseTo(48, 2);
+  it("produces a valid path for n = 1..12, with no NaN", () => {
+    for (const n of NS) {
+      for (const seg of layout(n)) {
+        const d = segmentPath(seg, n, G);
+        expect(d, `n=${n}`).not.toMatch(/NaN|Infinity|e-|e\+/);
+        expect(() => parsePath(d), `n=${n}`).not.toThrow();
+      }
     }
   });
 
-  it("leaves a gap exactly `gap` pixels wide between neighbours", () => {
-    const segments = layout(6);
-    const [a, b] = segments;
-    if (a === undefined || b === undefined) throw new Error("layout");
-    const na = numbers(segmentPath(a, GEOMETRY));
-    const nb = numbers(segmentPath(b, GEOMETRY));
-    // a's clockwise outer corner and b's counter-clockwise outer corner.
-    const aEnd = { x: na[7] ?? NaN, y: na[8] ?? NaN };
-    const bStart = { x: nb[0] ?? NaN, y: nb[1] ?? NaN };
-    expect(Math.hypot(aEnd.x - bStart.x, aEnd.y - bStart.y)).toBeCloseTo(4, 1);
+  it("draws n = 1 as a full ring: outer circle clockwise, inner counter-clockwise", () => {
+    const [seg] = layout(1);
+    if (seg === undefined) throw new Error("no segment");
+    const cmds = parsePath(segmentPath(seg, 1, G));
+    expect(cmds.map((c) => c.op).join("")).toBe("MAAZMAAZ");
+    const arcs = cmds.filter((c) => c.op === "A");
+    expect(arcs.map((c) => c.r)).toEqual([G.outerR, G.outerR, G.innerR, G.innerR]);
+    expect(arcs.map((c) => c.sweep)).toEqual([true, true, false, false]);
+    const rings = flatten(segmentPath(seg, 1, G));
+    expect(insidePath(rings, { x: 0, y: 0 })).toBe(false);
+    for (const angle of [0, 1, 2, 3, 4, 5, 6]) {
+      const r = (G.innerR + G.outerR) / 2;
+      expect(insidePath(rings, { x: r * Math.cos(angle), y: r * Math.sin(angle) })).toBe(true);
+    }
   });
 
-  it("uses a large arc only for a single segment", () => {
-    const [only] = layout(1);
-    if (only === undefined) throw new Error("layout");
-    expect(segmentPath(only, GEOMETRY)).toContain("A 120 120 0 1 1");
+  it("follows the outline order with the corners as vertices (n = 2..12)", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      for (const seg of layout(n)) {
+        const d = segmentPath(seg, n, G);
+        const cmds = parsePath(d);
+        expect(cmds.map((c) => c.op).join(""), `n=${n}`).toBe("MAALALAZ");
+        const c = corners(seg, n);
+        const expected = [
+          c.start.outer,
+          c.end.outer,
+          c.end.edge,
+          c.end.inner,
+          c.start.inner,
+          c.start.edge,
+          c.start.outer,
+        ];
+        const actual = vertices(d);
+        expect(actual).toHaveLength(expected.length);
+        actual.forEach((p, k) => {
+          const want = expected[k];
+          if (want === undefined) throw new Error("vertex count");
+          expect(dist(p, want), `n=${n} i=${seg.index} vertex ${k}`).toBeLessThan(EPS);
+        });
+      }
+    }
   });
 
-  it("is empty when the gap swallows the segment", () => {
-    const [tiny] = layout(500);
-    if (tiny === undefined) throw new Error("layout");
-    expect(segmentPath(tiny, GEOMETRY)).toBe("");
+  it("uses arcs centered where they should be (sweep and large-arc flags)", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      for (const seg of layout(n)) {
+        const c = corners(seg, n);
+        const cmds = parsePath(segmentPath(seg, n, G));
+        let at: Vec = { x: 0, y: 0 };
+        const centers: Vec[] = [];
+        for (const cmd of cmds) {
+          if (cmd.op === "A") centers.push(arcCenter(at, cmd).center);
+          if (cmd.op !== "Z") at = cmd.to;
+        }
+        const expected = [{ x: 0, y: 0 }, c.end.filletCenter, { x: 0, y: 0 }, c.start.filletCenter];
+        centers.forEach((center, k) => {
+          const want = expected[k];
+          if (want === undefined) throw new Error("arc count");
+          expect(dist(center, want), `n=${n} i=${seg.index} arc ${k}`).toBeLessThan(1e-4);
+        });
+      }
+    }
+  });
+
+  it("places segment 0 from the Rust-provided center: top for n ≠ 3, left for n = 3", () => {
+    for (let n = 2; n <= 12; n += 1) {
+      const [seg] = layout(n);
+      if (seg === undefined) throw new Error("no segment");
+      const c = corners(seg, n);
+      const mid = {
+        x: (c.start.outer.x + c.end.outer.x) / 2,
+        y: (c.start.outer.y + c.end.outer.y) / 2,
+      };
+      if (n === 3) {
+        expect(mid.x, `n=${n}`).toBeLessThan(0);
+        expect(Math.abs(mid.y), `n=${n}`).toBeLessThan(EPS);
+      } else {
+        expect(mid.y, `n=${n}`).toBeLessThan(0);
+        expect(Math.abs(mid.x), `n=${n}`).toBeLessThan(EPS);
+      }
+    }
+  });
+
+  it("reads only the center angle, never the index", () => {
+    const [seg] = layout(5);
+    if (seg === undefined) throw new Error("no segment");
+    const moved = { ...seg, index: 3 };
+    expect(segmentPath(moved, 5, G)).toBe(segmentPath(seg, 5, G));
+    expect(segmentPath({ ...seg, center: seg.center - 1 }, 5, G)).not.toBe(segmentPath(seg, 5, G));
+  });
+
+  it("agrees with grape-core's hit test away from the rounded corners", () => {
+    for (let n = 1; n <= 12; n += 1) {
+      const segs = layout(n);
+      const shapes = segs.map((seg) => flatten(segmentPath(seg, n, G)));
+      const half = G.gap / 2;
+      const rounded = segs.flatMap((seg) => {
+        const c = segmentCorners(seg, n, G);
+        if (c === null) return [];
+        // The unrounded outer corners (gap line meets outer circle): hit_test
+        // counts the bit the fillet cuts off, the drawing doesn't.
+        return [c.start, c.end].map((edge) => {
+          const extra = Math.sqrt(G.outerR ** 2 - half ** 2) - alongRay(edge.edge, edge.beta);
+          const d = dir(edge.beta);
+          return { x: edge.edge.x + extra * d.x, y: edge.edge.y + extra * d.y };
+        });
+      });
+      const rho = filletRadius(n, G);
+      let checked = 0;
+      const mismatches: string[] = [];
+      for (let x = -G.outerR - 2; x <= G.outerR + 2; x += 2.1) {
+        for (let y = -G.outerR - 2; y <= G.outerR + 2; y += 2.1) {
+          const p = { x, y };
+          const d = norm(p);
+          // Stay clear of every boundary by 0.25 px: the circles, the gap lines, the corners.
+          if (Math.abs(d - G.innerR) < 0.25 || Math.abs(d - G.outerR) < 0.25) continue;
+          if (rounded.some((corner) => dist(corner, p) < 1.5 * rho + 1)) continue;
+          const nearGapLine = segs.some((seg) =>
+            [seg.center + Math.PI / n, seg.center - Math.PI / n].some(
+              (beta) =>
+                Math.abs(Math.abs(offsetFromRay(p, beta)) - half) < 0.25 && alongRay(p, beta) > 0,
+            ),
+          );
+          if (nearGapLine) continue;
+          // n = 1: hit_test still keeps a gap/2 slit under the anchor; the ring is drawn whole (§D.1).
+          if (n === 1 && y > 0 && Math.abs(x) < G.gap / 2 + 0.25) continue;
+          const hit = hitTest(x, y, n);
+          shapes.forEach((shape, i) => {
+            if (insidePath(shape, p) !== (hit === i)) {
+              mismatches.push(`(${x.toFixed(1)}, ${y.toFixed(1)}) seg ${i} hit=${String(hit)}`);
+            }
+          });
+          checked += 1;
+        }
+      }
+      expect(mismatches, `n=${n}`).toEqual([]);
+      expect(checked, `n=${n}`).toBeGreaterThan(5_000);
+    }
+  }, 60_000);
+
+  it("returns an empty path for geometry it can't draw", () => {
+    expect(segmentPath({ center: 0 }, 0, G)).toBe("");
+    expect(segmentPath({ center: 0 }, 4, { ...G, gap: Number.NaN })).toBe("");
+    expect(segmentPath({ center: 0 }, 1, { ...G, outerR: 1 })).toBe("");
   });
 });
 
-describe("captions", () => {
-  it("name each wheel in Grape's own words", () => {
-    expect(modeCaption("conversions")).toBe("Convert");
-    expect(modeCaption("tools")).toBe("Tools");
-    expect(modeCaption("actions")).toBe("File actions");
+describe("labelAnchor", () => {
+  it("is Rust's (labelX, labelY), untouched", () => {
+    for (const n of NS) {
+      for (const seg of layout(n)) {
+        expect(labelAnchor(seg)).toEqual({ x: seg.labelX, y: seg.labelY });
+      }
+    }
+    expect(labelAnchor({ labelX: 0, labelY: -84 })).toEqual({ x: 0, y: -84 });
+  });
+});
+
+describe("formatNumber", () => {
+  it("keeps six decimals at most and drops trailing zeros", () => {
+    expect(formatNumber(120)).toBe("120");
+    expect(formatNumber(-84)).toBe("-84");
+    expect(formatNumber(1.5)).toBe("1.5");
+    expect(formatNumber(1 / 3)).toBe("0.333333");
+    expect(formatNumber(-2.0000004)).toBe("-2");
   });
 
-  it("name the user's own keys in empty states", () => {
-    const keys = { conversions: "Shift", tools: "Ctrl", actions: "Alt" };
-    expect(emptyMessage("noConversions", keys)).toBe(
-      "Nothing to convert here. Tap Alt for file actions.",
-    );
-    const remapped = { conversions: "F13", tools: "Ctrl", actions: "Caps Lock" };
-    expect(emptyMessage("noTools", remapped)).toBe(
-      "No tools fit this selection. Tap F13 to convert or Caps Lock for file actions.",
-    );
+  it("never writes -0 or exponents", () => {
+    expect(formatNumber(-0)).toBe("0");
+    expect(formatNumber(-1e-9)).toBe("0");
+    expect(formatNumber(1e-7)).toBe("0");
+    expect(formatNumber(2e-6)).toBe("0.000002");
   });
 });
