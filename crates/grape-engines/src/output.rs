@@ -74,10 +74,23 @@ pub(crate) fn remove_created(path: &Path) -> io::Result<()> {
 /// Creates a new file named `{prefix}{unique_suffix}{suffix}` in `dir`,
 /// exclusively (`create_new`), retrying with a fresh name if one exists.
 pub(crate) fn create_unique(dir: &Path, prefix: &str, suffix: &str) -> io::Result<(PathBuf, File)> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    create_unique_with(&options, dir, prefix, suffix)
+}
+
+/// [`create_unique`] with the caller's `options`, which must include
+/// `create_new(true)` so an existing file is never opened.
+pub(crate) fn create_unique_with(
+    options: &OpenOptions,
+    dir: &Path,
+    prefix: &str,
+    suffix: &str,
+) -> io::Result<(PathBuf, File)> {
     let mut last = None;
     for _ in 0..UNIQUE_ATTEMPTS {
         let path = dir.join(format!("{prefix}{}{suffix}", unique_suffix()));
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
+        match options.open(&path) {
             Ok(file) => return Ok((path, file)),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => last = Some(e),
             Err(e) => return Err(e),

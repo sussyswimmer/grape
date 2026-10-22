@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 
 use grape_core::{DirSnapshot, OutputLocation, Selection, SelectionItem, Settings};
 
-use crate::output::create_unique;
+#[cfg(windows)]
+use crate::output::create_unique_with;
+#[cfg(not(windows))]
+use crate::output::{create_unique, remove_created};
 
 /// Prefix of the writability probe files.
 const PROBE_PREFIX: &str = ".grape-probe-";
@@ -24,8 +27,9 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 ///   `settings.fallback_dir`. `names` are the folder's current entries
 ///   (lossy UTF-8; unreadable entries skipped). `writable` comes from a
 ///   probe: create a uniquely named `.grape-probe-{pid}-{nanos}-{n}` file
-///   with `create_new`, then remove it; any error means `false`. A missing
-///   or unreadable folder gets no names and `writable = false`.
+///   with `create_new`, then delete it (on Windows, the OS deletes it as
+///   its handle closes); any error means `false`. A missing or unreadable
+///   folder gets no names and `writable = false`.
 /// - **The fallback folder** is Grape's own (`Downloads\Grape`), so it is
 ///   created with `create_dir_all` if it doesn't exist yet, before it is
 ///   probed. No other folder is ever created.
@@ -83,12 +87,42 @@ fn snapshot(dir: &Path) -> DirSnapshot {
     }
 }
 
-/// True when a new file can be created in `dir` and removed again.
+/// True when a new file can be created in `dir` and deleted again.
+///
+/// On Windows the probe is opened with `FILE_FLAG_DELETE_ON_CLOSE` (and the
+/// `DELETE` access that needs), so the OS removes it when its handle
+/// closes, even if a scanner opened it meanwhile: no probe is ever left
+/// behind. A folder that lets Grape create files but not delete them
+/// refuses that open, so nothing is created and the folder counts as not
+/// writable (Grape couldn't remove its temp file there either).
+#[cfg(windows)]
+fn probe_writable(dir: &Path) -> bool {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    // Win32 values (winnt.h / winbase.h).
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+
+    let mut options = fs::OpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .access_mode(GENERIC_WRITE | DELETE)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE);
+    // Dropping the handle deletes the probe.
+    create_unique_with(&options, dir, PROBE_PREFIX, "").is_ok()
+}
+
+/// True when a new file can be created in `dir` and deleted again. The
+/// delete is retried like a temp file's; only a folder that allows creating
+/// but never deleting (an append-only folder) keeps the probe.
+#[cfg(not(windows))]
 fn probe_writable(dir: &Path) -> bool {
     match create_unique(dir, PROBE_PREFIX, "") {
         Ok((probe, file)) => {
             drop(file);
-            fs::remove_file(probe).is_ok()
+            remove_created(&probe).is_ok()
         }
         Err(_) => false,
     }
