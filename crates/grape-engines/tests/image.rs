@@ -557,3 +557,48 @@ fn a_fallback_job_creates_the_fallback_folder() {
     assert_eq!(names_in(&fallback), ["photo.tiff"]);
     before.assert_unchanged();
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_that_turns_read_only_is_a_write_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TestDir::new("turns-read-only");
+    let (src, job) = plan_one(
+        &dir,
+        "photo.png",
+        &encode(&gradient(), Format::Png),
+        Operation::convert(Format::Jpg),
+    );
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+    fs::set_permissions(&dir.path, fs::Permissions::from_mode(0o555)).unwrap();
+    // Restore write access before `TestDir` deletes the tree.
+    struct Unlock(PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+    let _unlock = Unlock(dir.path.clone());
+    // Root (and CAP_DAC_OVERRIDE) ignores permission bits: check first.
+    let canary = dir.join("canary");
+    if fs::write(&canary, b"x").is_ok() {
+        let _ = fs::remove_file(&canary);
+        println!("note: skipped, this user can write into a 0o555 folder (running as root?)");
+        return;
+    }
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::WriteFailed);
+    assert_eq!(
+        err.user_message,
+        format!(
+            "Grape couldn't save into {}.",
+            dir.path.file_name().unwrap().to_string_lossy()
+        )
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
