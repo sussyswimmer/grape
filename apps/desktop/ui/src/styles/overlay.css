@@ -1,0 +1,38 @@
+/* The overlay window is transparent: only the wheel is drawn. */
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  cursor: default;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  font-family: var(--font-ui);
+}
+
+.wheel {
+  display: block;
+}
+
+.wheel-backdrop {
+  fill: var(--glass-fill);
+  stroke: var(--glass-stroke);
+  stroke-width: 1;
+}
+
+.wheel-ring {
+  fill: none;
+  stroke: var(--segment-fill);
+}
+
+.wheel-edge {
+  fill: none;
+  stroke: var(--segment-stroke);
+  stroke-width: 1.5;
+}

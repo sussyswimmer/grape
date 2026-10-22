@@ -1,0 +1,58 @@
+/*
+ * Grape's palette and shared design tokens. Every color in the UI comes
+ * from here. The accent is a deep grape purple; the leaf green is used
+ * sparingly. The glass tokens follow the OS light/dark theme.
+ */
+:root {
+  /* Grape purples, darkest to lightest. */
+  --grape-950: #1b0c2e;
+  --grape-900: #2a1046;
+  --grape-700: #4b1f7a;
+  --grape-600: #5e2b97; /* brand accent */
+  --grape-500: #7442b8;
+  --grape-300: #b596e6;
+  --grape-100: #eee6fb;
+  --grape-50: #f8f4fd;
+
+  /* Leaf green. */
+  --leaf-600: #4a8a55;
+  --leaf-500: #5fa36a;
+
+  /* Semantic tokens, light theme. */
+  --color-accent: var(--grape-600);
+  --color-bg: var(--grape-50);
+  --color-surface: #ffffff;
+  --color-text: #1e1430;
+  --color-text-muted: #5a4d6e;
+  --color-border: rgba(94, 43, 151, 0.18);
+
+  /* The wheel's frosted glass. */
+  --glass-fill: rgba(248, 244, 253, 0.74);
+  --glass-stroke: rgba(94, 43, 151, 0.22);
+  --glass-blur: 18px;
+  --segment-fill: rgba(116, 66, 184, 0.16);
+  --segment-stroke: rgba(94, 43, 151, 0.35);
+  --segment-highlight: var(--grape-500);
+
+  /* System fonts only: nothing is downloaded (offline rule). */
+  --font-ui: system-ui, "Segoe UI", sans-serif;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-accent: var(--grape-300);
+    --color-bg: var(--grape-950);
+    --color-surface: #251838;
+    --color-text: #f3eefb;
+    --color-text-muted: #b9aecb;
+    --color-border: rgba(181, 150, 230, 0.2);
+
+    --glass-fill: rgba(27, 12, 46, 0.7);
+    --glass-stroke: rgba(181, 150, 230, 0.26);
+    --segment-fill: rgba(181, 150, 230, 0.16);
+    --segment-stroke: rgba(181, 150, 230, 0.38);
+    --segment-highlight: var(--grape-300);
+  }
+}
