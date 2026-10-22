@@ -8,6 +8,7 @@
 
 pub mod actions;
 pub mod format;
+pub mod geometry;
 pub mod matrix;
 pub mod naming;
 pub mod operation;
@@ -16,6 +17,9 @@ pub mod tools;
 
 pub use actions::{actions, ActionKey, Platform};
 pub use format::{Category, Format, INPUT_ONLY};
+pub use geometry::{
+    clamp_anchor, hit_test, wheel_layout, Geometry, Point, Rect, Segment, GEOMETRY,
+};
 pub use matrix::{pair_tier, pairs, targets, targets_enabled};
 pub use naming::{
     output_kind, output_name, page_file_name, pages_folder_name, produces_pages, split_name,
