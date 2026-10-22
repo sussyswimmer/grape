@@ -9,7 +9,8 @@ import {
 } from "../test-support/fake-dom";
 import { openFixture } from "../test-support/fixtures";
 import { entriesPayload } from "../test-support/payloads";
-import { mountWheel, type SoundSink, type WheelView, type WheelViewOptions } from "./render";
+import { mountWheel, type WheelView, type WheelViewOptions } from "./render";
+import type { SoundSink } from "./tick";
 
 interface Harness {
   root: FakeElement;

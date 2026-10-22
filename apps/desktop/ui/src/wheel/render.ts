@@ -13,6 +13,7 @@
  *   stale wheel.
  * - After drawing an open, the next animation frame reports `wheel_painted`
  *   to Rust (the M1 latency log). Errors there are swallowed.
+ * - Highlight changes drive the synthesized tick (`tick.ts`).
  */
 
 import { invoke } from "@tauri-apps/api/core";
@@ -35,6 +36,7 @@ import {
   type WheelScene,
   type WheelState,
 } from "./scene";
+import { createTick, type SoundSink } from "./tick";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -48,14 +50,6 @@ export interface WheelView {
 /** Calls a Rust command (Tauri's `invoke`, or a stand-in in tests). */
 export type InvokeFn = (command: string, args: Record<string, unknown>) => Promise<unknown>;
 
-/** Plays or cancels the highlight tick. */
-export interface SoundSink {
-  /** The wheel opened or swapped; `sounds` is the payload's setting. */
-  opened(sounds: boolean): void;
-  play(): void;
-  cancel(): void;
-}
-
 /** Seams for tests. Production code passes nothing. */
 export interface WheelViewOptions {
   readonly invoke?: InvokeFn;
@@ -63,8 +57,6 @@ export interface WheelViewOptions {
   readonly prefersReducedMotion?: () => boolean;
   readonly sound?: SoundSink;
 }
-
-const SILENT: SoundSink = { opened: () => undefined, play: () => undefined, cancel: () => undefined };
 
 /**
  * Mounts the wheel into `root` (the overlay's `#wheel-root`, which covers
@@ -90,7 +82,7 @@ export function mountWheel(root: HTMLElement, options: WheelViewOptions = {}): W
       win !== null &&
       typeof win.matchMedia === "function" &&
       win.matchMedia("(prefers-reduced-motion: reduce)").matches);
-  const sound = options.sound ?? SILENT;
+  const sound = options.sound ?? createTick();
 
   let state: WheelState = CLOSED;
   let svg: SVGSVGElement | null = null;

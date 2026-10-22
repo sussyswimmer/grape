@@ -27,7 +27,9 @@ import { type ListenFn, listenAll, route } from "../shared/listen";
 import type { WheelView } from "./render";
 
 export { mountWheel } from "./render";
-export type { InvokeFn, SoundSink, WheelView, WheelViewOptions } from "./render";
+export type { InvokeFn, WheelView, WheelViewOptions } from "./render";
+export { createTick } from "./tick";
+export type { SoundSink, TickAudio, TickOptions } from "./tick";
 export type { ListenFn } from "../shared/listen";
 
 /**
