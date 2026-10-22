@@ -9,6 +9,9 @@
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "test": "vitest run"
   },
+  "dependencies": {
+    "@tauri-apps/api": "2.12.1"
+  },
   "devDependencies": {
     "@types/node": "22.20.5",
     "typescript": "7.0.2",
