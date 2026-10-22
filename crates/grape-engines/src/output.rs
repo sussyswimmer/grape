@@ -21,13 +21,19 @@ use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Prefix of every temp file name. Hidden on Unix; a dot-name on Windows.
 pub(crate) const TEMP_PREFIX: &str = ".grape-tmp-";
 
 /// How many times a unique name is retried when one is (improbably) taken.
 const UNIQUE_ATTEMPTS: usize = 8;
+
+/// How many times [`TempFile`] tries to delete itself, and the pause
+/// between tries.
+const REMOVE_ATTEMPTS: u32 = 3;
+const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -80,8 +86,17 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        // Best effort: after a hard link this only removes the temp name.
-        let _ = fs::remove_file(&self.path);
+        // After a hard link this only removes the temp name. On Windows a
+        // virus scanner may hold the new file for a moment, so a failed
+        // delete is retried briefly before giving up.
+        for attempt in 1..=REMOVE_ATTEMPTS {
+            match fs::remove_file(&self.path) {
+                Ok(()) => return,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+                Err(_) if attempt < REMOVE_ATTEMPTS => thread::sleep(REMOVE_RETRY_DELAY),
+                Err(_) => return,
+            }
+        }
     }
 }
 
