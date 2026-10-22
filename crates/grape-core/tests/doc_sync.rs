@@ -3,16 +3,22 @@
 //!
 //! The parser only reads `|` table rows and a few rule lines it looks for
 //! by their exact wording; prose and `[Grape]` bullets around them are
-//! ignored.
+//! ignored. Rules that are formulas or prose (the §4 angle and hit-test
+//! rules, the naming bullets) are pinned by phrase, and their examples are
+//! run through the code.
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashSet;
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::path::Path;
 
-use grape_core::geometry::{GEOMETRY, SCREEN_MARGIN};
+use grape_core::geometry::{start_angle, GAP, GEOMETRY, INNER_R, OUTER_R, SCREEN_MARGIN};
 use grape_core::{
-    actions, pair_tier, pairs, targets, tool_naming, tool_suffix, tool_tier, tools, wheel_content,
-    Category, Channels, EmptyState, Features, Format, OutputExt, Platform, SelectionItem, Suffix,
-    Tier, ToolKey, ToolParams, WheelContent, WheelMode, INPUT_ONLY, TOOL_ROWS,
+    actions, hit_test, output_name, page_file_name, pair_tier, pairs, plan, split_name, targets,
+    tool_naming, tool_suffix, tool_tier, tools, wheel_content, wheel_layout, Category, Channels,
+    DirSnapshot, EmptyState, Features, Format, JobOutput, Operation, OutputExt, Platform,
+    Selection, SelectionItem, Settings, Speed, Suffix, Tier, ToolKey, ToolParams, WheelContent,
+    WheelMode, INPUT_ONLY, TOOL_ROWS,
 };
 
 const FORMAT_MATRIX: &str = include_str!(concat!(
@@ -83,6 +89,19 @@ fn line_with<'a>(doc: &'a str, needle: &str) -> &'a str {
     let found: Vec<&str> = doc.lines().filter(|l| l.contains(needle)).collect();
     assert_eq!(found.len(), 1, "expected one line containing {needle:?}");
     found[0]
+}
+
+/// Asserts that `line` still has each pinned phrase. Used for rules that
+/// are prose or formulas rather than tables: the test next to the pin
+/// checks the code against the same rule.
+fn assert_pinned(line: &str, pinned: &[&str]) {
+    for phrase in pinned {
+        assert!(line.contains(phrase), "{phrase:?} not in {line:?}");
+    }
+}
+
+fn names(list: &[&str]) -> HashSet<String> {
+    list.iter().map(|s| s.to_string()).collect()
 }
 
 /// The integer right after `label` in `line`.
@@ -380,6 +399,119 @@ fn naming_table_matches_tool_naming() {
     assert_eq!(tool_suffix(ToolKey::ChangeVideoSpeed, &p), "Speed 2x");
 }
 
+#[test]
+fn collision_rule_matches() {
+    let line = line_with(FORMAT_MATRIX, "If that name exists (on disk");
+    assert_pinned(line, &["or already planned in this batch"]);
+    let templates = backticked(line);
+    assert_eq!(templates.len(), 2, "{line}");
+    let png = Operation::convert(Format::Png);
+    let mut taken = names(&["a.png"]);
+    for template in templates {
+        let expected = template.replace("{stem}", "a").replace("{ext}", "png");
+        assert_eq!(output_name("a.jpg", &png, &taken), expected);
+        taken.insert(expected);
+    }
+    // Tools use "the same ` 2`, ` 3` collision rule".
+    let line = line_with(FORMAT_MATRIX, "Output = `{stem} {Suffix}.{ext}`");
+    assert_eq!(backticked(line), ["{stem} {Suffix}.{ext}", " 2", " 3"]);
+    let compress = Operation::tool(ToolKey::Compress);
+    let mut taken = names(&["a Compressed.jpg"]);
+    for counter in backticked(line).into_iter().skip(1) {
+        let expected = format!("a Compressed{counter}.jpg");
+        assert_eq!(output_name("a.jpg", &compress, &taken), expected);
+        taken.insert(expected);
+    }
+}
+
+#[test]
+fn case_rule_matches() {
+    let line = line_with(FORMAT_MATRIX, "The collision check ignores case");
+    let example = backticked(line);
+    assert_eq!(example.len(), 2, "{line}");
+    let (existing, wanted) = (example[0], example[1]);
+    let (stem, ext) = split_name(wanted);
+    let to = Format::from_extension(ext.unwrap()).unwrap();
+    let source = format!("{stem}.source");
+    let name = output_name(&source, &Operation::convert(to), &names(&[existing]));
+    assert_ne!(name, wanted, "{existing:?} must block {wanted:?}");
+    assert_eq!(name, format!("{stem} 2.{}", ext.unwrap()));
+}
+
+#[test]
+fn no_extension_rule_matches() {
+    let line = line_with(FORMAT_MATRIX, "A name with no dot");
+    let example = backticked(line);
+    assert_eq!(example.len(), 5, "{line}");
+    for name in &example[..3] {
+        assert_eq!(split_name(name), (*name, None), "{name}");
+    }
+    let (source, output) = (example[3], example[4]);
+    let to = Format::from_extension(split_name(output).1.unwrap()).unwrap();
+    assert_eq!(
+        output_name(source, &Operation::convert(to), &HashSet::new()),
+        output
+    );
+}
+
+#[test]
+fn pages_rule_matches() {
+    let line = line_with(FORMAT_MATRIX, "zero-padded to the width of the page count");
+    assert_pinned(line, &["`{stem} {n}.{ext}`", "counting from 1"]);
+    let example = backticked(line);
+    let (first, last) = (example[example.len() - 3], example[example.len() - 2]);
+    assert_eq!(page_file_name("report", 1, 12, "png"), first);
+    assert_eq!(page_file_name("report", 12, 12, "png"), last);
+}
+
+#[test]
+fn same_extension_rule_matches() {
+    let line = line_with(
+        FORMAT_MATRIX,
+        "\"same\" means the source's literal extension",
+    );
+    let example = backticked(line);
+    assert_eq!(example.len(), 4, "{line}");
+    let compress = Operation::tool(ToolKey::Compress);
+    assert_eq!(
+        output_name(example[0], &compress, &HashSet::new()),
+        example[1]
+    );
+    // wav → flac goes by the detected format, which only the planner has.
+    let dir = Path::new("/music");
+    let item = SelectionItem::file_with_format(dir.join(example[2]), Some(Format::Wav));
+    let sel = Selection::new(vec![item]).with_dir(dir, DirSnapshot::new([example[2]], true));
+    let job = plan(&sel, &compress, &Settings::new(dir)).unwrap();
+    assert_eq!(job.jobs[0].output, JobOutput::File(dir.join(example[3])));
+}
+
+#[test]
+fn speed_rule_matches() {
+    let line = line_with(FORMAT_MATRIX, "in `Speed {N}x` is the factor");
+    assert_pinned(line, &["at most two decimals and no trailing zeros"]);
+    let examples: Vec<&str> = backticked(line)
+        .into_iter()
+        .filter(|s| s.starts_with("Speed ") && !s.contains('{'))
+        .collect();
+    assert_eq!(examples.len(), 3, "{line}");
+    for example in examples {
+        let factor = example
+            .strip_prefix("Speed ")
+            .and_then(|s| s.strip_suffix('x'))
+            .unwrap();
+        let hundredths = (factor.parse::<f64>().unwrap() * 100.0).round() as u16;
+        let params = ToolParams {
+            speed: Speed::from_hundredths(hundredths).unwrap(),
+            ..ToolParams::default()
+        };
+        assert_eq!(
+            tool_suffix(ToolKey::ChangeVideoSpeed, &params),
+            example,
+            "{factor}"
+        );
+    }
+}
+
 // ---- TOOLS_AND_ACTIONS.md ----
 
 fn check(cell: &str) -> bool {
@@ -535,5 +667,71 @@ fn folders_stay_actions_only() {
                 .len(),
             6
         );
+    }
+}
+
+#[test]
+fn wheel_angle_rule_matches() {
+    let line = line_with(INTERACTION_SPEC, "The center angle of segment `i` is");
+    assert_pinned(
+        line,
+        &[
+            "`start(n) − 2π·i/n`",
+            "counter-clockwise from +x, so segments advance clockwise",
+            "`start(n) = π/2` (item 0 at the **top**)",
+            "except `start(3) = π` (item 0 on the **left**)",
+        ],
+    );
+    for n in 1..=12 {
+        let start = if n == 3 { PI } else { FRAC_PI_2 };
+        assert_eq!(start_angle(n), start, "n={n}");
+        for segment in wheel_layout(n) {
+            let center = start - TAU * segment.index as f64 / n as f64;
+            assert!((segment.center - center).abs() < 1e-12, "n={n}");
+        }
+    }
+}
+
+#[test]
+fn hit_test_rule_matches() {
+    let line = line_with(INTERACTION_SPEC, "**Hit test**");
+    assert_pinned(
+        line,
+        &[
+            "If `d < INNER_R` or `d > OUTER_R`, nothing is selected",
+            "pick the nearest segment by angle",
+            "exceeds `π/n − asin(GAP/2 / d)`, it's in a gap",
+        ],
+    );
+    // `d == INNER_R` and `d == OUTER_R` are on the ring (exact straight up,
+    // where the distance has no rounding error).
+    assert_eq!(hit_test(0.0, -INNER_R, 4), Some(0));
+    assert_eq!(hit_test(0.0, -OUTER_R, 4), Some(0));
+    // Screen offset (y down) for a math angle and a distance.
+    let at = |angle: f64, d: f64| (d * angle.cos(), -d * angle.sin());
+    let eps = 1e-6;
+    for n in 1..=12 {
+        for segment in wheel_layout(n) {
+            let i = Some(segment.index);
+            let hit = |angle: f64, d: f64| {
+                let (dx, dy) = at(angle, d);
+                hit_test(dx, dy, n)
+            };
+            // The ring: `d < INNER_R` and `d > OUTER_R` select nothing.
+            assert_eq!(hit(segment.center, INNER_R - eps), None, "n={n}");
+            assert_eq!(hit(segment.center, INNER_R + eps), i, "n={n}");
+            assert_eq!(hit(segment.center, OUTER_R - eps), i, "n={n}");
+            assert_eq!(hit(segment.center, OUTER_R + eps), None, "n={n}");
+            // The gap: past `π/n − asin(GAP/2 / d)` from the center.
+            for d in [INNER_R + 1.0, GEOMETRY.label_r, OUTER_R - 1.0] {
+                let half = PI / n as f64 - (GAP / 2.0 / d).asin();
+                for side in [1.0, -1.0] {
+                    let inside = segment.center + side * (half - eps);
+                    let outside = segment.center + side * (half + eps);
+                    assert_eq!(hit(inside, d), i, "n={n} d={d}");
+                    assert_eq!(hit(outside, d), None, "n={n} d={d}");
+                }
+            }
+        }
     }
 }
