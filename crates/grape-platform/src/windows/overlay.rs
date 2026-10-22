@@ -27,8 +27,8 @@ use core::ffi::c_void;
 
 use ::windows::core::HRESULT;
 use ::windows::Win32::Foundation::{
-    GetLastError, SetLastError, ERROR_INVALID_WINDOW_HANDLE, ERROR_SUCCESS, HWND, LPARAM, LRESULT,
-    WIN32_ERROR, WPARAM,
+    GetLastError, SetLastError, ERROR_INVALID_WINDOW_HANDLE, ERROR_SUCCESS, E_FAIL, HWND, LPARAM,
+    LRESULT, WIN32_ERROR, WPARAM,
 };
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -108,9 +108,16 @@ pub fn harden_overlay(hwnd: isize) -> Result<(), PlatformError> {
     // reference data (`dwRefData` = 0), so nothing it uses can dangle. It
     // removes itself on WM_NCDESTROY. Installing the same (proc, id) pair
     // twice only updates the reference data, so repeat calls are harmless.
-    let installed = unsafe { SetWindowSubclass(hwnd, Some(overlay_subclass_proc), SUBCLASS_ID, 0) };
+    // SetLastError/GetLastError only touch this thread's error slot.
+    // SetWindowSubclass isn't documented to set a last error, so it's
+    // cleared first: a stale code from an earlier call is never reported.
+    let (installed, error) = unsafe {
+        SetLastError(ERROR_SUCCESS);
+        let installed = SetWindowSubclass(hwnd, Some(overlay_subclass_proc), SUBCLASS_ID, 0);
+        (installed, GetLastError())
+    };
     if !installed.as_bool() {
-        return Err(last_error("SetWindowSubclass"));
+        return Err(win32_error_or_fail("SetWindowSubclass", error));
     }
 
     let before = read_ex_style(hwnd)?;
@@ -261,17 +268,23 @@ unsafe extern "system" fn overlay_subclass_proc(
     result
 }
 
-fn last_error(context: &'static str) -> PlatformError {
-    PlatformError::Os {
-        context,
-        code: ::windows::core::Error::from_thread().code().0,
-    }
-}
-
 fn win32_error(context: &'static str, error: WIN32_ERROR) -> PlatformError {
     PlatformError::Os {
         context,
         code: HRESULT::from_win32(error.0).0,
+    }
+}
+
+/// [`win32_error`] for a call that failed without setting a last error:
+/// reports `E_FAIL` rather than a code that reads as success (0).
+fn win32_error_or_fail(context: &'static str, error: WIN32_ERROR) -> PlatformError {
+    if error == ERROR_SUCCESS {
+        PlatformError::Os {
+            context,
+            code: E_FAIL.0,
+        }
+    } else {
+        win32_error(context, error)
     }
 }
 
@@ -420,6 +433,22 @@ mod tests {
             .join()
             .unwrap();
         assert_eq!(result, Err(PlatformError::WrongThread));
+    }
+
+    #[test]
+    fn a_failure_without_a_last_error_reads_as_a_failure() {
+        assert_eq!(
+            win32_error_or_fail("SetWindowSubclass", ERROR_SUCCESS),
+            PlatformError::Os {
+                context: "SetWindowSubclass",
+                code: E_FAIL.0,
+            }
+        );
+        assert_eq!(
+            win32_error_or_fail("SetWindowSubclass", ERROR_INVALID_WINDOW_HANDLE),
+            win32_error("SetWindowSubclass", ERROR_INVALID_WINDOW_HANDLE)
+        );
+        assert!(E_FAIL.is_err());
     }
 
     #[test]
