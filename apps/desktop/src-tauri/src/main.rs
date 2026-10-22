@@ -4,6 +4,9 @@
 
 fn main() {
     if let Err(err) = grape_app::run() {
+        // Release builds have no console, so stderr goes nowhere. The log
+        // file catches it too, if the logger was already running.
+        log::error!("Grape could not start: {err:#}");
         eprintln!("Grape could not start: {err:#}");
         std::process::exit(1);
     }

@@ -26,6 +26,12 @@ pub struct GrapeState {
 /// # Errors
 /// Fails if the app can't be built (bad config or a plugin that won't
 /// start).
+///
+/// A failure inside setup never comes back here: Tauri runs setup on the
+/// event loop and panics if it returns an error. So setup logs every
+/// failure first, and only fails for one Grape can't run without (no tray
+/// icon means no way to reach Settings or Quit). The others are logged and
+/// Grape keeps running.
 pub fn run() -> anyhow::Result<()> {
     let app = tauri::Builder::default()
         // Registered first so a second launch is caught before anything else
@@ -53,9 +59,11 @@ pub fn run() -> anyhow::Result<()> {
             tray::create(app.handle()).inspect_err(|err| {
                 log::error!("could not create the tray icon: {err}");
             })?;
-            ui_windows::prepare_overlay(app.handle()).inspect_err(|err| {
+            // Not fatal: the tray still works, and until M1 nothing shows
+            // the overlay.
+            if let Err(err) = ui_windows::prepare_overlay(app.handle()) {
                 log::error!("could not prepare the overlay window: {err:#}");
-            })?;
+            }
             log::info!("Grape {} is running", env!("CARGO_PKG_VERSION"));
             Ok(())
         })
