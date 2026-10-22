@@ -730,7 +730,7 @@ The pure modules get unit tests (§B.4, coords, golden JSON for events, `edge_mo
 5. **Hook removal under load** (`LowLevelHooksTimeout`): the health check reinstalls it; the left-button poll synthesizes `Ended`.
 6. **Autoplay blocked:** the tick is silent, which isn't critical; QA item.
 7. **Large monitors:** a full-screen transparent webview may cost frames, so measure latency (target < 100 ms) with `wheel_painted`.
-8. **Corner hits:** Rust's hit test includes the small rounded-off outer corner areas (≤ 20 px), so a drop there counts as a segment. That's acceptable for the slice; a UI `isPointInFill` re-check would need a reverse channel.
+8. ~~**Corner hits:** Rust's hit test includes the small rounded-off outer corner areas (≤ 20 px), so a drop there counts as a segment.~~ Resolved: `grape_core::hit_test` now honors the fillets (`fillet_radius(n)`, the same rule as `filletRadius`) and treats one item as a full ring with no gap (`INTERACTION_SPEC.md` §4), so no UI `isPointInFill` re-check or reverse channel is needed.
 
 ### Verifiable in this Linux container
 - `cargo test --workspace` (grape-core; platform detector and mock; controller, coords, events and edge_mode; engines' full 20-pair conversions with source-hash and no-temp assertions).
