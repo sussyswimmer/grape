@@ -61,6 +61,11 @@ pub fn build_selection(paths: &[PathBuf], settings: &Settings) -> Selection {
         let snapshot = snapshot(&dir);
         selection = selection.with_dir(dir, snapshot);
     }
+    if fallback.as_os_str().is_empty() {
+        // No fallback folder: a snapshot nobody can write to, so the
+        // planner reports `NoWritableDestination`, not a missing snapshot.
+        selection = selection.with_dir(fallback.clone(), DirSnapshot::default());
+    }
     selection
 }
 

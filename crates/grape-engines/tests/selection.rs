@@ -8,7 +8,8 @@ use std::path::PathBuf;
 
 use common::{assert_no_leftovers, TestDir};
 use grape_core::{
-    plan, Format, ItemKind, JobOutput, Operation, OutputLocation, SelectionItem, Settings,
+    plan, Format, ItemKind, JobOutput, Operation, OutputLocation, PlanError, SelectionItem,
+    Settings,
 };
 use grape_engines::build_selection;
 
@@ -212,6 +213,23 @@ fn a_unicode_file_name_is_kept_exactly() {
         [SelectionItem::file_with_format(&src, Some(Format::Png))]
     );
     assert!(sel.dirs[&dir.path].names.contains(name));
+}
+
+#[test]
+fn without_a_fallback_folder_the_plan_has_nowhere_to_write() {
+    let dir = TestDir::new("no-fallback");
+    // The source's folder is missing, so it isn't writable either.
+    let src = dir.join("gone").join("photo.png");
+    let settings = Settings::new("");
+
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+
+    assert!(!sel.dirs[&dir.join("gone")].writable);
+    assert!(!sel.dirs[&PathBuf::new()].writable);
+    assert_eq!(
+        plan(&sel, &Operation::convert(Format::Jpg), &settings),
+        Err(PlanError::NoWritableDestination)
+    );
 }
 
 #[test]
