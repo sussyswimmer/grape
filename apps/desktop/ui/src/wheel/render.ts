@@ -193,6 +193,8 @@ function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
   svg.setAttribute("viewBox", scene.viewBox);
   svg.setAttribute("width", formatNumber(scene.size));
   svg.setAttribute("height", formatNumber(scene.size));
+  // Positioned inline so placement never depends on the root's id or CSS.
+  svg.style.setProperty("position", "absolute");
   svg.style.setProperty("left", `${formatNumber(scene.left)}px`);
   svg.style.setProperty("top", `${formatNumber(scene.top)}px`);
 

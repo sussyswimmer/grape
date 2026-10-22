@@ -73,6 +73,7 @@ describe("open", () => {
     expect(svg.localName).toBe("svg");
     expect(svg.getAttribute("id")).toBe("wheel");
     expect(svg.classList.contains("wheel")).toBe(true);
+    expect(svg.style.getPropertyValue("position")).toBe("absolute");
     expect(svg.style.getPropertyValue("left")).toBe("274px");
     expect(svg.style.getPropertyValue("top")).toBe("174px");
     expect(svg.getAttribute("width")).toBe("252");
