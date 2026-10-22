@@ -24,7 +24,7 @@ The TypeScript UI for Grape's windows: the wheel **overlay**, **settings**, and 
 ## Rules
 - **Clean room** (golden rule 1): only Grape's own palette (see `src/styles/tokens.css`), Lucide icons (ISC) or our own SVGs, and our own copy. No SF Symbols, no Tangerine colors, layout or wording.
 - **Offline** (golden rule 3): no CDN scripts, web fonts or remote images. Everything is bundled. The CSP in `src-tauri/tauri.conf.json` enforces this; don't loosen it without a DECISIONS entry.
-- **No `any`**: no `: any`, `as any` or `<any>`. `src/no-any.test.ts` fails the build if one appears.
+- **No `any`**: no `: any`, `as any`, `<any>` or any other form of the type. `src/no-any.test.ts` fails the build if the word `any` appears in code (comments and strings are fine), so don't use it as a name either.
 - **Every DOM query is null-checked**: use `mustGetElementById` from `src/shared/dom.ts` instead of a bare `getElementById`/`querySelector`.
 - Webview permissions live in `src-tauri/capabilities/`. Ask for the narrowest permission that works.
 
