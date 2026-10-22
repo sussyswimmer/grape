@@ -6,7 +6,8 @@
 //! - `display`: [`crate::display_bounds_at`] (`MonitorFromPoint` +
 //!   `GetMonitorInfoW` + `GetDpiForMonitor`).
 //! - `drop_target`: Grape's own `IDropTarget` for the overlay, which never
-//!   reports a move ([`install_drop_target`]).
+//!   reports a move ([`install_drop_target`]), and a refusing one for
+//!   windows that take no drops ([`refuse_drops`]).
 //! - `overlay`: keeps the overlay out of the taskbar and Alt-Tab
 //!   ([`harden_overlay`]).
 //!
@@ -19,7 +20,7 @@ mod drop_target;
 mod hook;
 mod overlay;
 
-pub use drop_target::{install_drop_target, DropTargetCoverage};
+pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{describe_ex_style, ex_style, harden_overlay};
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};

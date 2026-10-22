@@ -37,7 +37,8 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: drag a file from Explorer, tap Shift → a numbered ring appears at the cursor with "Convert" in the middle. The log shows `wheel open: Conversions at (x, y)…` and `overlay drop target on N of M window(s)`.
 - [ ] win: hover the segments → each one highlights and the middle shows "Segment n". Drop on segment 1 (the top) → the log shows `drop on the Conversions wheel: segment 0 …` with the file's full path, and the file is still where it was.
 - [ ] win: tap Ctrl, then Alt, mid-drag → the middle changes to "Tools", then "File actions", without the ring moving.
-- [ ] win: drop in the middle circle or off the ring → the log says `no segment (cancel)` and nothing moves.
+- [ ] win: drop in the middle circle or off the ring, including far from the wheel on the same monitor → the log says `no segment (cancel)`, nothing moves, and the file doesn't land in the window underneath.
+- [ ] win: drop a scratch file onto the Settings window with Shift held → nothing happens (no drop cursor), and the file stays where it was.
 - [ ] win: Esc mid-drag → the ring hides; Explorer cancels its drag too. The file is untouched.
 - [ ] win: hold Shift *before* starting the drag → no ring, and dropping into another folder moves the scratch file as Explorer always does.
 - [ ] win: drag from a browser, an editor or the taskbar → no ring.

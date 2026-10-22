@@ -16,7 +16,9 @@ use std::thread::{self, JoinHandle};
 
 use ::windows::Win32::Foundation::{E_FAIL, LPARAM, LRESULT, WPARAM};
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use ::windows::Win32::System::Threading::GetCurrentThreadId;
+use ::windows::Win32::System::Threading::{
+    GetCurrentThread, GetCurrentThreadId, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, PeekMessageW, PostThreadMessageW,
     SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, HC_ACTION, MSG, MSLLHOOKSTRUCT,
@@ -116,6 +118,11 @@ fn run(tx: SyncSender<RawMouse>, ready: &SyncSender<Result<u32, PlatformError>>)
     let _ = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_NOREMOVE) };
     // SAFETY: a plain query of the calling thread's id.
     let thread_id = unsafe { GetCurrentThreadId() };
+    // A busy machine must not starve this thread: a late callback gets the
+    // hook removed. Failing to raise the priority isn't fatal.
+    // SAFETY: GetCurrentThread returns a pseudo-handle for this thread,
+    // valid for the call; no pointers.
+    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) };
 
     // SAFETY: `None` asks for this executable's own module handle; nothing
     // is written through pointers.

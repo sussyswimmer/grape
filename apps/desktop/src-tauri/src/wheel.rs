@@ -219,17 +219,20 @@ fn open_overlay(app: &AppHandle, view: &WheelView) {
     if let Some(sink) = app.try_state::<DropSink>() {
         install_drop_target(app, &sink);
     }
-    // Position before size: moving to a monitor with another DPI makes
-    // Windows rescale the window, so the size is set after.
+    // Position, size, position: moving to a monitor with another DPI makes
+    // Windows rescale the window (WM_DPICHANGED), so the size is set after
+    // the move, and the position again in case the rescale shifted it.
     let frame = view.monitor;
+    let position = PhysicalPosition::new(frame.x, frame.y);
     let framed = overlay
-        .set_position(PhysicalPosition::new(frame.x, frame.y))
+        .set_position(position)
         .and_then(|()| {
             overlay.set_size(PhysicalSize::new(
                 frame.width.unsigned_abs(),
                 frame.height.unsigned_abs(),
             ))
-        });
+        })
+        .and_then(|()| overlay.set_position(position));
     if let Err(err) = framed {
         log::error!("could not frame the overlay on the monitor: {err}");
     }

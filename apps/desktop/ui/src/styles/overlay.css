@@ -1,11 +1,16 @@
-/* The overlay window is transparent: only the wheel is drawn. */
+/*
+ * The overlay window is transparent: only the wheel is drawn. The page
+ * still gets a fill one step above invisible, so no part of the overlay
+ * can count as see-through when Windows decides which window a drop lands
+ * on: an off-ring drop must land here and cancel (INTERACTION_SPEC §6).
+ */
 html,
 body {
   margin: 0;
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background: transparent;
+  background: var(--overlay-hit-fill);
   user-select: none;
   cursor: default;
 }

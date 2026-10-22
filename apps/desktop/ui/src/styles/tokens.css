@@ -34,6 +34,10 @@
   --segment-stroke: rgba(94, 43, 151, 0.35);
   --segment-highlight: var(--grape-500);
 
+  /* Over the whole overlay while the wheel is open: 1/255 black, so it
+     can't be seen but every pixel takes the drop. */
+  --overlay-hit-fill: rgba(0, 0, 0, 0.004);
+
   /* System fonts only: nothing is downloaded (offline rule). */
   --font-ui: system-ui, "Segoe UI", sans-serif;
 

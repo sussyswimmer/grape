@@ -11,7 +11,11 @@
 //! else, in every callback, whatever keys are held. It never reports a move
 //! or a link.
 //!
-//! The callbacks run on the overlay's thread (Tauri's main thread). They
+//! Grape's other windows (Settings) get the same target in refusing mode
+//! ([`refuse_drops`]): it answers `DROPEFFECT_NONE` to everything, so OLE
+//! never calls `Drop` there and a file dropped on Settings stays put.
+//!
+//! The callbacks run on the window's thread (Tauri's main thread). They
 //! read the file list and position, `try_send` a [`DropEvent`] and return.
 
 use core::ffi::c_void;
@@ -38,10 +42,10 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::{DropEvent, PlatformError};
 
-/// How many of the overlay's windows carry Grape's drop target.
+/// How many of a window's HWNDs carry Grape's drop target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DropTargetCoverage {
-    /// The overlay window plus all its descendants.
+    /// The window plus all its descendants.
     pub windows: usize,
     /// How many of them Grape's target was registered on. Windows owned by
     /// another process (WebView2 can host some) can't be registered.
@@ -66,6 +70,22 @@ pub fn install_drop_target(
     hwnd: isize,
     sink: SyncSender<DropEvent>,
 ) -> Result<DropTargetCoverage, PlatformError> {
+    register(hwnd, OverlayDropTarget::new(Some(sink)))
+}
+
+/// Registers a drop target on the window `hwnd` and every descendant that
+/// refuses every drag (`DROPEFFECT_NONE`), replacing wry's and tao's, which
+/// don't set the effect in `Drop`. Use it on Grape's windows that take no
+/// drops, such as Settings. Same threading rules and errors as
+/// [`install_drop_target`].
+///
+/// # Errors
+/// As [`install_drop_target`].
+pub fn refuse_drops(hwnd: isize) -> Result<DropTargetCoverage, PlatformError> {
+    register(hwnd, OverlayDropTarget::new(None))
+}
+
+fn register(hwnd: isize, target: OverlayDropTarget) -> Result<DropTargetCoverage, PlatformError> {
     let root = HWND(hwnd as *mut c_void);
     // SAFETY: IsWindow accepts any handle value and only reads state.
     if !unsafe { IsWindow(Some(root)) }.as_bool() {
@@ -87,7 +107,7 @@ pub fn install_drop_target(
         code: err.code().0,
     })?;
 
-    let target: IDropTarget = OverlayDropTarget::new(sink).into();
+    let target: IDropTarget = target.into();
     let mut windows = vec![root];
     collect_descendants(root, &mut windows);
 
@@ -165,22 +185,29 @@ unsafe fn set_effect(out: *mut DROPEFFECT, effect: DROPEFFECT) {
 
 #[implement(IDropTarget)]
 struct OverlayDropTarget {
-    sink: SyncSender<DropEvent>,
-    /// Whether the drag now over the overlay carries files.
+    /// Where events go. `None` refuses every drag and reports nothing.
+    sink: Option<SyncSender<DropEvent>>,
+    /// Whether the drag now over the window carries files Grape accepts.
     has_files: Cell<bool>,
 }
 
 impl OverlayDropTarget {
-    fn new(sink: SyncSender<DropEvent>) -> Self {
+    fn new(sink: Option<SyncSender<DropEvent>>) -> Self {
         Self {
             sink,
             has_files: Cell::new(false),
         }
     }
 
+    fn accepts(&self) -> bool {
+        self.sink.is_some()
+    }
+
     fn send(&self, event: DropEvent) {
         // Never block the OS drag loop: a full channel drops the event.
-        let _ = self.sink.try_send(event);
+        if let Some(sink) = &self.sink {
+            let _ = sink.try_send(event);
+        }
     }
 }
 
@@ -193,6 +220,11 @@ impl IDropTarget_Impl for OverlayDropTarget_Impl {
         pt: &POINTL,
         pdwEffect: *mut DROPEFFECT,
     ) -> ::windows::core::Result<()> {
+        if !self.accepts() {
+            // SAFETY: OLE's pdwEffect is valid for this call.
+            unsafe { set_effect(pdwEffect, DROPEFFECT_NONE) };
+            return Ok(());
+        }
         let paths = read_paths(pDataObj.as_ref());
         let has_files = !paths.is_empty();
         self.has_files.set(has_files);
@@ -223,7 +255,9 @@ impl IDropTarget_Impl for OverlayDropTarget_Impl {
 
     fn DragLeave(&self) -> ::windows::core::Result<()> {
         self.has_files.set(false);
-        self.send(DropEvent::Leave);
+        if self.accepts() {
+            self.send(DropEvent::Leave);
+        }
         Ok(())
     }
 
@@ -234,9 +268,14 @@ impl IDropTarget_Impl for OverlayDropTarget_Impl {
         pt: &POINTL,
         pdwEffect: *mut DROPEFFECT,
     ) -> ::windows::core::Result<()> {
+        self.has_files.set(false);
+        if !self.accepts() {
+            // SAFETY: OLE's pdwEffect is valid for this call.
+            unsafe { set_effect(pdwEffect, DROPEFFECT_NONE) };
+            return Ok(());
+        }
         let paths = read_paths(pDataObj.as_ref());
         let has_files = !paths.is_empty();
-        self.has_files.set(false);
         self.send(DropEvent::Drop {
             paths,
             x: pt.x,
@@ -349,7 +388,7 @@ mod tests {
 
     fn target() -> (IDropTarget, mpsc::Receiver<DropEvent>) {
         let (tx, rx) = mpsc::sync_channel(16);
-        (OverlayDropTarget::new(tx).into(), rx)
+        (OverlayDropTarget::new(Some(tx)).into(), rx)
     }
 
     fn keys(flags: &[MODIFIERKEYS_FLAGS]) -> MODIFIERKEYS_FLAGS {
@@ -413,6 +452,30 @@ mod tests {
                 Some("golden rule 2.png")
             );
         }
+        assert!(file.0.exists());
+    }
+
+    /// Settings and other windows that take no drops: nothing is accepted,
+    /// so OLE never calls Drop and the source is never told "moved".
+    #[test]
+    fn a_refusing_target_refuses_file_drags_too() {
+        ole();
+        let file = TempFile::new("refused.png");
+        let data = shell_data_object(&file.0);
+        let target: IDropTarget = OverlayDropTarget::new(None).into();
+        let at = POINTL { x: 1, y: 2 };
+        let mut effect = ANY_EFFECT;
+        // SAFETY: a live data object and a valid out-pointer.
+        unsafe { target.DragEnter(&data, keys(&[MK_SHIFT]), at, &mut effect) }.unwrap();
+        assert_eq!(effect, DROPEFFECT_NONE);
+        let mut effect = ANY_EFFECT;
+        // SAFETY: a valid out-pointer.
+        unsafe { target.DragOver(keys(&[MK_SHIFT]), at, &mut effect) }.unwrap();
+        assert_eq!(effect, DROPEFFECT_NONE);
+        let mut effect = ANY_EFFECT;
+        // SAFETY: a live data object and a valid out-pointer.
+        unsafe { target.Drop(&data, keys(&[MK_SHIFT]), at, &mut effect) }.unwrap();
+        assert_eq!(effect, DROPEFFECT_NONE);
         assert!(file.0.exists());
     }
 
@@ -525,6 +588,8 @@ mod tests {
         );
         let again = install_drop_target(raw, tx).unwrap();
         assert_eq!(again, first);
+        let refused = refuse_drops(raw).unwrap();
+        assert_eq!(refused, first);
     }
 
     #[test]

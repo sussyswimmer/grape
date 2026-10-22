@@ -58,6 +58,7 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     // nothing broken: keep using it.
     let _creating = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     if let Some(window) = app.get_webview_window(SETTINGS) {
+        refuse_drops(app, &window);
         window.unminimize()?;
         window.show()?;
         window.set_focus()?;
@@ -69,8 +70,42 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
         .min_inner_size(420.0, 320.0)
         .center()
         .build()?;
+    refuse_drops(app, &window);
     window.set_focus()?;
     Ok(())
+}
+
+/// Settings takes no drops. On Windows, wry's and tao's drop handlers would
+/// accept a file there without setting the drop effect, which Explorer can
+/// read as a move (DECISIONS D13), so a refusing target replaces them. Runs
+/// on the main thread, which owns the window; failures are logged.
+fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
+    #[cfg(target_os = "windows")]
+    {
+        let window = window.clone();
+        let queued = app.run_on_main_thread(move || {
+            let hwnd = match window.hwnd() {
+                Ok(hwnd) => hwnd.0 as isize,
+                Err(err) => {
+                    log::error!("settings drop guard: no window handle: {err}");
+                    return;
+                }
+            };
+            match grape_platform::windows::refuse_drops(hwnd) {
+                Ok(coverage) => log::info!(
+                    "settings refuses drops on {} of {} window(s)",
+                    coverage.registered,
+                    coverage.windows
+                ),
+                Err(err) => log::error!("settings drop guard: {err}"),
+            }
+        });
+        if let Err(err) = queued {
+            log::error!("settings drop guard: could not reach the main thread: {err}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = (app, window);
 }
 
 /// Debug builds only: shows the overlay for about two seconds, so focus,
