@@ -1410,6 +1410,7 @@ name = "grape-engines"
 version = "0.1.0"
 dependencies = [
  "grape-core",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
