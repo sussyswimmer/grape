@@ -146,8 +146,13 @@ pub fn produces_pages(from: Format, to: Format) -> bool {
 ///   the source's literal extension (`Photo.JPG` → `Photo Compressed.JPG`).
 /// - Combine tools: pass the first file's name.
 /// - Collisions: `{base} 2.{ext}`, `{base} 3.{ext}`, …
+///
+/// The source's format comes from its extension. The planner passes the
+/// detected format instead, so compress's `wav → flac` follows the content
+/// when the extension lies.
 pub fn output_name(source: &str, op: &Operation, taken: &HashSet<String>) -> String {
-    output_name_folded(source, op, &fold_set(taken))
+    let format = Format::from_file_name(source);
+    output_name_folded(source, format, op, &fold_set(taken))
 }
 
 /// The folder name for a multi-page export of `source`: a unique `{stem}`.
@@ -191,14 +196,24 @@ pub(crate) fn fold_set(taken: &HashSet<String>) -> HashSet<String> {
     taken.iter().map(|s| fold(s)).collect()
 }
 
-/// [`output_name`] against an already folded `taken` set.
-pub(crate) fn output_name_folded(source: &str, op: &Operation, folded: &HashSet<String>) -> String {
-    let (base, ext) = output_base(source, op);
+/// [`output_name`] for a source of format `format` (`None` if unknown),
+/// against an already folded `taken` set.
+pub(crate) fn output_name_folded(
+    source: &str,
+    format: Option<Format>,
+    op: &Operation,
+    folded: &HashSet<String>,
+) -> String {
+    let (base, ext) = output_base(source, format, op);
     unique_name(&base, ext, folded)
 }
 
 /// The name before collision handling: `(base, extension)`.
-fn output_base<'a>(source: &'a str, op: &Operation) -> (String, Option<&'a str>) {
+fn output_base<'a>(
+    source: &'a str,
+    format: Option<Format>,
+    op: &Operation,
+) -> (String, Option<&'a str>) {
     let (stem, src_ext) = split_name(source);
     match op {
         Operation::Convert { to } => (stem.to_string(), Some(to.output_ext())),
@@ -207,7 +222,7 @@ fn output_base<'a>(source: &'a str, op: &Operation) -> (String, Option<&'a str>)
             let ext = match tool_naming(*tool).ext {
                 OutputExt::Same => src_ext,
                 OutputExt::SameWavToFlac => {
-                    if src_ext.and_then(Format::from_extension) == Some(Format::Wav) {
+                    if format == Some(Format::Wav) {
                         Some(Format::Flac.output_ext())
                     } else {
                         src_ext

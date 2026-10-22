@@ -177,7 +177,7 @@ Output = `{stem} {Suffix}.{ext}`, with the same ` 2`, ` 3` collision rule. A fol
 
 The multi-file tools' naming was not shown in the demo, so those names are Grape's choice.
 
-- **[Grape]** "same" means the source's literal extension, case included: `Photo.JPG` → `Photo Compressed.JPG`. A source with no extension gives an output with none.
+- **[Grape]** "same" means the source's literal extension, case included: `Photo.JPG` → `Photo Compressed.JPG`. A source with no extension gives an output with none. Compress's **wav → flac** goes by the detected format (rule 3), so WAV audio named `take.mp3` gives `take Compressed.flac`.
 - **[Grape]** `{N}` in `Speed {N}x` is the factor with at most two decimals and no trailing zeros: `Speed 2x`, `Speed 1.5x`, `Speed 0.25x`.
 
 ### Location [Grape]

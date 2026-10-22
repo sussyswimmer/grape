@@ -157,7 +157,9 @@ pub fn plan(sel: &Selection, op: &Operation, s: &Settings) -> Result<JobPlan, Pl
         Operation::Tool { tool, .. } if tool.is_combine() => {
             let name = file_name(&first.path)?;
             let (dir, used_fallback) = planner.destination(&first.path)?;
-            let out = planner.reserve(&dir, |taken| output_name_folded(&name, op, taken));
+            let out = planner.reserve(&dir, |taken| {
+                output_name_folded(&name, first.format(), op, taken)
+            });
             vec![Job {
                 inputs: sel.items.iter().map(|item| item.path.clone()).collect(),
                 output: JobOutput::File(dir.join(out)),
@@ -265,7 +267,9 @@ impl Planner<'_> {
             (Operation::Convert { to }, Some(from)) => produces_pages(from, to),
             _ => false,
         };
-        let file = self.reserve(&dir, |taken| output_name_folded(&name, op, taken));
+        let file = self.reserve(&dir, |taken| {
+            output_name_folded(&name, item.format(), op, taken)
+        });
         let output = if pages {
             let page_stem = stem(&name).to_string();
             let folder = self.reserve(&dir, |taken| unique_name(&page_stem, None, taken));

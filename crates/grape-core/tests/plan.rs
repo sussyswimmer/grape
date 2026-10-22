@@ -421,6 +421,31 @@ fn gz_conversion_writes_tar_gz() {
 }
 
 #[test]
+fn compress_wav_to_flac_follows_the_detected_format() {
+    const MUSIC: &str = "/home/u/music";
+    let items = vec![
+        // WAV content behind an mp3 extension: compress writes flac.
+        SelectionItem::file_with_format(p(MUSIC, "take.mp3"), Some(Wav)),
+        // MP3 content behind a wav extension: "same" keeps the extension.
+        SelectionItem::file_with_format(p(MUSIC, "song.wav"), Some(Mp3)),
+        // WAV content with no extension.
+        SelectionItem::file_with_format(p(MUSIC, "memo"), Some(Wav)),
+        // Detected from the extension.
+        SelectionItem::file(p(MUSIC, "loop.WAV")),
+    ];
+    let sel = Selection::new(items).with_dir(MUSIC, writable(&[]));
+    assert_eq!(
+        file_outputs(&sel, Operation::tool(Compress), &settings()),
+        vec![
+            p(MUSIC, "take Compressed.flac"),
+            p(MUSIC, "song Compressed.wav"),
+            p(MUSIC, "memo Compressed.flac"),
+            p(MUSIC, "loop Compressed.flac"),
+        ]
+    );
+}
+
+#[test]
 fn source_without_parent_is_an_error() {
     let sel = Selection::new(vec![SelectionItem::file("a.jpg")]);
     assert_eq!(
