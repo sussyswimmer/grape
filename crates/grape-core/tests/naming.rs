@@ -316,6 +316,23 @@ fn collision_check_ignores_case() {
         output_name("ảnh.jpg", &Operation::convert(Png), &taken(&["ẢNH.PNG"])),
         "ảnh 2.png"
     );
+    // Capital sharp s (U+1E9E) and ß are a case pair.
+    assert_eq!(
+        output_name(
+            "straße.jpg",
+            &Operation::convert(Png),
+            &taken(&["STRAẞE.PNG"])
+        ),
+        "straße 2.png"
+    );
+    assert_eq!(
+        output_name(
+            "STRAẞE.jpg",
+            &Operation::convert(Png),
+            &taken(&["straße.png"])
+        ),
+        "STRAẞE 2.png"
+    );
 }
 
 #[test]

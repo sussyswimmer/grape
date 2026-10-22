@@ -173,10 +173,18 @@ fn digits(mut n: usize) -> usize {
 }
 
 /// The collision key: names that differ only in case are the same name.
-/// Full Unicode case folding over-matches rather than under-matches, which
-/// is the safe direction (it can only add a ` 2`, never overwrite).
+///
+/// Lowercasing first sends `ẞ` (U+1E9E) to `ß`, which the uppercase step
+/// then expands to `SS`, so `STRAẞE`, `straße` and `STRASSE` share a key.
+/// Starting with uppercase would leave `ẞ` as `ß` and miss that pair. The
+/// key can over-match (`straße` vs `strasse`), which is the safe direction:
+/// it can only add a ` 2`, never plan over an existing file.
+///
+/// Unicode normalization is not folded: an NFC and an NFD spelling of the
+/// same name get different keys. Engines must therefore never replace an
+/// existing file when they move an output to its final name.
 pub(crate) fn fold(name: &str) -> String {
-    name.to_uppercase().to_lowercase()
+    name.to_lowercase().to_uppercase().to_lowercase()
 }
 
 pub(crate) fn fold_set(taken: &HashSet<String>) -> HashSet<String> {
@@ -231,5 +239,35 @@ pub(crate) fn unique_name(base: &str, ext: Option<&str>, folded: &HashSet<String
             return candidate;
         }
         counter += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fold;
+
+    /// Every code point shares its key with its own lowercase and uppercase
+    /// forms, so no case pair can slip past the collision check.
+    #[test]
+    fn fold_never_splits_a_case_pair() {
+        let mut misses = Vec::new();
+        for c in (0..=0x10_FFFF_u32).filter_map(char::from_u32) {
+            let key = fold(&c.to_string());
+            let lower: String = c.to_lowercase().collect();
+            let upper: String = c.to_uppercase().collect();
+            if fold(&lower) != key || fold(&upper) != key {
+                misses.push(format!("U+{:04X}", u32::from(c)));
+            }
+        }
+        assert!(
+            misses.is_empty(),
+            "case pairs with different keys: {misses:?}"
+        );
+    }
+
+    #[test]
+    fn fold_joins_capital_and_small_sharp_s() {
+        assert_eq!(fold("STRAẞE.PNG"), fold("straße.png"));
+        assert_eq!(fold("STRAẞE.PNG"), fold("STRASSE.PNG"));
     }
 }
