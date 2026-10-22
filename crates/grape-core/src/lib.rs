@@ -5,3 +5,11 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+
+pub mod format;
+pub mod matrix;
+pub mod tier;
+
+pub use format::{Category, Format, INPUT_ONLY};
+pub use matrix::{pair_tier, pairs, targets, targets_enabled};
+pub use tier::{Features, Tier};
