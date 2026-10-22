@@ -50,7 +50,7 @@ pnpm install                      # UI deps
 pnpm tauri dev                    # run the app (from apps/desktop)
 cargo test --workspace            # all Rust tests
 cargo test -p grape-core          # fast: matrix, naming, planning
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 pnpm -C apps/desktop/ui typecheck
 pnpm -C apps/desktop/ui test

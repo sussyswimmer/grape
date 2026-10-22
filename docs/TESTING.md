@@ -26,6 +26,13 @@
 
 In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC. Skip the **mac:** items until M8.
 
+App shell
+- [ ] win: the tray menu shows Settings…, Pause Grape and Quit. Settings opens the settings window; Pause toggles its check mark and the tooltip.
+- [ ] win: Quit ends the process (no Grape process left in Task Manager).
+- [ ] win: the overlay never gets a taskbar button or an Alt-Tab entry (debug build: tray → "Debug: flash overlay").
+- [ ] win: a second launch adds no second tray icon; it opens Settings in the running instance.
+- [ ] win: the debug overlay flash doesn't steal focus (the window you were typing in keeps the keyboard), and the log shows the overlay's ex-style with `TOOLWINDOW|NOACTIVATE|TOPMOST`.
+
 Drag + wheel
 - [ ] Drag a file from Finder/Explorer → tap the conversions key → the wheel appears at the cursor, clamped on screen.
 - [ ] Switch keys mid-drag → the wheel swaps contents in place.
@@ -36,7 +43,7 @@ Drag + wheel
 - [ ] Esc → the wheel hides; finishing the drop on a folder works normally.
 - [ ] Two modifiers held at once → no mode change.
 - [ ] Non-file drag (selected text, a browser image) → no wheel, or the wheel closes harmlessly.
-- [ ] Multi-select of 3 JPGs → Tools shows Create PDF and Collage; Conversions converts all three.
+- [ ] Multi-select of 3 JPGs → Tools shows Create PDF (and Collage, which is v2-only, once v2 tools are enabled); Conversions converts all three.
 - [ ] Folder → only Actions has items; the others show empty states naming the right keys.
 - [ ] Second monitor at a different scale → correct position and hit testing.
 - [ ] mac: full-screen app in front; Stage Manager on.

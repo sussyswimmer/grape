@@ -18,7 +18,7 @@ Then open a **new** terminal and run:
 ```powershell
 rustup default stable-msvc
 rustup target add aarch64-pc-windows-msvc   # only if building ARM64 too
-npm install -g pnpm
+npm install -g pnpm@10
 ```
 
 - WebView2 is built into Windows 11. On Windows 10, install the Evergreen runtime if `pnpm tauri dev` asks for it.
