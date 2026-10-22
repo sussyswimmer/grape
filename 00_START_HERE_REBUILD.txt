@@ -1,0 +1,44 @@
+GRAPE — HOW TO USE THESE FILES
+
+These .txt files are the Grape project docs, flattened into one folder so they can be dragged into Claude Code.
+Each filename encodes its real location: "__" stands for a folder separator, "_claude" stands for ".claude",
+and the trailing ".txt" must be removed.
+
+STEP 1: Make an empty folder for the project, e.g. C:\dev\grape (not inside OneDrive), and open Claude Code there.
+STEP 2: Drag ALL of these .txt files into Claude Code and paste this prompt:
+
+--- copy from here ---
+Rebuild the Grape repo from the attached .txt files. For every file except 00_START_HERE_REBUILD.txt,
+write its exact contents (byte-for-byte, no edits, no reformatting) to the path given in the mapping table
+in 00_START_HERE_REBUILD.txt, creating folders as needed. Then list the resulting tree, confirm 23 files exist,
+run git init, and commit with the message "Docs: Grape spec". Then read CLAUDE.md and docs/START_HERE.md and
+tell me the first step.
+--- copy to here ---
+
+STEP 3: Follow docs/START_HERE.md (Windows first).
+
+MAPPING TABLE (attached file  ->  path in the repo)
+_claude__commands__add-conversion.md.txt  ->  .claude/commands/add-conversion.md
+_claude__commands__next-task.md.txt  ->  .claude/commands/next-task.md
+_claude__commands__qa-drag.md.txt  ->  .claude/commands/qa-drag.md
+AGENTS.md.txt  ->  AGENTS.md
+CLAUDE.md.txt  ->  CLAUDE.md
+apps__desktop__src-tauri__CLAUDE.md.txt  ->  apps/desktop/src-tauri/CLAUDE.md
+apps__desktop__ui__CLAUDE.md.txt  ->  apps/desktop/ui/CLAUDE.md
+crates__grape-core__CLAUDE.md.txt  ->  crates/grape-core/CLAUDE.md
+crates__grape-engines__CLAUDE.md.txt  ->  crates/grape-engines/CLAUDE.md
+crates__grape-platform__CLAUDE.md.txt  ->  crates/grape-platform/CLAUDE.md
+docs__ARCHITECTURE.md.txt  ->  docs/ARCHITECTURE.md
+docs__DECISIONS.md.txt  ->  docs/DECISIONS.md
+docs__ENGINES.md.txt  ->  docs/ENGINES.md
+docs__FORMAT_MATRIX.md.txt  ->  docs/FORMAT_MATRIX.md
+docs__INTERACTION_SPEC.md.txt  ->  docs/INTERACTION_SPEC.md
+docs__PLATFORM_MACOS.md.txt  ->  docs/PLATFORM_MACOS.md
+docs__PLATFORM_WINDOWS.md.txt  ->  docs/PLATFORM_WINDOWS.md
+docs__PRODUCT.md.txt  ->  docs/PRODUCT.md
+docs__REA_FINDINGS.md.txt  ->  docs/REA_FINDINGS.md
+docs__ROADMAP.md.txt  ->  docs/ROADMAP.md
+docs__START_HERE.md.txt  ->  docs/START_HERE.md
+docs__TESTING.md.txt  ->  docs/TESTING.md
+docs__TOOLS_AND_ACTIONS.md.txt  ->  docs/TOOLS_AND_ACTIONS.md
+
