@@ -11,13 +11,16 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::path::PathBuf;
+mod image;
+mod output;
+
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
-use grape_core::{Format, Job, Operation};
+use grape_core::{Format, Job, JobOutput, Operation};
 
 /// Sidecar locations injected by the app. All `None` in this slice: the
 /// image engine needs no sidecar. Engines never look sidecars up on `PATH`.
@@ -119,23 +122,82 @@ impl GrapeError {
 }
 
 /// Can this build execute `op` for an input of format `from`?
+///
+/// In this build: conversions between two different raster formats among
+/// JPG, PNG, WebP, TIFF and BMP (20 pairs). Everything else (HEIC, AVIF,
+/// SVG, PDF, audio, video, documents, archives, subtitles, every tool) is
+/// `false`.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
-    let _ = (op, from);
-    false
+    match (op, from) {
+        (Operation::Convert { to }, Some(from)) => image::supports(from, *to),
+        _ => false,
+    }
 }
 
 /// Runs one planned job. `progress` gets fractions in 0.0..=1.0 (may never be called).
 /// Never opens a source for writing; never replaces an existing file; leaves no temp
 /// file behind on error or cancel.
+///
+/// The input's format comes from its file name, as on the wheel; the
+/// decoder then trusts the content. A job this build can't run (see
+/// [`supports`]), one without exactly one input, or one whose output isn't
+/// a single file fails with [`ErrorKind::NotYetSupported`] before anything
+/// is read or written. The output usually lands at the planned path; if
+/// that name was taken after planning, the next free `" N"` name is used
+/// and [`JobOutcome::renamed`] is set.
 pub fn run_job(
     job: &Job,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
-    let _ = (ctx, progress);
-    Err(GrapeError::new(
+    let from = job
+        .inputs
+        .first()
+        .and_then(|path| path.file_name())
+        .and_then(|name| Format::from_file_name(&name.to_string_lossy()));
+    match (from, job.inputs.as_slice(), &job.output, job.op) {
+        (Some(from), [src], JobOutput::File(dest), Operation::Convert { to })
+            if image::supports(from, to) =>
+        {
+            image::convert(job, src, dest, from, to, ctx, progress)
+        }
+        _ => Err(not_yet_supported(job, from)),
+    }
+}
+
+/// The error for a job this build can't run.
+fn not_yet_supported(job: &Job, from: Option<Format>) -> GrapeError {
+    let user_message = match (job.op, from) {
+        (Operation::Convert { to }, Some(from)) => format!(
+            "{} to {} isn't in this build yet.",
+            from.display_name(),
+            to.display_name()
+        ),
+        (Operation::Convert { to }, None) => format!(
+            "Converting this file to {} isn't in this build yet.",
+            to.display_name()
+        ),
+        // The design note's toast copy for tools (§C).
+        (Operation::Tool { .. }, _) => "Tools arrive in a later build.".to_string(),
+    };
+    GrapeError::new(
         ErrorKind::NotYetSupported,
-        "This isn't in this build yet.",
-        format!("no engine for {:?}", job.op),
-    ))
+        user_message,
+        format!(
+            "no engine for {:?} from {:?} with {} input(s) into {:?}",
+            job.op,
+            from,
+            job.inputs.len(),
+            job.output
+        ),
+    )
+}
+
+/// The error for a cancelled job.
+fn cancelled(src: &Path) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::Cancelled,
+        "Cancelled. Nothing was saved.",
+        format!("cancelled while converting {}", src.display()),
+    )
 }
