@@ -3,7 +3,7 @@
 Executes `JobPlan`s from `grape-core`: images, FFmpeg sidecar, PDF, archives, subtitles, and v2 documents. **Lane B (Codex) owns this crate.**
 
 ## Hard rules
-- **Never touch the source.** Open inputs read-only. Write to `{dest_dir}/.grape-tmp-{uuid}.{ext}`, fsync, then atomically rename to the final name from the plan. On error or cancel, delete the temp file. Every test hashes the source before and after.
+- **Never touch the source.** Open inputs read-only. Write to `{dest_dir}/.grape-tmp-{uuid}.{ext}`, fsync, then atomically rename to the final name from the plan, **never replacing an existing file** (no-clobber rename; re-plan the name if it was taken meanwhile). On error or cancel, delete the temp file. Every test hashes the source before and after.
 - **No network.** The engine code makes no HTTP calls at all.
 - **Sidecars come from `SidecarPaths`** injected by the app. Never use `PATH` lookups, which would pick up whatever FFmpeg the user has installed.
 - **Licensing:** read `docs/ENGINES.md` → Licensing rules before adding any crate or binary. Log it in `docs/DECISIONS.md`.

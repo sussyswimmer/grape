@@ -10,7 +10,7 @@ The Tauri 2 app: windows, tray, `WheelController` state machine, IPC and setting
 | `float` | file shelf | small, topmost, draggable out |
 | `toast` | progress and done messages | small, topmost, click → reveal |
 
-The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". macOS needs `"macOSPrivateApi": true` in `tauri.conf.json`.
+The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `"macOSPrivateApi": true` is set in `tauri.conf.json` (a no-op since Tauri 2.12.1, but it must match tauri's `macos-private-api` feature). On Windows the Cargo feature `overlay-subclass` (default on) adds the tool-window and no-activate styles (`docs/DECISIONS.md` D11).
 
 ## WheelController
 - Implements the state machine in `docs/INTERACTION_SPEC.md` §1, exactly. Unit-test it with `grape_platform::mock` signal scripts. It's pure state, so it doesn't need a real OS.
