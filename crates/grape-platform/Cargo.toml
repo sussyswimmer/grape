@@ -10,5 +10,15 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+# Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
+# so this shares that build.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [lints]
 workspace = true
