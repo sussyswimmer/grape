@@ -27,9 +27,11 @@ pub const WATCHDOG: Duration = Duration::from_secs(30);
 /// only after the overlay reports it painted, so a slow first show can't
 /// close the wheel before the drag ever reached it.
 pub const NO_FILES_GRACE: Duration = Duration::from_millis(300);
-/// After the button goes up, how long to wait for the overlay's drop to
-/// arrive (it comes from another thread) before closing anyway.
-pub const DROP_GRACE: Duration = Duration::from_millis(500);
+/// After the button goes up, how long to keep the overlay up waiting for
+/// its drop. The mouse hook sees the release before Explorer's OLE loop
+/// delivers the drop to Grape's target, so hiding on the release could let
+/// the drop fall through to the window underneath, maybe as a Shift move.
+pub const DROP_GRACE: Duration = Duration::from_millis(750);
 
 /// A modifier key that can be assigned to a wheel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
