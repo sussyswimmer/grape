@@ -22,9 +22,12 @@
 //! - **Writing** goes through [`crate::output`]: a temp file next to the
 //!   final name, then a no-clobber finalize that re-plans the name with
 //!   [`grape_core::output_name`] if it was taken meanwhile.
-//! - **Cancellation** is checked before reading, after decoding and before
-//!   finalizing. Decoding and encoding are single library calls and can't
-//!   be interrupted in between.
+//! - **Cancellation** is checked between steps; the source reader and the
+//!   temp file's writer fail once the job is cancelled, which stops a
+//!   decoder or encoder at its next read or write; and flattening checks
+//!   every [`CANCEL_CHECK_ROWS`] rows. The JPEG decoder reads the whole
+//!   file before decoding, so a JPEG decode (like the `image` crate's own
+//!   pixel conversions and rotations) runs to its end once started.
 
 use std::collections::HashSet;
 use std::fs::{self, File};
@@ -44,8 +47,9 @@ use ::image::{
 };
 use grape_core::{Format, Job};
 
+use crate::cancel::Cancellable;
 use crate::output::{place_no_clobber, TempFile};
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome};
+use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome};
 
 /// The formats this engine reads and writes. Every ordered pair of two
 /// different members is supported: 20 pairs.
@@ -67,6 +71,10 @@ const JPEG_QUALITY: u8 = 90;
 /// [`working_set`]). The decoded image alone is also held to the `image`
 /// crate's default 512 MiB limit.
 pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * 1024 * 1024;
+
+/// How many rows Grape's own pixel loops process between cancel checks
+/// (at most a few milliseconds of work).
+const CANCEL_CHECK_ROWS: usize = 64;
 
 /// True for a conversion between two different [`RASTER`] formats.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
@@ -92,16 +100,30 @@ pub(crate) fn convert(
             names.write_failed(format!("output path has no folder: {}", dest.display()))
         })?;
 
-    if ctx.cancel.is_cancelled() {
+    let cancel = &ctx.cancel;
+    // Whatever failed, a cancelled job reports that it was cancelled: the
+    // failure may just be the cancelled reader or writer.
+    let or_cancelled = |e: GrapeError| {
+        if cancel.is_cancelled() {
+            crate::cancelled(src)
+        } else {
+            e
+        }
+    };
+
+    if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let (img, icc) = decode(src, from, to, &names)?;
+    let (img, icc) = decode(src, from, to, &names, cancel).map_err(or_cancelled)?;
     progress(0.5);
-    if ctx.cancel.is_cancelled() {
+    if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
 
-    let img = prepare(img, to);
+    let img = match prepare(img, to, cancel) {
+        Some(img) if !cancel.is_cancelled() => img,
+        _ => return Err(crate::cancelled(src)),
+    };
     let icc = icc.filter(|profile| icc_fits(profile, &img));
 
     if job.used_fallback {
@@ -113,10 +135,10 @@ pub(crate) fn convert(
     // From here on, `temp` removes the temp file on every return path.
     let (temp, file) = TempFile::create(dir, to.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
-    encode(file, &img, icc, to, temp.path(), &names)?;
+    encode(file, &img, icc, to, temp.path(), &names, cancel).map_err(or_cancelled)?;
     drop(img);
 
-    if ctx.cancel.is_cancelled() {
+    if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
     let outcome = finalize(&temp, job, src, dest, dir, &names)?;
@@ -148,10 +170,11 @@ fn decode(
     from: Format,
     to: Format,
     names: &Names,
+    cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
-    let mut reader = ImageReader::new(BufReader::new(file));
+    let mut reader = ImageReader::new(BufReader::new(Cancellable::new(file, cancel)));
     if let Some(hint) = image_format(from) {
         // Used only when the content matches no known signature.
         reader.set_format(hint);
@@ -319,28 +342,30 @@ fn flattens(color: ColorType, to: Format) -> bool {
 }
 
 /// Converts the pixels to what the target writes ([`target_color`]).
-fn prepare(img: DynamicImage, to: Format) -> DynamicImage {
+/// `None` when the job was cancelled meanwhile.
+fn prepare(img: DynamicImage, to: Format, cancel: &CancelToken) -> Option<DynamicImage> {
     let color = img.color();
     let target = target_color(color, to);
     if target == color {
-        return img;
+        return Some(img);
     }
     if flattens(color, to) {
-        return DynamicImage::ImageRgb8(flatten_onto_white(&img));
+        return flatten_onto_white(&img, cancel).map(DynamicImage::ImageRgb8);
     }
-    match target {
+    Some(match target {
         ColorType::L8 => DynamicImage::ImageLuma8(img.into_luma8()),
         ColorType::Rgba8 => DynamicImage::ImageRgba8(img.into_rgba8()),
         ColorType::Rgb16 => DynamicImage::ImageRgb16(img.into_rgb16()),
         ColorType::Rgba16 => DynamicImage::ImageRgba16(img.into_rgba16()),
         _ => DynamicImage::ImageRgb8(img.into_rgb8()),
-    }
+    })
 }
 
 /// Composites `img` over white: JPEG has no alpha, and dropping it would
 /// turn transparent areas into whatever color they happen to hold. Reads
 /// 8-bit RGBA pixels in place; other layouts are converted to it first.
-fn flatten_onto_white(img: &DynamicImage) -> RgbImage {
+/// `None` when the job was cancelled meanwhile.
+fn flatten_onto_white(img: &DynamicImage, cancel: &CancelToken) -> Option<RgbImage> {
     let converted;
     let rgba = match img.as_rgba8() {
         Some(rgba) => rgba,
@@ -349,15 +374,22 @@ fn flatten_onto_white(img: &DynamicImage) -> RgbImage {
             &converted
         }
     };
-    RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
-        let [r, g, b, a] = rgba.get_pixel(x, y).0;
-        let a = u32::from(a);
-        let over = |c: u8| -> u8 {
-            let mixed = (u32::from(c) * a + 255 * (255 - a) + 127) / 255;
-            u8::try_from(mixed).unwrap_or(u8::MAX)
-        };
-        ::image::Rgb([over(r), over(g), over(b)])
-    })
+    let mut flat = RgbImage::new(rgba.width(), rgba.height());
+    for (y, (row, flat_row)) in rgba.rows().zip(flat.rows_mut()).enumerate() {
+        if y % CANCEL_CHECK_ROWS == 0 && cancel.is_cancelled() {
+            return None;
+        }
+        for (pixel, flat_pixel) in row.zip(flat_row) {
+            let [r, g, b, a] = pixel.0;
+            let a = u32::from(a);
+            let over = |c: u8| -> u8 {
+                let mixed = (u32::from(c) * a + 255 * (255 - a) + 127) / 255;
+                u8::try_from(mixed).unwrap_or(u8::MAX)
+            };
+            *flat_pixel = ::image::Rgb([over(r), over(g), over(b)]);
+        }
+    }
+    Some(flat)
 }
 
 /// True when an ICC profile describes the output's color model (`GRAY` for
@@ -374,6 +406,7 @@ fn icc_fits(profile: &[u8], img: &DynamicImage) -> bool {
 }
 
 /// Encodes `img` as `to` into the temp `file`, then flushes and syncs it.
+/// Writing fails once `cancel` is set.
 fn encode(
     file: File,
     img: &DynamicImage,
@@ -381,8 +414,9 @@ fn encode(
     to: Format,
     temp: &Path,
     names: &Names,
+    cancel: &CancelToken,
 ) -> Result<(), GrapeError> {
-    let mut out = BufWriter::new(file);
+    let mut out = BufWriter::new(Cancellable::new(file, cancel));
     let written = match to {
         Format::Jpg => write(
             JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY),
@@ -406,7 +440,8 @@ fn encode(
     }
     let file = out
         .into_inner()
-        .map_err(|e| names.write_failed(format!("write {}: {}", temp.display(), e.error())))?;
+        .map_err(|e| names.write_failed(format!("write {}: {}", temp.display(), e.error())))?
+        .into_inner();
     file.sync_all()
         .map_err(|e| names.write_failed(format!("sync {}: {e}", temp.display())))
 }
@@ -573,10 +608,53 @@ mod tests {
             1 => ::image::Rgba([0, 0, 0, 255]),
             _ => ::image::Rgba([0, 0, 0, 128]),
         }));
-        let flat = flatten_onto_white(&img);
+        let flat = flatten_onto_white(&img, &CancelToken::new()).unwrap();
         assert_eq!(flat.get_pixel(0, 0).0, [255, 255, 255]);
         assert_eq!(flat.get_pixel(1, 0).0, [0, 0, 0]);
         assert_eq!(flat.get_pixel(2, 0).0, [127, 127, 127]);
+        // Gray with alpha is converted to RGBA first.
+        let gray = DynamicImage::ImageLumaA8(::image::GrayAlphaImage::from_pixel(
+            2,
+            1,
+            ::image::LumaA([0, 0]),
+        ));
+        let flat = flatten_onto_white(&gray, &CancelToken::new()).unwrap();
+        assert_eq!(flat.get_pixel(1, 0).0, [255, 255, 255]);
+    }
+
+    #[test]
+    fn a_cancelled_token_stops_reading_and_writing() {
+        let dir = std::env::temp_dir().join(format!(
+            "grape-image-unit-{}",
+            crate::output::unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("a.png");
+        DynamicImage::new_rgb8(8, 8).save(&src).unwrap();
+        let out = dir.join("a.bmp");
+        let names = Names::new(&src, &out, Format::Png, Format::Bmp);
+        let cancel = CancelToken::new();
+        let (img, _) = decode(&src, Format::Png, Format::Bmp, &names, &cancel).unwrap();
+
+        cancel.cancel();
+
+        assert!(decode(&src, Format::Png, Format::Bmp, &names, &cancel).is_err());
+        let file = File::create(&out).unwrap();
+        let written = encode(file, &img, None, Format::Bmp, &out, &names, &cancel);
+        assert!(written.is_err());
+        assert_eq!(fs::metadata(&out).unwrap().len(), 0, "nothing was written");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn flattening_stops_when_cancelled() {
+        let img = DynamicImage::new_rgba8(4, 300);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        assert!(flatten_onto_white(&img, &cancel).is_none());
+        assert!(prepare(img.clone(), Format::Jpg, &cancel).is_none());
+        // Conversions without a pixel loop of Grape's own still finish.
+        assert!(prepare(img, Format::Png, &cancel).is_some());
     }
 
     #[test]
@@ -639,24 +717,21 @@ mod tests {
         let la8 = DynamicImage::new_luma_a8(1, 1);
         let l16 = DynamicImage::new_luma16(1, 1);
         let rgb32f = DynamicImage::new_rgb32f(1, 1);
-        assert_eq!(
-            prepare(rgba16.clone(), Format::Jpg).color(),
-            ColorType::Rgb8
-        );
-        assert_eq!(prepare(l16.clone(), Format::Jpg).color(), ColorType::L8);
-        assert_eq!(
-            prepare(rgba16.clone(), Format::Png).color(),
-            ColorType::Rgba16
-        );
-        assert_eq!(
-            prepare(rgb32f.clone(), Format::Png).color(),
-            ColorType::Rgb16
-        );
-        assert_eq!(prepare(la8.clone(), Format::Webp).color(), ColorType::Rgba8);
-        assert_eq!(prepare(l16.clone(), Format::Bmp).color(), ColorType::Rgb8);
-        assert_eq!(prepare(rgba16, Format::Tiff).color(), ColorType::Rgba16);
-        assert_eq!(prepare(la8, Format::Tiff).color(), ColorType::Rgba8);
-        assert_eq!(prepare(l16, Format::Tiff).color(), ColorType::L16);
-        assert_eq!(prepare(rgb32f, Format::Tiff).color(), ColorType::Rgb8);
+        let color = |img: &DynamicImage, to| {
+            let prepared = prepare(img.clone(), to, &CancelToken::new()).unwrap();
+            // The estimate in `working_set` relies on this.
+            assert_eq!(prepared.color(), target_color(img.color(), to));
+            prepared.color()
+        };
+        assert_eq!(color(&rgba16, Format::Jpg), ColorType::Rgb8);
+        assert_eq!(color(&l16, Format::Jpg), ColorType::L8);
+        assert_eq!(color(&rgba16, Format::Png), ColorType::Rgba16);
+        assert_eq!(color(&rgb32f, Format::Png), ColorType::Rgb16);
+        assert_eq!(color(&la8, Format::Webp), ColorType::Rgba8);
+        assert_eq!(color(&l16, Format::Bmp), ColorType::Rgb8);
+        assert_eq!(color(&rgba16, Format::Tiff), ColorType::Rgba16);
+        assert_eq!(color(&la8, Format::Tiff), ColorType::Rgba8);
+        assert_eq!(color(&l16, Format::Tiff), ColorType::L16);
+        assert_eq!(color(&rgb32f, Format::Tiff), ColorType::Rgb8);
     }
 }

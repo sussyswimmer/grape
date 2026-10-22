@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod cancel;
 mod image;
 mod output;
 mod selection;
@@ -66,7 +67,8 @@ impl CancelToken {
 pub struct EngineCtx {
     /// Where the bundled sidecar executables are.
     pub sidecars: SidecarPaths,
-    /// Checked before reading and before the output gets its final name.
+    /// Checked between steps, at every read of the source and write of the
+    /// output, and while Grape's own pixel loops run.
     pub cancel: CancelToken,
 }
 
