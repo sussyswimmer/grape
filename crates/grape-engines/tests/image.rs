@@ -19,8 +19,8 @@ use grape_engines::{build_selection, run_job, supports, EngineCtx, ErrorKind, Jo
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{
-    DynamicImage, GenericImageView, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, Rgb,
-    RgbImage, Rgba, RgbaImage,
+    DynamicImage, GenericImageView, GrayImage, ImageDecoder, ImageEncoder, ImageFormat,
+    ImageReader, Rgb, RgbImage, Rgba, RgbaImage,
 };
 
 const RASTER: [Format; 5] = [
@@ -366,6 +366,112 @@ fn corrupt_input_is_a_decode_error_and_leaves_nothing() {
     assert!(err.detail.contains("broken.png"), "{}", err.detail);
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
+}
+
+/// CRC-32 (IEEE 802.3), for patching PNG chunks.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// `img` as a small PNG whose header claims `width`×`height`, with the
+/// header's CRC fixed: a decompression bomb.
+fn png_claiming(img: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
+    let mut png = encode(img, Format::Png);
+    // Signature (8), length (4), "IHDR", width, height, 5 more bytes, CRC.
+    assert_eq!(&png[12..16], b"IHDR");
+    png[16..20].copy_from_slice(&width.to_be_bytes());
+    png[20..24].copy_from_slice(&height.to_be_bytes());
+    let crc = crc32(&png[12..29]);
+    png[29..33].copy_from_slice(&crc.to_be_bytes());
+    png
+}
+
+/// A small JPEG whose frame header claims `width`×`height`.
+fn jpeg_claiming(width: u16, height: u16) -> Vec<u8> {
+    let mut jpeg = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Jpg);
+    // SOF0: FF C0, length (2), precision (1), height (2), width (2).
+    let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+    jpeg[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
+    jpeg[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
+    jpeg
+}
+
+/// A small BMP whose info header claims `width`×`height`.
+fn bmp_claiming(width: i32, height: i32) -> Vec<u8> {
+    let mut bmp = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Bmp);
+    bmp[18..22].copy_from_slice(&width.to_le_bytes());
+    bmp[22..26].copy_from_slice(&height.to_le_bytes());
+    bmp
+}
+
+#[test]
+fn an_image_too_large_to_convert_is_refused_before_decoding() {
+    let rgb = DynamicImage::ImageRgb8(RgbImage::new(16, 16));
+    let gray = DynamicImage::ImageLuma8(GrayImage::new(16, 16));
+    let over_working_set = "over the 1024 MiB limit";
+    let over_decode_limit = "Memory limit exceeded";
+    let cases = [
+        // Hundreds of gigabytes claimed by a few hundred bytes.
+        (
+            "bomb.png",
+            png_claiming(&rgb, 200_000, 200_000),
+            Format::Bmp,
+            over_working_set,
+        ),
+        (
+            "bomb.jpg",
+            jpeg_claiming(65_000, 65_000),
+            Format::Png,
+            over_working_set,
+        ),
+        (
+            "bomb.bmp",
+            bmp_claiming(40_000, 40_000),
+            Format::Tiff,
+            over_working_set,
+        ),
+        // 588 MB of RGB kept as is: over the 512 MiB decode limit.
+        (
+            "big.png",
+            png_claiming(&rgb, 14_000, 14_000),
+            Format::Tiff,
+            over_decode_limit,
+        ),
+        // 400 MB of gray fits the decode limit, but BMP's RGB copy takes
+        // the conversion past the working-set limit.
+        (
+            "gray.png",
+            png_claiming(&gray, 20_000, 20_000),
+            Format::Bmp,
+            over_working_set,
+        ),
+    ];
+    for (name, bytes, to, why) in cases {
+        let dir = TestDir::new("too-large");
+        let (src, job) = plan_one(&dir, name, &bytes, Operation::convert(to));
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+
+        let err = run(&job).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+        assert_eq!(err.user_message, format!("{name} is too large to convert."));
+        assert!(err.detail.contains(name), "{}", err.detail);
+        assert!(err.detail.contains(why), "{}", err.detail);
+        assert_eq!(dir.names(), names_before, "{name}");
+        before.assert_unchanged();
+    }
 }
 
 #[test]

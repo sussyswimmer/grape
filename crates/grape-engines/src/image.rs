@@ -6,8 +6,13 @@
 //!   is applied to the pixels (the output carries no EXIF, so it can't be
 //!   rotated twice), and the ICC profile is carried over when the target
 //!   format can embed it and its color model matches the output pixels.
-//!   The `image` crate's default 512 MiB allocation limit stays on, as a
-//!   guard against decompression bombs.
+//! - **Memory limits,** checked from the header before any pixel is
+//!   decoded, so a tiny file that claims huge dimensions (a decompression
+//!   bomb) can't exhaust memory: the decoded image must fit the `image`
+//!   crate's default 512 MiB allocation limit (which `ImageReader::decode`
+//!   applies but `into_decoder` doesn't), and the whole conversion's peak
+//!   (decoder buffers, a rotated copy, the converted copy and the encoder's
+//!   in-memory output) must fit [`WORKING_SET_LIMIT`].
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
 //!   its first frame or page.
 //! - **Targets:** JPEG at quality 90 with any alpha flattened onto white;
@@ -35,7 +40,7 @@ use ::image::codecs::webp::WebPEncoder;
 use ::image::metadata::Orientation;
 use ::image::{
     ColorType, DynamicImage, ImageDecoder, ImageEncoder, ImageError, ImageFormat, ImageReader,
-    ImageResult, RgbImage,
+    ImageResult, Limits, RgbImage,
 };
 use grape_core::{Format, Job};
 
@@ -57,6 +62,11 @@ const MAX_REPLANS: usize = 3;
 
 /// JPEG output quality.
 const JPEG_QUALITY: u8 = 90;
+
+/// The most memory one conversion may hold at its peak (see
+/// [`working_set`]). The decoded image alone is also held to the `image`
+/// crate's default 512 MiB limit.
+pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// True for a conversion between two different [`RASTER`] formats.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
@@ -85,7 +95,7 @@ pub(crate) fn convert(
     if ctx.cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let (img, icc) = decode(src, from, &names)?;
+    let (img, icc) = decode(src, from, to, &names)?;
     progress(0.5);
     if ctx.cancel.is_cancelled() {
         return Err(crate::cancelled(src));
@@ -115,11 +125,28 @@ pub(crate) fn convert(
     Ok(outcome)
 }
 
+/// Why [`decode`]'s inner step failed.
+enum DecodeFailure {
+    /// The codec's own error.
+    Image(ImageError),
+    /// The header asks for more memory than Grape allows; the detail says
+    /// how much.
+    TooLarge(String),
+}
+
+impl From<ImageError> for DecodeFailure {
+    fn from(e: ImageError) -> Self {
+        DecodeFailure::Image(e)
+    }
+}
+
 /// Opens `src` read-only and decodes its first frame, upright, with its ICC
-/// profile if it has one.
+/// profile if it has one. Refuses, before decoding any pixel, an image
+/// whose conversion to `to` wouldn't fit the memory limits.
 fn decode(
     src: &Path,
     from: Format,
+    to: Format,
     names: &Names,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
@@ -132,27 +159,118 @@ fn decode(
     let reader = reader
         .with_guessed_format()
         .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?;
+    let format = reader.format();
 
     // A decoder panic on a malformed file must not take the worker down.
-    let decoded = panic::catch_unwind(AssertUnwindSafe(move || -> ImageResult<_> {
-        let mut decoder = reader.into_decoder()?;
-        // A malformed EXIF block is not worth failing the conversion for.
-        let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-        let icc = decoder.icc_profile().ok().flatten();
-        let mut img = DynamicImage::from_decoder(decoder)?;
-        img.apply_orientation(orientation);
-        Ok((img, icc))
-    }));
+    let decoded = panic::catch_unwind(AssertUnwindSafe(
+        move || -> Result<(DynamicImage, Option<Vec<u8>>), DecodeFailure> {
+            let mut decoder = reader.into_decoder()?;
+            // A malformed EXIF block is not worth failing the conversion for.
+            let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+            let (width, height) = decoder.dimensions();
+            let color = decoder.color_type();
+            let peak = working_set(width, height, color, format, orientation, to);
+            if peak > WORKING_SET_LIMIT {
+                return Err(DecodeFailure::TooLarge(format!(
+                    "{width}x{height} {color:?} to {} needs about {} MiB, over the {} MiB limit",
+                    to.key(),
+                    peak / (1024 * 1024),
+                    WORKING_SET_LIMIT / (1024 * 1024)
+                )));
+            }
+            // What `ImageReader::decode` does and `into_decoder` doesn't:
+            // hold the decoded buffer to the default limit, and give the
+            // decoder only what is left for its own buffers.
+            let mut limits = Limits::default();
+            limits.reserve(decoder.total_bytes())?;
+            decoder.set_limits(limits)?;
+            let icc = decoder.icc_profile().ok().flatten();
+            let mut img = DynamicImage::from_decoder(decoder)?;
+            img.apply_orientation(orientation);
+            Ok((img, icc))
+        },
+    ));
     match decoded {
         Ok(Ok(decoded)) => Ok(decoded),
-        Ok(Err(ImageError::IoError(e))) => {
+        Ok(Err(DecodeFailure::TooLarge(detail))) => {
+            Err(names.too_large(format!("decode {}: {detail}", src.display())))
+        }
+        Ok(Err(DecodeFailure::Image(ImageError::Limits(e)))) => {
+            Err(names.too_large(format!("decode {}: {e}", src.display())))
+        }
+        Ok(Err(DecodeFailure::Image(ImageError::IoError(e)))) => {
             Err(names.read_failed(format!("read {}: {e}", src.display())))
         }
-        Ok(Err(e)) => Err(names.decode_failed(format!("decode {}: {e}", src.display()))),
+        Ok(Err(DecodeFailure::Image(e))) => {
+            Err(names.decode_failed(format!("decode {}: {e}", src.display())))
+        }
         Err(_) => {
             Err(names.decode_failed(format!("decode {}: the decoder panicked", src.display())))
         }
     }
+}
+
+/// The most memory converting a `width`×`height` `color` image (decoded by
+/// `decoder`, turned by `orientation`) to `to` holds at once, in bytes. The
+/// steps run one after another, so the peak is the largest of:
+/// - **decoding:** the decoded image plus the decoder's own buffers (JPEG
+///   keeps 16-bit coefficients for progressive images; WebP may build an
+///   RGBA frame);
+/// - **EXIF rotation** by a quarter turn: a rotated copy;
+/// - **pixel prep:** the decoded image, an RGBA copy to flatten from and the
+///   converted image;
+/// - **encoding:** the pixels written plus the encoder's in-memory buffers
+///   (PNG compresses in memory and byte-swaps 16-bit samples into a copy;
+///   WebP expands to RGBA and compresses in memory).
+fn working_set(
+    width: u32,
+    height: u32,
+    color: ColorType,
+    decoder: Option<ImageFormat>,
+    orientation: Orientation,
+    to: Format,
+) -> u64 {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    let size = |c: ColorType| pixels.saturating_mul(u64::from(c.bytes_per_pixel()));
+    let decoded = size(color);
+    let decoder_buffers = match decoder {
+        Some(ImageFormat::Jpeg) => decoded.saturating_mul(2),
+        Some(ImageFormat::WebP) => size(ColorType::Rgba8),
+        _ => 0,
+    };
+    let rotated = match orientation {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => decoded,
+        _ => 0,
+    };
+    let target = target_color(color, to);
+    let converted = if target == color { 0 } else { size(target) };
+    let flatten_copy = if flattens(color, to) && color != ColorType::Rgba8 {
+        size(ColorType::Rgba8)
+    } else {
+        0
+    };
+    let written = size(target);
+    let sixteen_bit = target.bytes_per_pixel() == 2 * target.channel_count();
+    let encoder_buffers = match to {
+        Format::Png if sixteen_bit => written.saturating_mul(2),
+        Format::Png => written,
+        Format::Webp => size(ColorType::Rgba8).saturating_mul(2),
+        _ => 0,
+    };
+    [
+        decoded.saturating_add(decoder_buffers),
+        decoded.saturating_add(rotated),
+        decoded
+            .saturating_add(flatten_copy)
+            .saturating_add(converted),
+        written.saturating_add(encoder_buffers),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(u64::MAX)
 }
 
 /// The `image` crate's format for a Grape format, used as a decode hint.
@@ -167,36 +285,70 @@ fn image_format(f: Format) -> Option<ImageFormat> {
     }
 }
 
-/// Converts the pixels to what the target writes.
-fn prepare(img: DynamicImage, to: Format) -> DynamicImage {
-    use ColorType::{La16, La8, Rgb16, Rgb32F, Rgb8, Rgba16, Rgba32F, Rgba8, L16, L8};
-    let color = img.color();
+/// The pixel layout `to` is written in, for decoded pixels of `color`:
+/// JPEG takes 8-bit gray or RGB (alpha is flattened onto white); PNG keeps
+/// the layout (float becomes 16-bit); WebP and BMP take 8-bit RGB(A); TIFF
+/// keeps 8- and 16-bit gray/RGB/RGBA and maps the rest to RGB(A).
+fn target_color(color: ColorType, to: Format) -> ColorType {
+    use ColorType::{La16, Rgb16, Rgb32F, Rgb8, Rgba16, Rgba32F, Rgba8, L16, L8};
+    let alpha = color.has_alpha();
     match to {
-        Format::Jpg if img.has_alpha() => DynamicImage::ImageRgb8(flatten_onto_white(&img)),
-        Format::Jpg if matches!(color, L8 | L16) => DynamicImage::ImageLuma8(img.into_luma8()),
-        Format::Jpg => DynamicImage::ImageRgb8(img.into_rgb8()),
+        Format::Jpg if alpha => Rgb8,
+        Format::Jpg if matches!(color, L8 | L16) => L8,
+        Format::Jpg => Rgb8,
         Format::Png => match color {
-            Rgb32F => DynamicImage::ImageRgb16(img.into_rgb16()),
-            Rgba32F => DynamicImage::ImageRgba16(img.into_rgba16()),
-            _ => img,
+            Rgb32F => Rgb16,
+            Rgba32F => Rgba16,
+            _ => color,
         },
-        Format::Webp | Format::Bmp if img.has_alpha() => DynamicImage::ImageRgba8(img.into_rgba8()),
-        Format::Webp | Format::Bmp => DynamicImage::ImageRgb8(img.into_rgb8()),
+        Format::Webp | Format::Bmp if alpha => Rgba8,
+        Format::Webp | Format::Bmp => Rgb8,
         Format::Tiff => match color {
-            L8 | Rgb8 | Rgba8 | L16 | Rgb16 | Rgba16 => img,
-            La16 => DynamicImage::ImageRgba16(img.into_rgba16()),
-            La8 => DynamicImage::ImageRgba8(img.into_rgba8()),
-            _ if img.has_alpha() => DynamicImage::ImageRgba8(img.into_rgba8()),
-            _ => DynamicImage::ImageRgb8(img.into_rgb8()),
+            L8 | Rgb8 | Rgba8 | L16 | Rgb16 | Rgba16 => color,
+            La16 => Rgba16,
+            _ if alpha => Rgba8,
+            _ => Rgb8,
         },
-        _ => img,
+        _ => color,
+    }
+}
+
+/// True when converting `color` pixels to `to` composites them onto white.
+fn flattens(color: ColorType, to: Format) -> bool {
+    to == Format::Jpg && color.has_alpha()
+}
+
+/// Converts the pixels to what the target writes ([`target_color`]).
+fn prepare(img: DynamicImage, to: Format) -> DynamicImage {
+    let color = img.color();
+    let target = target_color(color, to);
+    if target == color {
+        return img;
+    }
+    if flattens(color, to) {
+        return DynamicImage::ImageRgb8(flatten_onto_white(&img));
+    }
+    match target {
+        ColorType::L8 => DynamicImage::ImageLuma8(img.into_luma8()),
+        ColorType::Rgba8 => DynamicImage::ImageRgba8(img.into_rgba8()),
+        ColorType::Rgb16 => DynamicImage::ImageRgb16(img.into_rgb16()),
+        ColorType::Rgba16 => DynamicImage::ImageRgba16(img.into_rgba16()),
+        _ => DynamicImage::ImageRgb8(img.into_rgb8()),
     }
 }
 
 /// Composites `img` over white: JPEG has no alpha, and dropping it would
-/// turn transparent areas into whatever color they happen to hold.
+/// turn transparent areas into whatever color they happen to hold. Reads
+/// 8-bit RGBA pixels in place; other layouts are converted to it first.
 fn flatten_onto_white(img: &DynamicImage) -> RgbImage {
-    let rgba = img.to_rgba8();
+    let converted;
+    let rgba = match img.as_rgba8() {
+        Some(rgba) => rgba,
+        None => {
+            converted = img.to_rgba8();
+            &converted
+        }
+    };
     RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
         let [r, g, b, a] = rgba.get_pixel(x, y).0;
         let a = u32::from(a);
@@ -391,6 +543,12 @@ impl Names {
         GrapeError::new(ErrorKind::DecodeFailed, message, detail)
     }
 
+    /// Converting the image would need more memory than Grape allows.
+    fn too_large(&self, detail: String) -> GrapeError {
+        let message = format!("{} is too large to convert.", self.source);
+        GrapeError::new(ErrorKind::DecodeFailed, message, detail)
+    }
+
     fn encode_failed(&self, detail: String) -> GrapeError {
         let message = format!("Grape couldn't write a {} file.", self.to);
         GrapeError::new(ErrorKind::EncodeFailed, message, detail)
@@ -437,6 +595,42 @@ mod tests {
         assert!(icc_fits(&gray, &luma));
         assert!(!icc_fits(&rgb, &luma));
         assert!(!icc_fits(&rgb[..64], &color));
+    }
+
+    #[test]
+    fn the_working_set_counts_every_copy() {
+        use ColorType::{La8, Rgb16, Rgb8, Rgba8, L8};
+        let none = Orientation::NoTransforms;
+        let png = Some(ImageFormat::Png);
+        // 1024×1024 is 1 MiB of pixels, so each result in MiB is the
+        // number of bytes held per pixel.
+        let mib = |color, decoder, orientation, to| {
+            working_set(1024, 1024, color, decoder, orientation, to) / (1024 * 1024)
+        };
+        // JPEG: 3 decoded + 6 of coefficients while decoding.
+        assert_eq!(mib(Rgb8, Some(ImageFormat::Jpeg), none, Format::Bmp), 9);
+        // Gray to BMP: 1 decoded + 3 converted.
+        assert_eq!(mib(L8, png, none, Format::Bmp), 4);
+        // RGBA to JPEG is flattened in place: 4 + 3.
+        assert_eq!(mib(Rgba8, png, none, Format::Jpg), 7);
+        // Gray with alpha is copied to RGBA first: 2 + 4 + 3.
+        assert_eq!(mib(La8, png, none, Format::Jpg), 9);
+        // A quarter turn holds two copies.
+        assert_eq!(mib(Rgb8, png, Orientation::Rotate90, Format::Tiff), 6);
+        // 16-bit PNG: 6 written + 6 compressed + 6 byte-swapped.
+        assert_eq!(mib(Rgb16, Some(ImageFormat::Tiff), none, Format::Png), 18);
+        // WebP: 3 written + 4 as RGBA + 4 compressed.
+        assert_eq!(mib(Rgb8, png, none, Format::Webp), 11);
+        // Absurd dimensions saturate instead of overflowing.
+        let huge = working_set(
+            u32::MAX,
+            u32::MAX,
+            ColorType::Rgba32F,
+            None,
+            none,
+            Format::Webp,
+        );
+        assert!(huge > WORKING_SET_LIMIT);
     }
 
     #[test]
