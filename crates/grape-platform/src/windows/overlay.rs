@@ -1,5 +1,6 @@
 //! Keeps the overlay window out of the taskbar and Alt-Tab, and stops it
-//! from taking focus (`docs/PLATFORM_WINDOWS.md` → "Overlay window").
+//! from taking focus when it is shown or moved (`docs/PLATFORM_WINDOWS.md`
+//! → "Overlay window").
 //!
 //! The Tauri config already asks for most of this: `focusable: false`
 //! becomes `WS_EX_NOACTIVATE` and `alwaysOnTop` becomes `WS_EX_TOPMOST`.
@@ -10,6 +11,17 @@
 //! edits every `WM_STYLECHANGING` for `GWL_EXSTYLE`: it forces
 //! `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE` on and `WS_EX_APPWINDOW` off, after
 //! the rest of the window-proc chain has had its say.
+//!
+//! `WS_EX_NOACTIVATE` only stops clicks from activating the window. It
+//! doesn't stop a programmatic show: once the window exists, tao shows it
+//! with `ShowWindow(SW_SHOW)`, which activates it whenever Grape owns the
+//! foreground (for example just after its tray menu closes). `ShowWindow`
+//! does its work through a window-position change, so the subclass also
+//! adds `SWP_NOACTIVATE` to every `WM_WINDOWPOSCHANGING`. That covers show,
+//! move, resize and z-order changes. A direct `SetForegroundWindow` or
+//! `SetActiveWindow` (Tauri's `set_focus`) still activates the window, so
+//! never call those on the overlay. Whether Windows honors this has to be
+//! checked by hand (`docs/TESTING.md` → "App shell").
 
 use core::ffi::c_void;
 
@@ -22,10 +34,10 @@ use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use ::windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongW, GetWindowThreadProcessId, IsWindow, SetWindowLongW, SetWindowPos, GWL_EXSTYLE,
-    HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    WINDOW_EX_STYLE, WM_NCDESTROY, WM_STYLECHANGING, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
+    HWND_TOPMOST, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, WINDOWPOS,
+    WINDOW_EX_STYLE, WM_NCDESTROY, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_ACCEPTFILES,
+    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
 };
 
 use crate::PlatformError;
@@ -33,8 +45,8 @@ use crate::PlatformError;
 /// Identifies Grape's subclass on the window ("GRAP").
 const SUBCLASS_ID: usize = 0x4752_4150;
 
-/// Bits the overlay must always have: no taskbar or Alt-Tab entry, never
-/// activated.
+/// Bits the overlay must always have: no taskbar or Alt-Tab entry, not
+/// activated by clicks.
 const FORCED_ON: u32 = WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0;
 
 /// Bits the overlay must never have: `WS_EX_APPWINDOW` puts a window back on
@@ -56,10 +68,13 @@ const NAMED_FLAGS: [(WINDOW_EX_STYLE, &str); 9] = [
 ];
 
 /// Makes `hwnd` behave as Grape's overlay: tool window (no taskbar button,
-/// no Alt-Tab entry), never activated, topmost.
+/// no Alt-Tab entry), topmost, and not activated when it is shown, moved or
+/// clicked. `SetForegroundWindow`/`SetActiveWindow` can still activate it;
+/// don't call them (or Tauri's `set_focus`) on the overlay.
 ///
-/// It installs a subclass that keeps those bits through tao's style rewrites,
-/// applies them once with `SetWindowLongW`, and refreshes the frame and
+/// It installs a subclass that keeps the style bits through tao's style
+/// rewrites and adds `SWP_NOACTIVATE` to every window-position change,
+/// applies the bits once with `SetWindowLongW`, and refreshes the frame and
 /// z-order with `SetWindowPos(HWND_TOPMOST, NOMOVE | NOSIZE | NOACTIVATE |
 /// FRAMECHANGED)`. The subclass removes itself when the window is destroyed.
 ///
@@ -197,7 +212,8 @@ fn set_ex_style(hwnd: HWND, ex_style: u32) -> Result<(), PlatformError> {
 
 /// The subclass proc. It runs on the window's thread for every message, so
 /// it stays tiny: let the chain handle the message, then adjust the
-/// proposed extended style if that's what is changing.
+/// proposed extended style or window-position change, if that's what the
+/// message carries.
 unsafe extern "system" fn overlay_subclass_proc(
     hwnd: HWND,
     msg: u32,
@@ -217,17 +233,30 @@ unsafe extern "system" fn overlay_subclass_proc(
     // chain, which every subclass proc must do for messages it doesn't eat.
     let result = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
 
-    // WM_STYLECHANGING's wParam says which style is changing; it carries the
-    // index (-20 for GWL_EXSTYLE) sign-extended to pointer width.
-    if msg == WM_STYLECHANGING && wparam.0 as isize == GWL_EXSTYLE.0 as isize {
-        let styles = lparam.0 as *mut STYLESTRUCT;
-        // SAFETY: for WM_STYLECHANGING the system passes, in lParam, a
-        // pointer to a writable STYLESTRUCT that lives for the duration of
-        // this call; the docs invite the window proc to edit `styleNew`.
-        // `as_mut` also guards against a null pointer.
-        if let Some(styles) = unsafe { styles.as_mut() } {
-            styles.styleNew = hardened(styles.styleNew);
+    match msg {
+        // WM_STYLECHANGING's wParam says which style is changing; it carries
+        // the index (-20 for GWL_EXSTYLE) sign-extended to pointer width.
+        WM_STYLECHANGING if wparam.0 as isize == GWL_EXSTYLE.0 as isize => {
+            let styles = lparam.0 as *mut STYLESTRUCT;
+            // SAFETY: for WM_STYLECHANGING the system passes, in lParam, a
+            // pointer to a writable STYLESTRUCT that lives for the duration
+            // of this call; the docs invite the window proc to edit
+            // `styleNew`. `as_mut` also guards against a null pointer.
+            if let Some(styles) = unsafe { styles.as_mut() } {
+                styles.styleNew = hardened(styles.styleNew);
+            }
         }
+        WM_WINDOWPOSCHANGING => {
+            let pos = lparam.0 as *mut WINDOWPOS;
+            // SAFETY: for WM_WINDOWPOSCHANGING the system passes, in lParam,
+            // a pointer to a writable WINDOWPOS that lives for the duration
+            // of this call; the docs let the window proc set `flags` bits to
+            // veto parts of the change. `as_mut` also guards against null.
+            if let Some(pos) = unsafe { pos.as_mut() } {
+                pos.flags |= SWP_NOACTIVATE;
+            }
+        }
+        _ => {}
     }
     result
 }
@@ -250,7 +279,9 @@ fn win32_error(context: &'static str, error: WIN32_ERROR) -> PlatformError {
 mod tests {
     use super::*;
     use ::windows::core::w;
-    use ::windows::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, WS_POPUP};
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, SendMessageW, SWP_SHOWWINDOW, WS_POPUP,
+    };
 
     /// A hidden top-level test window, destroyed on drop.
     struct TestWindow(HWND);
@@ -344,6 +375,32 @@ mod tests {
             "{}",
             describe_ex_style(ex)
         );
+    }
+
+    #[test]
+    fn subclass_keeps_a_show_from_activating() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        harden_overlay(window.raw()).unwrap();
+        // The position change ShowWindow(SW_SHOW) asks for: show, and
+        // activate (no SWP_NOACTIVATE).
+        let mut pos = WINDOWPOS {
+            hwnd: window.0,
+            flags: SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE,
+            ..WINDOWPOS::default()
+        };
+        // SAFETY: a same-thread message to our own live window. lParam
+        // points to a WINDOWPOS that outlives the call, which is what
+        // WM_WINDOWPOSCHANGING carries.
+        unsafe {
+            SendMessageW(
+                window.0,
+                WM_WINDOWPOSCHANGING,
+                Some(WPARAM(0)),
+                Some(LPARAM(&raw mut pos as isize)),
+            )
+        };
+        assert!(pos.flags.contains(SWP_NOACTIVATE), "{:#x}", pos.flags.0);
+        assert!(pos.flags.contains(SWP_SHOWWINDOW), "{:#x}", pos.flags.0);
     }
 
     #[test]

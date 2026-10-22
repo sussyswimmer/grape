@@ -9,8 +9,10 @@ pub const OVERLAY: &str = "overlay";
 /// Label of the settings window.
 pub const SETTINGS: &str = "settings";
 
-/// Gets the overlay ready at startup. On Windows this hardens its extended
-/// style (tool window, no activation, topmost) and logs the result.
+/// Gets the overlay ready at startup. On Windows this hardens the window
+/// (tool window, topmost, not activated when shown or moved) and logs its
+/// extended style. Never call `set_focus` on the overlay: a direct
+/// activation still works.
 ///
 /// Must run on the main thread (Tauri's `setup`), which owns the window.
 ///
