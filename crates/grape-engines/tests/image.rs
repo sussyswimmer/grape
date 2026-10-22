@@ -475,6 +475,28 @@ fn an_image_too_large_to_convert_is_refused_before_decoding() {
 }
 
 #[test]
+fn a_truncated_file_is_not_a_readable_image() {
+    for (from, name) in [(Format::Bmp, "half.bmp"), (Format::Png, "half.png")] {
+        let mut bytes = encode(&gradient(), from);
+        bytes.truncate(bytes.len() / 2);
+        let dir = TestDir::new("truncated");
+        let (src, job) = plan_one(&dir, name, &bytes, Operation::convert(Format::Tiff));
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+
+        let err = run(&job).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+        assert_eq!(
+            err.user_message,
+            format!("{name} isn't a readable {} image.", from.display_name())
+        );
+        assert_eq!(dir.names(), names_before, "{name}");
+        before.assert_unchanged();
+    }
+}
+
+#[test]
 fn a_missing_source_is_a_read_error() {
     let dir = TestDir::new("missing");
     let (src, job) = plan_one(

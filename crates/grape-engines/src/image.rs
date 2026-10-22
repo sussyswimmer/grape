@@ -221,6 +221,16 @@ fn decode(
         Ok(Err(DecodeFailure::Image(ImageError::Limits(e)))) => {
             Err(names.too_large(format!("decode {}: {e}", src.display())))
         }
+        // Decoders report a truncated or malformed stream as these `io`
+        // errors: the file was read, it just isn't a valid image.
+        Ok(Err(DecodeFailure::Image(ImageError::IoError(e))))
+            if matches!(
+                e.kind(),
+                io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
+            ) =>
+        {
+            Err(names.decode_failed(format!("decode {}: {e}", src.display())))
+        }
         Ok(Err(DecodeFailure::Image(ImageError::IoError(e)))) => {
             Err(names.read_failed(format!("read {}: {e}", src.display())))
         }
