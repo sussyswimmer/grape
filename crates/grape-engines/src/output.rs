@@ -30,10 +30,16 @@ pub(crate) const TEMP_PREFIX: &str = ".grape-tmp-";
 /// How many times a unique name is retried when one is (improbably) taken.
 const UNIQUE_ATTEMPTS: usize = 8;
 
-/// How many times [`TempFile`] tries to delete itself, and the pause
-/// between tries.
-const REMOVE_ATTEMPTS: u32 = 3;
-const REMOVE_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// The pauses between attempts to delete a file Grape created (775 ms in
+/// all): on Windows a virus scanner or the indexer may hold a brand-new
+/// file for a moment.
+const REMOVE_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_millis(25),
+    Duration::from_millis(50),
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+];
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -46,6 +52,23 @@ pub(crate) fn unique_suffix() -> String {
         .unwrap_or(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("{}-{nanos}-{n}", std::process::id())
+}
+
+/// Deletes `path`, a file Grape created, retrying with growing pauses
+/// ([`REMOVE_RETRY_DELAYS`]) while it fails. A missing file counts as
+/// deleted. Returns the last error if every attempt failed.
+pub(crate) fn remove_created(path: &Path) -> io::Result<()> {
+    let mut delays = REMOVE_RETRY_DELAYS.iter();
+    loop {
+        match fs::remove_file(path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => match delays.next() {
+                Some(delay) => thread::sleep(*delay),
+                None => return Err(e),
+            },
+        }
+    }
 }
 
 /// Creates a new file named `{prefix}{unique_suffix}{suffix}` in `dir`,
@@ -86,17 +109,10 @@ impl TempFile {
 
 impl Drop for TempFile {
     fn drop(&mut self) {
-        // After a hard link this only removes the temp name. On Windows a
-        // virus scanner may hold the new file for a moment, so a failed
-        // delete is retried briefly before giving up.
-        for attempt in 1..=REMOVE_ATTEMPTS {
-            match fs::remove_file(&self.path) {
-                Ok(()) => return,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return,
-                Err(_) if attempt < REMOVE_ATTEMPTS => thread::sleep(REMOVE_RETRY_DELAY),
-                Err(_) => return,
-            }
-        }
+        // After a hard link this only removes the temp name. If it still
+        // can't be removed after the retries, there is no one to tell: a
+        // drop can't fail, and the output (if any) is complete either way.
+        let _ = remove_created(&self.path);
     }
 }
 
@@ -188,6 +204,31 @@ mod tests {
         assert!(temp.path().exists());
         drop(temp);
         assert!(names(&dir.0).is_empty());
+    }
+
+    #[test]
+    fn removing_a_created_file_tolerates_one_already_gone() {
+        let dir = Dir::new();
+        let path = dir.0.join("x");
+        fs::write(&path, b"x").unwrap();
+        remove_created(&path).unwrap();
+        assert!(names(&dir.0).is_empty());
+        remove_created(&path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removing_retries_and_then_reports_the_error() {
+        let dir = Dir::new();
+        // A non-empty folder can't be removed as a file, however often we try.
+        let stuck = dir.0.join("stuck");
+        fs::create_dir(&stuck).unwrap();
+        fs::write(stuck.join("inner"), b"x").unwrap();
+        let started = std::time::Instant::now();
+        assert!(remove_created(&stuck).is_err());
+        let waited: Duration = REMOVE_RETRY_DELAYS.iter().sum();
+        assert!(started.elapsed() >= waited);
+        assert!(stuck.exists());
     }
 
     #[test]
