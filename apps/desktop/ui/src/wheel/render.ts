@@ -16,13 +16,13 @@
  * - Highlight changes drive the synthesized tick (`tick.ts`).
  */
 
-import { invoke } from "@tauri-apps/api/core";
 import {
   WHEEL_PAINTED,
   type WheelClosePayload,
   type WheelHighlightPayload,
   type WheelOpenPayload,
 } from "../shared/events";
+import { callQuietly, type InvokeFn, tauriInvoke } from "../shared/ipc";
 import { formatNumber } from "./geometry";
 import {
   applyClose,
@@ -47,9 +47,6 @@ export interface WheelView {
   close(payload: WheelClosePayload): void;
 }
 
-/** Calls a Rust command (Tauri's `invoke`, or a stand-in in tests). */
-export type InvokeFn = (command: string, args: Record<string, unknown>) => Promise<unknown>;
-
 /** Seams for tests. Production code passes nothing. */
 export interface WheelViewOptions {
   readonly invoke?: InvokeFn;
@@ -66,7 +63,7 @@ export interface WheelViewOptions {
 export function mountWheel(root: HTMLElement, options: WheelViewOptions = {}): WheelView {
   const doc = root.ownerDocument;
   const win = doc.defaultView;
-  const callRust: InvokeFn = options.invoke ?? invoke;
+  const callRust: InvokeFn = options.invoke ?? tauriInvoke;
   const requestFrame =
     options.requestFrame ??
     ((callback: () => void): void => {
@@ -104,13 +101,8 @@ export function mountWheel(root: HTMLElement, options: WheelViewOptions = {}): W
   function reportPainted(seq: number): void {
     requestFrame(() => {
       // Closed or replaced before it reached the screen: nothing to report.
-      if (state.shown?.seq !== seq) {
-        return;
-      }
-      try {
-        callRust(WHEEL_PAINTED, { seq }).catch(() => undefined);
-      } catch {
-        // Outside Tauri (a plain browser) there is no IPC; never break drawing.
+      if (state.shown?.seq === seq) {
+        callQuietly(callRust, WHEEL_PAINTED, { seq });
       }
     });
   }

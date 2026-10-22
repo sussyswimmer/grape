@@ -17,6 +17,7 @@ export default defineConfig({
       input: {
         overlay: resolve(import.meta.dirname, "overlay.html"),
         settings: resolve(import.meta.dirname, "settings.html"),
+        toast: resolve(import.meta.dirname, "toast.html"),
       },
     },
   },

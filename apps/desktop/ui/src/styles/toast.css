@@ -1,0 +1,159 @@
+/*
+ * The toast window: a transparent 320×64 tool window (Rust sets the size)
+ * holding one rounded glass pill. Grape's palette only, via tokens.css.
+ */
+:root {
+  --toast-fill: rgba(248, 244, 253, 0.96);
+  --toast-stroke: var(--glass-stroke);
+  --toast-shadow: rgba(27, 12, 46, 0.18);
+  --toast-title: var(--color-text);
+  --toast-detail: var(--color-text-muted);
+  --toast-track: rgba(94, 43, 151, 0.14);
+  --toast-bar: var(--grape-500);
+
+  --toast-dot-working: var(--grape-500);
+  --toast-dot-done: var(--color-done);
+  --toast-dot-error: var(--color-error);
+  --toast-dot-info: var(--color-text-muted);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --toast-fill: rgba(27, 12, 46, 0.94);
+    --toast-shadow: rgba(0, 0, 0, 0.4);
+    --toast-track: rgba(181, 150, 230, 0.2);
+    --toast-bar: var(--grape-300);
+    --toast-dot-working: var(--grape-300);
+  }
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  cursor: default;
+  font-family: var(--font-ui);
+}
+
+/* Covers the window, so a click anywhere counts. */
+#toast-root {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Only a toast that can reveal its output looks clickable. */
+#toast-root.is-revealable {
+  cursor: pointer;
+}
+
+.toast {
+  box-sizing: border-box;
+  position: relative;
+  width: calc(100% - 8px);
+  height: calc(100% - 8px);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 22px 0 20px;
+  border-radius: 999px;
+  background: var(--toast-fill);
+  border: 1px solid var(--toast-stroke);
+  box-shadow: 0 1px 4px var(--toast-shadow);
+  overflow: hidden;
+}
+
+.toast-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--toast-dot-info);
+}
+
+.toast[data-tone="working"] .toast-dot {
+  background: var(--toast-dot-working);
+  animation: toast-pulse 1.1s ease-in-out infinite;
+}
+
+.toast[data-tone="done"] .toast-dot {
+  background: var(--toast-dot-done);
+}
+
+.toast[data-tone="error"] .toast-dot {
+  background: var(--toast-dot-error);
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.toast-title,
+.toast-detail {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toast-title {
+  color: var(--toast-title);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.toast-detail {
+  color: var(--toast-detail);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.toast-progress {
+  position: absolute;
+  left: 20px;
+  right: 22px;
+  bottom: 7px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--toast-track);
+  overflow: hidden;
+}
+
+.toast-progress-bar {
+  height: 100%;
+  border-radius: 1px;
+  background: var(--toast-bar);
+  transition: width 120ms linear;
+}
+
+@keyframes toast-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast[data-tone="working"] .toast-dot {
+    animation: none;
+  }
+
+  .toast-progress-bar {
+    transition: none;
+  }
+}
