@@ -343,13 +343,10 @@ describe("semantic checks", () => {
     expect(isWheelOpenPayload(mutate(entries, ["keys", "tools"], "Right Ctrl"))).toBe(true);
   });
 
-  it("accepts toast progress only as a fraction in 0..=1", () => {
+  it("accepts any finite toast progress (the view clamps it to 0..=1)", () => {
     const working = clone(parsed("toast-show-working.json"));
-    for (const ok of [0, 0.25, 1]) {
+    for (const ok of [0, 0.25, 1, 1.0000001, -0.01]) {
       expect(isToastShowPayload(mutate(working, ["progress"], ok))).toBe(true);
-    }
-    for (const bad of [-0.01, 1.01, 50]) {
-      expect(isToastShowPayload(mutate(working, ["progress"], bad))).toBe(false);
     }
   });
 

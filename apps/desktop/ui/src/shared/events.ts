@@ -277,7 +277,11 @@ export function isWheelClosePayload(value: unknown): value is WheelClosePayload 
   );
 }
 
-/** Guards a `toast://show` payload. `progress` is a fraction in 0..=1. */
+/**
+ * Guards a `toast://show` payload. `progress` is meant as a fraction in
+ * 0..=1; any finite number passes and the view clamps it, so a value a
+ * rounding error past 1 never drops a whole toast.
+ */
 export function isToastShowPayload(value: unknown): value is ToastShowPayload {
   if (!hasExactKeys(value, ["id", "tone", "title", "detail", "progress", "revealable"])) {
     return false;
@@ -288,7 +292,7 @@ export function isToastShowPayload(value: unknown): value is ToastShowPayload {
     isOneOf(value["tone"], TOAST_TONES) &&
     typeof value["title"] === "string" &&
     (value["detail"] === null || typeof value["detail"] === "string") &&
-    (progress === null || (isFiniteNumber(progress) && progress >= 0 && progress <= 1)) &&
+    (progress === null || isFiniteNumber(progress)) &&
     typeof value["revealable"] === "boolean"
   );
 }
