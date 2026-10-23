@@ -35,7 +35,7 @@ App shell
 
 Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: drag a PNG from Explorer, tap Shift → a ring appears at the cursor, then fills in with PNG's targets (JPG, WEBP, HEIC, TIFF, AVIF, BMP, PDF; JPG at the top). The log shows `wheel 1 open: Conversions at (x, y)…`, `1 item(s) entered; 7 segment(s)` and `overlay drop target on N of M window(s)`.
-- [ ] win: hover the segments → each one highlights with a soft tick, and the middle shows its title. Drop on JPG (the top) → the log shows `drop on the Conversions wheel: segment 0 (Convert(Jpg)) …` with the file's full path, a toast under the wheel says "Not in this build yet / PNG to JPG is coming." and fades after a few seconds, and the file is still where it was.
+- [ ] win: hover the segments → each one highlights with a soft tick, and the middle shows its title. Drop on JPG (the top) → the log shows `drop on the Conversions wheel: segment 0 (Convert(Jpg)) …` with the file's full path, and a toast under the wheel says "Making photo.jpg…", then "Done / photo.jpg", and fades after a few seconds. The original is still where it was (the conversion checks are in the next section).
 - [ ] win: the toast never takes the keyboard from the window you were in, has no taskbar or Alt-Tab entry, and dropping a file on it does nothing.
 - [ ] win: tap Ctrl, then Alt, mid-drag → the wheel swaps in place to the tools (COMPRESS, METADATA) and then the six file actions.
 - [ ] win: drag a folder and tap Shift → no segments; the wheel says there's nothing to convert and names the Alt key for file actions.
@@ -53,7 +53,7 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
 - [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
 - [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
-- Once the app runs `grape-engines` jobs (until then, the "Not in this build yet" toast above applies):
+- The app runs `grape-engines` jobs for the 20 raster pairs; every other conversion and every tool shows an info toast instead:
 - [ ] win: Shift-drop `photo.png` on JPG → the toast reads "Making photo.jpg…" then "Done / photo.jpg"; `photo.jpg` appears next to the original and opens in Photos. `Get-FileHash` of `photo.png` is the same before and after.
 - [ ] win: do it again → `photo 2.jpg`; the first `photo.jpg` is untouched.
 - [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.

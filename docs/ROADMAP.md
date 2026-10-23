@@ -60,6 +60,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Atomic writes, progress events, cancel.
 - [ ] Toast: "Making name…" → "Done", with click-to-reveal in Explorer.
 
+*Status 2026-10-23:* the first slice is built. The 20 raster pairs among JPG, PNG, WEBP, TIFF and BMP convert through `grape-engines` (D16), with no-clobber writes and cancel inside the engine. The app (`src/jobs.rs`) plans each drop, shows "Making {name}…" with progress, then "Done", "{ok} of {n} done" or the engine's error, and a click reveals the first output. Every other pair and every tool shows "Not in this build yet". None of it has run on the PC yet: `TESTING.md` → "Wheel look and image conversions".
+
 **Accept:** every v1 pair (178) converts a fixture file on Windows (`engines-it` test run on the PC and in CI), and spot-checks by hand pass.
 
 ## M4: v1 tools (lane B engines, lane A panels)

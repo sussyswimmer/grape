@@ -180,18 +180,6 @@ fn select_arg(path: &std::path::Path) -> std::ffi::OsString {
     select
 }
 
-/// An info toast for a drop Grape can't run yet.
-pub fn not_yet(id: u64, title: &str, detail: Option<String>) -> ToastShow {
-    ToastShow {
-        id,
-        tone: ToastTone::Info,
-        title: title.to_owned(),
-        detail,
-        progress: None,
-        revealable: false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

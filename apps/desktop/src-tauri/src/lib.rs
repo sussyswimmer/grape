@@ -7,6 +7,7 @@
 mod actions;
 pub mod controller;
 pub mod events;
+mod jobs;
 mod toast;
 mod tray;
 mod ui_windows;
