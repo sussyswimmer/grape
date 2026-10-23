@@ -131,6 +131,18 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **`toast_clicked(id)`:** granted only to the toast window (`capabilities/toast.json`, with event listen/unlisten). The page sends the toast's id, never a path; Rust looks up what to reveal.
 - **WebView2 flags:** every window uses the same `additionalBrowserArgs` (`ui_windows::BROWSER_ARGS`, repeated in `tauri.conf.json`; a test checks they match), because WebView2 won't start windows with different flags in one profile. Setting flags replaces wry's defaults, so the string keeps wry's `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection` and adds `--autoplay-policy=no-user-gesture-required` so the overlay's tick plays without a click.
 
+## D17: `hit_test` follows the drawn wheel (2026-10-23, proposed, confirm)
+- **Decision:** `grape_core::hit_test` selects exactly what the overlay draws (`INTERACTION_SPEC.md` §4):
+  - the rounded outer corners: a pointer in a corner's cut-off, outside its fillet circle, selects nothing;
+  - one item is a full ring with no gap;
+  - segments too narrow to draw (from 76 items) select nothing.
+- **API:** adds `pub fn fillet_radius(n) -> f64`, the corner radius `min(CORNER, the largest that fits)`, which mirrors the UI's `filletRadius`. `hit_test`'s signature is unchanged. This extends D12.
+- **Why:** during an OS drag the overlay gets no pointer events, so it can't re-check `isPointInFill` as the spec's [observed] line describes. The check has to live where the hit test runs.
+- **Checked:**
+  - Against the UI's own `segmentPath` on a 0.5 px grid for n = 1–12: 0 disagreements in 3.15 million points away from the outlines.
+  - The UI's agreement test (`ui/src/wheel/geometry.test.ts`) now covers the corners and the single-item ring, too.
+- **Revisit if:** the wheel's shape changes; the UI and core must change together.
+
 ---
 
 ## Open questions

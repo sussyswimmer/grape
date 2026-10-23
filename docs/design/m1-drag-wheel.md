@@ -427,8 +427,9 @@ export interface ToastHidePayload { id: number }
 - `toast_clicked(id: u64)`: Rust reveals the first output of that batch if it's `revealable`. **The UI never sends paths.**
 
 **Copy (Grape's own words).** The UI owns the empty-state strings; Rust owns the toast strings.
-- Empty `noConversions`: `Nothing to convert here. Tap {actions} for file actions.`
-- Empty `noTools`: `No tools fit this selection. Tap {conversions} to convert or {actions} for file actions.`
+- Empty `noConversions`: `Nothing to convert here. Switch to file actions with {actions}.`
+- Empty `noTools`: `No tools fit here. Switch to conversions with {conversions} or file actions with {actions}.`
+- (Reworded from the first draft, whose second sentences echoed the observed copy in `INTERACTION_SPEC.md` §5; `ui/src/wheel/copy.ts` owns these strings.)
 - Pending center label: `…`
 - Toasts:
   - Working, one file: `Making {name}…`. Several files: `Making {n} files…`.

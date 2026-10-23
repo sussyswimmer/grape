@@ -764,10 +764,17 @@ fn hit_test_shape_rule_matches() {
             "The inner corners stay square",
             "With one item the wheel is a full ring with no gap",
             "any pointer with `INNER_R ≤ d ≤ OUTER_R` selects it",
+            "Segments too narrow to draw (their inner corners would cross, from 76 items with these constants) select nothing",
         ],
     );
     let at = |angle: f64, d: f64| (d * angle.cos(), -d * angle.sin());
     let eps = 1e-6;
+
+    // "from 76 items": segment 0's center ray still hits at 75 and not at 76.
+    let (dx, dy) = at(start_angle(75), GEOMETRY.label_r);
+    assert_eq!(hit_test(dx, dy, 75), Some(0));
+    let (dx, dy) = at(start_angle(76), GEOMETRY.label_r);
+    assert_eq!(hit_test(dx, dy, 76), None);
 
     // One item: a full ring, also straight below the anchor where a gap
     // would be.
