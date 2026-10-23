@@ -11,7 +11,8 @@
 //! - `overlay`: keeps the overlay out of the taskbar and Alt-Tab
 //!   ([`harden_overlay`]).
 //! - `actions`: the file actions behind [`crate::file_actions`]: the
-//!   clipboard, Windows Terminal or PowerShell, and the shell's move.
+//!   clipboard, Windows Terminal or PowerShell, the shell's move, and
+//!   Explorer for Reveal. Share isn't there yet.
 //!
 //! Inside this crate, write the Win32 bindings as `::windows::…`: a bare
 //! `windows::…` can be confused with this module.
@@ -26,7 +27,9 @@ mod overlay;
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{describe_ex_style, ex_style, harden_overlay};
 
-pub(crate) use actions::{copy_files, copy_paths, move_to_chosen_folder, open_terminal};
+pub(crate) use actions::{
+    copy_files, copy_paths, move_to_chosen_folder, open_terminal, reveal, share,
+};
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};
 

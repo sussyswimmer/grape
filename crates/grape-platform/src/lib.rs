@@ -1,15 +1,15 @@
 //! OS glue for Grape: drag detection, modifier and cursor state, display
-//! bounds, file actions. See `CLAUDE.md` in this crate.
+//! bounds, file actions and haptics. See `CLAUDE.md` in this crate.
 //!
-//! Phase 1 is Windows first (DECISIONS D8). The entry points below dispatch
-//! by `cfg` to the `windows` module, the `macos` stub, or an `unsupported`
-//! fallback for other hosts (Linux dev machines and CI). Since milestone M1,
-//! Windows has a real drag monitor, display bounds and an overlay drop
-//! target; everywhere else the entry points return
-//! [`PlatformError::Unsupported`].
+//! The entry points below dispatch by `cfg` to the `windows` module, the
+//! `macos` module, or an `unsupported` fallback for other hosts (Linux dev
+//! machines and CI), where they return [`PlatformError::Unsupported`].
+//! Windows came first (DECISIONS D8); the macOS port follows D18.
 //!
-//! Coordinates leaving this crate are global, top-left origin, physical
-//! pixels.
+//! Coordinates leaving this crate are global with a top-left origin and y
+//! growing downwards: physical pixels on Windows, points on macOS (origin at
+//! the top-left of the primary screen, and [`DisplayBounds::scale`] is
+//! always 1.0 there).
 
 #![warn(missing_docs)]
 
@@ -20,8 +20,11 @@ pub mod file_actions;
 pub mod mock;
 pub mod tracker;
 
+// The pure flips and picks under the macOS layer, tested on every OS.
+#[cfg(any(target_os = "macos", test))]
+mod mac_rules;
 #[cfg(target_os = "macos")]
-mod macos;
+pub mod macos;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod unsupported;
 #[cfg(target_os = "windows")]
@@ -50,7 +53,8 @@ pub enum DragSignal {
         /// dragging keeps meaning "move" in Explorer.
         modifiers: Modifiers,
     },
-    /// The pointer moved. Global, top-left origin, physical pixels.
+    /// The pointer moved. Global, top-left origin: physical pixels on
+    /// Windows, points on macOS.
     Moved {
         /// Horizontal position.
         x: i32,
@@ -59,7 +63,8 @@ pub enum DragSignal {
     },
     /// The set of held modifier keys changed.
     Modifiers(Modifiers),
-    /// Esc went down during the drag.
+    /// Esc went down during the drag. Windows only: macOS can't read keys
+    /// without a permission prompt (DECISIONS D7).
     Escape,
     /// The drag ended (the primary button was released).
     Ended,
@@ -69,8 +74,8 @@ pub enum DragSignal {
 ///
 /// On Windows these come from Grape's own `IDropTarget`
 /// ([`windows::install_drop_target`]), which always reports a copy, never a
-/// move (golden rule 2). Positions are global, top-left origin, physical
-/// pixels.
+/// move (golden rule 2). Positions are global, top-left origin: physical
+/// pixels on Windows, points on macOS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropEvent {
     /// A drag entered the overlay. `paths` is empty when the drag carries
@@ -163,20 +168,21 @@ impl Modifiers {
     }
 }
 
-/// A rectangle in global, top-left origin, physical pixels.
+/// A rectangle in global, top-left origin coordinates: physical pixels on
+/// Windows, points on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Rect {
     /// Left edge.
     pub x: i32,
     /// Top edge.
     pub y: i32,
-    /// Width in pixels.
+    /// Width.
     pub width: i32,
-    /// Height in pixels.
+    /// Height.
     pub height: i32,
 }
 
-/// The display under a point.
+/// The display under a point, in the same coordinates as [`Rect`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayBounds {
     /// The whole monitor. The overlay is sized to this while the wheel is
@@ -185,7 +191,9 @@ pub struct DisplayBounds {
     /// The monitor minus the taskbar or menu bar. The wheel anchor is
     /// clamped to this.
     pub work_area: Rect,
-    /// Physical pixels per logical pixel (1.0 at 100 % scaling, 1.5 at 150 %).
+    /// Physical pixels per logical pixel on Windows (1.0 at 100 % scaling,
+    /// 1.5 at 150 %). Always 1.0 on macOS, where the rectangles are already
+    /// in points: one point is one CSS pixel.
     pub scale: f64,
 }
 
@@ -223,7 +231,8 @@ pub enum PlatformError {
     Os {
         /// The call that failed.
         context: &'static str,
-        /// The OS error code (an `HRESULT` on Windows).
+        /// The OS error code: an `HRESULT` on Windows; on macOS an `errno`,
+        /// an `NSError` or `CGError` code, or -1 when the call gave none.
         code: i32,
     },
 }
@@ -231,18 +240,28 @@ pub enum PlatformError {
 /// Creates the drag monitor for this OS.
 ///
 /// # Errors
-/// [`PlatformError::Unsupported`] except on Windows; macOS stays
-/// unsupported until M8.
+/// [`PlatformError::Unsupported`] except on Windows and macOS.
 pub fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
     imp::drag_monitor()
 }
 
-/// The display under the global point (`x`, `y`), in physical pixels.
+/// The display under the global point (`x`, `y`), or the nearest one:
+/// physical pixels on Windows, points on macOS. Safe to call from any
+/// thread.
 ///
 /// # Errors
-/// [`PlatformError::Unsupported`] except on Windows, or an OS error.
+/// [`PlatformError::Unsupported`] except on Windows and macOS, or an OS
+/// error.
 pub fn display_bounds_at(x: i32, y: i32) -> Result<DisplayBounds, PlatformError> {
     imp::display_bounds_at(x, y)
+}
+
+/// A light haptic tick on a Force Touch trackpad (macOS's "alignment"
+/// feedback), for a highlight moving to a new segment. Returns at once.
+/// Does nothing on other OSes or without such a trackpad.
+pub fn haptic_tick() {
+    #[cfg(target_os = "macos")]
+    macos::haptic_tick();
 }
 
 #[cfg(test)]
@@ -273,10 +292,15 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fn entry_points_are_unsupported_off_windows() {
         assert!(matches!(drag_monitor(), Err(PlatformError::Unsupported)));
         assert_eq!(display_bounds_at(0, 0), Err(PlatformError::Unsupported));
+    }
+
+    #[test]
+    fn haptic_tick_never_fails() {
+        haptic_tick();
     }
 
     #[test]

@@ -29,3 +29,11 @@ pub(crate) fn open_terminal(_dir: &Path) -> Result<(), PlatformError> {
 pub(crate) fn move_to_chosen_folder(_paths: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
     Err(PlatformError::Unsupported)
 }
+
+pub(crate) fn share(_paths: &[PathBuf]) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn reveal(_path: &Path) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}

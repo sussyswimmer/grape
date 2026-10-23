@@ -10,6 +10,8 @@
 //!   items with undo. Moving to another drive is confirmed first. What
 //!   moved is read back from the disk, with the shell's own reports (a
 //!   progress sink) as hints for where things went.
+//! - Reveal: `explorer.exe /select,"<path>"`.
+//! - Share: not yet (the Windows share sheet comes later).
 //!
 //! A message-only window made for each call owns the clipboard while Grape
 //! writes it: `SetClipboardData` fails when the clipboard has no owner. The
@@ -113,6 +115,29 @@ pub(crate) fn open_terminal(dir: &Path) -> Result<(), PlatformError> {
         Ok(_) => Ok(()),
         Err(err) => Err(PlatformError::Os {
             context: "start powershell.exe",
+            code: err
+                .raw_os_error()
+                .map_or(E_UNEXPECTED, |code| HRESULT::from_win32(code as u32))
+                .0,
+        }),
+    }
+}
+
+pub(crate) fn share(_paths: &[PathBuf]) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
+    // Raw, because `Command::arg` would quote the whole switch when the
+    // path has a space and leave a comma bare, and Explorer then ignores
+    // the switch or cuts the path at the comma.
+    match Command::new("explorer.exe")
+        .raw_arg(select_arg(path))
+        .spawn()
+    {
+        Ok(_) => Ok(()),
+        Err(err) => Err(PlatformError::Os {
+            context: "start explorer.exe",
             code: err
                 .raw_os_error()
                 .map_or(E_UNEXPECTED, |code| HRESULT::from_win32(code as u32))
@@ -256,6 +281,15 @@ fn put(format: u32, bytes: &[u8]) -> Result<(), PlatformError> {
         return Err(os_err("SetClipboardData", &err));
     }
     Ok(())
+}
+
+/// Explorer's own form, `/select,"<path>"`. A Windows path can't hold `"`,
+/// so the quotes can't be broken out of.
+fn select_arg(path: &Path) -> OsString {
+    let mut select = OsString::from("/select,\"");
+    select.push(path.as_os_str());
+    select.push("\"");
+    select
 }
 
 /// `wt -d <dir>`. The caller keeps paths with `;` away from wt.
@@ -947,6 +981,12 @@ mod tests {
     fn wt_gets_the_folder_as_one_argument() {
         let args = wt_args(Path::new(r"C:\My Files"));
         assert_eq!(args, [OsString::from("-d"), OsString::from(r"C:\My Files")]);
+    }
+
+    #[test]
+    fn reveal_quotes_the_path_after_select() {
+        let arg = select_arg(Path::new(r"C:\My Pictures\a,b\photo 3,4.png"));
+        assert_eq!(arg, r#"/select,"C:\My Pictures\a,b\photo 3,4.png""#);
     }
 
     #[test]

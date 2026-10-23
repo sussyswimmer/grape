@@ -37,5 +37,55 @@ windows = { version = "0.62.2", features = [
 # already build.
 windows-core = "0.62.2"
 
+# Only macOS builds pull in the AppKit bindings (DECISIONS D18). tao and wry
+# already build every one of these crates at these versions, so nothing new
+# enters Cargo.lock; the features are the smallest set the code needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.5", default-features = false, features = [
+    "std",
+    "exception",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSEnumerator",
+    "NSError",
+    "NSFileManager",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSHapticFeedback",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSPasteboard",
+    "NSResponder",
+    "NSSavePanel",
+    "NSScreen",
+    "NSSharingService",
+    "NSView",
+    "NSWindow",
+] }
+# Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds).
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGError",
+] }
+# The main queue, for AppKit work that must run on the main thread.
+dispatch2 = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "objc2",
+] }
+
 [lints]
 workspace = true
