@@ -42,6 +42,7 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: drop in the middle circle or off the ring, including far from the wheel on the same monitor → the log says `no segment (cancel)`, nothing moves, and the file doesn't land in the window underneath.
 - [ ] win: drop a scratch file onto the Settings window with Shift held → nothing happens (no drop cursor), and the file stays where it was.
 - [ ] win: Esc mid-drag → the ring hides; Explorer cancels its drag too. The file is untouched.
+- [ ] win: press Esc mid-drag before tapping any key, keep holding and tap Shift → no ring.
 - [ ] win: hold Shift *before* starting the drag → no ring, and dropping into another folder moves the scratch file as Explorer always does.
 - [ ] win: drag from a browser, an editor or the taskbar → no ring.
 - [ ] win: the log's `painted N ms after the key` stays under 100 ms.
@@ -90,7 +91,11 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Esc mid-drag → the ring hides within about a quarter second, Finder cancels its drag, and the file is untouched. Moving on and releasing reopens nothing.
 - [ ] mac: drop in the middle or off the ring, including over a Finder window under the overlay → nothing happens, and the file doesn't land in that window.
 - [ ] mac: drag selected text from Safari or TextEdit, or an image from Safari, and tap Shift → no ring. Drag a window by its title bar with Shift held → no ring.
-- [ ] mac: a quick flick: press on a file, drag and tap Shift within a tenth of a second → the ring still opens.
+- [ ] mac: a quick flick: press on a file, flick it and stop, then tap Shift while the pointer rests → the ring opens without another move.
+- [ ] mac: during a long conversion (a big TIFF, or several images at once), start another drag and open a wheel over the toast → the wheel covers the toast, stays open, and the segment under the toast highlights.
+- [ ] mac: hold Control, highlight COPY, press Esc and let go at once → the wheel closes and the clipboard is unchanged.
+- [ ] mac: press Esc mid-drag before tapping any key, keep holding and tap Shift → either no ring, or an empty ring that closes when you move or let go. Nothing is dropped.
+- [ ] mac: open the wheel on one display, drag onto another and press Esc → the drag cancels, and the ring closes when you let go.
 - [ ] mac: hold Command and release in the middle or off the ring → nothing runs, the wheel closes, and the file stays where it was.
 - [ ] mac: open the wheel on one display and drag onto another → the wheel stays where it was with nothing highlighted and doesn't close; dragging back highlights segments again.
 - [ ] mac: drag slowly around the open wheel, including over the menu bar and the Dock → it never closes by itself.
@@ -101,8 +106,10 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Control-drop two files on MOVE → a "Move 2 items to…" folder picker comes to the front (note if it opens behind Finder). Pick a folder → both move, and the toast says "Moved 2 items". Close the picker → nothing moves and no toast.
 - [ ] mac: MOVE onto a folder holding a file with the same name → that file stays where it was, nothing is overwritten, and the toast says "Moved 1 of 2 items".
 - [ ] mac: MOVE to a USB stick → "Move to another drive?" with Cancel as the default (Return cancels). Move → the items move.
-- [ ] mac: Control-drop on SHARE → the AirDrop window opens with the files.
-- [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Some of it may not have moved", and the original folder is still there.
+- [ ] mac: Control-drop on SHARE → the AirDrop window comes to the front with the files (note if it opens behind Finder). Close it or send → Finder is active again.
+- [ ] mac: after a Move, and after cancelling one, the Finder window you dragged from is active again: arrow keys move its selection without clicking first.
+- [ ] mac: drag a USB stick's or a mounted DMG's icon from the Desktop onto MOVE → it isn't moved and nothing on it is erased; the toast says nothing moved.
+- [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Couldn't move" or "Some of it may not have moved", never "Moved …", and the original folder is still complete in its old place.
 - [ ] mac (needs Xcode): quit Grape, then start it from Terminal with Xcode's Main Thread Checker: `DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib` followed by the path of the Grape executable in `Grape.app/Contents/MacOS/`. Drag files for a minute → Terminal shows no "Main Thread Checker: UI API called on a background thread" report.
 - [ ] mac: Quit from the menu bar → no Grape process is left in Activity Monitor.
 
@@ -113,7 +120,7 @@ Drag + wheel
 - [ ] Hover segments → highlight, center label, tick (and haptic on mac).
 - [ ] Drop on a segment → output appears next to the source with the right name.
 - [ ] Drop in the dead zone, a gap, or off-ring → nothing happens; the source didn't move.
-- [ ] Esc → the wheel hides; finishing the drop on a folder works normally.
+- [ ] Esc → the wheel hides and the drag is cancelled; the file stays where it was.
 - [ ] Two modifiers held at once → no mode change.
 - [ ] Non-file drag (selected text, a browser image) → no wheel, or the wheel closes harmlessly.
 - [ ] Multi-select of 3 JPGs → Tools shows Create PDF (and Collage, which is v2-only, once v2 tools are enabled); Conversions converts all three.

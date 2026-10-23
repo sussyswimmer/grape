@@ -299,7 +299,7 @@ States: `Idle`, `Dragging{mods, cursor: Option<(i32,i32)>}`, `WheelOpen(Open)`, 
 | Idle | `Drag(Started)` | `Dragging{mods: NONE, cursor: None}` |
 | Dragging | `Moved{x,y}` | Store the cursor. If `env.display_at(x,y)` is a different monitor from the prepared one: `PrepareOverlay{monitor}` (pre-positioning keeps key → visible under 100 ms) |
 | Dragging | `Modifiers(m)` | `if let Some(mode) = edge_mode(prev, m)` and the cursor is known, **open**: `display = env.display_at(cursor)`. If that's `None`, log it and stay in `Dragging` (golden rule 4). Compute `anchor_l = clamp_anchor(to_local(cursor), work_area_local)` and `anchor_phys = to_global(anchor_l)`, and `seq += 1`. Effects: `[PrepareOverlay?] , Emit(Open{content: pending}), ShowOverlay`. Next: `WheelOpen`. **Always** update `mods = m` |
-| Dragging | `Ended` / `Escape` | `Ended` → `Idle`. `Escape` → stay (no wheel) |
+| Dragging | `Ended` / `Escape` | `Ended` → `Idle`. `Escape` → `Dismissed`: the source cancelled the drag, so no wheel until the button goes up (D18) |
 | Dragging / Idle | any `Drop(..)` | Ignore and log at warn (the overlay is hidden) |
 | WheelOpen | `Modifiers(m)` | If `edge_mode` gives a mode other than the current one: **swap in place**, same anchor and same seq, recompute the content if items are known, reset the highlight, `Emit(Open{…})`. Update `mods` |
 | WheelOpen | `Moved{x,y}` or `Drop(Over{x,y})` | If the content has n>0 entries: `hit = hit_test(dx, dy, n)` (§B.3). If it changed: `Emit(Highlight{index})`. A first move after open extends `no_paths_deadline` (see Tick) |

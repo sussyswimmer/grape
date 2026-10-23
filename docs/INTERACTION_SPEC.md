@@ -11,13 +11,14 @@ Idle
  └─(OS file drag begins)──────────────▶ Dragging        (no UI yet)
 Dragging
  ├─(exactly one wheel modifier held)──▶ WheelOpen(mode)
+ ├─(Esc)──────────────────────────────▶ Idle            (the source cancels the drag; no wheel until the button goes up)
  ├─(drag ends)────────────────────────▶ Idle            (OS handles the drop normally)
 WheelOpen(mode)
  ├─(a different single modifier)──────▶ WheelOpen(new mode)   wheel re-renders in place
  ├─(cursor over a segment)────────────▶ highlight segment + play tick
  ├─(drop on a segment)────────────────▶ Running(job) ─▶ Idle
  ├─(drop off-ring / on empty wheel)───▶ Idle            (cancel, nothing happens)
- └─(Esc)──────────────────────────────▶ Idle            (overlay hides; OS drag continues)
+ └─(Esc)──────────────────────────────▶ Idle            (overlay hides; on Windows and macOS the source cancels the drag)
 ```
 
 ## 2. Opening the wheel
@@ -29,7 +30,7 @@ WheelOpen(mode)
 - **[Grape]** On Windows the defaults are Shift / Ctrl / Alt, because the Windows key opens the Start menu.
 - **[Grape]** The wheel opens on **key-down** during an active drag. The user can tap (press and release) or keep holding; both work. Some apps, like Explorer, change the drag's drop effect while a modifier is held. That stops mattering because the drop then lands on Grape's overlay (see `PLATFORM_WINDOWS.md`).
 - **[Grape]** A key already held when the drag starts isn't a key-down: holding Shift before dragging keeps Explorer's "move" and opens no wheel. Releasing it and pressing it again during the drag does (`DECISIONS.md` D14).
-- **[observed]** The wheel only counts as active after the pointer has moved more than 4 px since mouse-down. Grape uses 4 px on macOS and `GetSystemMetrics(SM_CXDRAG/SM_CYDRAG)` on Windows.
+- **[observed]** The wheel only counts as active after the pointer has moved more than 4 px since mouse-down. Grape uses `GetSystemMetrics(SM_CXDRAG/SM_CYDRAG)` on Windows. On macOS the drag counts as started once AppKit's own file drag session exists, which already needs the pointer to move (`PLATFORM_MACOS.md`).
 
 ## 3. Anchor and placement
 
@@ -72,7 +73,9 @@ These are Grape's values, in points/DIPs at 1× scale. The site's values were �
 
 - **[observed]** Drop on a highlighted segment → run that conversion, tool or action.
 - **[observed]** Drop while the wheel is open but nothing is highlighted → cancel. **[Grape]** The overlay swallows the drop, so the file does *not* land in whatever app was underneath. That's why the overlay covers the whole display while the wheel is open (see `ARCHITECTURE.md`).
-- **[Grape]** Esc hides the overlay *without* ending the OS drag, so the user can still drop normally. On Windows the drag source itself (Explorer) also cancels the drag on Esc, so there the drag ends too and nothing is dropped (`DECISIONS.md` D14).
+- **[Grape]** Esc hides the overlay. The drag sources Grape works with also cancel their drag on Esc (Explorer on Windows, AppKit on macOS), so the drag ends too and nothing is dropped (`DECISIONS.md` D14, D18). Esc before any wheel opens keeps Grape out of the way until the button goes up.
+- **[Grape]** On macOS Grape can't read Esc without a permission prompt (D7). It sees the cancelled drag session as a `Leave` with the button still down and closes the wheel 200 ms later. That works while the cursor is over the wheel's display; elsewhere the ring stays until the button goes up. Esc before any wheel can't be seen there, so a key tap while still holding shows an empty ring that closes on the next move or on release (D18).
+- **[Grape]** On macOS AppKit may refuse a drop while Command or Control is held. If the button goes up over a highlighted segment with either key held and no drop arrives within 750 ms, Grape runs that segment itself, once (D18).
 - **[observed]** While a conversion runs, a placeholder shows "Making {name}…". When it finishes, a confirmation appears.
 - **[Grape]** In the real OS, show this as a small toast near the anchor plus the OS's own file appearance. The demo's ≈ 680 ms is fake latency; real jobs report progress.
 
