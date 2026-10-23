@@ -151,14 +151,20 @@ pub(crate) fn place_no_clobber(tmp: &Path, dest: &Path) -> io::Result<()> {
 
 /// The fallback: create `dest` exclusively, copy `tmp` into it, sync it.
 /// On failure the partial `dest` (created here, so ours to delete) is
-/// closed and removed.
+/// closed and removed, with the same retries as a temp file; the error
+/// says so if it still couldn't be removed.
 pub(crate) fn copy_new(tmp: &Path, dest: &Path) -> io::Result<()> {
     let out = OpenOptions::new().write(true).create_new(true).open(dest)?;
-    let result = fill(tmp, out);
-    if result.is_err() {
-        let _ = fs::remove_file(dest);
-    }
-    result
+    fill(tmp, out).map_err(|e| match remove_created(dest) {
+        Ok(()) => e,
+        Err(remove_err) => io::Error::new(
+            e.kind(),
+            format!(
+                "{e}; the partial {} couldn't be removed ({remove_err})",
+                dest.display()
+            ),
+        ),
+    })
 }
 
 /// Copies `tmp` into `out`, syncs it and closes it.
