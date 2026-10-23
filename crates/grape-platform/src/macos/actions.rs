@@ -9,14 +9,23 @@
 //! - Move: `NSOpenPanel` picks a folder, an `NSAlert` confirms a move to
 //!   another volume, then `NSFileManager` moves each item. It never
 //!   replaces anything: an item whose name is taken in the folder stays
-//!   where it is. What moved is read back from the disk afterwards.
+//!   where it is. A mounted volume's root (a USB stick, a DMG, a network
+//!   share) never moves either: moving it would copy what's on it, then
+//!   erase it. Each item is read back from the disk right after its own
+//!   move, before the next one moves, and judged by
+//!   `crate::mac_rules::judge_move`.
 //!
 //! The panel, the alert and AirDrop are AppKit UI, so they run on the main
 //! thread: inline when the caller is on it, otherwise through the main
-//! queue, waiting for it. The rest runs on the calling thread inside an
-//! autorelease pool. `open` runs as its own process with each path as its
-//! own argument, never through a shell.
+//! queue, waiting for it. Grape is an accessory app that's rarely active,
+//! so it activates itself first, or they could open behind the frontmost
+//! window. Move then hands activation back to the app that was in front,
+//! whatever the user answered; Share does the same when AirDrop reports
+//! that it's done or was cancelled. The rest runs on the calling thread inside
+//! an autorelease pool. `open` runs as its own process with each path as
+//! its own argument, never through a shell.
 
+use std::cell::RefCell;
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
@@ -27,19 +36,23 @@ use std::thread;
 
 use dispatch2::run_on_main;
 use objc2::rc::{autoreleasepool, Retained};
-use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::MainThreadMarker;
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
+use objc2::{define_class, msg_send, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication, NSHapticFeedbackManager,
-    NSHapticFeedbackPattern, NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer,
-    NSModalResponseOK, NSOpenPanel, NSPasteboard, NSPasteboardTypeString, NSPasteboardWriting,
-    NSSharingService, NSSharingServiceNameSendViaAirDrop,
+    NSAlert, NSAlertSecondButtonReturn, NSAlertStyle, NSApplication,
+    NSApplicationActivationOptions, NSHapticFeedbackManager, NSHapticFeedbackPattern,
+    NSHapticFeedbackPerformanceTime, NSHapticFeedbackPerformer, NSModalResponseOK, NSOpenPanel,
+    NSPasteboard, NSPasteboardTypeString, NSPasteboardWriting, NSRunningApplication,
+    NSSharingService, NSSharingServiceDelegate, NSSharingServiceNameSendViaAirDrop, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSError, NSFileManager, NSString, NSURL};
 
 use super::{io_error, FEATURE_UNSUPPORTED, NO_CODE};
 use crate::file_actions::{MoveOutcome, MovedItem};
-use crate::mac_rules::{path_lines, picker_message, reveal_args, terminal_args};
+use crate::mac_rules::{
+    judge_move, path_lines, picker_message, reveal_args, terminal_args, ItemDevices, MoveSnapshot,
+    MoveVerdict, OldPlace,
+};
 use crate::PlatformError;
 
 /// The tool that opens files, folders and apps the way Finder does.
@@ -98,7 +111,7 @@ pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
 
 pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
     let urls = autoreleasepool(|_| file_urls(paths))?;
-    on_main("AirDrop", move |_mtm| {
+    on_main("AirDrop", move |mtm| {
         let unavailable = PlatformError::Os {
             context: "AirDrop",
             code: FEATURE_UNSUPPORTED,
@@ -116,15 +129,112 @@ pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
         if !unsafe { service.canPerformWithItems(Some(items)) } {
             return Err(unavailable);
         }
+        // The delegate gives activation back to this app once AirDrop is
+        // done, as Move does after its panel.
+        let done = ShareDone::new(mtm, frontmost_other_app(mtm));
+        service.setDelegate(Some(ProtocolObject::from_ref(&*done)));
+        // Or the AirDrop window may open behind the frontmost app's.
+        activate(mtm);
         // SAFETY: as above, and the service said it can take them.
         unsafe { service.performWithItems(items) };
+        // The service holds its delegate weakly, so keep both. The previous
+        // pair goes now, never from inside one of its own callbacks.
+        SHARING.with(|slot| slot.replace(Some((service, done))));
         Ok(())
     })
 }
 
+/// What [`ShareDone`] needs once AirDrop is done.
+struct ShareIvars {
+    /// The app that was in front before Grape opened AirDrop.
+    front: Option<Retained<NSRunningApplication>>,
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and ShareDone
+    // doesn't implement Drop.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "GrapeShareDone"]
+    #[ivars = ShareIvars]
+    /// AirDrop's delegate: hands activation back when the share ends,
+    /// whether it was sent, failed or was cancelled.
+    struct ShareDone;
+
+    // SAFETY: NSObjectProtocol has no safety requirements.
+    unsafe impl NSObjectProtocol for ShareDone {}
+
+    // SAFETY: both methods have the signatures NSSharingServiceDelegate
+    // declares, and neither keeps `items` past the call.
+    unsafe impl NSSharingServiceDelegate for ShareDone {
+        #[unsafe(method(sharingService:didShareItems:))]
+        fn did_share(&self, _service: &NSSharingService, _items: &NSArray) {
+            self.give_back();
+        }
+
+        #[unsafe(method(sharingService:didFailToShareItems:error:))]
+        fn did_fail(&self, _service: &NSSharingService, _items: &NSArray, _error: &NSError) {
+            self.give_back();
+        }
+    }
+);
+
+impl ShareDone {
+    fn new(mtm: MainThreadMarker, front: Option<Retained<NSRunningApplication>>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ShareIvars { front });
+        // SAFETY: NSObject's designated initializer, on a fresh allocation.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn give_back(&self) {
+        if let Some(app) = &self.ivars().front {
+            hand_back(self.mtm(), app);
+        }
+    }
+}
+
+thread_local! {
+    /// The last AirDrop service and its delegate, on the main thread.
+    static SHARING: RefCell<Option<(Retained<NSSharingService>, Retained<ShareDone>)>> =
+        const { RefCell::new(None) };
+}
+
 pub(crate) fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
+    // The panel and the alert activate Grape. The app that was in front gets
+    // activation back once they're answered, whatever the answer.
+    let front = on_main("reading the frontmost app", |mtm| {
+        Ok(frontmost_other_app(mtm))
+    })?;
+    let answer = ask_where(paths);
+    if let Some(app) = front {
+        // Focus is a courtesy: failing to hand it back doesn't stop the move.
+        let _ = on_main("handing activation back", move |mtm| {
+            hand_back(mtm, &app);
+            Ok(())
+        });
+    }
+    match answer? {
+        Answer::Cancelled => Ok(MoveOutcome::Cancelled),
+        Answer::AlreadyThere(to) => Ok(MoveOutcome::AlreadyThere { to }),
+        Answer::Move { sources, to } => autoreleasepool(|_| move_items(&sources, &to)),
+    }
+}
+
+/// What the user said in the Move's panel and alert.
+enum Answer<'a> {
+    /// They closed the panel or said no to another volume.
+    Cancelled,
+    /// Every item is already in the folder they picked.
+    AlreadyThere(PathBuf),
+    /// Move these items, the ones not already there, into `to`.
+    Move { sources: Vec<&'a Path>, to: PathBuf },
+}
+
+/// Asks for the folder, then whether to move to another volume if that's
+/// where it is.
+fn ask_where(paths: &[PathBuf]) -> Result<Answer<'_>, PlatformError> {
     let Some(to) = on_main("the Move folder picker", |mtm| Ok(pick_folder(mtm, paths)))? else {
-        return Ok(MoveOutcome::Cancelled);
+        return Ok(Answer::Cancelled);
     };
     let sources: Vec<&Path> = paths
         .iter()
@@ -132,14 +242,14 @@ pub(crate) fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, Pl
         .filter(|source| !already_in(source, &to))
         .collect();
     if sources.is_empty() {
-        return Ok(MoveOutcome::AlreadyThere { to });
+        return Ok(Answer::AlreadyThere(to));
     }
     if crosses_volumes(&sources, &to)
         && !on_main("the Move confirmation", |mtm| Ok(confirm_other_volume(mtm)))?
     {
-        return Ok(MoveOutcome::Cancelled);
+        return Ok(Answer::Cancelled);
     }
-    autoreleasepool(|_| move_items(&sources, &to))
+    Ok(Answer::Move { sources, to })
 }
 
 pub(crate) fn haptic_tick() {
@@ -215,9 +325,9 @@ fn open(
     Ok(())
 }
 
-/// Makes Grape the active app, so its panel or alert comes to the front.
-/// Grape has no Dock icon, and an inactive app's modal UI may open behind
-/// the frontmost window.
+/// Makes Grape the active app, so its panel, alert or AirDrop window comes
+/// to the front. Grape has no Dock icon, and an inactive app's windows may
+/// open behind the frontmost one.
 fn activate(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
     if objc2::available!(macos = 14.0) {
@@ -225,6 +335,33 @@ fn activate(mtm: MainThreadMarker) {
     } else {
         #[allow(deprecated)]
         app.activateIgnoringOtherApps(true);
+    }
+}
+
+/// The app in front, unless that's Grape itself. Read on the main thread,
+/// where AppKit keeps it current.
+fn frontmost_other_app(_mtm: MainThreadMarker) -> Option<Retained<NSRunningApplication>> {
+    let front = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+    let grape = NSRunningApplication::currentApplication();
+    (front.processIdentifier() != grape.processIdentifier()).then_some(front)
+}
+
+/// Gives activation back to `app` after Grape took it for the Move's panel
+/// and alert, or for AirDrop. Only while Grape is still active: if the user went to
+/// another app meanwhile, that one keeps it. From macOS 14 activation is
+/// cooperative, so Grape yields to `app` first and then asks on its behalf.
+/// Never `NSApp.hide`: that would hide the overlay and the toast too.
+fn hand_back(mtm: MainThreadMarker, app: &NSRunningApplication) {
+    let grape = NSApplication::sharedApplication(mtm);
+    if !grape.isActive() {
+        return;
+    }
+    let options = NSApplicationActivationOptions::empty();
+    if objc2::available!(macos = 14.0) {
+        grape.yieldActivationToApplication(app);
+        app.activateFromApplication_options(&NSRunningApplication::currentApplication(), options);
+    } else {
+        app.activateWithOptions(options);
     }
 }
 
@@ -284,20 +421,33 @@ fn already_in(source: &Path, folder: &Path) -> bool {
     }
 }
 
-/// `true` when any item may be on another volume than `to`: its folder's
-/// device differs from `to`'s. The item's folder, not the item, because
-/// moving a link moves the link. A device that can't be read counts as
-/// another volume, so the user is asked.
+/// `true` when any item that would move may be on another volume than
+/// `to`: the item or its folder is on another device
+/// ([`ItemDevices::crosses_to`]). A volume's root never moves, so it
+/// doesn't count.
 fn crosses_volumes(sources: &[&Path], to: &Path) -> bool {
-    // `metadata` follows links, so a linked folder counts where it really is.
-    let device = |dir: &Path| std::fs::metadata(dir).ok().map(|meta| meta.dev());
-    let target = device(to);
+    let target = folder_device(to);
     sources
         .iter()
-        .any(|source| match (source.parent().and_then(device), target) {
-            (Some(device), Some(target)) => device != target,
-            _ => true,
-        })
+        .map(|source| item_devices(source))
+        .filter(|devices| !devices.is_volume_root())
+        .any(|devices| devices.crosses_to(target))
+}
+
+/// The devices of `path` and of its folder. The item's own from `lstat`,
+/// because moving a link moves the link; a mount point gives the volume
+/// mounted there.
+fn item_devices(path: &Path) -> ItemDevices {
+    ItemDevices {
+        item: path.symlink_metadata().ok().map(|meta| meta.dev()),
+        folder: path.parent().and_then(folder_device),
+    }
+}
+
+/// A folder's device. `metadata` follows links, so a linked folder counts
+/// where it really is.
+fn folder_device(dir: &Path) -> Option<u64> {
+    std::fs::metadata(dir).ok().map(|meta| meta.dev())
 }
 
 /// `to/<the item's name>`.
@@ -305,31 +455,25 @@ fn destination(source: &Path, to: &Path) -> Option<PathBuf> {
     source.file_name().map(|name| to.join(name))
 }
 
-/// One item asked to move.
-struct Source<'a> {
-    path: &'a Path,
-    /// `to` already had the item's name before the move, so the item was
-    /// left where it was, and `to/name` is something else.
-    taken: bool,
-    /// `NSFileManager` reported an error for this item.
-    failed: bool,
-}
-
 /// Moves each item into `to` with `NSFileManager`, never replacing
-/// anything, then reports what the disk says moved.
+/// anything and never moving a volume's root. Each item is judged from the
+/// disk right after its own move, before the next one moves, so a later
+/// item with the same name can't change what an earlier one says.
 fn move_items(sources: &[&Path], to: &Path) -> Result<MoveOutcome, PlatformError> {
     let manager = NSFileManager::defaultManager();
-    let mut items = Vec::with_capacity(sources.len());
+    let mut moved = Vec::new();
+    let mut unsure = Vec::new();
     let mut first_error: Option<i32> = None;
     for &path in sources {
-        // No name (a volume root) counts as taken: there's nowhere to put it.
-        let target = destination(path, to).filter(|target| target.symlink_metadata().is_err());
-        let taken = target.is_none();
+        // No name (`/`) or a volume's root: it stays, like a taken name.
+        let target = destination(path, to)
+            .filter(|_| !item_devices(path).is_volume_root())
+            .filter(|target| target.symlink_metadata().is_err());
         let mut failed = false;
-        if let Some(target) = target {
+        if let Some(target) = &target {
             // NSFileManager refuses to move onto an existing item, so a name
             // taken since the check above still isn't replaced.
-            let result = match (NSURL::from_file_path(path), NSURL::from_file_path(&target)) {
+            let result = match (NSURL::from_file_path(path), NSURL::from_file_path(target)) {
                 (Some(from), Some(into)) => manager
                     .moveItemAtURL_toURL_error(&from, &into)
                     .map_err(|err| ns_error_code(&err)),
@@ -340,13 +484,18 @@ fn move_items(sources: &[&Path], to: &Path) -> Result<MoveOutcome, PlatformError
                 first_error.get_or_insert(code);
             }
         }
-        items.push(Source {
-            path,
-            taken,
-            failed,
-        });
+        let snapshot = after_move(path, target.as_deref(), failed);
+        match judge_move(snapshot) {
+            MoveVerdict::Moved => moved.push(MovedItem {
+                from: path.to_path_buf(),
+                now: target
+                    .filter(|_| snapshot.arrived)
+                    .unwrap_or_else(|| to.to_path_buf()),
+            }),
+            MoveVerdict::Unsure => unsure.push(path.to_path_buf()),
+            MoveVerdict::Stayed => {}
+        }
     }
-    let (moved, unsure) = settle(&items, to);
     if moved.is_empty() && unsure.is_empty() {
         if let Some(code) = first_error {
             return Err(PlatformError::Os {
@@ -363,48 +512,32 @@ fn move_items(sources: &[&Path], to: &Path) -> Result<MoveOutcome, PlatformError
     })
 }
 
-/// Sorts the items after a move, by what the disk says now.
-///
-/// An item moved if its old path is gone while its old folder can still be
-/// read, unless its move failed and it isn't at `to/name` either: then
-/// Grape can't tell where it went. An item still in its old place while
-/// `to/name` now exists (and didn't before) is in both places, partly or
-/// wholly: a move to another volume copies first, and a folder can fail
-/// halfway. An old place that can't be read can't be judged. Those three
-/// are `unsure`. Everything else stayed.
-fn settle(items: &[Source<'_>], to: &Path) -> (Vec<MovedItem>, Vec<PathBuf>) {
-    let mut moved = Vec::new();
-    let mut unsure = Vec::new();
-    for item in items {
-        let target = destination(item.path, to).filter(|_| !item.taken);
-        let arrived = target
-            .as_ref()
-            .is_some_and(|target| target.symlink_metadata().is_ok());
-        match item.path.symlink_metadata() {
-            Err(err)
-                if err.kind() == ErrorKind::NotFound
-                    && item
-                        .path
-                        .parent()
-                        .is_some_and(|parent| parent.symlink_metadata().is_ok()) =>
-            {
-                if arrived || !item.failed {
-                    moved.push(MovedItem {
-                        from: item.path.to_path_buf(),
-                        now: target
-                            .filter(|_| arrived)
-                            .unwrap_or_else(|| to.to_path_buf()),
-                    });
-                } else {
-                    unsure.push(item.path.to_path_buf());
-                }
-            }
-            Err(_) => unsure.push(item.path.to_path_buf()),
-            Ok(_) if arrived => unsure.push(item.path.to_path_buf()),
-            Ok(_) => {}
-        }
+/// The disk right after one item's own move. `tried` is `to/name` when
+/// Grape asked for the move: the name was free just before, so anything
+/// there now arrived with this item.
+fn after_move(path: &Path, tried: Option<&Path>, failed: bool) -> MoveSnapshot {
+    MoveSnapshot {
+        tried: tried.is_some(),
+        failed,
+        arrived: tried.is_some_and(|target| target.symlink_metadata().is_ok()),
+        old_place: old_place(path),
     }
-    (moved, unsure)
+}
+
+/// What the item's old path says now.
+fn old_place(path: &Path) -> OldPlace {
+    match path.symlink_metadata() {
+        Ok(_) => OldPlace::Present,
+        Err(err)
+            if err.kind() == ErrorKind::NotFound
+                && path
+                    .parent()
+                    .is_some_and(|parent| parent.symlink_metadata().is_ok()) =>
+        {
+            OldPlace::Gone
+        }
+        Err(_) => OldPlace::Unreadable,
+    }
 }
 
 /// An `NSError`'s code as an `i32`, or [`NO_CODE`] if it doesn't fit.
@@ -528,6 +661,34 @@ mod tests {
         // A folder that can't be read counts as another volume.
         let missing = scratch.0.join("missing").join("deeper");
         assert!(crosses_volumes(&[file.as_path()], &missing));
+        // So does an item that can't be read.
+        let ghost = scratch.0.join("ghost.txt");
+        assert!(crosses_volumes(&[ghost.as_path()], &other));
+    }
+
+    #[test]
+    fn a_volume_root_is_never_moved() {
+        // devfs is mounted on /dev on every Mac: a volume's root that's
+        // always there. Grape never asks to move it.
+        let dev = Path::new("/dev");
+        assert!(item_devices(dev).is_volume_root());
+        let scratch = Scratch::new("move-root");
+        let into = scratch.folder("into");
+        assert!(!item_devices(&scratch.file("a.txt")).is_volume_root());
+        // It stays, so it doesn't make the move cross volumes either.
+        assert!(!crosses_volumes(&[dev], &into));
+        let outcome = move_items(&[dev], &into).unwrap();
+        assert_eq!(
+            outcome,
+            MoveOutcome::Moved {
+                to: into.clone(),
+                moved: vec![],
+                unsure: vec![],
+                of: 1,
+            }
+        );
+        assert!(dev.exists());
+        assert!(!into.join("dev").exists());
     }
 
     #[test]
@@ -615,8 +776,35 @@ mod tests {
     }
 
     #[test]
-    fn settle_is_unsure_of_an_item_in_both_places() {
-        let scratch = Scratch::new("settle");
+    fn two_items_with_one_name_move_once() {
+        let scratch = Scratch::new("move-twins");
+        let first = scratch.folder("a").join("x.txt");
+        std::fs::write(&first, b"first").unwrap();
+        let second = scratch.folder("b").join("x.txt");
+        std::fs::write(&second, b"second").unwrap();
+        let into = scratch.folder("into");
+        let outcome = move_items(&[first.as_path(), second.as_path()], &into).unwrap();
+        // The first takes the name; the second finds it taken and stays.
+        assert_eq!(
+            outcome,
+            MoveOutcome::Moved {
+                to: into.clone(),
+                moved: vec![MovedItem {
+                    from: first.clone(),
+                    now: into.join("x.txt"),
+                }],
+                unsure: vec![],
+                of: 2,
+            }
+        );
+        assert!(!first.exists());
+        assert_eq!(std::fs::read(into.join("x.txt")).unwrap(), b"first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+    }
+
+    #[test]
+    fn a_snapshot_is_unsure_of_an_item_in_both_places() {
+        let scratch = Scratch::new("snapshot");
         let into = scratch.folder("into");
         // Copied over but not deleted: a folder split halfway, and a file.
         let split = scratch.folder("split");
@@ -633,28 +821,21 @@ mod tests {
         let quiet = scratch.0.join("quiet.png");
         // Still in place, nothing at `into/name`: stayed.
         let stayed = scratch.file("stayed.png");
-        let source = |path, taken, failed| Source {
-            path,
-            taken,
-            failed,
+        // `tried` is false when the name was taken, so there was no move.
+        let judged = |path: &Path, tried: bool, failed: bool| {
+            let target = destination(path, &into).filter(|_| tried);
+            let snapshot = after_move(path, target.as_deref(), failed);
+            (judge_move(snapshot), snapshot.arrived)
         };
-        let items = [
-            source(&split, false, true),
-            source(&copied, false, true),
-            source(&merged, true, false),
-            source(&lost, false, false),
-            source(&quiet, false, false),
-            source(&stayed, false, true),
-        ];
-        let (moved, unsure) = settle(&items, &into);
-        assert_eq!(
-            moved,
-            vec![MovedItem {
-                from: quiet,
-                now: into.clone(),
-            }]
-        );
-        assert_eq!(unsure, vec![split, copied, lost]);
+        assert_eq!(judged(&split, true, true), (MoveVerdict::Unsure, true));
+        assert_eq!(judged(&copied, true, true), (MoveVerdict::Unsure, true));
+        assert_eq!(judged(&merged, false, false), (MoveVerdict::Stayed, false));
+        assert_eq!(judged(&lost, true, false), (MoveVerdict::Unsure, false));
+        assert_eq!(judged(&quiet, true, false), (MoveVerdict::Moved, false));
+        assert_eq!(judged(&stayed, true, true), (MoveVerdict::Stayed, false));
+        assert_eq!(old_place(&lost), OldPlace::Unreadable);
+        assert_eq!(old_place(&quiet), OldPlace::Gone);
+        assert_eq!(old_place(&stayed), OldPlace::Present);
     }
 
     #[test]

@@ -45,12 +45,14 @@ use crate::windows as imp;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DragSignal {
     /// A candidate drag started: the primary button is down and the pointer
-    /// moved past the OS drag threshold.
+    /// moved past the OS drag threshold. On macOS that's when a file drag
+    /// session appears, which AppKit only starts past its own threshold.
     Started {
-        /// The modifiers already held when the drag started. They weren't
-        /// pressed *during* the drag, so they don't open a wheel on their
-        /// own (`docs/INTERACTION_SPEC.md` §2): holding Shift before
-        /// dragging keeps meaning "move" in Explorer.
+        /// The modifiers already held when the drag started (on macOS, when
+        /// the drag session was first seen). They weren't pressed *during* the
+        /// drag, so they don't open a wheel on their own
+        /// (`docs/INTERACTION_SPEC.md` §2): holding Shift before dragging
+        /// keeps meaning "move" in Explorer.
         modifiers: Modifiers,
     },
     /// The pointer moved. Global, top-left origin: physical pixels on

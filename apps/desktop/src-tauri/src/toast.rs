@@ -3,9 +3,11 @@
 //! clicked. Rust owns the copy, the placement and the timing; the page in
 //! `ui/toast.html` only renders `toast://show` / `toast://hide`.
 //!
-//! The toast never takes focus (on Windows it gets the overlay's
-//! tool-window, no-activate styles; on macOS it's ordered front without
-//! becoming key) and refuses drops (DECISIONS D13).
+//! The toast never takes focus: on Windows it gets the overlay's
+//! tool-window, no-activate styles; on macOS it can't become key and sits
+//! one level below the overlay, so an open wheel always covers it. On
+//! Windows it refuses drops (DECISIONS D13). On macOS wry accepts a drop
+//! on it as a copy and nothing happens, so the file is never moved (D18).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -39,7 +41,8 @@ fn linger(tone: ToastTone) -> Option<Duration> {
 }
 
 /// Where the toast goes: centered under the wheel, or above it when there's
-/// no room below, kept inside the work area. Global physical pixels.
+/// no room below, kept inside the work area. Global coordinates: physical
+/// pixels on Windows, points on macOS.
 pub fn place(anchor: (i32, i32), display: &DisplayBounds) -> (i32, i32) {
     let scale = if display.scale.is_finite() && display.scale > 0.0 {
         display.scale
@@ -136,8 +139,8 @@ fn place_and_show(_app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32
     }
 }
 
-/// Moves the toast to (x, y), in points, and orders it front on the main
-/// thread. Tauri's `show()` would make it the key window.
+/// Moves the toast to (x, y), in points, and orders it front in one
+/// main-thread call, although Grape isn't the active app.
 #[cfg(target_os = "macos")]
 fn place_and_show(app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32) {
     // Points on macOS (the display's scale is 1.0).

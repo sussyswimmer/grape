@@ -1,6 +1,6 @@
 //! The pure rules under the macOS layer: Cocoa's bottom-left coordinates to
-//! Grape's top-left points and back, the screen under a point, and the text
-//! and arguments the file actions use.
+//! Grape's top-left points and back, the screen under a point, the text and
+//! arguments the file actions use, and how Move judges each item.
 //!
 //! No AppKit here, so these build and are tested on every OS, not only on a
 //! Mac. The `macos` module is the only caller outside the tests.
@@ -144,6 +144,105 @@ pub(crate) fn terminal_args(dir: &Path) -> [OsString; 3] {
 /// selected. The path goes as its own argument, never through a shell.
 pub(crate) fn reveal_args(path: &Path) -> [OsString; 2] {
     ["-R".into(), path.as_os_str().to_owned()]
+}
+
+/// Where one item asked to Move sits, as device numbers (`st_dev`). `None`
+/// is a device that couldn't be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ItemDevices {
+    /// The item itself, from `lstat`: a link counts where the link is, and a
+    /// mount point reports the volume mounted there.
+    pub(crate) item: Option<u64>,
+    /// The folder holding it, with links followed.
+    pub(crate) folder: Option<u64>,
+}
+
+impl ItemDevices {
+    /// `true` for the root of a mounted volume (a USB stick, a DMG, a
+    /// network share): its own device isn't its folder's. Moving one would
+    /// copy what's on it and then erase it, so it never moves. A folder
+    /// that can't be read counts as a root too, so in doubt nothing moves.
+    /// An item that can't be read is left to the move, which reports it.
+    ///
+    /// The firmlinked folders at the top of the startup disk (`/Users`,
+    /// `/Applications`) count as roots as well; they couldn't move off the
+    /// read-only system volume anyway.
+    pub(crate) fn is_volume_root(self) -> bool {
+        match (self.item, self.folder) {
+            (Some(item), Some(folder)) => item != folder,
+            (Some(_), None) => true,
+            (None, _) => false,
+        }
+    }
+
+    /// `true` when moving the item to a folder on device `target` may cross
+    /// volumes: the item or its folder is on another device. Anything that
+    /// can't be read counts as another volume, so the user is asked.
+    pub(crate) fn crosses_to(self, target: Option<u64>) -> bool {
+        match (self.item, self.folder, target) {
+            (Some(item), Some(folder), Some(target)) => item != target || folder != target,
+            _ => true,
+        }
+    }
+}
+
+/// What the item's old place says, read right after its own move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OldPlace {
+    /// The item is still there.
+    Present,
+    /// The item is gone, and its folder can still be read.
+    Gone,
+    /// The item or its folder can't be read.
+    Unreadable,
+}
+
+/// One Move item, as the disk stood right after its own `moveItemAtURL`
+/// and before the next item moved, so a later item with the same name
+/// can't change it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MoveSnapshot {
+    /// Grape asked for the move. It doesn't when the name is already taken
+    /// in the folder, the item has no name (`/`) or it's a volume's root.
+    pub(crate) tried: bool,
+    /// `NSFileManager` reported an error.
+    pub(crate) failed: bool,
+    /// `to/name` exists now and didn't before this item's move.
+    pub(crate) arrived: bool,
+    /// The old place.
+    pub(crate) old_place: OldPlace,
+}
+
+/// How one Move item ended up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MoveVerdict {
+    /// It left its old place.
+    Moved,
+    /// It may be in both places, or its old place can't be read.
+    Unsure,
+    /// It's where it was.
+    Stayed,
+}
+
+/// Sorts one Move item by its [`MoveSnapshot`].
+///
+/// An item Grape didn't try to move stayed. One that's gone from a
+/// folder that can still be read moved, unless its move failed and it
+/// didn't arrive either: then Grape can't tell where it went. One still
+/// in its old place while `to/name` arrived is in both places, partly or
+/// wholly: a move to another volume copies first, and a folder can fail
+/// halfway. An old place that can't be read can't be judged. Those three
+/// are unsure. Everything else stayed.
+pub(crate) fn judge_move(snapshot: MoveSnapshot) -> MoveVerdict {
+    if !snapshot.tried {
+        return MoveVerdict::Stayed;
+    }
+    match snapshot.old_place {
+        OldPlace::Gone if snapshot.arrived || !snapshot.failed => MoveVerdict::Moved,
+        OldPlace::Gone | OldPlace::Unreadable => MoveVerdict::Unsure,
+        OldPlace::Present if snapshot.arrived => MoveVerdict::Unsure,
+        OldPlace::Present => MoveVerdict::Stayed,
+    }
 }
 
 fn contains(rect: Rect, x: i32, y: i32) -> bool {
@@ -334,6 +433,118 @@ mod tests {
         assert_eq!(path_lines(&paths), "/Users/max/a b.png\n/Volumes/USB/c");
         assert_eq!(path_lines(&paths[..1]), "/Users/max/a b.png");
         assert_eq!(path_lines(&[]), "");
+    }
+
+    fn devices(item: Option<u64>, folder: Option<u64>) -> ItemDevices {
+        ItemDevices { item, folder }
+    }
+
+    #[test]
+    fn a_volume_root_is_on_another_device_than_its_folder() {
+        // /Users/max/a.png, a link on the Desktop, a folder inside a USB
+        // stick: each on its folder's device.
+        assert!(!devices(Some(1), Some(1)).is_volume_root());
+        assert!(!devices(Some(7), Some(7)).is_volume_root());
+        // /Volumes/USB, a mounted DMG or an SMB share: /Volumes is on the
+        // startup disk, the item on its own volume.
+        assert!(devices(Some(7), Some(1)).is_volume_root());
+        // A folder that can't be read: in doubt, it stays.
+        assert!(devices(Some(7), None).is_volume_root());
+        // An item that can't be read is the move's to report.
+        assert!(!devices(None, Some(1)).is_volume_root());
+        assert!(!devices(None, None).is_volume_root());
+    }
+
+    #[test]
+    fn crossing_volumes_checks_the_item_and_its_folder() {
+        let target = Some(1);
+        assert!(!devices(Some(1), Some(1)).crosses_to(target));
+        // Its folder is elsewhere.
+        assert!(devices(Some(7), Some(7)).crosses_to(target));
+        // Its folder is on the target's volume but it isn't: a volume
+        // mounted inside a folder there.
+        assert!(devices(Some(7), Some(1)).crosses_to(target));
+        // Its folder is elsewhere but it isn't.
+        assert!(devices(Some(1), Some(7)).crosses_to(target));
+        // Anything unreadable asks.
+        assert!(devices(None, Some(1)).crosses_to(target));
+        assert!(devices(Some(1), None).crosses_to(target));
+        assert!(devices(Some(1), Some(1)).crosses_to(None));
+    }
+
+    fn snapshot(tried: bool, failed: bool, arrived: bool, old_place: OldPlace) -> MoveSnapshot {
+        MoveSnapshot {
+            tried,
+            failed,
+            arrived,
+            old_place,
+        }
+    }
+
+    #[test]
+    fn a_move_is_judged_by_the_normal_rules() {
+        use MoveVerdict::{Moved, Stayed, Unsure};
+        use OldPlace::{Gone, Present, Unreadable};
+        let cases = [
+            // It left and arrived.
+            (snapshot(true, false, true, Gone), Moved),
+            // It left without an error, though it's not at `to/name`.
+            (snapshot(true, false, false, Gone), Moved),
+            // An error, but it left and arrived (a warning after the move).
+            (snapshot(true, true, true, Gone), Moved),
+            // An error, it left and never arrived: gone before the move,
+            // or lost on the way.
+            (snapshot(true, true, false, Gone), Unsure),
+            // In both places: a copy to another volume or a folder split
+            // halfway.
+            (snapshot(true, true, true, Present), Unsure),
+            (snapshot(true, false, true, Present), Unsure),
+            // The old place can't be read.
+            (snapshot(true, false, false, Unreadable), Unsure),
+            (snapshot(true, true, true, Unreadable), Unsure),
+            // It failed and is still where it was.
+            (snapshot(true, true, false, Present), Stayed),
+            // Never tried: a taken name, `/` or a volume root.
+            (snapshot(false, false, false, Present), Stayed),
+            (snapshot(false, false, false, Gone), Stayed),
+            (snapshot(false, false, false, Unreadable), Stayed),
+        ];
+        for (snapshot, verdict) in cases {
+            assert_eq!(judge_move(snapshot), verdict, "{snapshot:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_move_is_not_moved_by_a_same_named_item_arriving_later() {
+        // /a/x.png can't move and is gone from /a (deleted while it was
+        // being copied, say). Its snapshot, taken before /b/x.png moved:
+        let first = snapshot(true, true, false, OldPlace::Gone);
+        assert_eq!(judge_move(first), MoveVerdict::Unsure);
+        // /b/x.png then takes the free name and moves.
+        let second = snapshot(true, false, true, OldPlace::Gone);
+        assert_eq!(judge_move(second), MoveVerdict::Moved);
+        // Re-read after both moves, the first would look as if it arrived
+        // and be claimed as moved. That's what the snapshot prevents.
+        let reread = MoveSnapshot {
+            arrived: true,
+            ..first
+        };
+        assert_eq!(judge_move(reread), MoveVerdict::Moved);
+    }
+
+    #[test]
+    fn a_locked_item_stays_while_a_same_named_item_arrives() {
+        // /a/x.png is locked: its move fails and it's still in /a. Its
+        // snapshot, taken before /b/x.png moved:
+        let locked = snapshot(true, true, false, OldPlace::Present);
+        assert_eq!(judge_move(locked), MoveVerdict::Stayed);
+        // Re-read after /b/x.png arrived, it would look as if it were in
+        // both places.
+        let reread = MoveSnapshot {
+            arrived: true,
+            ..locked
+        };
+        assert_eq!(judge_move(reread), MoveVerdict::Unsure);
     }
 
     #[test]

@@ -53,11 +53,15 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSError",
     "NSFileManager",
     "NSGeometry",
+    "NSProcessInfo",
     "NSString",
     "NSURL",
 ] }
+# `libc` only types NSRunningApplication's `processIdentifier` (pid_t); the
+# libc crate is already in the build.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "libc",
     "objc2-core-foundation",
     "NSAlert",
     "NSApplication",
@@ -69,11 +73,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSPanel",
     "NSPasteboard",
     "NSResponder",
+    "NSRunningApplication",
     "NSSavePanel",
     "NSScreen",
     "NSSharingService",
     "NSView",
     "NSWindow",
+    "NSWorkspace",
 ] }
 # Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [

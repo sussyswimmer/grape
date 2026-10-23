@@ -7,7 +7,10 @@
 //! A drag starts when the primary button is down and the pointer has moved
 //! past the OS drag threshold (`docs/INTERACTION_SPEC.md` §2), but only if
 //! the press was *armed*: on Windows that means it landed on Explorer or the
-//! Desktop (`docs/PLATFORM_WINDOWS.md` → "Is it a file drag?").
+//! Desktop (`docs/PLATFORM_WINDOWS.md` → "Is it a file drag?"). Windows
+//! measures the threshold itself ([`DragTracker::moved`]). On macOS a file
+//! drag session already proves the pointer passed AppKit's threshold, so the
+//! drag starts the moment the session is seen ([`DragTracker::start_now`]).
 
 use crate::{DragSignal, Modifiers};
 
@@ -91,6 +94,31 @@ impl DragTracker {
             }
             State::Dragging { .. } => vec![DragSignal::Moved { x, y }],
         }
+    }
+
+    /// The press became a drag without waiting for the threshold: the OS
+    /// already says it's one (on macOS, a file drag session started). The
+    /// pointer is at (`x`, `y`), and `baseline` is the modifier set held
+    /// when the press was first seen, so keys pressed since then are
+    /// reported by the next [`poll`](Self::poll) and can open a wheel.
+    ///
+    /// Returns `[Started, Moved]` for an armed press, and nothing when no
+    /// press is pending (no button down, an unarmed press, or a drag
+    /// already in progress).
+    pub fn start_now(&mut self, x: i32, y: i32, baseline: Modifiers) -> Vec<DragSignal> {
+        if !matches!(self.state, State::Pressed { armed: true, .. }) {
+            return Vec::new();
+        }
+        self.state = State::Dragging {
+            modifiers: baseline,
+            escape: false,
+        };
+        vec![
+            DragSignal::Started {
+                modifiers: baseline,
+            },
+            DragSignal::Moved { x, y },
+        ]
     }
 
     /// The primary button went up. Returns [`DragSignal::Ended`] if a drag
@@ -272,6 +300,64 @@ mod tests {
         let mut t = DragTracker::new(4, 4);
         assert!(t.moved(500, 500, Modifiers::SHIFT).is_empty());
         assert!(t.poll(Modifiers::SHIFT, true, true).is_empty());
+        assert_eq!(t.button_up(), None);
+    }
+
+    #[test]
+    fn start_now_starts_where_the_pointer_rests() {
+        let mut t = DragTracker::new(4, 4);
+        t.button_down(100, 100, true);
+        // No move past the threshold is needed: the pointer can be at rest,
+        // even back where the press began.
+        assert_eq!(
+            t.start_now(100, 100, NONE),
+            vec![started(NONE), DragSignal::Moved { x: 100, y: 100 }]
+        );
+        assert!(t.is_dragging());
+        // Only once per press.
+        assert!(t.start_now(120, 100, NONE).is_empty());
+        assert_eq!(
+            t.moved(101, 100, NONE),
+            vec![DragSignal::Moved { x: 101, y: 100 }]
+        );
+        assert_eq!(t.button_up(), Some(DragSignal::Ended));
+    }
+
+    #[test]
+    fn start_now_keeps_the_keys_held_at_the_press_as_the_baseline() {
+        let mut t = DragTracker::new(4, 4);
+        t.button_down(0, 0, true);
+        // Command was down when the press was first seen (a Finder
+        // Command-drag): it's the baseline, never a change.
+        let signals = t.start_now(0, 0, Modifiers::META);
+        assert_eq!(signals.first(), Some(&started(Modifiers::META)));
+        assert!(t.poll(Modifiers::META, false, true).is_empty());
+    }
+
+    #[test]
+    fn a_key_pressed_while_resting_is_reported_after_start_now() {
+        let mut t = DragTracker::new(4, 4);
+        t.button_down(0, 0, true);
+        // Before the drag session is seen, a key isn't reported yet...
+        assert!(t.poll(Modifiers::SHIFT, false, true).is_empty());
+        t.start_now(0, 0, NONE);
+        // ...and the first poll after the start reports it against the
+        // baseline from the press, though the pointer never moved.
+        assert_eq!(
+            t.poll(Modifiers::SHIFT, false, true),
+            vec![DragSignal::Modifiers(Modifiers::SHIFT)]
+        );
+        assert!(t.poll(Modifiers::SHIFT, false, true).is_empty());
+    }
+
+    #[test]
+    fn start_now_needs_an_armed_press() {
+        let mut t = DragTracker::new(4, 4);
+        assert!(t.start_now(10, 10, NONE).is_empty());
+        assert!(!t.is_pressed());
+        t.button_down(0, 0, false);
+        assert!(t.start_now(10, 10, NONE).is_empty());
+        assert!(!t.is_dragging());
         assert_eq!(t.button_up(), None);
     }
 

@@ -4,7 +4,11 @@
 //! A thread polls three things AppKit gives any app without a prompt (D7):
 //! `NSEvent.pressedMouseButtons` (the left button), `NSEvent.modifierFlags`
 //! and the drag pasteboard's `changeCount`. It polls every 100 ms while the
-//! button is up and every 8 ms while it's down.
+//! button is up and every 8 ms while it's down. With every window hidden,
+//! macOS may App Nap a menu-bar app and stretch those waits, so the thread
+//! holds an `NSProcessInfo` activity (user-initiated, idle system sleep
+//! allowed) for its whole life. It waits with `park_timeout`, and stopping
+//! unparks it, so Quit never waits out a wait.
 //!
 //! A press only becomes a drag for Grape once a drag session has started
 //! (the drag pasteboard's `changeCount` moved since the button was last
@@ -13,10 +17,16 @@
 //! the wheel. Grape reads only the pasteboard's change count and type list,
 //! never its contents: the overlay gets the paths from the drop itself.
 //!
-//! From there the [`DragTracker`] applies the usual rules with a 4-point
-//! threshold. Esc is never reported: reading keys needs a permission
-//! prompt. AppKit ends the drag session on Esc, and the app reads that from
-//! the overlay's drop events instead.
+//! The drag starts the moment such a session is seen, wherever the pointer
+//! is: AppKit only starts a session once the pointer has passed its own
+//! drag threshold, so Grape adds none ([`DragTracker::start_now`]). The
+//! keys held when Grape first sees that session are the baseline, as on
+//! Windows where they're read at the threshold: a Command held for a Finder
+//! Command-drag doesn't open a wheel. A key pressed after that is reported
+//! by the next poll, even while the pointer rests. A key tapped and
+//! released before the session is seen is missed. Esc is never reported: reading keys needs a permission prompt.
+//! AppKit ends the drag session on Esc, and the app reads that from the
+//! overlay's drop events instead.
 //!
 //! Signals go out with `try_send`: a full channel drops them rather than
 //! slow anything down.
@@ -28,18 +38,18 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use objc2::rc::{autoreleasepool, Retained};
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
 use objc2_app_kit::{
     NSEvent, NSEventModifierFlags, NSPasteboard, NSPasteboardNameDrag, NSPasteboardTypeFileURL,
 };
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
+use objc2_foundation::{ns_string, NSActivityOptions, NSProcessInfo};
 
 use super::{display, io_error};
 use crate::mac_rules::cursor_to_grape;
 use crate::tracker::DragTracker;
 use crate::{DragMonitor, DragSignal, Modifiers, PlatformError};
 
-/// How far, in points, the pointer moves before a press counts as a drag.
-const DRAG_THRESHOLD: i32 = 4;
 /// Polling interval while the left button is down (about 120 Hz).
 const POLL_EVERY: Duration = Duration::from_millis(8);
 /// Polling interval while it's up.
@@ -77,6 +87,8 @@ impl DragMonitor for MacDragMonitor {
     fn stop(&mut self) {
         if let Some(running) = self.running.take() {
             running.stop.store(true, Ordering::Release);
+            // Wake it from its wait, so stopping never waits one out.
+            running.worker.thread().unpark();
             let _ = running.worker.join();
         }
     }
@@ -89,11 +101,44 @@ impl Drop for MacDragMonitor {
 }
 
 fn run(tx: &SyncSender<DragSignal>, stop: &AtomicBool) {
+    // Held until this thread ends, so App Nap never stretches the waits.
+    let _awake = autoreleasepool(|_| Awake::begin());
     // The pasteboard object isn't Send, so it's made here, on this thread.
     let mut poller = autoreleasepool(|_| Poller::new());
     while !stop.load(Ordering::Acquire) {
         let pressed = autoreleasepool(|_| poller.tick(tx));
-        thread::sleep(if pressed { POLL_EVERY } else { IDLE_WAIT });
+        // `stop` unparks the thread. An early wake only polls early.
+        thread::park_timeout(if pressed { POLL_EVERY } else { IDLE_WAIT });
+    }
+}
+
+/// An `NSProcessInfo` activity that keeps App Nap away while Grape watches
+/// for drags: user-initiated, but the Mac may still sleep when idle. It
+/// ends when dropped, on the thread that began it.
+struct Awake {
+    process: Retained<NSProcessInfo>,
+    activity: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+}
+
+impl Awake {
+    fn begin() -> Self {
+        let process = NSProcessInfo::processInfo();
+        let activity = process.beginActivityWithOptions_reason(
+            NSActivityOptions::UserInitiatedAllowingIdleSystemSleep,
+            ns_string!("Watching for file drags"),
+        );
+        Self { process, activity }
+    }
+}
+
+impl Drop for Awake {
+    fn drop(&mut self) {
+        autoreleasepool(|_| {
+            // SAFETY: `activity` is the token this process's
+            // `beginActivityWithOptions:reason:` returned, and it's ended
+            // only here, once.
+            unsafe { self.process.endActivity(&self.activity) };
+        });
     }
 }
 
@@ -112,7 +157,7 @@ struct Poller {
 /// One press of the left button, as the poller saw it.
 struct Press {
     /// The change count from before the press.
-    baseline: isize,
+    idle_count: isize,
     /// The primary screen's height, for the cursor flip.
     primary_height: f64,
     /// A drag that carries files started during this press.
@@ -127,7 +172,8 @@ impl Poller {
         let idle_count = pasteboard.changeCount();
         Self {
             pasteboard,
-            tracker: DragTracker::new(DRAG_THRESHOLD, DRAG_THRESHOLD),
+            // The thresholds go unused: drags start with `start_now`.
+            tracker: DragTracker::new(0, 0),
             idle_count,
             press: None,
         }
@@ -144,7 +190,7 @@ impl Poller {
                 let primary_height = primary_height();
                 let (x, y) = cursor(primary_height);
                 self.press = Some(Press {
-                    baseline: self.idle_count,
+                    idle_count: self.idle_count,
                     primary_height,
                     file_drag: false,
                     last: None,
@@ -152,23 +198,29 @@ impl Poller {
                 out.extend(self.tracker.button_down(x, y, true));
             }
             if let Some(press) = &mut self.press {
-                if !press.file_drag {
-                    press.file_drag = self.pasteboard.changeCount() != press.baseline
-                        && carries_files(&self.pasteboard);
-                }
                 if press.file_drag {
                     let at = cursor(press.primary_height);
                     if press.last != Some(at) {
                         press.last = Some(at);
-                        let signals = self.tracker.moved(at.0, at.1, held);
-                        if signals
-                            .iter()
-                            .any(|signal| matches!(signal, DragSignal::Started { .. }))
-                        {
-                            display::request_refresh();
-                        }
-                        out.extend(signals);
+                        out.extend(self.tracker.moved(at.0, at.1, held));
                     }
+                } else if self.pasteboard.changeCount() != press.idle_count
+                    && carries_files(&self.pasteboard)
+                {
+                    // AppKit started a file drag, so the pointer is already
+                    // past its threshold: start now, even at rest. The keys
+                    // held now are the baseline.
+                    press.file_drag = true;
+                    let at = cursor(press.primary_height);
+                    press.last = Some(at);
+                    let signals = self.tracker.start_now(at.0, at.1, held);
+                    if signals
+                        .iter()
+                        .any(|signal| matches!(signal, DragSignal::Started { .. }))
+                    {
+                        display::request_refresh();
+                    }
+                    out.extend(signals);
                 }
             }
         } else {
@@ -178,6 +230,7 @@ impl Poller {
             self.idle_count = self.pasteboard.changeCount();
         }
 
+        // Reports keys changed since the baseline, once the drag started.
         if self.tracker.is_pressed() {
             out.extend(self.tracker.poll(held, false, button_down));
         }

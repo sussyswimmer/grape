@@ -288,8 +288,9 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
 }
 
 /// Frames the overlay on the monitor (in points) and orders it to the
-/// front on the main thread, without making it key or activating Grape:
-/// Tauri's `show()` would make it the key window and take the keyboard.
+/// front in one main-thread call. `orderFrontRegardless` brings it forward
+/// although Grape isn't the active app; `focusable: false` keeps it from
+/// ever becoming key, so the app under the cursor keeps the keyboard.
 #[cfg(target_os = "macos")]
 fn show_overlay(app: &AppHandle, frame: Rect) {
     let Some(overlay) = overlay(app) else {

@@ -88,8 +88,10 @@ pub fn open_terminal(dir: &Path) -> Result<(), PlatformError> {
 /// On Windows the shell's own file operation moves them, so name clashes
 /// get the usual dialog and the move can be undone. On macOS
 /// `NSFileManager` moves them and never replaces anything: an item whose
-/// name is taken in the folder stays where it was. The picker and the
-/// question run on the main thread there, so the caller waits for it.
+/// name is taken in the folder stays where it was, and so does a mounted
+/// volume's root. The picker and the question run on the main thread
+/// there, so the caller waits for it, and the app that was in front gets
+/// activation back afterwards.
 ///
 /// Blocks until the user is done: call it from a thread of its own, and
 /// never from one the main thread is waiting for.

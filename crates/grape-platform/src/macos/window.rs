@@ -8,9 +8,22 @@
 //! `setup` or `run_on_main_thread`), checks that it is, and retains the
 //! window for the length of the call.
 //!
-//! Tauri's own `set_always_on_top` and `set_ignore_cursor_events` queue
-//! their AppKit calls for later and would undo [`harden_window`]'s level,
-//! so don't call them on a hardened window.
+//! Neither window ever becomes key, so the frontmost app keeps focus. That
+//! comes from `"focusable": false` in `tauri.conf.json`, not from this
+//! module: tao's `TaoWindow` answers `canBecomeKeyWindow` and
+//! `canBecomeMainWindow` from its `focusable` flag. [`frame_and_show`]
+//! uses `orderFrontRegardless` because a plain `orderFront` from an
+//! inactive app doesn't come above the active app's windows, and it sets
+//! the frame and orders the window front in one main-thread call.
+//!
+//! tao resets the level that [`harden_window`] sets in `set_always_on_top`
+//! and `set_always_on_bottom` (queued on the main queue: floating, below
+//! normal or normal level) and in `set_fullscreen` (level 0 before it
+//! toggles full screen; the shielding level and back to normal for
+//! exclusive full screen), so don't call them on a hardened window.
+//! `set_visible_on_all_workspaces(false)` clears `CanJoinAllSpaces` from the
+//! collection behavior. tao's `set_ignore_cursor_events` only sets
+//! `ignoresMouseEvents` and leaves both alone.
 
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
@@ -28,12 +41,35 @@ use super::{display, NO_CODE};
 use crate::mac_rules::to_cocoa;
 use crate::{PlatformError, Rect};
 
+/// Which of Grape's always-in-front windows is being hardened. They differ
+/// only in level, so the overlay always covers the toast.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowRole {
+    /// The full-display wheel overlay: `NSPopUpMenuWindowLevel` (101).
+    Overlay,
+    /// The progress and done toast: one level lower (100). The overlay
+    /// covers it while a wheel is open, so a progress update can't come up
+    /// over the wheel, and it never covers another app's pop-up menu.
+    Toast,
+}
+
+impl WindowRole {
+    /// The window level for this role.
+    fn level(self) -> NSWindowLevel {
+        match self {
+            Self::Overlay => NSPopUpMenuWindowLevel,
+            Self::Toast => NSPopUpMenuWindowLevel - 1,
+        }
+    }
+}
+
 /// Lifts the window over the menu bar, the Dock and full-screen apps, on
-/// every Space, and keeps it out of Cmd-Tab and window cycling: level
-/// `NSPopUpMenuWindowLevel` (101) and collection behavior
-/// `CanJoinAllSpaces | FullScreenAuxiliary | Stationary | IgnoresCycle`. It
-/// stays visible when Grape isn't the active app. The level stays below
-/// 500: any higher and it would cover the image the user is dragging.
+/// every Space, and keeps it out of Cmd-Tab and window cycling: the level
+/// for `role` (101 for the overlay, 100 for the toast) and collection
+/// behavior `CanJoinAllSpaces | FullScreenAuxiliary | Stationary |
+/// IgnoresCycle` for both. It stays visible when Grape isn't the active
+/// app. The level stays below 500: any higher and it would cover the image
+/// the user is dragging.
 ///
 /// Call it once on the main thread, before the window is first shown.
 /// Calling it again is harmless.
@@ -46,12 +82,12 @@ use crate::{PlatformError, Rect};
 /// - [`PlatformError::WrongThread`] off the main thread.
 /// - [`PlatformError::Os`] for a null pointer, or if AppKit raised an
 ///   exception.
-pub unsafe fn harden_window(ns_window: *mut c_void) -> Result<(), PlatformError> {
+pub unsafe fn harden_window(ns_window: *mut c_void, role: WindowRole) -> Result<(), PlatformError> {
     // SAFETY: the caller's contract is the one `retain_window` needs.
     let (window, _mtm) = unsafe { retain_window(ns_window) }?;
     let behavior = overlay_behavior(window.collectionBehavior());
     objc2::exception::catch(AssertUnwindSafe(|| {
-        window.setLevel(NSPopUpMenuWindowLevel);
+        window.setLevel(role.level());
         window.setCollectionBehavior(behavior);
         window.setHidesOnDeactivate(false);
     }))
@@ -63,8 +99,9 @@ pub unsafe fn harden_window(ns_window: *mut c_void) -> Result<(), PlatformError>
 
 /// Moves and sizes the window to `frame` (Grape's top-left points) and
 /// brings it to the front without activating Grape, so the frontmost app
-/// keeps focus. Also refreshes the screen cache that
-/// [`crate::display_bounds_at`] reads.
+/// keeps focus. It goes in front of the other windows at its level, never
+/// above a higher one: the toast stays under an open wheel. Also refreshes
+/// the screen cache that [`crate::display_bounds_at`] reads.
 ///
 /// # Safety
 /// As [`harden_window`].
@@ -89,6 +126,8 @@ pub unsafe fn frame_and_show(ns_window: *mut c_void, frame: Rect) -> Result<(), 
             false,
         );
         // Never makeKeyAndOrderFront or activate: Grape must not take focus.
+        // A plain orderFront from an inactive app stays behind the active
+        // app's windows.
         window.orderFrontRegardless();
     });
     Ok(())
@@ -163,7 +202,8 @@ fn overlay_behavior(existing: NSWindowCollectionBehavior) -> NSWindowCollectionB
     (existing - clashing) | wanted
 }
 
-/// AppKit's name for a standard window level, or "custom".
+/// AppKit's name for a standard window level, the toast's level, or
+/// "custom".
 fn level_name(level: NSWindowLevel) -> &'static str {
     [
         (NSNormalWindowLevel, "normal"),
@@ -172,6 +212,7 @@ fn level_name(level: NSWindowLevel) -> &'static str {
         (NSMainMenuWindowLevel, "main menu"),
         (NSStatusWindowLevel, "status"),
         (NSPopUpMenuWindowLevel, "pop-up menu"),
+        (WindowRole::Toast.level(), "toast, under pop-up menu"),
         (NSScreenSaverWindowLevel, "screen saver"),
     ]
     .into_iter()
@@ -242,8 +283,20 @@ mod tests {
     }
 
     #[test]
+    fn the_toast_sits_just_under_the_overlay() {
+        assert_eq!(WindowRole::Overlay.level(), 101);
+        assert_eq!(WindowRole::Toast.level(), 100);
+        // Both above the status bar items, both below the drag image (500).
+        for role in [WindowRole::Overlay, WindowRole::Toast] {
+            assert!(role.level() > NSStatusWindowLevel, "{role:?}");
+            assert!(role.level() < 500, "{role:?}");
+        }
+    }
+
+    #[test]
     fn levels_and_behaviors_read_well_in_a_log() {
         assert_eq!(level_name(101), "pop-up menu");
+        assert_eq!(level_name(100), "toast, under pop-up menu");
         assert_eq!(level_name(3), "floating");
         assert_eq!(level_name(102), "custom");
         assert_eq!(
@@ -256,9 +309,11 @@ mod tests {
 
     #[test]
     fn a_null_window_is_refused() {
-        // SAFETY: null is allowed by the contract and never dereferenced.
-        let hardened = unsafe { harden_window(std::ptr::null_mut()) };
-        assert!(matches!(hardened, Err(PlatformError::Os { .. })));
+        for role in [WindowRole::Overlay, WindowRole::Toast] {
+            // SAFETY: null is allowed by the contract and never dereferenced.
+            let hardened = unsafe { harden_window(std::ptr::null_mut(), role) };
+            assert!(matches!(hardened, Err(PlatformError::Os { .. })));
+        }
         // SAFETY: as above.
         let shown = unsafe { frame_and_show(std::ptr::null_mut(), Rect::default()) };
         assert!(matches!(shown, Err(PlatformError::Os { .. })));

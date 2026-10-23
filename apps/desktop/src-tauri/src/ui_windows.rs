@@ -46,7 +46,7 @@ pub fn prepare_overlay(app: &AppHandle) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     windows_overlay::harden(&overlay);
     #[cfg(target_os = "macos")]
-    mac_overlay::harden(&overlay);
+    mac_overlay::harden(&overlay, grape_platform::macos::WindowRole::Overlay);
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = overlay;
 
@@ -65,7 +65,7 @@ pub fn prepare_toast(app: &AppHandle) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     windows_overlay::harden(&toast);
     #[cfg(target_os = "macos")]
-    mac_overlay::harden(&toast);
+    mac_overlay::harden(&toast, grape_platform::macos::WindowRole::Toast);
     refuse_drops(app, &toast);
     Ok(())
 }
@@ -234,8 +234,9 @@ mod windows_overlay {
 #[cfg(target_os = "macos")]
 mod mac_overlay {
     /// Lifts `window` over the menu bar, the Dock and full-screen apps, on
-    /// every Space, and logs how it ended up. Main thread only.
-    pub(super) fn harden(window: &tauri::WebviewWindow) {
+    /// every Space, and logs how it ended up. The toast sits one level
+    /// below the overlay. Main thread only.
+    pub(super) fn harden(window: &tauri::WebviewWindow, role: grape_platform::macos::WindowRole) {
         let ns_window = match window.ns_window() {
             Ok(ns_window) => ns_window,
             Err(err) => {
@@ -245,7 +246,7 @@ mod mac_overlay {
         };
         // SAFETY: `ns_window` came from Tauri on this, the main thread
         // (setup), just now, so it's a live NSWindow for this call.
-        match unsafe { grape_platform::macos::harden_window(ns_window) } {
+        match unsafe { grape_platform::macos::harden_window(ns_window, role) } {
             // SAFETY: as above.
             Ok(()) => log::info!("{}: {}", window.label(), unsafe {
                 grape_platform::macos::describe_window(ns_window)
