@@ -33,8 +33,9 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 /// - **The fallback folder** is Grape's own (`Downloads\Grape`) and may not
 ///   exist yet. It is never created here: a missing fallback gets no names
 ///   and counts as writable when its nearest existing ancestor is a folder
-///   that passes the probe. The engine creates it only when a job actually
-///   uses it (`Job::used_fallback`). No folder is ever created here.
+///   that passes the probe. The engine creates it only when a job writes
+///   into it (by falling back, or because `OutputLocation::Folder` names
+///   it). No folder is ever created here.
 ///
 /// Never panics; problems show up as `writable = false` and the planner
 /// then falls back or reports `NoWritableDestination`.

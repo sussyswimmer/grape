@@ -130,9 +130,11 @@ pub(crate) fn convert(
     };
     let icc = icc.filter(|profile| icc_fits(profile, &img, to));
 
-    if job.used_fallback {
-        // The fallback is Grape's own folder (Downloads\Grape); it may not
-        // exist yet.
+    // The planner only picks a missing folder when it is Grape's own
+    // fallback (Downloads\Grape), which it counts as writable when it could
+    // be created. A job gets there by falling back, or because the output
+    // setting names that same folder; either way it is created now.
+    if job.used_fallback || !dir.try_exists().unwrap_or(true) {
         fs::create_dir_all(dir)
             .map_err(|e| names.write_failed(format!("create {}: {e}", dir.display())))?;
     }

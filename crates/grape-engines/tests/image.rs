@@ -12,8 +12,8 @@ use std::time::SystemTime;
 
 use common::{assert_no_leftovers, names_in, TestDir};
 use grape_core::{
-    pairs, plan, DirSnapshot, Features, Format, Job, JobOutput, Operation, Selection,
-    SelectionItem, Settings, ToolKey,
+    pairs, plan, DirSnapshot, Features, Format, Job, JobOutput, Operation, OutputLocation,
+    Selection, SelectionItem, Settings, ToolKey,
 };
 use grape_engines::{build_selection, run_job, supports, EngineCtx, ErrorKind, JobOutcome};
 use image::codecs::jpeg::JpegEncoder;
@@ -774,4 +774,31 @@ fn a_folder_that_turns_read_only_is_a_write_error() {
     );
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
+}
+#[test]
+fn an_output_folder_that_is_the_missing_fallback_is_created() {
+    // The output setting names Grape's own fallback folder, which doesn't
+    // exist yet: the job isn't a fallback job, but the folder is created.
+    let dir = TestDir::new("output-is-fallback");
+    let src = dir.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let fallback = dir.join("Downloads").join("Grape");
+    let settings = Settings {
+        output: OutputLocation::Folder(fallback.clone()),
+        ..Settings::new(&fallback)
+    };
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Webp), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert!(!job.used_fallback);
+    let before = SourceState::of(&src);
+
+    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+
+    assert_eq!(outcome.outputs, [fallback.join("photo.webp")]);
+    assert_eq!(names_in(&fallback), ["photo.webp"]);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
 }
