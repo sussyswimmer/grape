@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Same toolchain as rust-toolchain.toml, so clippy's lints match local runs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  ui-windows:
+    name: UI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the pnpm version from package.json's packageManager field.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm -C apps/desktop/ui typecheck
+      - name: Test
+        run: pnpm -C apps/desktop/ui test
+      - name: Build
+        run: pnpm -C apps/desktop/ui build
+
+  # The macOS port (DECISIONS D18): lint and test on a Mac, like Windows.
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Every crate's tests, even after one fails: the Mac runs are new.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
+
+  # A Mac build anyone can download from the run's Artifacts: a universal
+  # (Apple silicon + Intel) Grape.app in a DMG. It's ad-hoc signed, not
+  # notarized, so the first open needs the steps in docs/PLATFORM_MACOS.md
+  # → "Running a CI build".
+  build-macos:
+    name: Build (macOS DMG)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Build Grape.app and the DMG
+        working-directory: apps/desktop
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Grape-macOS-universal
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error

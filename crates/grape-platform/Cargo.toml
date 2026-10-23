@@ -1,0 +1,97 @@
+[package]
+name = "grape-platform"
+description = "OS glue for Grape: drag detection, modifiers, display bounds, file actions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+# Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
+# so this shares that build. wry and tao already enable every feature below
+# except Win32_Storage_FileSystem, so the rest add no new code to the build
+# (DECISIONS D9, D13).
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# The COM `#[implement]` macro (Grape's IDropTarget) expands to `windows_core`
+# paths, so the crate must be a direct dependency. Same version wry and tao
+# already build.
+windows-core = "0.62.2"
+
+# Only macOS builds pull in the AppKit bindings (DECISIONS D18). tao and wry
+# already build every one of these crates at these versions, so nothing new
+# enters Cargo.lock; the features are the smallest set the code needs.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6.5", default-features = false, features = [
+    "std",
+    "exception",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-core-foundation",
+    "NSArray",
+    "NSEnumerator",
+    "NSError",
+    "NSFileManager",
+    "NSGeometry",
+    "NSProcessInfo",
+    "NSString",
+    "NSURL",
+] }
+# `libc` only types NSRunningApplication's `processIdentifier` (pid_t); the
+# libc crate is already in the build.
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "libc",
+    "objc2-core-foundation",
+    "NSAlert",
+    "NSApplication",
+    "NSButton",
+    "NSControl",
+    "NSEvent",
+    "NSHapticFeedback",
+    "NSOpenPanel",
+    "NSPanel",
+    "NSPasteboard",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSSavePanel",
+    "NSScreen",
+    "NSSharingService",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+] }
+# Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds).
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGDirectDisplay",
+    "CGError",
+] }
+# The main queue, for AppKit work that must run on the main thread.
+dispatch2 = { version = "0.3.1", default-features = false, features = [
+    "std",
+    "objc2",
+] }
+
+[lints]
+workspace = true

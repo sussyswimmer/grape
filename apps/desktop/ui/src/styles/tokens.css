@@ -1,0 +1,90 @@
+/*
+ * Grape's palette and shared design tokens. Every color in the UI comes
+ * from here. The accent is a deep grape purple; the leaf green is used
+ * sparingly. The glass tokens follow the OS light/dark theme.
+ */
+:root {
+  /* Grape purples, darkest to lightest. */
+  --grape-950: #1b0c2e;
+  --grape-900: #2a1046;
+  --grape-700: #4b1f7a;
+  --grape-600: #5e2b97; /* brand accent */
+  --grape-500: #7442b8;
+  --grape-300: #b596e6;
+  --grape-100: #eee6fb;
+  --grape-50: #f8f4fd;
+
+  /* Leaf green. */
+  --leaf-600: #4a8a55;
+  --leaf-500: #5fa36a;
+
+  /* Wine red, for errors only. */
+  --wine-600: #a8304f;
+  --wine-400: #e07a95;
+
+  /* Semantic tokens, light theme. */
+  --color-accent: var(--grape-600);
+  --color-bg: var(--grape-50);
+  --color-surface: #ffffff;
+  --color-text: #1e1430;
+  --color-text-muted: #5a4d6e;
+  --color-border: rgba(94, 43, 151, 0.18);
+  --color-done: var(--leaf-600);
+  --color-error: var(--wine-600);
+  /* Text drawn on the accent fill, e.g. a highlighted segment's label. */
+  --color-on-accent: #ffffff;
+
+  /* The wheel's frosted glass. */
+  --glass-fill: rgba(248, 244, 253, 0.74);
+  --glass-stroke: rgba(94, 43, 151, 0.22);
+  --glass-blur: 18px;
+  --segment-fill: rgba(116, 66, 184, 0.16);
+  --segment-stroke: rgba(94, 43, 151, 0.35);
+  --segment-highlight: var(--grape-500);
+
+  /*
+   * Glass in a transparent window (the wheel overlay, the toast), where
+   * backdrop blur doesn't apply, so the fill is denser. grape-50 here,
+   * grape-950 in dark mode.
+   */
+  --glass-fill-solid: rgba(248, 244, 253, 0.94);
+  --glass-fill-pill: rgba(248, 244, 253, 0.96);
+
+  /* Drop shadows, tinted with grape-950 instead of black. */
+  --shadow-strong: rgba(27, 12, 46, 0.26);
+  --shadow-soft: rgba(27, 12, 46, 0.18);
+
+  /* The track behind a progress bar (grape-600; grape-300 in dark mode). */
+  --track-fill: rgba(94, 43, 151, 0.14);
+
+  /* System fonts only: nothing is downloaded (offline rule). */
+  --font-ui: system-ui, "Segoe UI", sans-serif;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-accent: var(--grape-300);
+    --color-bg: var(--grape-950);
+    --color-surface: #251838;
+    --color-text: #f3eefb;
+    --color-text-muted: #b9aecb;
+    --color-border: rgba(181, 150, 230, 0.2);
+    --color-done: var(--leaf-500);
+    --color-error: var(--wine-400);
+    --color-on-accent: var(--grape-950);
+
+    --glass-fill: rgba(27, 12, 46, 0.7);
+    --glass-stroke: rgba(181, 150, 230, 0.26);
+    --segment-fill: rgba(181, 150, 230, 0.16);
+    --segment-stroke: rgba(181, 150, 230, 0.38);
+    --segment-highlight: var(--grape-300);
+
+    --glass-fill-solid: rgba(27, 12, 46, 0.92);
+    --glass-fill-pill: rgba(27, 12, 46, 0.94);
+    --shadow-strong: rgba(27, 12, 46, 0.55);
+    --shadow-soft: rgba(27, 12, 46, 0.5);
+    --track-fill: rgba(181, 150, 230, 0.2);
+  }
+}

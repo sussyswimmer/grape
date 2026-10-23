@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "toast",
+  "description": "The toast listens for toast://show and toast://hide, and tells Rust when it's clicked (toast_clicked with the toast's id, never a path) so Rust can reveal the output.",
+  "windows": ["toast"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-toast-clicked"]
+}

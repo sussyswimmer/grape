@@ -1,0 +1,44 @@
+/**
+ * The golden payloads from `src/shared/fixtures/`, parsed and guarded, for
+ * tests. Test code only.
+ */
+
+import {
+  isToastShowPayload,
+  isWheelOpenPayload,
+  type ToastShowPayload,
+  type WheelOpenPayload,
+} from "../shared/events";
+
+const raw = import.meta.glob<string>("../shared/fixtures/*.json", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+/** The parsed JSON of `src/shared/fixtures/<name>`. */
+export function fixtureJson(name: string): unknown {
+  const text = raw[`../shared/fixtures/${name}`];
+  if (text === undefined) {
+    throw new Error(`no fixture ${name}`);
+  }
+  return JSON.parse(text);
+}
+
+/** A `wheel://open` fixture, guarded. */
+export function openFixture(name: string): WheelOpenPayload {
+  const value = fixtureJson(name);
+  if (!isWheelOpenPayload(value)) {
+    throw new Error(`${name} is not a wheel://open payload`);
+  }
+  return value;
+}
+
+/** A `toast://show` fixture, guarded. */
+export function toastFixture(name: string): ToastShowPayload {
+  const value = fixtureJson(name);
+  if (!isToastShowPayload(value)) {
+    throw new Error(`${name} is not a toast://show payload`);
+  }
+  return value;
+}

@@ -1,0 +1,65 @@
+# Engines, codecs and licensing
+
+## Licensing rules (Grape is free and open source; see DECISIONS D2)
+
+1. **Grape's own binaries** (the Tauri app and our crates) may link only permissive code (MIT/Apache/BSD/ISC/Zlib) or LGPL libraries that are *dynamically* linked.
+2. **GPL/AGPL tools may ship only as separate sidecar executables** that Grape runs as a child process. Never link them into our binary.
+3. Every bundled third-party binary ships with its license text in `licenses/` and an entry in `THIRD_PARTY_NOTICES.md`. GPL sidecars also need the exact source version and a link to the source (or a source archive on the GitHub Release).
+4. Record every new library or sidecar in `DECISIONS.md`: name, version, license and why it's needed.
+5. Skip anything with *restrictive non-OSS* terms, like the `unrar` freeware license. Use libarchive (BSD) for RAR reading instead.
+
+## Engine map
+
+| Family | v1 engine | Notes |
+|---|---|---|
+| **Raster images** (jpg png webp tiff bmp avif) | Rust `image` crate + `ravif` (AVIF encode) + `jpeg-encoder`/`mozjpeg` for quality | Keep EXIF orientation: apply it, then strip or keep per tool |
+| **HEIC** | macOS: ImageIO. Windows: libheif + libde265 (LGPL DLLs) to decode; `heif-enc` sidecar with x265 (GPL, rule 2) to encode | |
+| **SVG input** | `resvg` + `usvg` | Rasterize; see the size rule in FORMAT_MATRIX |
+| **Images → PDF / Create PDF** | `printpdf` or `lopdf` embedding JPEG/PNG streams directly | One page per image, page size = image aspect at 72 dpi-equivalent |
+| **Audio & video** | **FFmpeg sidecar** (static build, pinned version) | Arguments per target below |
+| **PDF → JPG/PNG** | `pdfium-render` + bundled PDFium (BSD/Apache) | 300 DPI, every page; folder for > 1 page |
+| **PDF → TXT / MD** | PDFium text extraction. MD = paragraphs + headings by font-size heuristics | Scanned PDFs: OCR is v2 (Apple Vision on mac, `Windows.Media.Ocr` on Windows) |
+| **PDF split / merge / metadata** | `lopdf` | |
+| **PDF compress** (v2) | Downsample embedded images via pdfium + lopdf rewrite | No Ghostscript |
+| **Subtitles** | Our own parser in `grape-engines` (srt ⇄ vtt ⇄ txt) | Tiny, fully tested |
+| **Archives** | `zip`, `tar`, `flate2`; RAR read via `compress-tools` (libarchive) | Zip-slip guard on extract: reject `..` and absolute paths |
+| **Documents** (v2) | `pandoc` sidecar (GPL, rule 2) for docx/md/html/epub/txt/rtf. macOS can also use `NSAttributedString` for docx/rtf/rtfd | → PDF: render HTML in the system webview and print to PDF (WKWebView `createPDF`, WebView2 `PrintToPdfAsync`). No LaTeX |
+| **Spreadsheets** (v2) | `calamine` (read xlsx/xls/ods), `rust_xlsxwriter` (xlsx), `spreadsheet-ods` (ods), `csv` | → PDF via HTML table + webview print |
+| **Slides** (v2) | LibreOffice headless sidecar (MPL) for ppt/pptx → pdf, then pdfium → images | Big download (~300 MB). Make it an **optional add-on download**, which needs a DECISIONS entry since it's a network call |
+| **PDF → DOCX/PPTX/XLSX/EPUB** (v2) | LibreOffice `--infilter=writer_pdf_import` for docx; others TBD | Quality is hard. Spike before promising |
+| **Pages** | none | O2 in DECISIONS |
+
+## FFmpeg build
+
+- Pin one version for both OSes (e.g. 7.1.x) and record it in DECISIONS.
+- Build flags: `--enable-gpl --enable-version3 --enable-libx264 --enable-libmp3lame --enable-libopus --enable-libvorbis --enable-libvpx --enable-libdav1d --enable-libsvtav1`, plus platform hardware encoders: `--enable-videotoolbox` (mac); `--enable-mediafoundation --enable-nvenc --enable-amf --enable-libvpl` (win). GPL is fine under rule 2.
+- Use a reputable static build (e.g. BtbN for Windows, evermeet/martin-riedl style for macOS) or our own CI build. Record the source and checksum.
+- Ship as a Tauri sidecar via `bundle.externalBin` with target-triple suffixes (`ffmpeg-aarch64-apple-darwin`, `ffmpeg-x86_64-pc-windows-msvc.exe`, …). Also ship `ffprobe`.
+
+### Target arguments (starting points; tune in M3)
+
+| Target | Video | Audio | Notes |
+|---|---|---|---|
+| mp4 | `h264_videotoolbox` (mac) / hw or `libx264 -crf 20 -preset medium` | `aac -b:a 192k` | `-movflags +faststart -pix_fmt yuv420p` |
+| mov | same as mp4 | `aac` | |
+| mkv | `-c copy` when the codecs fit, else as mp4 | | try remux first |
+| webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1` | `libopus 128k` | |
+| avi | `mpeg4 -q:v 3` | `libmp3lame` | |
+| wmv | `wmv2 -q:v 3` | `wmav2` | |
+| gif | `fps=12,scale=min(iw\,720):-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse` | — | cap long inputs: warn above 30 s |
+| mp3 | — | `libmp3lame -q:a 2` | from video: `-vn` |
+| m4a | — | `aac 256k` | |
+| wav | — | `pcm_s16le` (keep 24-bit if the source is) | |
+| flac | — | `flac -compression_level 8` | compress(wav) → flac |
+| ogg | — | `libvorbis -q:a 6` | |
+| opus | — | `libopus 128k` | |
+| aiff | — | `pcm_s16be` | |
+| wma | — | `wmav2 192k` | |
+
+Run FFmpeg with `-nostdin -hide_banner -y`, write to a temp name, parse `-progress pipe:1` for the progress bar, and kill the child process on cancel.
+
+## Metadata removal
+- Images: decode and re-encode without EXIF/XMP/IPTC. Apply the orientation first, so stripping it doesn't rotate the picture.
+- Media: `-map_metadata -1 -map_chapters -1 -c copy`.
+- PDF: clear the `Info` dictionary and XMP `Metadata` stream with lopdf.
+- Report what was removed (GPS, camera, author…) in the toast.
