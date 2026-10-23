@@ -2,17 +2,19 @@
 //! them with the code, so any drift between the two fails the build.
 //!
 //! The parser only reads `|` table rows and a few rule lines it looks for
-//! by their exact wording; prose and `[Grape]` bullets around them are
-//! ignored. Rules that are formulas or prose (the §4 angle and hit-test
-//! rules, the naming bullets) are pinned by phrase, and their examples are
-//! run through the code.
+//! by their exact wording; other prose and `[Grape]` bullets around them
+//! are ignored. Rules that are formulas or prose (the §4 angle, hit-test and
+//! hit-shape rules, the naming bullets) are pinned by phrase, and their
+//! examples are run through the code.
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashSet;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::path::Path;
 
-use grape_core::geometry::{start_angle, GAP, GEOMETRY, INNER_R, OUTER_R, SCREEN_MARGIN};
+use grape_core::geometry::{
+    fillet_radius, start_angle, CORNER, GAP, GEOMETRY, INNER_R, OUTER_R, SCREEN_MARGIN,
+};
 use grape_core::{
     actions, hit_test, output_name, page_file_name, pair_tier, pairs, plan, split_name, targets,
     tool_naming, tool_suffix, tool_tier, tools, wheel_content, wheel_layout, Category, Channels,
@@ -722,15 +724,101 @@ fn hit_test_rule_matches() {
             assert_eq!(hit(segment.center, INNER_R + eps), i, "n={n}");
             assert_eq!(hit(segment.center, OUTER_R - eps), i, "n={n}");
             assert_eq!(hit(segment.center, OUTER_R + eps), None, "n={n}");
-            // The gap: past `π/n − asin(GAP/2 / d)` from the center.
-            for d in [INNER_R + 1.0, GEOMETRY.label_r, OUTER_R - 1.0] {
+            // The gap: past `π/n − asin(GAP/2 / d)` from the center. One
+            // item has no gap (the [Grape] shape rule, checked below).
+            if n == 1 {
+                continue;
+            }
+            // Just inside the gap edge at `OUTER_R − 1` is a rounded-off
+            // corner, so it selects nothing either (checked below).
+            for (d, in_corner) in [
+                (INNER_R + 1.0, false),
+                (GEOMETRY.label_r, false),
+                (OUTER_R - 1.0, true),
+            ] {
                 let half = PI / n as f64 - (GAP / 2.0 / d).asin();
                 for side in [1.0, -1.0] {
                     let inside = segment.center + side * (half - eps);
                     let outside = segment.center + side * (half + eps);
-                    assert_eq!(hit(inside, d), i, "n={n} d={d}");
                     assert_eq!(hit(outside, d), None, "n={n} d={d}");
+                    if !in_corner {
+                        assert_eq!(hit(inside, d), i, "n={n} d={d}");
+                    }
                 }
+            }
+        }
+    }
+}
+
+#[test]
+fn hit_test_shape_rule_matches() {
+    let line = line_with(INTERACTION_SPEC, "honors the rounded outer corners itself");
+    assert_pinned(
+        line,
+        &[
+            "**[Grape]** Hit testing runs in `grape-core`",
+            "the overlay receives no pointer events during an OS drag",
+            "rounded by a circle tangent to the gap edge and to the outer circle",
+            "with radius `min(CORNER, the largest that fits the segment)`",
+            "in the cut-off corner outside that circle selects nothing",
+            "The inner corners stay square",
+            "With one item the wheel is a full ring with no gap",
+            "any pointer with `INNER_R ≤ d ≤ OUTER_R` selects it",
+            "Segments too narrow to draw (their inner corners would cross, from 76 items with these constants) select nothing",
+        ],
+    );
+    let at = |angle: f64, d: f64| (d * angle.cos(), -d * angle.sin());
+    let eps = 1e-6;
+
+    // "from 76 items": segment 0's center ray still hits at 75 and not at 76.
+    let (dx, dy) = at(start_angle(75), GEOMETRY.label_r);
+    assert_eq!(hit_test(dx, dy, 75), Some(0));
+    let (dx, dy) = at(start_angle(76), GEOMETRY.label_r);
+    assert_eq!(hit_test(dx, dy, 76), None);
+
+    // One item: a full ring, also straight below the anchor where a gap
+    // would be.
+    assert_eq!(hit_test(0.0, INNER_R, 1), Some(0));
+    assert_eq!(hit_test(0.0, GEOMETRY.label_r, 1), Some(0));
+    assert_eq!(hit_test(0.0, OUTER_R, 1), Some(0));
+    for k in 0..720 {
+        let angle = TAU * f64::from(k) / 720.0;
+        for d in [INNER_R + eps, GEOMETRY.label_r, OUTER_R - eps] {
+            let (dx, dy) = at(angle, d);
+            assert_eq!(hit_test(dx, dy, 1), Some(0), "angle={angle} d={d}");
+        }
+    }
+
+    for n in 2..=12 {
+        let h = PI / n as f64;
+        // A circle tangent to the gap edge (GAP/2 + ρ from the boundary ray)
+        // and, from inside, to the outer circle (OUTER_R − ρ from the anchor).
+        let center_angle = |rho: f64| ((GAP / 2.0 + rho) / (OUTER_R - rho)).asin();
+        // `CORNER` fits a twelfth of the ring (its tangent point stays short
+        // of the segment's center line), so `min(CORNER, …)` is `CORNER`.
+        assert!(center_angle(CORNER) < h, "n={n}");
+        let rho = fillet_radius(n);
+        assert_eq!(rho, CORNER, "n={n}");
+        let phi = center_angle(rho);
+        for segment in wheel_layout(n) {
+            let i = Some(segment.index);
+            for side in [1.0, -1.0] {
+                // The boundary ray, and the fillet center just inside it.
+                let beta = segment.center + side * h;
+                let (cx, cy) = at(beta - side * phi, OUTER_R - rho);
+                assert_eq!(hit_test(cx, cy, n), i, "n={n}: fillet center");
+                // Just inside the gap edge at OUTER_R − 1: the [observed] gap
+                // rule alone would select it, but it's outside the fillet.
+                let d = OUTER_R - 1.0;
+                let gap_edge = segment.center + side * (h - (GAP / 2.0 / d).asin() - eps);
+                let (x, y) = at(gap_edge, d);
+                assert!((x - cx).hypot(y - cy) > rho, "n={n}: in the cut-off corner");
+                assert_eq!(hit_test(x, y, n), None, "n={n}: cut-off corner");
+                // Halfway between the fillet center and that point: inside
+                // the fillet, so selected.
+                let (mx, my) = ((x + cx) / 2.0, (y + cy) / 2.0);
+                assert!((mx - cx).hypot(my - cy) < rho, "n={n}");
+                assert_eq!(hit_test(mx, my, n), i, "n={n}: inside the fillet");
             }
         }
     }

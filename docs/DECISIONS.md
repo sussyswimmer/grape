@@ -131,6 +131,38 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **`toast_clicked(id)`:** granted only to the toast window (`capabilities/toast.json`, with event listen/unlisten). The page sends the toast's id, never a path; Rust looks up what to reveal.
 - **WebView2 flags:** every window uses the same `additionalBrowserArgs` (`ui_windows::BROWSER_ARGS`, repeated in `tauri.conf.json`; a test checks they match), because WebView2 won't start windows with different flags in one profile. Setting flags replaces wry's defaults, so the string keeps wry's `--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection` and adds `--autoplay-policy=no-user-gesture-required` so the overlay's tick plays without a click.
 
+## D16: Raster image engine and no-clobber writes (2026-10-23, proposed, confirm)
+- **Engine:** `grape-engines` converts among JPG, PNG, WebP, TIFF and BMP (20 pairs) with `image` 0.25.10 (MIT OR Apache-2.0). It's crate-local, with `default-features = false` and features `jpeg`, `png`, `webp`, `bmp` and `tiff`, so there's no rayon and no other codecs.
+  - JPEG is written at quality 90, with alpha flattened onto white. WebP output is lossless only, because lossy WebP would need libwebp.
+  - EXIF orientation is applied to the pixels. The ICC profile is kept when the target can embed it; a profile too large for JPEG is left out.
+  - Only the first frame or page of an animated or multi-page input is converted.
+  - Memory is reserved against a 512 MiB limit for the decoded image and the converted copy before anything is allocated. A bigger image is refused before decoding.
+  - Cancel is checked while reading, converting and writing.
+  - Every other target (HEIC, AVIF, SVG, PDF, audio, video) and every tool returns `NotYetSupported` with a message the toast can show.
+- **API** (for the app): `supports(&Operation, Option<Format>)`; `run_job(&Job, &EngineCtx, &mut dyn FnMut(f32)) -> Result<JobOutcome { outputs, renamed }, GrapeError { kind, user_message, detail }>`, which **blocks** (run it on a worker); `EngineCtx { sidecars: SidecarPaths, cancel: CancelToken }`, where `EngineCtx::default()` is fine until sidecars exist; `build_selection(&[PathBuf], &Settings) -> Selection`, which reads the disk so `grape-core` doesn't have to.
+- **No-clobber writes:**
+  - Output goes to `.grape-tmp-{pid}-{nanos}-{n}.{ext}` in the destination folder, created with `create_new` and synced.
+  - It is then named with `std::fs::hard_link(tmp, final)`, which fails if `final` exists, so the name appears atomically with the full content. The temp is then removed.
+  - If the name was taken meanwhile, the job re-plans it with `grape_core::output_name` up to 3 times (`renamed = true`), else it fails with `NameTaken`.
+  - Where hard links don't work (FAT32, exFAT, some shares), it creates `final` with `create_new` and copies. That is still no-clobber but not atomic: a crash mid-copy can leave a partial file with the new name. `MoveFileExW` would be atomic but needs `unsafe`, which the crate forbids.
+  - A drop guard deletes the temp on every path, retrying for up to 775 ms in case a scanner holds it. A temp that still can't be deleted stays (known limitation; a startup sweep can come later).
+- **Writability probes:** `build_selection` creates and deletes a `.grape-probe-…` file in each destination folder. On Windows the probe is opened delete-on-close, so it can't be left behind. Grape's fallback folder (`Downloads\Grape`) is created only when a job actually falls back; until then it counts as writable if its nearest existing parent passes the probe.
+- **New `Cargo.lock` entries**, all permissive and all published before the 14-day cutoff (D9): image 0.25.10, zune-jpeg 0.5.15, zune-core 0.5.3 (MIT/Apache-2.0/Zlib); image-webp 0.2.4, half 2.7.1, weezl 0.1.12 (MIT OR Apache-2.0); tiff 0.11.3, fax 0.2.7, crunchy 0.2.4 (MIT); moxcms 0.8.1, pxfm 0.1.30 (BSD-3-Clause OR Apache-2.0); byteorder-lite 0.1.0 (Unlicense OR MIT); quick-error 2.0.1 (MIT/Apache-2.0). No GPL, LGPL or MPL in the engines tree.
+- **Tested:** every engine test hashes the source before and after and checks that no temp or probe file is left. CI's Windows runner exercises the NTFS hard-link path.
+- **Revisit if:** lossy WebP is wanted (libwebp), or HEIC/AVIF/SVG/PDF land (ravif, resvg, pdfium).
+
+## D17: `hit_test` follows the drawn wheel (2026-10-23, proposed, confirm)
+- **Decision:** `grape_core::hit_test` selects exactly what the overlay draws (`INTERACTION_SPEC.md` §4):
+  - the rounded outer corners: a pointer in a corner's cut-off, outside its fillet circle, selects nothing;
+  - one item is a full ring with no gap;
+  - segments too narrow to draw (from 76 items) select nothing.
+- **API:** adds `pub fn fillet_radius(n) -> f64`, the corner radius `min(CORNER, the largest that fits)`, which mirrors the UI's `filletRadius`. `hit_test`'s signature is unchanged. This extends D12.
+- **Why:** during an OS drag the overlay gets no pointer events, so it can't re-check `isPointInFill` as the spec's [observed] line describes. The check has to live where the hit test runs.
+- **Checked:**
+  - Against the UI's own `segmentPath` on a 0.5 px grid for n = 1–12: 0 disagreements in 3.15 million points away from the outlines.
+  - The UI's agreement test (`ui/src/wheel/geometry.test.ts`) now covers the corners and the single-item ring, too.
+- **Revisit if:** the wheel's shape changes; the UI and core must change together.
+
 ---
 
 ## Open questions

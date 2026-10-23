@@ -55,7 +55,7 @@ These are Grape's values, in points/DIPs at 1× scale. The site's values were �
 - **[observed]** There are `n` equal segments. The center angle of segment `i` is `start(n) − 2π·i/n`, with angles measured counter-clockwise from +x, so segments advance clockwise. `start(n) = π/2` (item 0 at the **top**), except `start(3) = π` (item 0 on the **left**).
 - **[observed]** **Hit test**: let `d` be the distance from the anchor. If `d < INNER_R` or `d > OUTER_R`, nothing is selected. Otherwise pick the nearest segment by angle. If the pointer's angular distance from that segment's center exceeds `π/n − asin(GAP/2 / d)`, it's in a gap, so nothing is selected.
 - **[observed]** The UI then also checks that the pointer is inside the drawn path (`isPointInFill`), so the rounded corners are honored. Grape does the same.
-- **[Grape]** Hit testing runs in `grape-core` (pure function, unit-tested). The UI may re-check against its rendered path.
+- **[Grape]** Hit testing runs in `grape-core` (pure function, unit-tested) and honors the rounded outer corners itself, because the overlay receives no pointer events during an OS drag and can't re-check its drawn path. Each outer corner is rounded by a circle tangent to the gap edge and to the outer circle, with radius `min(CORNER, the largest that fits the segment)`. A pointer in the cut-off corner outside that circle selects nothing. The inner corners stay square. With one item the wheel is a full ring with no gap: any pointer with `INNER_R ≤ d ≤ OUTER_R` selects it. Segments too narrow to draw (their inner corners would cross, from 76 items with these constants) select nothing.
 
 ## 5. Feedback
 

@@ -148,16 +148,134 @@ pub fn wheel_layout(n: usize) -> Vec<Segment> {
         .collect()
 }
 
+/// How far (radians) the fillets must stop short of a segment's center
+/// line, so the two fillets of a narrow segment never cross. The UI's
+/// `RHO_ANGLE_MARGIN` in `apps/desktop/ui/src/wheel/geometry.ts`.
+const FILLET_ANGLE_MARGIN: f64 = 1e-6;
+
+/// Bisection steps for the largest fillet that fits when [`CORNER`] is too
+/// big. The UI's `RHO_SEARCH_STEPS`.
+const FILLET_SEARCH_STEPS: usize = 20;
+
+/// True when `n` segments can be drawn: at least one, and for `n ≥ 2`
+/// segments wide enough at [`INNER_R`] that the square inner corners don't
+/// cross (the UI's `canDraw` with the spec constants). False from `n = 76`.
+fn can_draw(n: usize) -> bool {
+    match n {
+        0 => false,
+        1 => true,
+        _ => PI / n as f64 - (GAP / 2.0 / INNER_R).asin() > 0.0,
+    }
+}
+
+/// An outer-corner fillet of radius `rho`: the circle tangent to a
+/// segment's gap edge and, from inside, to the outer circle.
+///
+/// Measured in the frame of the boundary ray (`u` along the ray, `w` the
+/// distance from the ray's line toward the segment), its center is
+/// `(u, offset)`. It touches the gap edge at `(u, GAP/2)` and the outer
+/// circle at `angle` from the ray.
+#[derive(Debug, Clone, Copy)]
+struct Fillet {
+    /// The radius.
+    rho: f64,
+    /// The center's `u`: `√((OUTER_R − rho)² − (GAP/2 + rho)²)`.
+    u: f64,
+    /// The center's `w`: `GAP/2 + rho`.
+    offset: f64,
+    /// The angle from the ray to the center and to the outer tangent point
+    /// (the UI's `filletAngle`).
+    angle: f64,
+}
+
+impl Fillet {
+    /// The fillet of radius `rho`, or `None` when it can't touch both the
+    /// gap edge and the outer circle.
+    fn new(rho: f64) -> Option<Self> {
+        let inset = OUTER_R - rho;
+        let offset = GAP / 2.0 + rho;
+        if inset <= offset {
+            return None;
+        }
+        let u = (inset * inset - offset * offset).sqrt();
+        Some(Self {
+            rho,
+            u,
+            offset,
+            angle: offset.atan2(u),
+        })
+    }
+
+    /// True when a point `d` from the anchor and `alpha` radians from the
+    /// nearer boundary ray (toward the segment) is in the outer corner this
+    /// fillet cuts off: past the edge tangent point along the ray (`u` beyond
+    /// the center's), closer to the ray than the outer tangent point
+    /// (`alpha < angle`), and outside the fillet circle. Only meaningful for
+    /// a point that is already on the ring and out of the gap.
+    fn cuts_off(&self, d: f64, alpha: f64) -> bool {
+        let u = d * alpha.cos();
+        let w = d * alpha.sin();
+        alpha < self.angle && u > self.u && (u - self.u).hypot(w - self.offset) > self.rho
+    }
+}
+
+/// The radius of the rounded outer corners of `n` segments (§4): [`CORNER`],
+/// or the largest radius that fits when the segments are too narrow for it.
+/// The same rule as the UI's `filletRadius` in
+/// `apps/desktop/ui/src/wheel/geometry.ts`, which draws the shape.
+///
+/// A radius fits when its fillet touches both the gap edge and the outer
+/// circle, its outer tangent point stays at least `1e-6` rad short of the
+/// segment's center line (so the two fillets never cross), and its edge
+/// tangent point is no closer to the anchor than the square inner corner.
+/// The largest fitting radius is found by a 20-step bisection on
+/// `0..CORNER`. With the spec constants that is `CORNER` for `n ≤ 14` and
+/// less from `n = 15`.
+///
+/// Returns `0.0` (square corners) when `n < 2` (one item is a full ring
+/// with no corners), when the segments are too narrow to draw at all
+/// (`n ≥ 76`), or when no radius fits.
+pub fn fillet_radius(n: usize) -> f64 {
+    if n < 2 || !can_draw(n) {
+        return 0.0;
+    }
+    let h = PI / n as f64;
+    let half = GAP / 2.0;
+    let u_inner = (INNER_R * INNER_R - half * half).sqrt();
+    let fits = |rho: f64| {
+        Fillet::new(rho).is_some_and(|f| f.angle <= h - FILLET_ANGLE_MARGIN && f.u >= u_inner)
+    };
+    if fits(CORNER) {
+        return CORNER;
+    }
+    let (mut lo, mut hi) = (0.0, CORNER);
+    for _ in 0..FILLET_SEARCH_STEPS {
+        let mid = (lo + hi) / 2.0;
+        if fits(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 /// The segment under the screen offset `(dx, dy)` from the anchor (y down),
-/// or `None` (§4):
+/// or `None`. It matches the shape the UI draws (§4), because the overlay
+/// gets no pointer events during an OS drag and can't re-check its path:
 ///
-/// - `n == 0`, or any NaN input.
+/// - `n == 0`, or any NaN input: `None`.
 /// - `d < INNER_R` or `d > OUTER_R`, where `d` is the distance from the
-///   anchor. `d == INNER_R` and `d == OUTER_R` are selectable.
+///   anchor: `None`. `d == INNER_R` and `d == OUTER_R` are selectable.
+/// - `n == 1`: the wheel is a full ring with no gap, so every other point
+///   is `Some(0)`.
+/// - `n ≥ 76`: the segments are too narrow to draw, so `None`.
 /// - In a gap: the angular distance from the nearest segment's center
-///   exceeds `π/n − asin(GAP/2 / d)`.
-///
-/// The UI may additionally check its rendered path for rounded corners.
+///   exceeds `π/n − asin(GAP/2 / d)`, so `None`.
+/// - In a rounded-off outer corner: outside the fillet of radius
+///   [`fillet_radius`]`(n)`, in the zone past both of its tangent points
+///   (see `Fillet::cuts_off`), so `None`. The inner corners are square.
+/// - Otherwise the nearest segment by angle.
 pub fn hit_test(dx: f64, dy: f64, n: usize) -> Option<usize> {
     if n == 0 {
         return None;
@@ -165,6 +283,12 @@ pub fn hit_test(dx: f64, dy: f64, n: usize) -> Option<usize> {
     let d = dx.hypot(dy);
     // The range check also rejects NaN.
     if !(INNER_R..=OUTER_R).contains(&d) {
+        return None;
+    }
+    if n == 1 {
+        return Some(0);
+    }
+    if !can_draw(n) {
         return None;
     }
     let theta = (-dy).atan2(dx);
@@ -177,8 +301,14 @@ pub fn hit_test(dx: f64, dy: f64, n: usize) -> Option<usize> {
     let index = (k as usize).min(n - 1);
     let center = start - step * index as f64;
     let offset = wrap_angle(theta - center).abs();
-    let half_width = PI / count - (GAP / 2.0 / d).asin();
+    let half = PI / count;
+    let half_width = half - (GAP / 2.0 / d).asin();
     if offset > half_width {
+        return None;
+    }
+    let cut =
+        Fillet::new(fillet_radius(n)).is_some_and(|f| f.rho > 0.0 && f.cuts_off(d, half - offset));
+    if cut {
         None
     } else {
         Some(index)

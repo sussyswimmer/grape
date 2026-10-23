@@ -51,10 +51,17 @@ function layout(n: number, g: Geometry = G): UiSegment[] {
   });
 }
 
-/** grape-core `hit_test(dx, dy, n)`. */
+/**
+ * grape-core `hit_test(dx, dy, n)`: the ring, the gaps, and the rounded
+ * outer corners (a point in a corner's cut-off, outside its fillet circle,
+ * selects nothing). One item is a full ring with no gap.
+ */
 function hitTest(dx: number, dy: number, n: number, g: Geometry = G): number | null {
   const d = Math.hypot(dx, dy);
   if (n === 0 || !(d >= g.innerR && d <= g.outerR)) return null;
+  if (n === 1) return 0;
+  // Too narrow to draw (the inner corners would cross): nothing to select.
+  if (Math.PI / n - Math.asin(g.gap / 2 / g.innerR) <= 0) return null;
   const theta = Math.atan2(-dy, dx);
   const step = (2 * Math.PI) / n;
   const start = n === 3 ? Math.PI : Math.PI / 2;
@@ -62,7 +69,20 @@ function hitTest(dx: number, dy: number, n: number, g: Geometry = G): number | n
   const index = Math.min(((k % n) + n) % n, n - 1);
   const center = start - step * index;
   const wrapped = ((((theta - center + Math.PI) % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI)) - Math.PI;
-  return Math.abs(wrapped) > Math.PI / n - Math.asin(g.gap / 2 / d) ? null : index;
+  const offset = Math.abs(wrapped);
+  if (offset > Math.PI / n - Math.asin(g.gap / 2 / d)) return null;
+  const rho = filletRadius(n, g);
+  if (rho > 0) {
+    // In the frame of the nearer boundary ray: u along it, w toward the segment.
+    const alpha = Math.PI / n - offset;
+    const u = d * Math.cos(alpha);
+    const w = d * Math.sin(alpha);
+    const off = g.gap / 2 + rho;
+    const uc = Math.sqrt((g.outerR - rho) ** 2 - off ** 2);
+    const phi = Math.atan2(off, uc);
+    if (alpha < phi && u > uc && Math.hypot(u - uc, w - off) > rho) return null;
+  }
+  return index;
 }
 
 // ---------------------------------------------------------------------------
@@ -498,21 +518,15 @@ describe("segmentPath", () => {
     expect(segmentPath({ ...seg, center: seg.center - 1 }, 5, G)).not.toBe(segmentPath(seg, 5, G));
   });
 
-  it("agrees with grape-core's hit test away from the rounded corners", () => {
+  it("agrees with grape-core's hit test everywhere, rounded corners and the full ring included", () => {
     for (let n = 1; n <= 12; n += 1) {
       const segs = layout(n);
       const shapes = segs.map((seg) => flatten(segmentPath(seg, n, G)));
       const half = G.gap / 2;
-      const rounded = segs.flatMap((seg) => {
+      // Every fillet circle: its arc is part of the drawn outline.
+      const fillets = segs.flatMap((seg) => {
         const c = segmentCorners(seg, n, G);
-        if (c === null) return [];
-        // The unrounded outer corners (gap line meets outer circle): hit_test
-        // counts the bit the fillet cuts off, the drawing doesn't.
-        return [c.start, c.end].map((edge) => {
-          const extra = Math.sqrt(G.outerR ** 2 - half ** 2) - alongRay(edge.edge, edge.beta);
-          const d = dir(edge.beta);
-          return { x: edge.edge.x + extra * d.x, y: edge.edge.y + extra * d.y };
-        });
+        return c === null ? [] : [c.start.filletCenter, c.end.filletCenter];
       });
       const rho = filletRadius(n, G);
       let checked = 0;
@@ -521,18 +535,19 @@ describe("segmentPath", () => {
         for (let y = -G.outerR - 2; y <= G.outerR + 2; y += 2.1) {
           const p = { x, y };
           const d = norm(p);
-          // Stay clear of every boundary by 0.25 px: the circles, the gap lines, the corners.
+          // Stay clear of every boundary by 0.25 px: the circles, the gap
+          // lines and the fillet arcs.
           if (Math.abs(d - G.innerR) < 0.25 || Math.abs(d - G.outerR) < 0.25) continue;
-          if (rounded.some((corner) => dist(corner, p) < 1.5 * rho + 1)) continue;
-          const nearGapLine = segs.some((seg) =>
-            [seg.center + Math.PI / n, seg.center - Math.PI / n].some(
-              (beta) =>
-                Math.abs(Math.abs(offsetFromRay(p, beta)) - half) < 0.25 && alongRay(p, beta) > 0,
-            ),
-          );
+          if (fillets.some((center) => Math.abs(dist(center, p) - rho) < 0.25)) continue;
+          const nearGapLine =
+            n > 1 &&
+            segs.some((seg) =>
+              [seg.center + Math.PI / n, seg.center - Math.PI / n].some(
+                (beta) =>
+                  Math.abs(Math.abs(offsetFromRay(p, beta)) - half) < 0.25 && alongRay(p, beta) > 0,
+              ),
+            );
           if (nearGapLine) continue;
-          // n = 1: hit_test still keeps a gap/2 slit under the anchor; the ring is drawn whole (§D.1).
-          if (n === 1 && y > 0 && Math.abs(x) < G.gap / 2 + 0.25) continue;
           const hit = hitTest(x, y, n);
           shapes.forEach((shape, i) => {
             if (insidePath(shape, p) !== (hit === i)) {
