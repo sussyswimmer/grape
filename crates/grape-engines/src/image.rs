@@ -6,13 +6,21 @@
 //!   is applied to the pixels (the output carries no EXIF, so it can't be
 //!   rotated twice), and the ICC profile is carried over when the target
 //!   format can embed it and its color model matches the output pixels.
-//! - **Memory limits,** checked from the header before any pixel is
-//!   decoded, so a tiny file that claims huge dimensions (a decompression
-//!   bomb) can't exhaust memory: the decoded image must fit the `image`
-//!   crate's default 512 MiB allocation limit (which `ImageReader::decode`
-//!   applies but `into_decoder` doesn't), and the whole conversion's peak
-//!   (decoder buffers, a rotated copy, the converted copy and the encoder's
-//!   in-memory output) must fit [`WORKING_SET_LIMIT`].
+//! - **Memory limits,** checked before any pixel is decoded, so neither a
+//!   huge file nor a tiny one that claims huge dimensions (a decompression
+//!   bomb) can exhaust memory:
+//!   - the source file must fit [`MAX_SOURCE`], checked before reading it
+//!     (the JPEG decoder reads the whole file into memory);
+//!   - the PNG decoder's own buffers (text chunks, the inflated ICC
+//!     profile) must fit [`PNG_METADATA_LIMIT`];
+//!   - an ICC profile over [`MAX_ICC`] is dropped as soon as it is read;
+//!   - from the header: the decoded image must fit the `image` crate's
+//!     default 512 MiB allocation limit (`into_decoder` hands that limit to
+//!     the codec but, unlike `ImageReader::decode`, doesn't hold the decoded
+//!     buffer to it, so Grape reserves it itself), and the whole
+//!     conversion's peak (the file or profile the decoder holds, decoder
+//!     buffers, a rotated copy, the converted copy, the encoder's in-memory
+//!     output and the profile carried over) must fit [`WORKING_SET_LIMIT`].
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
 //!   its first frame or page.
 //! - **Targets:** JPEG at quality 90 with any alpha flattened onto white;
@@ -67,14 +75,29 @@ const MAX_REPLANS: usize = 3;
 /// JPEG output quality.
 const JPEG_QUALITY: u8 = 90;
 
-/// The largest ICC profile a JPEG can hold: 255 APP2 segments of 65,519
-/// profile bytes each. The encoder refuses a larger one.
-const JPEG_MAX_ICC: usize = 255 * 65_519;
+const MIB: u64 = 1024 * 1024;
+
+/// The largest ICC profile carried over: what a JPEG can hold, 255 APP2
+/// segments of 65,519 profile bytes each (the encoder refuses more). Real
+/// profiles are far smaller; a larger one is dropped for every target, and
+/// the conversion goes ahead without it.
+const MAX_ICC: usize = 255 * 65_519;
 
 /// The most memory one conversion may hold at its peak (see
 /// [`working_set`]). The decoded image alone is also held to the `image`
 /// crate's default 512 MiB limit.
-pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * 1024 * 1024;
+pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * MIB;
+
+/// The largest source file Grape decodes. The JPEG decoder holds the whole
+/// file in memory, and the others hold whole chunks of it. A file this
+/// large whose first image would still fit the 512 MiB decode limit is
+/// mostly other pages, frames, metadata or padding.
+pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
+
+/// What the PNG decoder may allocate besides the pixels: its text chunks,
+/// the inflated ICC profile and its row buffers. A profile that would
+/// inflate past it is dropped by the decoder, and the image still converts.
+const PNG_METADATA_LIMIT: u64 = 64 * MIB;
 
 /// How many rows Grape's own pixel loops process between cancel checks
 /// (at most a few milliseconds of work).
@@ -128,7 +151,7 @@ pub(crate) fn convert(
         Some(img) if !cancel.is_cancelled() => img,
         _ => return Err(crate::cancelled(src)),
     };
-    let icc = icc.filter(|profile| icc_fits(profile, &img, to));
+    let icc = icc.filter(|profile| icc_fits(profile, &img));
 
     // The planner only picks a missing folder when it is Grape's own
     // fallback (Downloads\Grape), which it counts as writable when it could
@@ -169,8 +192,8 @@ impl From<ImageError> for DecodeFailure {
 }
 
 /// Opens `src` read-only and decodes its first frame, upright, with its ICC
-/// profile if it has one. Refuses, before decoding any pixel, an image
-/// whose conversion to `to` wouldn't fit the memory limits.
+/// profile if it has one. Refuses, before decoding any pixel, a file or an
+/// image whose conversion to `to` wouldn't fit the memory limits.
 fn decode(
     src: &Path,
     from: Format,
@@ -180,15 +203,34 @@ fn decode(
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
+    let len = file
+        .metadata()
+        .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?
+        .len();
+    if len > MAX_SOURCE {
+        return Err(names.too_large(format!(
+            "decode {}: the file is {} MiB, over the {} MiB limit for a source",
+            src.display(),
+            len / MIB,
+            MAX_SOURCE / MIB
+        )));
+    }
     let mut reader = ImageReader::new(BufReader::new(Cancellable::new(file, cancel)));
     if let Some(hint) = image_format(from) {
         // Used only when the content matches no known signature.
         reader.set_format(hint);
     }
-    let reader = reader
+    let mut reader = reader
         .with_guessed_format()
         .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?;
     let format = reader.format();
+    if format == Some(ImageFormat::Png) {
+        // The PNG decoder holds its own allocations to the reader's limit;
+        // the pixels are held to the default one below.
+        let mut limits = Limits::default();
+        limits.max_alloc = Some(PNG_METADATA_LIMIT);
+        reader.limits(limits);
+    }
 
     // A decoder panic on a malformed file must not take the worker down.
     let decoded = panic::catch_unwind(AssertUnwindSafe(
@@ -198,13 +240,25 @@ fn decode(
             let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
             let (width, height) = decoder.dimensions();
             let color = decoder.color_type();
-            let peak = working_set(width, height, color, format, orientation, to);
+            let profile = decoder.icc_profile().ok().flatten();
+            let profile_len = profile.as_ref().map_or(0, |icc| icc.len() as u64);
+            let icc = profile.filter(|icc| icc.len() <= MAX_ICC);
+            let held = Held {
+                decoder: match format {
+                    Some(ImageFormat::Jpeg) => len,
+                    // The PNG decoder keeps its own copy of the profile.
+                    Some(ImageFormat::Png) => profile_len,
+                    _ => 0,
+                },
+                profile: icc.as_ref().map_or(0, |icc| icc.len() as u64),
+            };
+            let peak = working_set(width, height, color, format, orientation, to, held);
             if peak > WORKING_SET_LIMIT {
                 return Err(DecodeFailure::TooLarge(format!(
                     "{width}x{height} {color:?} to {} needs about {} MiB, over the {} MiB limit",
                     to.key(),
-                    peak / (1024 * 1024),
-                    WORKING_SET_LIMIT / (1024 * 1024)
+                    peak / MIB,
+                    WORKING_SET_LIMIT / MIB
                 )));
             }
             // What `ImageReader::decode` does and `into_decoder` doesn't:
@@ -213,7 +267,6 @@ fn decode(
             let mut limits = Limits::default();
             limits.reserve(decoder.total_bytes())?;
             decoder.set_limits(limits)?;
-            let icc = decoder.icc_profile().ok().flatten();
             let mut img = DynamicImage::from_decoder(decoder)?;
             img.apply_orientation(orientation);
             Ok((img, icc))
@@ -249,18 +302,32 @@ fn decode(
     }
 }
 
+/// Bytes a conversion holds besides its pixels (see [`working_set`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct Held {
+    /// Held by the decoder while it decodes: the whole file for JPEG, its
+    /// own copy of the ICC profile for PNG.
+    decoder: u64,
+    /// The ICC profile carried over, held from decoding to encoding.
+    profile: u64,
+}
+
 /// The most memory converting a `width`×`height` `color` image (decoded by
 /// `decoder`, turned by `orientation`) to `to` holds at once, in bytes. The
 /// steps run one after another, so the peak is the largest of:
 /// - **decoding:** the decoded image plus the decoder's own buffers (JPEG
 ///   keeps 16-bit coefficients for progressive images; WebP may build an
-///   RGBA frame);
+///   RGBA frame) and what it holds ([`Held::decoder`]);
 /// - **EXIF rotation** by a quarter turn: a rotated copy;
 /// - **pixel prep:** the decoded image, an RGBA copy to flatten from and the
 ///   converted image;
 /// - **encoding:** the pixels written plus the encoder's in-memory buffers
 ///   (PNG compresses in memory and byte-swaps 16-bit samples into a copy;
-///   WebP expands to RGBA and compresses in memory).
+///   WebP expands to RGBA and compresses in memory);
+///
+/// plus the ICC profile carried through all of them ([`Held::profile`]).
+/// It is an estimate: a CMYK progressive JPEG's coefficients and an
+/// animated WebP's canvas can take somewhat more.
 fn working_set(
     width: u32,
     height: u32,
@@ -268,6 +335,7 @@ fn working_set(
     decoder: Option<ImageFormat>,
     orientation: Orientation,
     to: Format,
+    held: Held,
 ) -> u64 {
     let pixels = u64::from(width).saturating_mul(u64::from(height));
     let size = |c: ColorType| pixels.saturating_mul(u64::from(c.bytes_per_pixel()));
@@ -300,7 +368,9 @@ fn working_set(
         _ => 0,
     };
     [
-        decoded.saturating_add(decoder_buffers),
+        decoded
+            .saturating_add(decoder_buffers)
+            .saturating_add(held.decoder),
         decoded.saturating_add(rotated),
         decoded
             .saturating_add(flatten_copy)
@@ -310,6 +380,7 @@ fn working_set(
     .into_iter()
     .max()
     .unwrap_or(u64::MAX)
+    .saturating_add(held.profile)
 }
 
 /// The `image` crate's format for a Grape format, used as a decode hint.
@@ -409,19 +480,18 @@ fn flatten_onto_white(img: &DynamicImage, cancel: &CancelToken) -> Option<RgbIma
 }
 
 /// True when an ICC profile describes the output's color model (`GRAY` for
-/// gray pixels, `RGB ` otherwise) and `to` can hold it. A CMYK or gray
-/// profile on RGB pixels would make viewers show wrong colors, and a JPEG
-/// can't hold more than [`JPEG_MAX_ICC`] bytes, so such profiles are
-/// dropped and the conversion goes ahead without them.
-fn icc_fits(profile: &[u8], img: &DynamicImage, to: Format) -> bool {
+/// gray pixels, `RGB ` otherwise). A CMYK or gray profile on RGB pixels
+/// would make viewers show wrong colors, so such a profile is dropped and
+/// the conversion goes ahead without it. (Its size was checked against
+/// [`MAX_ICC`] when it was read.)
+fn icc_fits(profile: &[u8], img: &DynamicImage) -> bool {
     use ColorType::{La16, La8, L16, L8};
     let expected: &[u8] = if matches!(img.color(), L8 | L16 | La8 | La16) {
         b"GRAY"
     } else {
         b"RGB "
     };
-    let room = to != Format::Jpg || profile.len() <= JPEG_MAX_ICC;
-    room && profile.len() >= 128 && profile.get(16..20) == Some(expected)
+    profile.len() >= 128 && profile.get(16..20) == Some(expected)
 }
 
 /// Encodes `img` as `to` into the temp `file`, then flushes and syncs it.
@@ -696,20 +766,12 @@ mod tests {
         cmyk[16..20].copy_from_slice(b"CMYK");
         let color = DynamicImage::new_rgb8(1, 1);
         let luma = DynamicImage::new_luma8(1, 1);
-        let png = Format::Png;
-        assert!(icc_fits(&rgb, &color, png));
-        assert!(!icc_fits(&gray, &color, png));
-        assert!(!icc_fits(&cmyk, &color, png));
-        assert!(icc_fits(&gray, &luma, png));
-        assert!(!icc_fits(&rgb, &luma, png));
-        assert!(!icc_fits(&rgb[..64], &color, png));
-        // A JPEG holds at most 255 segments' worth of profile.
-        let mut big = rgb.clone();
-        big.resize(JPEG_MAX_ICC, 0);
-        assert!(icc_fits(&big, &color, Format::Jpg));
-        big.push(0);
-        assert!(!icc_fits(&big, &color, Format::Jpg));
-        assert!(icc_fits(&big, &color, png));
+        assert!(icc_fits(&rgb, &color));
+        assert!(!icc_fits(&gray, &color));
+        assert!(!icc_fits(&cmyk, &color));
+        assert!(icc_fits(&gray, &luma));
+        assert!(!icc_fits(&rgb, &luma));
+        assert!(!icc_fits(&rgb[..64], &color));
     }
 
     #[test]
@@ -720,7 +782,7 @@ mod tests {
         // 1024×1024 is 1 MiB of pixels, so each result in MiB is the
         // number of bytes held per pixel.
         let mib = |color, decoder, orientation, to| {
-            working_set(1024, 1024, color, decoder, orientation, to) / (1024 * 1024)
+            working_set(1024, 1024, color, decoder, orientation, to, Held::default()) / MIB
         };
         // JPEG: 3 decoded + 6 of coefficients while decoding.
         assert_eq!(mib(Rgb8, Some(ImageFormat::Jpeg), none, Format::Bmp), 9);
@@ -736,6 +798,20 @@ mod tests {
         assert_eq!(mib(Rgb16, Some(ImageFormat::Tiff), none, Format::Png), 18);
         // WebP: 3 written + 4 as RGBA + 4 compressed.
         assert_eq!(mib(Rgb8, png, none, Format::Webp), 11);
+        // What the decoder holds counts while decoding; the profile counts
+        // throughout. A 100 MiB JPEG file: 100 + 3 decoded + 6.
+        let held = |decoder, profile| Held {
+            decoder: decoder * MIB,
+            profile: profile * MIB,
+        };
+        let jpeg = Some(ImageFormat::Jpeg);
+        let with = |color, decoder, to, held| {
+            working_set(1024, 1024, color, decoder, none, to, held) / MIB
+        };
+        assert_eq!(with(Rgb8, jpeg, Format::Bmp, held(100, 0)), 109);
+        // Gray to BMP with a 2 MiB profile (and the PNG decoder's copy):
+        // 1 + 2 + 2 while decoding, 1 + 3 + 2 when converting.
+        assert_eq!(with(L8, png, Format::Bmp, held(2, 2)), 6);
         // Absurd dimensions saturate instead of overflowing.
         let huge = working_set(
             u32::MAX,
@@ -744,6 +820,7 @@ mod tests {
             None,
             none,
             Format::Webp,
+            held(1, 1),
         );
         assert!(huge > WORKING_SET_LIMIT);
     }

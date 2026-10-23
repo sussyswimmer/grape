@@ -134,9 +134,13 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 ## D16: Raster image engine and no-clobber writes (2026-10-23, proposed, confirm)
 - **Engine:** `grape-engines` converts among JPG, PNG, WebP, TIFF and BMP (20 pairs) with `image` 0.25.10 (MIT OR Apache-2.0). It's crate-local, with `default-features = false` and features `jpeg`, `png`, `webp`, `bmp` and `tiff`, so there's no rayon and no other codecs.
   - JPEG is written at quality 90, with alpha flattened onto white. WebP output is lossless only, because lossy WebP would need libwebp.
-  - EXIF orientation is applied to the pixels. The ICC profile is kept when the target can embed it; a profile too large for JPEG is left out.
+  - EXIF orientation is applied to the pixels. The ICC profile is kept when the target can embed it and it matches the output's color model. A profile over 255 × 65,519 bytes (the most a JPEG holds, about 16 MiB) is left out for every target.
   - Only the first frame or page of an animated or multi-page input is converted.
-  - Memory is reserved against a 512 MiB limit for the decoded image and the converted copy before anything is allocated. A bigger image is refused before decoding.
+  - **Memory limits**, all checked before any pixel is decoded. A job refused by one fails with `DecodeFailed` and "{name} is too large to convert.":
+    - The source file must be at most 512 MiB; a bigger one is refused unread. (The JPEG decoder reads the whole file into memory. A raster file that big whose first image fits the decode limit is mostly other pages, frames or padding.)
+    - The PNG decoder may allocate at most 64 MiB besides the pixels (text chunks, the inflated ICC profile), so an ICC profile that would inflate past that is dropped while reading.
+    - The decoded image must fit the `image` crate's 512 MiB default limit.
+    - The estimated peak of the whole conversion must fit 1 GiB: decoder buffers, the file or profile the decoder holds, a rotated copy, the converted copy, the encoder's in-memory output and the profile carried over. It's an estimate: a CMYK progressive JPEG's coefficients or an animated WebP's canvas can take somewhat more.
   - Cancel is checked while reading, converting and writing.
   - Every other target (HEIC, AVIF, SVG, PDF, audio, video) and every tool returns `NotYetSupported` with a message the toast can show.
 - **API** (for the app): `supports(&Operation, Option<Format>)`; `run_job(&Job, &EngineCtx, &mut dyn FnMut(f32)) -> Result<JobOutcome { outputs, renamed }, GrapeError { kind, user_message, detail }>`, which **blocks** (run it on a worker); `EngineCtx { sidecars: SidecarPaths, cancel: CancelToken }`, where `EngineCtx::default()` is fine until sidecars exist; `build_selection(&[PathBuf], &Settings) -> Selection`, which reads the disk so `grape-core` doesn't have to.

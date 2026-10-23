@@ -5,8 +5,10 @@
 
 mod common;
 
-use std::fs;
-use std::io::Cursor;
+use std::collections::hash_map::DefaultHasher;
+use std::fs::{self, File};
+use std::hash::Hasher;
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -56,26 +58,44 @@ fn encode(img: &DynamicImage, f: Format) -> Vec<u8> {
     buf.into_inner()
 }
 
-/// The source's bytes and mtime, to prove it was never touched.
+/// The source's length, content hash and mtime, to prove it was never
+/// touched.
 struct SourceState {
     path: PathBuf,
-    bytes: Vec<u8>,
+    content: (u64, u64),
     modified: SystemTime,
+}
+
+/// The length and a hash of a file's bytes, read in chunks so a large
+/// source isn't held in memory.
+fn content_digest(path: &Path) -> (u64, u64) {
+    let mut file = File::open(path).unwrap();
+    let mut hasher = DefaultHasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut len = 0u64;
+    loop {
+        let n = file.read(&mut buf).unwrap();
+        if n == 0 {
+            return (len, hasher.finish());
+        }
+        hasher.write(&buf[..n]);
+        len += n as u64;
+    }
 }
 
 impl SourceState {
     fn of(path: &Path) -> SourceState {
         SourceState {
             path: path.to_path_buf(),
-            bytes: fs::read(path).unwrap(),
+            content: content_digest(path),
             modified: fs::metadata(path).unwrap().modified().unwrap(),
         }
     }
 
     fn assert_unchanged(&self) {
         assert_eq!(
-            fs::read(&self.path).unwrap(),
-            self.bytes,
+            content_digest(&self.path),
+            self.content,
             "source bytes changed: {}",
             self.path.display()
         );
@@ -368,21 +388,27 @@ fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
 }
 
 #[test]
-fn a_profile_too_large_for_jpeg_is_left_out() {
-    // Over the 255 × 65,519 bytes a JPEG can hold (the zeros compress well
-    // in the PNG). PNG, WebP and TIFF could hold it.
-    let source = png_with_profile(&rgb_profile(17 * 1024 * 1024));
-    let dir = TestDir::new("icc-large");
-    let (src, job) = plan_one(&dir, "wide.png", &source, Operation::convert(Format::Jpg));
-    let before = SourceState::of(&src);
+fn a_profile_over_the_size_cap_is_left_out() {
+    // Over the 255 × 65,519 bytes a JPEG can hold, the cap for every target
+    // (the zeros compress well in the PNG). Then one that inflates past
+    // what the PNG decoder may allocate besides the pixels: dropped while
+    // reading, not after.
+    for len in [17 * 1024 * 1024, 80 * 1024 * 1024] {
+        let source = png_with_profile(&rgb_profile(len));
+        for to in [Format::Jpg, Format::Webp, Format::Tiff] {
+            let dir = TestDir::new("icc-large");
+            let (src, job) = plan_one(&dir, "wide.png", &source, Operation::convert(to));
+            let before = SourceState::of(&src);
 
-    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+            let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
 
-    let bytes = fs::read(&outcome.outputs[0]).unwrap();
-    assert_eq!(image::guess_format(&bytes).unwrap(), ImageFormat::Jpeg);
-    assert_eq!(embedded_profile(bytes), None);
-    before.assert_unchanged();
-    assert_no_leftovers(&dir.path);
+            let bytes = fs::read(&outcome.outputs[0]).unwrap();
+            assert_eq!(image::guess_format(&bytes).unwrap(), image_format(to));
+            assert_eq!(embedded_profile(bytes), None, "{len} bytes to {to:?}");
+            before.assert_unchanged();
+            assert_no_leftovers(&dir.path);
+        }
+    }
 }
 
 #[test]
@@ -409,20 +435,22 @@ fn corrupt_input_is_a_decode_error_and_leaves_nothing() {
     before.assert_unchanged();
 }
 
-/// CRC-32 (IEEE 802.3), for patching PNG chunks.
+/// CRC-32 (IEEE 802.3), for patching and writing PNG chunks.
 fn crc32(bytes: &[u8]) -> u32 {
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 1 {
-                (crc >> 1) ^ 0xEDB8_8320
-            } else {
-                crc >> 1
-            };
-        }
-    }
-    !crc
+    let table: Vec<u32> = (0..256u32)
+        .map(|n| {
+            (0..8).fold(n, |c, _| {
+                if c & 1 == 1 {
+                    (c >> 1) ^ 0xEDB8_8320
+                } else {
+                    c >> 1
+                }
+            })
+        })
+        .collect();
+    !bytes.iter().fold(0xFFFF_FFFFu32, |crc, &byte| {
+        table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8)
+    })
 }
 
 /// `img` as a small PNG whose header claims `width`×`height`, with the
@@ -513,6 +541,108 @@ fn an_image_too_large_to_convert_is_refused_before_decoding() {
         assert_eq!(dir.names(), names_before, "{name}");
         before.assert_unchanged();
     }
+}
+
+/// Extends the file at `path` with zeros to `len` bytes (sparse where the
+/// file system allows), after its image data.
+fn pad_to(path: &Path, len: u64) {
+    fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(len)
+        .unwrap();
+}
+
+#[test]
+fn a_source_file_over_the_size_limit_is_refused_before_reading() {
+    let rgb = DynamicImage::ImageRgb8(RgbImage::new(16, 16));
+    for (name, f) in [("huge.jpg", Format::Jpg), ("huge.png", Format::Png)] {
+        let dir = TestDir::new("huge-file");
+        let (src, job) = plan_one(
+            &dir,
+            name,
+            &encode(&rgb, f),
+            Operation::convert(Format::Bmp),
+        );
+        pad_to(&src, 512 * 1024 * 1024 + 1);
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+
+        let err = run(&job).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, format!("{name} is too large to convert."));
+        assert!(
+            err.detail.contains("over the 512 MiB limit for a source"),
+            "{}",
+            err.detail
+        );
+        assert_eq!(dir.names(), names_before);
+        before.assert_unchanged();
+    }
+}
+
+#[test]
+fn a_jpeg_file_counts_toward_the_working_set() {
+    // 10,901² RGB is 340 MiB decoded, and the decoder's coefficients take
+    // the estimate to 1,020 MiB: just under the 1 GiB limit. The JPEG
+    // decoder also holds the whole file, here 8 MiB, which tips it over.
+    let dir = TestDir::new("jpeg-held");
+    let (src, job) = plan_one(
+        &dir,
+        "tall.jpg",
+        &jpeg_claiming(10_901, 10_901),
+        Operation::convert(Format::Bmp),
+    );
+    pad_to(&src, 8 * 1024 * 1024);
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.user_message, "tall.jpg is too large to convert.");
+    assert!(
+        err.detail
+            .contains("needs about 1027 MiB, over the 1024 MiB limit"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
+
+#[test]
+fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
+    // The PNG decoder holds its text chunks and the inflated ICC profile to
+    // 64 MiB (so an ICC profile that inflates past it is dropped while
+    // reading). A 65 MiB comment takes it past that.
+    let mut png = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Png);
+    let mut chunk = b"tEXtComment\0".to_vec();
+    chunk.resize(chunk.len() + 65 * 1024 * 1024, b'a');
+    let mut text = u32::try_from(chunk.len() - 4)
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    text.extend_from_slice(&chunk);
+    text.extend_from_slice(&crc32(&chunk).to_be_bytes());
+    // After the signature (8) and IHDR (25).
+    png.splice(33..33, text);
+    let dir = TestDir::new("png-metadata");
+    let (src, job) = plan_one(&dir, "notes.png", &png, Operation::convert(Format::Bmp));
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.user_message, "notes.png is too large to convert.");
+    assert!(
+        err.detail.contains("Memory limit exceeded"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
 }
 
 #[test]
@@ -731,6 +861,34 @@ fn a_fallback_job_creates_the_fallback_folder() {
     before.assert_unchanged();
 }
 
+#[test]
+fn an_output_folder_that_is_the_missing_fallback_is_created() {
+    // The output setting names Grape's own fallback folder, which doesn't
+    // exist yet: the job isn't a fallback job, but the folder is created.
+    let dir = TestDir::new("output-is-fallback");
+    let src = dir.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let fallback = dir.join("Downloads").join("Grape");
+    let settings = Settings {
+        output: OutputLocation::Folder(fallback.clone()),
+        ..Settings::new(&fallback)
+    };
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Webp), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert!(!job.used_fallback);
+    let before = SourceState::of(&src);
+
+    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+
+    assert_eq!(outcome.outputs, [fallback.join("photo.webp")]);
+    assert_eq!(names_in(&fallback), ["photo.webp"]);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
 #[cfg(unix)]
 #[test]
 fn a_folder_that_turns_read_only_is_a_write_error() {
@@ -774,31 +932,4 @@ fn a_folder_that_turns_read_only_is_a_write_error() {
     );
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
-}
-#[test]
-fn an_output_folder_that_is_the_missing_fallback_is_created() {
-    // The output setting names Grape's own fallback folder, which doesn't
-    // exist yet: the job isn't a fallback job, but the folder is created.
-    let dir = TestDir::new("output-is-fallback");
-    let src = dir.join("photo.png");
-    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
-    let fallback = dir.join("Downloads").join("Grape");
-    let settings = Settings {
-        output: OutputLocation::Folder(fallback.clone()),
-        ..Settings::new(&fallback)
-    };
-    let sel = build_selection(std::slice::from_ref(&src), &settings);
-    let job = plan(&sel, &Operation::convert(Format::Webp), &settings)
-        .unwrap()
-        .jobs
-        .remove(0);
-    assert!(!job.used_fallback);
-    let before = SourceState::of(&src);
-
-    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
-
-    assert_eq!(outcome.outputs, [fallback.join("photo.webp")]);
-    assert_eq!(names_in(&fallback), ["photo.webp"]);
-    before.assert_unchanged();
-    assert_no_leftovers(&dir.path);
 }

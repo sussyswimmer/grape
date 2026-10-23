@@ -566,6 +566,7 @@ pub fn run_job(job: &Job, ctx: &EngineCtx, progress: &mut dyn FnMut(f32)) -> Res
 - Steps:
   1. If cancelled → `Cancelled`.
   2. `File::open(src)` (read-only) into a `BufReader`, then `ImageReader::new(..).with_guessed_format()`, `into_decoder()`, `orientation()`, `icc_profile()` (ok to fail), `DynamicImage::from_decoder`, `apply_orientation`. Report `progress(0.5)`.
+     - **[Grape] Memory limits** (D16), all checked before any pixel is decoded: a source file over 512 MiB is refused unread; the PNG decoder may hold at most 64 MiB of metadata (text chunks, the inflated ICC profile); an ICC profile over 255 × 65,519 bytes (what a JPEG can hold) is dropped for every target; the decoded image must fit the `image` crate's 512 MiB default; and the estimated peak of the whole conversion (including the file the JPEG decoder holds and the profile) must fit 1 GiB.
   3. Convert per target:
      - **jpg:** if the image has alpha, composite onto white (`to_rgba8` then a manual blend), then `to_rgb8`. `JpegEncoder::new_with_quality(w, 90)`.
      - **png:** keep the color type.
@@ -577,7 +578,7 @@ pub fn run_job(job: &Job, ctx: &EngineCtx, progress: &mut dyn FnMut(f32)) -> Res
   5. **Finalize, no clobber** (§1.6): `hard_link`, then `remove(tmp)`. On `AlreadyExists` → re-plan. On any other error → the `create_new` copy fallback.
      - Re-plan: read the destination folder's names fresh, add every name attempted so far, `grape_core::output_name(source_file_name, &job.op, &taken)`, and retry up to 3 times with `renamed = true`. After that → `NameTaken`.
   6. Cleanup guard (a `Drop` struct) removes the temp on every error path. `progress(1.0)`.
-- Errors map to user messages: `ReadFailed` "Grape couldn't read {name}.", `DecodeFailed` "{name} isn't a readable {FROM} image.", `EncodeFailed` "Grape couldn't write a {TO} file.", `WriteFailed` "Grape couldn't save into {folder}.", `NameTaken` "A file named {name} keeps appearing; try again." `detail` = the `io` or `image` error's `Display`, plus paths. Never include file contents.
+- Errors map to user messages: `ReadFailed` "Grape couldn't read {name}.", `DecodeFailed` "{name} isn't a readable {FROM} image." (or "{name} is too large to convert." when a memory limit refuses it), `EncodeFailed` "Grape couldn't write a {TO} file.", `WriteFailed` "Grape couldn't save into {folder}.", `NameTaken` "A file named {name} keeps appearing; try again." `detail` = the `io` or `image` error's `Display`, plus paths. Never include file contents.
 - Animated or multi-page inputs use the first frame or page (documented).
 
 ### E.3 Dependency (D18)
@@ -597,7 +598,7 @@ If anything is too young: `cargo update -p <name> --precise <older>`. Record eve
   - the output exists and has the planned name;
   - `ImageReader::open(out).with_guessed_format()` reports the target format (magic bytes);
   - the dimensions are equal;
-  - **the source's bytes and mtime are unchanged** (compare the full byte vectors);
+  - **the source's bytes and mtime are unchanged** (compare its length and a hash of its full contents);
   - no `.grape-tmp-` file remains.
 - Late collision: after planning, create the planned name. `run_job` writes `name 2.ext`, sets `renamed = true`, and the pre-existing file's bytes are unchanged.
 - EXIF orientation: a 40×20 JPEG with an Orientation=6 EXIF (`set_exif_metadata`), converted to PNG, gives a 20×40 output.
