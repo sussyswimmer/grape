@@ -13,23 +13,25 @@
 //!   broken file is reported as unreadable, not as too large.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
 use zune_jpeg::zune_core::options::DecoderOptions;
 use zune_jpeg::JpegDecoder;
 
+use crate::cancel::Cancellable;
+use crate::CancelToken;
+
 /// How a JPEG's frame is coded, as far as the decoder's memory goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct JpegLayout {
     /// Color components in the frame (1 gray, 3 YCbCr, 4 CMYK).
     pub(crate) components: u8,
-    /// True when zune-jpeg may keep 16-bit coefficients for every component
-    /// of the whole image while decoding. It does for a progressive frame,
-    /// and for a sequential one whose first scan doesn't carry every
-    /// component; its headers don't say which scan is first, so only a
-    /// sequential frame of one component is sure to decode row by row.
+    /// True when zune-jpeg keeps 16-bit coefficients for every component
+    /// of the whole image while decoding: a progressive frame, or a
+    /// sequential one whose first scan doesn't carry every component.
+    /// Otherwise it decodes one row of blocks at a time.
     pub(crate) whole_image: bool,
 }
 
@@ -44,27 +46,123 @@ impl JpegLayout {
 
 /// The layout of the JPEG at `src`, from its headers as zune-jpeg reads
 /// them with the options the `image` crate decodes with, or
-/// [`JpegLayout::WORST`] if they can't be read.
-pub(crate) fn jpeg_layout(src: &Path) -> JpegLayout {
+/// [`JpegLayout::WORST`] if they can't be read. The read goes through the
+/// cancel token: a cancelled job ends it at the next read.
+pub(crate) fn jpeg_layout(src: &Path, cancel: &CancelToken) -> JpegLayout {
     let Ok(file) = File::open(src) else {
         return JpegLayout::WORST;
     };
+    let mut reader = BufReader::new(Cancellable::new(file, cancel));
     let options = DecoderOptions::default()
         .set_strict_mode(false)
         .set_max_width(usize::MAX)
         .set_max_height(usize::MAX);
     // A decoder panic on a malformed file must not take the worker down.
     let read = panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut decoder = JpegDecoder::new_with_options(BufReader::new(file), options);
+        let mut decoder = JpegDecoder::new_with_options(&mut reader, options);
         decoder.decode_headers().ok()?;
         decoder.info()
     }));
-    match read {
-        Ok(Some(info)) => JpegLayout {
-            components: info.components,
-            whole_image: info.sof.is_progressive() || info.components > 1,
-        },
-        _ => JpegLayout::WORST,
+    let Ok(Some(info)) = read else {
+        return JpegLayout::WORST;
+    };
+    let row_by_row =
+        !info.sof.is_progressive() && first_scan_components(&mut reader) == Some(info.components);
+    JpegLayout {
+        components: info.components,
+        whole_image: !row_by_row,
+    }
+}
+
+/// How many components the first scan carries, read back from where
+/// zune-jpeg's header decode stopped: right after the first SOS header,
+/// whose length it requires to be exactly `6 + 2 × count` bytes. So the
+/// real count always matches `[0, 6 + 2 × count, count]` at that distance
+/// before the end. `None` unless exactly one count from 1 to 4 does: a
+/// split first scan then never passes for a full one.
+fn first_scan_components<R: Read + Seek>(r: &mut R) -> Option<u8> {
+    let end = r.stream_position().ok()?;
+    let mut found = None;
+    for count in 1..=4u8 {
+        let len = 6 + 2 * count;
+        let Some(at) = end.checked_sub(u64::from(len)) else {
+            continue;
+        };
+        let mut bytes = [0u8; 3];
+        if r.seek(SeekFrom::Start(at)).is_err() || r.read_exact(&mut bytes).is_err() {
+            return None;
+        }
+        if bytes == [0, len, count] {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(count);
+        }
+    }
+    found
+}
+
+/// The namespace that starts an extended-XMP segment's data.
+const XMP_EXTENSION: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
+
+/// The most data one JPEG segment holds.
+const JPEG_SEGMENT: u64 = 65_533;
+
+/// What a read of a whole JPEG file finds about its metadata, before any
+/// decoder sees it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct JpegScan {
+    /// Places the extended-XMP namespace appears: at least as many as the
+    /// decoder's extended-XMP segments.
+    pub(crate) xmp_segments: u64,
+    /// `FF` bytes: at least as many as the markers the decoder's header
+    /// parse can meet.
+    pub(crate) ff_bytes: u64,
+}
+
+impl JpegScan {
+    /// What the JPEG decoder keeps besides pixels, for a file of `len`
+    /// bytes: the file itself; its copies of the metadata segments it
+    /// parses (ICC, EXIF, XMP), which can't exceed the file; and the
+    /// extended XMP it reassembles from those copies.
+    pub(crate) fn decoder_holds(&self, len: u64) -> u64 {
+        let xmp = self.xmp_segments.saturating_mul(JPEG_SEGMENT).min(len);
+        len.saturating_mul(2).saturating_add(xmp)
+    }
+
+    /// An upper bound on the work of the decoder's header parse: it
+    /// re-checks every pending extended-XMP segment after every marker.
+    pub(crate) fn header_work(&self) -> u64 {
+        self.xmp_segments.saturating_mul(self.ff_bytes)
+    }
+}
+
+/// Reads the JPEG at `src` once, through the cancel token, and counts what
+/// [`JpegScan`] holds.
+pub(crate) fn jpeg_scan(src: &Path, cancel: &CancelToken) -> io::Result<JpegScan> {
+    let mut reader = Cancellable::new(File::open(src)?, cancel);
+    let mut scan = JpegScan::default();
+    // The end of the last read, so a namespace split between two reads is
+    // found once.
+    let keep = XMP_EXTENSION.len() - 1;
+    let mut window = vec![0u8; keep + 64 * 1024];
+    let mut held = 0;
+    loop {
+        let n = match reader.read(&mut window[held..]) {
+            Ok(0) => return Ok(scan),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        let filled = held + n;
+        let fresh = &window[held..filled];
+        scan.ff_bytes += fresh.iter().filter(|&&b| b == 0xFF).count() as u64;
+        scan.xmp_segments += window[..filled]
+            .windows(XMP_EXTENSION.len())
+            .filter(|w| *w == XMP_EXTENSION)
+            .count() as u64;
+        held = keep.min(filled);
+        window.copy_within(filled - held..filled, 0);
     }
 }
 
@@ -294,22 +392,36 @@ mod tests {
         jpeg
     }
 
+    /// `jpeg` with its first scan header replaced by one that carries only
+    /// the first component.
+    fn first_scan_of_one(mut jpeg: Vec<u8>) -> Vec<u8> {
+        let sos = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+        let len = usize::from(u16::from_be_bytes([jpeg[sos + 2], jpeg[sos + 3]]));
+        jpeg.splice(
+            sos..sos + 2 + len,
+            [0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00],
+        );
+        jpeg
+    }
+
     #[test]
     fn jpeg_layouts_come_from_the_decoders_own_headers() {
         let dir = Scratch::new();
-        let layout = |name: &str, bytes: &[u8]| jpeg_layout(&dir.file(name, bytes));
+        let cancel = CancelToken::new();
+        let layout = |name: &str, bytes: &[u8]| jpeg_layout(&dir.file(name, bytes), &cancel);
         let gray = jpeg(ExtendedColorType::L8);
         let rgb = jpeg(ExtendedColorType::Rgb8);
-        // A sequential gray frame decodes row by row; a color one may not.
+        // Sequential frames whose first scan carries every component decode
+        // row by row.
+        let row_by_row = |components| JpegLayout {
+            components,
+            whole_image: false,
+        };
+        assert_eq!(layout("gray.jpg", &gray), row_by_row(1));
+        assert_eq!(layout("rgb.jpg", &rgb), row_by_row(3));
+        // A first scan with only the luma keeps the whole image.
         assert_eq!(
-            layout("gray.jpg", &gray),
-            JpegLayout {
-                components: 1,
-                whole_image: false
-            }
-        );
-        assert_eq!(
-            layout("rgb.jpg", &rgb),
+            layout("split.jpg", &first_scan_of_one(rgb.clone())),
             JpegLayout {
                 components: 3,
                 whole_image: true
@@ -331,7 +443,67 @@ mod tests {
         assert_eq!(layout("wide.jpg", &wide).components, 1);
         // Not a JPEG, or no file at all: the worst case.
         assert_eq!(layout("png.jpg", b"\x89PNG\r\n\x1a\n"), JpegLayout::WORST);
-        assert_eq!(jpeg_layout(&dir.0.join("gone.jpg")), JpegLayout::WORST);
+        assert_eq!(
+            jpeg_layout(&dir.0.join("gone.jpg"), &cancel),
+            JpegLayout::WORST
+        );
+        // Cancelled, the read stops: the worst case, and the job reports
+        // the cancel.
+        cancel.cancel();
+        assert_eq!(layout("late.jpg", &rgb), JpegLayout::WORST);
+    }
+
+    #[test]
+    fn the_first_scan_is_read_back_only_when_unambiguous() {
+        let back = |bytes: &[u8]| {
+            let mut r = Cursor::new(bytes.to_vec());
+            r.seek(SeekFrom::End(0)).unwrap();
+            first_scan_components(&mut r)
+        };
+        // A three-component scan header, ending at the end.
+        let three = [
+            0xFF, 0xDA, 0x00, 0x0C, 0x03, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3F, 0,
+        ];
+        assert_eq!(back(&three), Some(3));
+        // Selectors that also read as a one-component header: either could
+        // be the real one, so neither is taken.
+        let mut tricky = vec![0x00, 0x0C, 0x03, 1, 0x00, 0x08, 0x01, 3, 0x11, 0, 0x3F, 0];
+        assert_eq!(back(&tricky), None);
+        tricky[5] = 0x09;
+        assert_eq!(back(&tricky), Some(3));
+        // Too short to hold any header.
+        assert_eq!(back(&[0x00, 0x08]), None);
+    }
+
+    #[test]
+    fn the_jpeg_scan_counts_xmp_extensions_and_ff_bytes() {
+        let dir = Scratch::new();
+        let cancel = CancelToken::new();
+        // One namespace split across the scan's 64 KiB reads, one whole,
+        // and FF bytes around them.
+        let mut bytes = vec![0x11; 64 * 1024 - 10];
+        bytes.extend_from_slice(XMP_EXTENSION);
+        bytes.extend([0xFF, 0xFF, 0x00]);
+        bytes.extend_from_slice(XMP_EXTENSION);
+        bytes.push(0xFF);
+        let path = dir.file("xmp.jpg", &bytes);
+        let scan = jpeg_scan(&path, &cancel).unwrap();
+        assert_eq!(
+            scan,
+            JpegScan {
+                xmp_segments: 2,
+                ff_bytes: 3
+            }
+        );
+        assert_eq!(scan.header_work(), 6);
+        // The decoder holds the file, its metadata copies and the extended
+        // XMP, which is at most the segments' data and at most the file.
+        let len = bytes.len() as u64;
+        assert_eq!(scan.decoder_holds(len), 3 * len);
+        assert_eq!(scan.decoder_holds(1 << 30), (2 << 30) + 2 * JPEG_SEGMENT);
+        assert_eq!(JpegScan::default().decoder_holds(len), 2 * len);
+        cancel.cancel();
+        assert!(jpeg_scan(&path, &cancel).is_err());
     }
 
     #[test]
@@ -355,7 +527,7 @@ mod tests {
         .concat();
         let dir = Scratch::new();
         assert_eq!(
-            jpeg_layout(&dir.file("rst.jpg", &bytes)),
+            jpeg_layout(&dir.file("rst.jpg", &bytes), &CancelToken::new()),
             JpegLayout {
                 components: 3,
                 whole_image: true

@@ -11,6 +11,10 @@
 //!   bomb) can exhaust memory:
 //!   - a JPEG or WebP source file must fit [`MAX_SOURCE`], checked before
 //!     reading it (the JPEG decoder reads the whole file into memory);
+//!   - a JPEG is read once before decoding, to bound what its decoder
+//!     holds before any check could run: the file, its metadata copies and
+//!     reassembled extended XMP must fit [`WORKING_SET_LIMIT`], and its
+//!     header parse must not take too long ([`MAX_JPEG_HEADER_WORK`]);
 //!   - the metadata the PNG decoder keeps is held to
 //!     [`PNG_METADATA_LIMIT`] twice over: its text and EXIF chunks, counted
 //!     from the chunk headers, and what its own limit holds (the inflated
@@ -112,6 +116,13 @@ pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
 ///   text and its row buffers. A profile that would inflate past it is
 ///   dropped, and the image still converts.
 const PNG_METADATA_LIMIT: u64 = 128 * MIB;
+
+/// The most work the JPEG decoder's header parse may do, as
+/// [`headers::JpegScan::header_work`] bounds it: about a few seconds per
+/// parse. It re-checks every pending extended-XMP segment after every
+/// marker, so a file with many of them and many markers can take hours;
+/// real files have none, or under a hundred.
+const MAX_JPEG_HEADER_WORK: u64 = 1 << 30;
 
 /// How many rows Grape's own pixel loops process between cancel checks
 /// (at most a few milliseconds of work).
@@ -240,10 +251,19 @@ fn decode(
         )));
     }
     let keeps = match format {
-        Some(ImageFormat::Jpeg) => DecoderKeeps::Jpeg {
-            file: len,
-            layout: headers::jpeg_layout(src),
-        },
+        Some(ImageFormat::Jpeg) => {
+            // The decoder reads the file and parses its headers before any
+            // check of Grape's runs, so what that holds and how long it
+            // takes are bounded from a plain read of the file first.
+            let scan = headers::jpeg_scan(src, cancel)
+                .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?;
+            let holds = admit_jpeg(len, &scan)
+                .map_err(|why| names.too_large(format!("decode {}: {why}", src.display())))?;
+            DecoderKeeps::Jpeg {
+                holds,
+                layout: headers::jpeg_layout(src, cancel),
+            }
+        }
         Some(ImageFormat::WebP) => DecoderKeeps::WebP {
             layout: headers::webp_layout(src),
         },
@@ -342,6 +362,28 @@ fn decode(
     }
 }
 
+/// What the JPEG decoder will hold besides pixels for a file of `len`
+/// bytes that `scan` read, or why it mustn't be decoded: its header parse
+/// would take too long, or the file and the decoder's copies of its
+/// metadata wouldn't fit [`WORKING_SET_LIMIT`].
+fn admit_jpeg(len: u64, scan: &headers::JpegScan) -> Result<u64, String> {
+    if scan.header_work() > MAX_JPEG_HEADER_WORK {
+        return Err(format!(
+            "its {} extended XMP segments would take too long to parse",
+            scan.xmp_segments
+        ));
+    }
+    let holds = scan.decoder_holds(len);
+    if holds > WORKING_SET_LIMIT {
+        return Err(format!(
+            "the file and its decoder's copies of its metadata need about {} MiB, over the {} MiB limit",
+            holds / MIB,
+            WORKING_SET_LIMIT / MIB
+        ));
+    }
+    Ok(holds)
+}
+
 /// What a decoder keeps besides the decoded image while it decodes (see
 /// [`working_set`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,11 +396,11 @@ enum DecoderKeeps {
     /// plus the decoder's own limit when there is an ICC profile to
     /// inflate. The pixel data is read as it goes.
     Png { metadata: u64 },
-    /// The JPEG decoder: the whole `file`, and its copies of the metadata
-    /// segments it parses (ICC, EXIF, XMP), which can't exceed the file;
-    /// plus 16-bit coefficients for every component of the whole image
-    /// when the `layout` may need them.
-    Jpeg { file: u64, layout: JpegLayout },
+    /// The JPEG decoder: what it `holds` besides pixels
+    /// ([`headers::JpegScan::decoder_holds`]: the file, its metadata copies
+    /// and reassembled extended XMP), plus 16-bit coefficients for every
+    /// component of the whole image when the `layout` needs them.
+    Jpeg { holds: u64, layout: JpegLayout },
     /// The WebP decoder, by `layout`:
     /// - a simple file, or a still one without a lossy image with alpha: up
     ///   to an RGBA frame (lossless without alpha decodes to RGBA first;
@@ -396,13 +438,13 @@ fn working_set(
     let decoded = size(color);
     let decoder_buffers = match keeps {
         DecoderKeeps::Little => 0,
-        DecoderKeeps::Jpeg { file, layout } => {
+        DecoderKeeps::Jpeg { holds, layout } => {
             let coefficients = if layout.whole_image {
                 pixels.saturating_mul(2 * u64::from(layout.components))
             } else {
                 0
             };
-            file.saturating_mul(2).saturating_add(coefficients)
+            holds.saturating_add(coefficients)
         }
         DecoderKeeps::Png { metadata } => metadata,
         DecoderKeeps::WebP { layout } => match layout {
@@ -867,11 +909,11 @@ mod tests {
         // WebP: 3 written + 4 as RGBA + 4 compressed.
         assert_eq!(mib(Rgb8, little, none, Format::Webp), 11);
 
-        // The JPEG decoder keeps the file (here 100 MiB) and its metadata
-        // copies, and 2 bytes per component for the whole image only when
-        // its layout may need them.
+        // The JPEG decoder keeps what its scan bounds (here 200 MiB), and 2
+        // bytes per component for the whole image only when its layout
+        // needs them.
         let jpeg = |components, whole_image| DecoderKeeps::Jpeg {
-            file: 100 * MIB,
+            holds: 200 * MIB,
             layout: JpegLayout {
                 components,
                 whole_image,
@@ -885,7 +927,7 @@ mod tests {
         // by row, and doesn't with whole-image coefficients.
         let pano = |whole_image| {
             let keeps = DecoderKeeps::Jpeg {
-                file: 40 * MIB,
+                holds: 80 * MIB,
                 layout: JpegLayout {
                     components: 3,
                     whole_image,
@@ -936,6 +978,27 @@ mod tests {
             u64::MAX,
         );
         assert_eq!(huge, u64::MAX);
+    }
+
+    #[test]
+    fn a_jpeg_is_admitted_only_if_its_decoder_fits() {
+        let scan = |xmp_segments, ff_bytes| headers::JpegScan {
+            xmp_segments,
+            ff_bytes,
+        };
+        // No extended XMP: the file and its metadata copies.
+        assert_eq!(admit_jpeg(100 * MIB, &scan(0, 1 << 30)), Ok(200 * MIB));
+        assert_eq!(admit_jpeg(512 * MIB, &scan(0, 0)), Ok(1024 * MIB));
+        // Extended XMP can add as much again: 350 MiB holds 1,050 MiB.
+        let err = admit_jpeg(350 * MIB, &scan(6_000, 6_000)).unwrap_err();
+        assert!(
+            err.contains("need about 1050 MiB, over the 1024 MiB limit"),
+            "{err}"
+        );
+        // Many segments and many markers: the parse would take too long.
+        let err = admit_jpeg(MIB, &scan(1 << 15, 1 << 16)).unwrap_err();
+        assert!(err.contains("32768 extended XMP segments"), "{err}");
+        assert!(admit_jpeg(MIB, &scan(1 << 14, 1 << 16)).is_ok());
     }
 
     #[test]

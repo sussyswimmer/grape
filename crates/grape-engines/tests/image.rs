@@ -472,7 +472,15 @@ fn claiming(mut png: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
 
 /// A small JPEG whose frame header claims `width`×`height`.
 fn jpeg_claiming(width: u16, height: u16) -> Vec<u8> {
-    let mut jpeg = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Jpg);
+    claiming_jpeg(
+        encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Jpg),
+        width,
+        height,
+    )
+}
+
+/// `jpeg` with its frame header changed to claim `width`×`height`.
+fn claiming_jpeg(mut jpeg: Vec<u8>, width: u16, height: u16) -> Vec<u8> {
     // SOF0: FF C0, length (2), precision (1), height (2), width (2).
     let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
     jpeg[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
@@ -650,6 +658,73 @@ fn a_jpeg_file_counts_toward_the_working_set() {
     );
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
+}
+
+/// `jpeg` with `count` extended-XMP segments of `size` data bytes each
+/// right after SOI, laid out as one XMP packet `total` bytes long.
+fn with_extended_xmp(jpeg: &[u8], count: u32, size: u16, total: u32) -> Vec<u8> {
+    let mut segments = Vec::new();
+    for i in 0..count {
+        let mut data = b"http://ns.adobe.com/xmp/extension/\0".to_vec();
+        data.extend_from_slice(b"0123456789ABCDEF0123456789ABCDEF");
+        data.extend(total.to_be_bytes());
+        data.extend((i * u32::from(size)).to_be_bytes());
+        data.resize(data.len() + usize::from(size), b'x');
+        segments.extend([0xFF, 0xE1]);
+        segments.extend(u16::try_from(data.len() + 2).unwrap().to_be_bytes());
+        segments.extend(data);
+    }
+    [&jpeg[..2], &segments, &jpeg[2..]].concat()
+}
+
+#[test]
+fn a_jpegs_extended_xmp_counts_toward_the_working_set() {
+    // The decoder copies each extended-XMP segment and then reassembles
+    // them: up to as much again as the file, on top of the file and its
+    // other metadata copies. A progressive 18,836² gray frame (kept gray
+    // in a TIFF) and 64 segments of 65,000 bytes fit the 1 GiB limit
+    // without that, and not with it.
+    let gray = encode(
+        &DynamicImage::ImageLuma8(GrayImage::new(16, 16)),
+        Format::Jpg,
+    );
+    let jpeg = with_extended_xmp(
+        &progressive(claiming_jpeg(gray, 18_836, 18_836)),
+        64,
+        65_000,
+        64 * 65_000,
+    );
+    let mib = 1024 * 1024;
+    let len = jpeg.len() as u64;
+    // Decoded, and 2 bytes per pixel of coefficients.
+    let pixels = 18_836u64 * 18_836;
+    let without = 3 * pixels + 2 * len;
+    assert!(without <= 1024 * mib, "{}", without / mib);
+    assert_too_large_as(
+        "scan.jpg",
+        &jpeg,
+        Format::Tiff,
+        &format!(
+            "needs about {} MiB, over the 1024 MiB limit",
+            (without + len) / mib
+        ),
+    );
+}
+
+#[test]
+fn a_jpeg_whose_header_parse_would_take_too_long_is_refused() {
+    // 40,000 one-byte extended-XMP segments that never add up to the
+    // packet's size: the decoder would re-check every pending one after
+    // every marker, for minutes. Refused before any decoder parses it.
+    let gray = encode(
+        &DynamicImage::ImageLuma8(GrayImage::new(16, 16)),
+        Format::Jpg,
+    );
+    assert_too_large(
+        "slow.jpg",
+        &with_extended_xmp(&gray, 40_000, 1, u32::MAX),
+        "its 40000 extended XMP segments would take too long to parse",
+    );
 }
 
 #[test]
