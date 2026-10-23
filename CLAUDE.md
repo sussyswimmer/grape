@@ -7,8 +7,8 @@ Grape's behavior is modeled on Tangerine for Mac (tangerineformac.com). The beha
 ## Current phase: Windows first
 
 We are in **Phase 1: Windows** (`docs/ROADMAP.md`, DECISIONS D8). Development and testing happen on Maxwell's Windows PC.
-- Write and test Windows code only. Keep `grape-platform`'s `macos` module as a compiling stub until milestone M8.
-- Keep shared code (`grape-core`, `grape-engines`, the UI) OS-neutral, so the Mac port later is cheap.
+- Since 2026-10-23 the macOS port (M8) runs alongside it (DECISIONS D18). Mac code lives in `grape-platform`'s `macos` module and Mac-gated app code. CI builds a downloadable DMG, and nothing on the Mac is tested by hand until Maxwell runs that build.
+- Keep shared code (`grape-core`, `grape-engines`, the UI) OS-neutral.
 - New here? Read `docs/START_HERE.md` first.
 
 ## Golden rules (never break these)

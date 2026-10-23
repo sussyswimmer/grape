@@ -167,6 +167,16 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - The UI's agreement test (`ui/src/wheel/geometry.test.ts`) now covers the corners and the single-item ring, too.
 - **Revisit if:** the wheel's shape changes; the UI and core must change together.
 
+## D18: Start the macOS port now (2026-10-23, decided by Maxwell)
+- **Decision:** Maxwell asked for the Mac build now, so M8 starts alongside Phase 1 instead of after Windows v1 ships. This changes D8's order, not its scope: Windows stays the main test machine, and shared code stays OS-neutral.
+- **What it means:**
+  - `grape-platform`'s `macos` module gets real code: drag-pasteboard polling (D7, no permissions), display bounds, file actions and haptics, following `PLATFORM_MACOS.md`.
+  - The app wires the overlay for macOS.
+  - CI lints and tests on `macos-latest` and builds an ad-hoc-signed, un-notarized universal DMG as a downloadable artifact on every run.
+  - Notarization and the release workflow stay in M9.
+- **Tested:** CI only, until Maxwell runs the DMG on a Mac. Every Mac behavior that CI can't check has a `mac:` line in `TESTING.md`.
+- **Revisit if:** the Mac work starts slowing Windows v1 down.
+
 ---
 
 ## Open questions

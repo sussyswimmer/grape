@@ -92,6 +92,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 # Phase 2: macOS port
 
 ## M8: macOS platform layer
+*Started early, 2026-10-23 (DECISIONS D18).* CI builds a downloadable universal DMG on every run (`PLATFORM_MACOS.md` → "Running a CI build"). The platform layer is next.
 - [ ] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), AppKit file actions, haptics.
 - [ ] Overlay over full-screen apps (`tauri-nspanel` if needed). `ActivationPolicy::Accessory`.
 - [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds.

@@ -40,6 +40,17 @@ If the drag pasteboard holds no file URLs (text, browser images, promised files)
 - **v2 documents:** `NSAttributedString` reads and writes `docx`, `rtf`, `rtfd`, `html` and `odt` natively. **[inferred]** This is a plausible route for Tangerine's DOCX/RTF/RTFD support. Text clippings are `.textClipping` resource-fork-style plists; read the `utf8` / `public.utf8-plain-text` data.
 - **Pages:** no public API. `NSAttributedString` can't read `.pages`. See `DECISIONS.md` O2.
 
+## Running a CI build
+
+Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silicon + Intel) Grape.app. It's ad-hoc signed but not notarized (D18; notarization comes with M9), so macOS will refuse to open it at first.
+
+1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-macOS-universal` and unzip it.
+2. Open the `.dmg` and drag **Grape** into **Applications**.
+3. Launch Grape once. macOS says it can't check it for malware. Click **Done**.
+4. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to "Grape was blocked". Confirm with your password.
+   - Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Grape.app`, then open Grape normally.
+5. Grape appears in the menu bar (no Dock icon). Quit it from its menu.
+
 ## Distribution
 - **Direct download first:** a DMG signed with **Developer ID**, hardened runtime, **notarized** and stapled. Every sidecar binary must be signed with the same identity and hardened runtime, or notarization fails.
 - Entitlements: none needed for drag/modifier polling. Add `com.apple.security.cs.disable-library-validation` **only** if a sidecar loads unsigned dylibs (avoid this).

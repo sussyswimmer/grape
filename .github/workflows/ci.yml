@@ -54,16 +54,47 @@ jobs:
       - name: Build
         run: pnpm -C apps/desktop/ui build
 
-  # Phase 1 is Windows only, but the workspace must still build on a Mac
-  # (grape-platform's macOS stub). Check only: nothing runs here.
-  rust-macos-check:
-    name: Rust check (macOS)
+  # The macOS port (DECISIONS D18): lint and test on a Mac, like Windows.
+  rust-macos:
+    name: Rust (macOS)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Check
-        run: cargo check --workspace --all-targets --locked
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+
+  # A Mac build anyone can download from the run's Artifacts: a universal
+  # (Apple silicon + Intel) Grape.app in a DMG. It's ad-hoc signed, not
+  # notarized, so the first open needs the steps in docs/PLATFORM_MACOS.md
+  # → "Running a CI build".
+  build-macos:
+    name: Build (macOS DMG)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Build Grape.app and the DMG
+        working-directory: apps/desktop
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Grape-macOS-universal
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
