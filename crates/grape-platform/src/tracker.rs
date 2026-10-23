@@ -99,8 +99,9 @@ impl DragTracker {
     /// The press became a drag without waiting for the threshold: the OS
     /// already says it's one (on macOS, a file drag session started). The
     /// pointer is at (`x`, `y`), and `baseline` is the modifier set held
-    /// when the press was first seen, so keys pressed since then are
-    /// reported by the next [`poll`](Self::poll) and can open a wheel.
+    /// when the OS drag session was first seen, so only keys pressed after
+    /// that are reported by the next [`poll`](Self::poll) and can open a
+    /// wheel.
     ///
     /// Returns `[Started, Moved]` for an armed press, and nothing when no
     /// press is pending (no button down, an unarmed press, or a drag
@@ -324,10 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn start_now_keeps_the_keys_held_at_the_press_as_the_baseline() {
+    fn start_now_keeps_the_keys_held_at_the_start_as_the_baseline() {
         let mut t = DragTracker::new(4, 4);
         t.button_down(0, 0, true);
-        // Command was down when the press was first seen (a Finder
+        // Command was down when the drag session was first seen (a Finder
         // Command-drag): it's the baseline, never a change.
         let signals = t.start_now(0, 0, Modifiers::META);
         assert_eq!(signals.first(), Some(&started(Modifiers::META)));
@@ -338,16 +339,26 @@ mod tests {
     fn a_key_pressed_while_resting_is_reported_after_start_now() {
         let mut t = DragTracker::new(4, 4);
         t.button_down(0, 0, true);
-        // Before the drag session is seen, a key isn't reported yet...
+        // Before the drag session is seen, a key isn't reported...
         assert!(t.poll(Modifiers::SHIFT, false, true).is_empty());
-        t.start_now(0, 0, NONE);
-        // ...and the first poll after the start reports it against the
-        // baseline from the press, though the pointer never moved.
+        // ...and one still held when it's seen is the baseline, as at the
+        // threshold on Windows.
+        t.start_now(0, 0, Modifiers::SHIFT);
+        assert!(t.poll(Modifiers::SHIFT, false, true).is_empty());
+        // A key pressed after the start is reported, though the pointer
+        // never moved.
+        let both = Modifiers {
+            shift: true,
+            meta: true,
+            ..NONE
+        };
+        assert_eq!(t.poll(both, false, true), vec![DragSignal::Modifiers(both)]);
+        assert!(t.poll(both, false, true).is_empty());
+        assert_eq!(t.poll(NONE, false, true), vec![DragSignal::Modifiers(NONE)]);
         assert_eq!(
             t.poll(Modifiers::SHIFT, false, true),
             vec![DragSignal::Modifiers(Modifiers::SHIFT)]
         );
-        assert!(t.poll(Modifiers::SHIFT, false, true).is_empty());
     }
 
     #[test]

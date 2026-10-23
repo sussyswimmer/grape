@@ -106,7 +106,7 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Control-drop two files on MOVE → a "Move 2 items to…" folder picker comes to the front (note if it opens behind Finder). Pick a folder → both move, and the toast says "Moved 2 items". Close the picker → nothing moves and no toast.
 - [ ] mac: MOVE onto a folder holding a file with the same name → that file stays where it was, nothing is overwritten, and the toast says "Moved 1 of 2 items".
 - [ ] mac: MOVE to a USB stick → "Move to another drive?" with Cancel as the default (Return cancels). Move → the items move.
-- [ ] mac: Control-drop on SHARE → the AirDrop window comes to the front with the files (note if it opens behind Finder). Close it or send → Finder is active again.
+- [ ] mac: Control-drop on SHARE → the AirDrop window comes to the front with the files (note if it opens behind Finder). Send or close it → Finder is active again, and no AirDrop window is left behind Finder (note if "Sent" leaves its window open and Grape active).
 - [ ] mac: after a Move, and after cancelling one, the Finder window you dragged from is active again: arrow keys move its selection without clicking first.
 - [ ] mac: drag a USB stick's or a mounted DMG's icon from the Desktop onto MOVE → it isn't moved and nothing on it is erased; the toast says nothing moved.
 - [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Couldn't move" or "Some of it may not have moved", never "Moved …", and the original folder is still complete in its old place.

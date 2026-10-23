@@ -25,7 +25,7 @@
 //! an autorelease pool. `open` runs as its own process with each path as
 //! its own argument, never through a shell.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
@@ -137,9 +137,18 @@ pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
         activate(mtm);
         // SAFETY: as above, and the service said it can take them.
         unsafe { service.performWithItems(items) };
-        // The service holds its delegate weakly, so keep both. The previous
-        // pair goes now, never from inside one of its own callbacks.
-        SHARING.with(|slot| slot.replace(Some((service, done))));
+        // The service holds its delegate weakly, so keep both until AirDrop
+        // reports back. Finished pairs go now, never from inside one of
+        // their own callbacks; a share that never reports goes once
+        // SHARES_KEPT newer ones have started.
+        SHARING.with(|open| {
+            let mut open = open.borrow_mut();
+            open.retain(|(_, done)| !done.ivars().finished.get());
+            if open.len() >= SHARES_KEPT {
+                open.remove(0);
+            }
+            open.push((service, done));
+        });
         Ok(())
     })
 }
@@ -148,7 +157,12 @@ pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
 struct ShareIvars {
     /// The app that was in front before Grape opened AirDrop.
     front: Option<Retained<NSRunningApplication>>,
+    /// AirDrop has reported back.
+    finished: Cell<bool>,
 }
+
+/// How many AirDrop shares that haven't reported back Grape keeps.
+const SHARES_KEPT: usize = 8;
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and ShareDone
@@ -181,22 +195,35 @@ define_class!(
 
 impl ShareDone {
     fn new(mtm: MainThreadMarker, front: Option<Retained<NSRunningApplication>>) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(ShareIvars { front });
+        let this = Self::alloc(mtm).set_ivars(ShareIvars {
+            front,
+            finished: Cell::new(false),
+        });
         // SAFETY: NSObject's designated initializer, on a fresh allocation.
         unsafe { msg_send![super(this), init] }
     }
 
+    /// Hands activation back, unless one of Grape's windows is still key:
+    /// the overlay and toast never are, so that's AirDrop's window (or
+    /// Settings), and handing back would push it behind the app in front.
+    /// Grape then just stays active until the user clicks elsewhere.
     fn give_back(&self) {
+        self.ivars().finished.set(true);
+        let mtm = self.mtm();
+        if NSApplication::sharedApplication(mtm).keyWindow().is_some() {
+            return;
+        }
         if let Some(app) = &self.ivars().front {
-            hand_back(self.mtm(), app);
+            hand_back(mtm, app);
         }
     }
 }
 
 thread_local! {
-    /// The last AirDrop service and its delegate, on the main thread.
-    static SHARING: RefCell<Option<(Retained<NSSharingService>, Retained<ShareDone>)>> =
-        const { RefCell::new(None) };
+    /// The AirDrop services that haven't reported back, with their
+    /// delegates, on the main thread.
+    static SHARING: RefCell<Vec<(Retained<NSSharingService>, Retained<ShareDone>)>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
