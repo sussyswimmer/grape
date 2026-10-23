@@ -89,15 +89,21 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: hold Command, drop on a tool, then hold Control and drop on COPY → each runs exactly once. Note whether the log says it ran "on release because no drop arrived" (AppKit refused the drop) or shows a normal drop.
 - [ ] mac: Esc mid-drag → the ring hides within about a quarter second, Finder cancels its drag, and the file is untouched. Moving on and releasing reopens nothing.
 - [ ] mac: drop in the middle or off the ring, including over a Finder window under the overlay → nothing happens, and the file doesn't land in that window.
-- [ ] mac: drag selected text from Safari or TextEdit and tap Shift → no ring.
+- [ ] mac: drag selected text from Safari or TextEdit, or an image from Safari, and tap Shift → no ring. Drag a window by its title bar with Shift held → no ring.
+- [ ] mac: a quick flick: press on a file, drag and tap Shift within a tenth of a second → the ring still opens.
+- [ ] mac: hold Command and release in the middle or off the ring → nothing runs, the wheel closes, and the file stays where it was.
+- [ ] mac: open the wheel on one display and drag onto another → the wheel stays where it was with nothing highlighted and doesn't close; dragging back highlights segments again.
+- [ ] mac: drag slowly around the open wheel, including over the menu bar and the Dock → it never closes by itself.
 - [ ] mac: two displays (one Retina, one not; also with the second one left of or above the main one) → the ring appears at the cursor on each, and the highlighted segment is the one under the cursor.
 - [ ] mac: a full-screen app in front, another Space, and Stage Manager on → the ring appears over it and drops work.
 - [ ] mac: Control-drop two files on COPY → "Copied 2 items"; Cmd+V in a Finder window pastes copies. COPY PATH → pasting into TextEdit gives two lines.
-- [ ] mac: Control-drop a file on TERMINAL → Terminal opens in its folder.
+- [ ] mac: Control-drop a file on TERMINAL → Terminal opens in its folder, also for a folder named `a b "c" $(whoami)`.
 - [ ] mac: Control-drop two files on MOVE → a "Move 2 items to…" folder picker comes to the front (note if it opens behind Finder). Pick a folder → both move, and the toast says "Moved 2 items". Close the picker → nothing moves and no toast.
 - [ ] mac: MOVE onto a folder holding a file with the same name → that file stays where it was, nothing is overwritten, and the toast says "Moved 1 of 2 items".
 - [ ] mac: MOVE to a USB stick → "Move to another drive?" with Cancel as the default (Return cancels). Move → the items move.
 - [ ] mac: Control-drop on SHARE → the AirDrop window opens with the files.
+- [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Some of it may not have moved", and the original folder is still there.
+- [ ] mac (needs Xcode): quit Grape, then start it from Terminal with Xcode's Main Thread Checker: `DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib` followed by the path of the Grape executable in `Grape.app/Contents/MacOS/`. Drag files for a minute → Terminal shows no "Main Thread Checker: UI API called on a background thread" report.
 - [ ] mac: Quit from the menu bar → no Grape process is left in Activity Monitor.
 
 Drag + wheel
