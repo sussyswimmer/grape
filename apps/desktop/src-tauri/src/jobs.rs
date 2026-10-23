@@ -105,10 +105,8 @@ fn not_runnable(op: &Operation, items: &[SelectionItem]) -> Option<Report> {
             Some(Report::new(
                 ToastTone::Info,
                 "Not in this build yet",
-                Some(format!(
-                    "{from} to {} is coming. JPG, PNG, WEBP, TIFF and BMP convert now.",
-                    to.display_name()
-                )),
+                // One line: the detail row is cut with an ellipsis.
+                Some(format!("{from} to {} is coming.", to.display_name())),
             ))
         }
     }
@@ -231,16 +229,32 @@ fn finished(
                 [one] => name(one),
                 many => format!("{} files", many.len()),
             };
-            let used_fallback = jobs.iter().any(|job| job.used_fallback);
-            let detail = if used_fallback {
-                format!(
-                    "{what}, saved in {} (the folder is read-only)",
-                    short(&settings.fallback_dir)
-                )
-            } else {
-                what
-            };
-            Report::new(ToastTone::Done, "Done", Some(detail))
+            // Only the jobs that wrote something count. The detail row is
+            // one line cut with an ellipsis, so where the files went leads.
+            let fell_back = jobs
+                .iter()
+                .zip(results)
+                .filter(|(job, result)| job.used_fallback && result.is_ok())
+                .count();
+            let folder = short(&settings.fallback_dir);
+            match (fell_back, outputs.as_slice()) {
+                (0, _) => Report::new(ToastTone::Done, "Done", Some(what)),
+                (1, [_]) => Report::new(
+                    ToastTone::Done,
+                    format!("Saved in {folder}"),
+                    Some(format!("{what}; its folder is read-only")),
+                ),
+                (all, many) if all == many.len() => Report::new(
+                    ToastTone::Done,
+                    format!("Saved in {folder}"),
+                    Some(format!("{what}; their folders are read-only")),
+                ),
+                (some, _) => Report::new(
+                    ToastTone::Done,
+                    "Done",
+                    Some(format!("{what}; {some} in {folder}")),
+                ),
+            }
         }
         ([], Some(err)) => Report::new(ToastTone::Error, err.user_message.clone(), None),
         (some, Some(err)) => Report::new(
@@ -341,10 +355,7 @@ mod tests {
         let report = not_runnable(&to_heic, &png).unwrap();
         assert_eq!(report.tone, ToastTone::Info);
         assert_eq!(report.title, "Not in this build yet");
-        assert_eq!(
-            report.detail.as_deref(),
-            Some("PNG to HEIC is coming. JPG, PNG, WEBP, TIFF and BMP convert now.")
-        );
+        assert_eq!(report.detail.as_deref(), Some("PNG to HEIC is coming."));
         assert_eq!(report.reveal, None);
     }
 
@@ -356,10 +367,7 @@ mod tests {
             SelectionItem::file("/a/two.heic"),
         ];
         let report = not_runnable(&to_png, &mixed).unwrap();
-        assert_eq!(
-            report.detail.as_deref(),
-            Some("HEIC to PNG is coming. JPG, PNG, WEBP, TIFF and BMP convert now.")
-        );
+        assert_eq!(report.detail.as_deref(), Some("HEIC to PNG is coming."));
     }
 
     #[test]
@@ -418,6 +426,10 @@ mod tests {
         assert_eq!(report.reveal, Some(PathBuf::from("/a/1.jpg")));
     }
 
+    fn grape_folder() -> String {
+        Path::new("Downloads").join("Grape").display().to_string()
+    }
+
     #[test]
     fn done_says_where_a_fallback_output_went() {
         let jobs = [job(
@@ -430,10 +442,51 @@ mod tests {
             &[wrote("/home/max/Downloads/Grape/photo.jpg")],
             &settings(),
         );
-        let expected = format!(
-            "photo.jpg, saved in {} (the folder is read-only)",
-            Path::new("Downloads").join("Grape").display()
+        assert_eq!(report.tone, ToastTone::Done);
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("photo.jpg; its folder is read-only")
         );
+        assert_eq!(
+            report.reveal,
+            Some(PathBuf::from("/home/max/Downloads/Grape/photo.jpg"))
+        );
+
+        let two = [
+            job("/ro/1.png", "/home/max/Downloads/Grape/1.jpg", true),
+            job("/ro/2.png", "/home/max/Downloads/Grape/2.jpg", true),
+        ];
+        let report = finished(
+            &two,
+            &[
+                wrote("/home/max/Downloads/Grape/1.jpg"),
+                wrote("/home/max/Downloads/Grape/2.jpg"),
+            ],
+            &settings(),
+        );
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("2 files; their folders are read-only")
+        );
+    }
+
+    #[test]
+    fn a_batch_where_only_some_fell_back_says_how_many() {
+        let jobs = [
+            job("/a/1.png", "/a/1.jpg", false),
+            job("/ro/2.png", "/home/max/Downloads/Grape/2.jpg", true),
+            job("/a/3.png", "/a/3.jpg", false),
+        ];
+        let results = [
+            wrote("/a/1.jpg"),
+            wrote("/home/max/Downloads/Grape/2.jpg"),
+            wrote("/a/3.jpg"),
+        ];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.title, "Done");
+        let expected = format!("3 files; 1 in {}", grape_folder());
         assert_eq!(report.detail.as_deref(), Some(expected.as_str()));
     }
 

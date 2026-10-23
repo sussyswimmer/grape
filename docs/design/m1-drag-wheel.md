@@ -436,8 +436,8 @@ export interface ToastHidePayload { id: number }
   - Done: title `Done`, detail `{name}` (or `{n} files`).
   - Partial: title `{ok} of {n} done`, detail = the first error's `user_message`.
   - Error: title = `user_message`, detail null.
-  - Fallback note in the done detail: `{name}, saved in Downloads\Grape (the folder is read-only)`.
-  - Not in this build: info, title `Not in this build yet`, detail `{FROM} to {TO} is coming. JPG, PNG, WEBP, TIFF and BMP convert now.`
+  - Fallback, with the location first so the ellipsis can't cut it: when every output fell back, title `Saved in Downloads\Grape`, detail `{name}; its folder is read-only` (or `{n} files; their folders are read-only`). When only some did, title `Done`, detail `{n} files; {k} in Downloads\Grape`.
+  - Not in this build: info, title `Not in this build yet`, detail `{FROM} to {TO} is coming.` (The detail is one line cut with an ellipsis, about 248 px at 12 px, so a list of the formats that do convert wouldn't be seen.)
   - Tools: info, `Tools arrive in a later build.` Actions: info, `File actions arrive in a later build.`
   - (The "Making {name}…" / "Done" wording follows ROADMAP M3; its clean-room status falls under open question O7.)
 

@@ -59,7 +59,7 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.
 - [ ] win: a PNG with a transparent background → JPG has a white background. A phone photo that displays rotated → its PNG is upright.
 - [ ] win: drop on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
-- [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist) and the toast says so.
+- [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist), and the toast's title says "Saved in Downloads\Grape".
 - [ ] win: with hidden files shown, no `.grape-tmp-…` or `.grape-probe-…` file is left in any folder you converted in, also after a failed or cancelled conversion.
 
 File actions, M5 (win; use scratch copies of files)
