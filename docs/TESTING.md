@@ -73,8 +73,9 @@ File actions, M5 (win; use scratch copies of files)
 - [ ] win: Move into the folder the files are already in → the toast says "Already there", and nothing moves.
 - [ ] win: Move onto a folder that already has a file with the same name → Windows asks what to do. Skip → that file stays put, and the toast says "Moved 1 of 2 items". Keep both → the toast says the move is done, and clicking it selects the renamed file ("name (2)"), or at least opens the folder. It must never select the file that was already there.
 - [ ] win: Move a folder into a folder that already holds a folder of the same name with one clashing file, and Skip the clash → the toast says "Some of it may not have moved" and shows the destination. It never says "Nothing moved".
+- [ ] win: Move a junction to a folder on another drive, then cancel part-way → the toast says "Some of it may not have moved" (or nothing moved, and no toast appears if you cancelled before anything copied).
 - [ ] win: Move into a folder whose name has a space and a comma (`a b,c`), then click the toast → Explorer opens that folder with the moved file selected.
-- [ ] win: make a junction to another drive (`mklink /J C:\scratch\other D:\scratch`), then Move a file from C: into `C:\scratch\other` → Grape asks "Move to another drive?" first.
+- [ ] win: make a junction to another drive in PowerShell (`New-Item -ItemType Junction -Path C:\scratch\other -Target D:\scratch`), then Move a file from C: into `C:\scratch\other` → Grape asks "Move to another drive?" first.
 - [ ] win: Move to a folder on another drive (a USB stick) → Grape first asks "Move to another drive?" with No as the default. No → nothing moves. Yes → the items move.
 - [ ] win: Share and Float → a "Not in this build yet" toast, and nothing else happens.
 

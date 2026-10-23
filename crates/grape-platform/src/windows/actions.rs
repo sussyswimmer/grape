@@ -21,7 +21,7 @@ use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::ErrorKind;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::fs::{FileTypeExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -611,7 +611,11 @@ fn settle(
                 // may have lost part of its contents, can't be "stayed".
                 let elsewhere =
                     destination(source, to).is_some_and(|path| path.symlink_metadata().is_ok());
-                let partly = meta.is_dir() && (inside || aborted || elsewhere);
+                // A junction or directory symlink counts as a folder: a
+                // move across drives copies what's under it, then deletes
+                // as it goes, so a cancel can split it too.
+                let folder = meta.is_dir() || meta.file_type().is_symlink_dir();
+                let partly = inside || (folder && (aborted || elsewhere));
                 if reported.is_some() || partly {
                     unsure.push(source.to_path_buf());
                 }
@@ -1162,6 +1166,20 @@ mod tests {
         // After a cancel, any folder still there may be partly moved.
         let (_, unsure) = settle(&[source(&cancelled, false)], &into, &[], true);
         assert_eq!(unsure, vec![cancelled]);
+        // A junction still there after a cancel may be split too.
+        let target = scratch.folder("target");
+        let junction = scratch.0.join("junction");
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J failed: {made:?}");
+        let (_, unsure) = settle(&[source(&junction, false)], &into, &[], true);
+        assert_eq!(unsure, vec![junction.clone()]);
+        let (_, unsure) = settle(&[source(&junction, false)], &into, &[], false);
+        assert!(unsure.is_empty());
         // A file still there after a cancel just stayed.
         let (moved, unsure) = settle(&[source(&claimed, false)], &into, &[], true);
         assert!(moved.is_empty() && unsure.is_empty());
