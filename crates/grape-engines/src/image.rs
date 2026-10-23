@@ -11,9 +11,10 @@
 //!   bomb) can exhaust memory:
 //!   - a JPEG or WebP source file must fit [`MAX_SOURCE`], checked before
 //!     reading it (the JPEG decoder reads the whole file into memory);
-//!   - the metadata the PNG decoder keeps (text and EXIF chunks, counted
-//!     from the chunk headers; the inflated ICC profile, held by the
-//!     decoder itself) must fit [`PNG_METADATA_LIMIT`];
+//!   - the metadata the PNG decoder keeps is held to
+//!     [`PNG_METADATA_LIMIT`] twice over: its text and EXIF chunks, counted
+//!     from the chunk headers, and what its own limit holds (the inflated
+//!     ICC profile);
 //!   - an ICC profile over [`MAX_ICC`] is dropped as soon as it is read;
 //!   - from the headers: the decoded image must fit the `image` crate's
 //!     default 512 MiB allocation limit (`into_decoder` hands that limit to
@@ -101,14 +102,15 @@ pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * MIB;
 /// multi-page scan converts its first image.
 pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
 
-/// What the PNG decoder may keep besides the pixels. Two checks hold it:
+/// The limit for each of the two kinds of metadata the PNG decoder keeps
+/// besides the pixels, so up to about twice this in all:
 /// - the text and EXIF chunks ahead of the image data, as
 ///   [`headers::png_metadata`] counts them from their headers before
 ///   decoding (a text chunk costs up to twice its size, plus its entry, so
 ///   one chunk of up to about 40 MiB fits); more is refused as too large;
-/// - the decoder's own limit, which also covers the inflated ICC profile
-///   and its row buffers: a profile that would inflate past it is dropped,
-///   and the image still converts.
+/// - what the decoder's own limit holds: the inflated ICC profile, the raw
+///   text and its row buffers. A profile that would inflate past it is
+///   dropped, and the image still converts.
 const PNG_METADATA_LIMIT: u64 = 128 * MIB;
 
 /// How many rows Grape's own pixel loops process between cancel checks
@@ -246,10 +248,17 @@ fn decode(
             layout: headers::webp_layout(src),
         },
         Some(ImageFormat::Png) => match headers::png_metadata(src) {
-            Some(metadata) if metadata <= PNG_METADATA_LIMIT => DecoderKeeps::Png { metadata },
-            counted => {
-                let why = match counted {
-                    Some(metadata) => format!("its metadata needs about {} MiB", metadata / MIB),
+            Some(found) if found.counted <= PNG_METADATA_LIMIT => DecoderKeeps::Png {
+                // An ICC profile is inflated under the decoder's own limit.
+                metadata: found.counted.saturating_add(if found.icc {
+                    PNG_METADATA_LIMIT
+                } else {
+                    0
+                }),
+            },
+            found => {
+                let why = match found {
+                    Some(found) => format!("its metadata needs about {} MiB", found.counted / MIB),
                     None => "it has too many metadata chunks to count".to_owned(),
                 };
                 return Err(names.too_large(format!(
@@ -341,17 +350,21 @@ enum DecoderKeeps {
     /// they go, and the TIFF decoder holds its buffers to what the 512 MiB
     /// decode limit leaves beside the image.
     Little,
-    /// The PNG decoder: the `metadata` [`headers::png_metadata`] counted.
-    /// The pixel data is read as it goes.
+    /// The PNG decoder: the `metadata` [`headers::png_metadata`] counted,
+    /// plus the decoder's own limit when there is an ICC profile to
+    /// inflate. The pixel data is read as it goes.
     Png { metadata: u64 },
-    /// The JPEG decoder: the whole `file`, plus 16-bit coefficients for
-    /// every component of the whole image when the `layout` needs them.
+    /// The JPEG decoder: the whole `file`, and its copies of the metadata
+    /// segments it parses (ICC, EXIF, XMP), which can't exceed the file;
+    /// plus 16-bit coefficients for every component of the whole image
+    /// when the `layout` may need them.
     Jpeg { file: u64, layout: JpegLayout },
     /// The WebP decoder, by `layout`:
-    /// - a simple file: up to an RGBA frame (lossless without alpha decodes
-    ///   to RGBA first; lossy keeps 1.5 bytes per pixel of YUV planes);
-    /// - a still image with alpha: lossy keeps its YUV planes, the `ALPH`
-    ///   chunk decoded as RGBA and the alpha plane, 6.5 bytes per pixel;
+    /// - a simple file, or a still one without a lossy image with alpha: up
+    ///   to an RGBA frame (lossless without alpha decodes to RGBA first;
+    ///   lossy keeps 1.5 bytes per pixel of YUV planes);
+    /// - a still lossy image with alpha: its YUV planes, the `ALPH` chunk
+    ///   decoded as RGBA and the alpha plane, 6.5 bytes per pixel;
     /// - an animation: an RGBA frame and an RGBA canvas.
     WebP { layout: WebpLayout },
 }
@@ -389,12 +402,12 @@ fn working_set(
             } else {
                 0
             };
-            file.saturating_add(coefficients)
+            file.saturating_mul(2).saturating_add(coefficients)
         }
         DecoderKeeps::Png { metadata } => metadata,
         DecoderKeeps::WebP { layout } => match layout {
-            WebpLayout::Simple | WebpLayout::Still { alpha: false } => size(ColorType::Rgba8),
-            WebpLayout::Still { alpha: true } => pixels.saturating_mul(13) / 2,
+            WebpLayout::Simple | WebpLayout::Still { lossy_alpha: false } => size(ColorType::Rgba8),
+            WebpLayout::Still { lossy_alpha: true } => pixels.saturating_mul(13) / 2,
             WebpLayout::Animated => size(ColorType::Rgba8).saturating_mul(2),
         },
     };
@@ -854,8 +867,9 @@ mod tests {
         // WebP: 3 written + 4 as RGBA + 4 compressed.
         assert_eq!(mib(Rgb8, little, none, Format::Webp), 11);
 
-        // The JPEG decoder keeps the file (here 100 MiB), and 2 bytes per
-        // component for the whole image only when its layout needs them.
+        // The JPEG decoder keeps the file (here 100 MiB) and its metadata
+        // copies, and 2 bytes per component for the whole image only when
+        // its layout may need them.
         let jpeg = |components, whole_image| DecoderKeeps::Jpeg {
             file: 100 * MIB,
             layout: JpegLayout {
@@ -863,12 +877,12 @@ mod tests {
                 whole_image,
             },
         };
-        assert_eq!(mib(Rgb8, jpeg(3, false), none, Format::Bmp), 103);
-        assert_eq!(mib(Rgb8, jpeg(3, true), none, Format::Bmp), 109);
+        assert_eq!(mib(Rgb8, jpeg(3, false), none, Format::Bmp), 203);
+        assert_eq!(mib(Rgb8, jpeg(3, true), none, Format::Bmp), 209);
         // CMYK is decoded to RGB, but its coefficients have 4 components.
-        assert_eq!(mib(Rgb8, jpeg(4, true), none, Format::Bmp), 111);
-        // A baseline 25,000×4,600 panorama in a 40 MiB file fits; the same
-        // frame coded progressively doesn't.
+        assert_eq!(mib(Rgb8, jpeg(4, true), none, Format::Bmp), 211);
+        // A 25,000×4,600 panorama in a 40 MiB file fits when it decodes row
+        // by row, and doesn't with whole-image coefficients.
         let pano = |whole_image| {
             let keeps = DecoderKeeps::Jpeg {
                 file: 40 * MIB,
@@ -882,14 +896,14 @@ mod tests {
         assert!(pano(false) < WORKING_SET_LIMIT);
         assert!(pano(true) > WORKING_SET_LIMIT);
 
-        // WebP: up to an RGBA frame; a lossy still with alpha keeps 6.5
-        // bytes per pixel; an animation an RGBA frame and an RGBA canvas.
+        // WebP: up to an RGBA frame; a still lossy image with alpha keeps
+        // 6.5 bytes per pixel; an animation an RGBA frame and an RGBA canvas.
         let webp = |layout| DecoderKeeps::WebP { layout };
         let simple = webp(WebpLayout::Simple);
         assert_eq!(mib(Rgba8, simple, none, Format::Bmp), 8);
-        let opaque = webp(WebpLayout::Still { alpha: false });
+        let opaque = webp(WebpLayout::Still { lossy_alpha: false });
         assert_eq!(mib(Rgb8, opaque, none, Format::Bmp), 7);
-        let alpha = webp(WebpLayout::Still { alpha: true });
+        let alpha = webp(WebpLayout::Still { lossy_alpha: true });
         assert_eq!(
             working_set(1024, 1024, Rgba8, alpha, none, Format::Bmp, 0),
             21 * MIB / 2

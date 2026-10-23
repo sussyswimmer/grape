@@ -626,7 +626,8 @@ fn progressive(mut jpeg: Vec<u8>) -> Vec<u8> {
 fn a_jpeg_file_counts_toward_the_working_set() {
     // A progressive 10,901² RGB frame: 340 MiB decoded plus 680 MiB of
     // coefficients is 1,020 MiB, just under the 1 GiB limit. The JPEG
-    // decoder also holds the whole file, here 8 MiB, which tips it over.
+    // decoder also holds the whole file, here 8 MiB, and its copies of the
+    // file's metadata, counted as much again, which tips it over.
     let dir = TestDir::new("jpeg-held");
     let (src, job) = plan_one(
         &dir,
@@ -643,7 +644,7 @@ fn a_jpeg_file_counts_toward_the_working_set() {
     assert_eq!(err.user_message, "tall.jpg is too large to convert.");
     assert!(
         err.detail
-            .contains("needs about 1027 MiB, over the 1024 MiB limit"),
+            .contains("needs about 1035 MiB, over the 1024 MiB limit"),
         "{}",
         err.detail
     );
@@ -722,9 +723,10 @@ fn animated_webp(width: u32, height: u32) -> Vec<u8> {
     riff_chunk(b"RIFF", &body)
 }
 
-/// A still extended WebP with alpha on a `width`×`height` canvas, holding
-/// a small lossless image: a few kilobytes that claim a huge canvas.
-fn still_webp_with_alpha(width: u32, height: u32) -> Vec<u8> {
+/// A still extended WebP with alpha on a `width`×`height` canvas. A
+/// `lossy` one carries `ALPH` and `VP8 ` chunks (whose data is never read:
+/// it is refused before decoding); otherwise the small lossless gradient.
+fn still_webp_with_alpha(width: u32, height: u32, lossy: bool) -> Vec<u8> {
     let simple = encode(&gradient(), Format::Webp);
     assert_eq!(&simple[12..16], b"VP8L");
     let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
@@ -732,25 +734,43 @@ fn still_webp_with_alpha(width: u32, height: u32) -> Vec<u8> {
     let mut vp8x = vec![0x10, 0, 0, 0];
     vp8x.extend(u24(width - 1));
     vp8x.extend(u24(height - 1));
-    let body = [
-        b"WEBP".to_vec(),
-        riff_chunk(b"VP8X", &vp8x),
-        simple[12..].to_vec(),
-    ]
-    .concat();
+    let image = if lossy {
+        [riff_chunk(b"ALPH", &[0; 4]), riff_chunk(b"VP8 ", &[0; 10])].concat()
+    } else {
+        simple[12..].to_vec()
+    };
+    let body = [b"WEBP".to_vec(), riff_chunk(b"VP8X", &vp8x), image].concat();
     riff_chunk(b"RIFF", &body)
 }
 
 #[test]
-fn a_still_webp_with_alpha_counts_its_alpha_decoding() {
+fn a_still_lossy_webp_with_alpha_counts_its_alpha_decoding() {
     // An 11,585² RGBA canvas: 4 bytes decoded, and 6.5 for what a lossy
     // image with an alpha chunk keeps while decoding, is 1,344 MiB. With
     // just an RGBA frame it would be 1,024 MiB, just under the limit.
     assert_too_large(
         "cutout.webp",
-        &still_webp_with_alpha(11_585, 11_585),
+        &still_webp_with_alpha(11_585, 11_585, true),
         "needs about 1343 MiB, over the 1024 MiB limit",
     );
+    // The same canvas holding a lossless image decodes into the output
+    // directly, so it gets past the estimate; its 64×48 bitstream then
+    // doesn't match the canvas, which the decoder reports.
+    let dir = TestDir::new("webp-lossless");
+    let (src, job) = plan_one(
+        &dir,
+        "cutout.webp",
+        &still_webp_with_alpha(11_585, 11_585, false),
+        Operation::convert(Format::Bmp),
+    );
+    let before = SourceState::of(&src);
+    let err = run(&job).unwrap_err();
+    assert_eq!(
+        err.user_message, "cutout.webp isn't a readable WEBP image.",
+        "{}",
+        err.detail
+    );
+    before.assert_unchanged();
 }
 
 #[test]
@@ -801,8 +821,13 @@ fn png_with_comment(len: usize) -> Vec<u8> {
 /// Plans `bytes` as `name` for BMP, expects it refused as too large with
 /// `why` in the detail, and checks that nothing changed.
 fn assert_too_large(name: &str, bytes: &[u8], why: &str) {
+    assert_too_large_as(name, bytes, Format::Bmp, why);
+}
+
+/// [`assert_too_large`], converting to `to`.
+fn assert_too_large_as(name: &str, bytes: &[u8], to: Format, why: &str) {
     let dir = TestDir::new("too-large");
-    let (src, job) = plan_one(&dir, name, bytes, Operation::convert(Format::Bmp));
+    let (src, job) = plan_one(&dir, name, bytes, Operation::convert(to));
     let before = SourceState::of(&src);
     let names_before = dir.names();
 
@@ -866,6 +891,27 @@ fn a_png_with_a_million_tiny_text_chunks_is_refused() {
         "chatty.png",
         &png_with_empty_comments(1_100_000),
         "it has too many metadata chunks to count",
+    );
+}
+
+#[test]
+fn a_png_icc_profile_counts_while_decoding() {
+    // The decoder may inflate an ICC profile up to its own 128 MiB limit,
+    // so a PNG with one is charged that while decoding. 31,000² gray kept
+    // as gray in a TIFF is 917 MiB decoded (more than the decode limit,
+    // which is checked after the estimate): with the profile's 128 MiB,
+    // past 1 GiB.
+    let mut png = Vec::new();
+    let mut encoder = PngEncoder::new(&mut png);
+    encoder.set_icc_profile(rgb_profile(132)).unwrap();
+    DynamicImage::ImageLuma8(GrayImage::new(16, 16))
+        .write_with_encoder(encoder)
+        .unwrap();
+    assert_too_large_as(
+        "scan.png",
+        &claiming(png, 31_000, 31_000),
+        Format::Tiff,
+        "needs about 1044 MiB, over the 1024 MiB limit",
     );
 }
 

@@ -123,8 +123,10 @@ mod tests {
 
     #[test]
     fn reading_to_the_end_holds_the_file_size_not_the_next_power_of_two() {
-        // A power of two is the worst case for a buffer that doubles.
-        let bytes: Vec<u8> = (0..1u32 << 20).map(|i| (i % 251) as u8).collect();
+        // One byte past a power of two is the worst case: a buffer grown by
+        // doubling (by std's probe read, or by appending step by step)
+        // would end at twice the size.
+        let bytes: Vec<u8> = (0..(1u32 << 20) + 1).map(|i| (i % 251) as u8).collect();
         let token = CancelToken::new();
         let mut reader = io::BufReader::new(Cancellable::new(Cursor::new(bytes.clone()), &token));
         // Like a decoder: sniff the first bytes, then seek back.
