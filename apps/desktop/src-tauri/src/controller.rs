@@ -12,6 +12,12 @@
 //! with grape-core's [`wheel_content`] once the drop target's Enter says
 //! which files are being dragged.
 //!
+//! Esc closes an open wheel, and Esc before any wheel keeps one from
+//! opening: Explorer cancels its drag on Esc, so a key tapped while the
+//! button is still down would open a wheel over a drag that no longer
+//! exists. Either way the controller stays out of the way until the button
+//! goes up.
+//!
 //! Two [`ControllerConfig`] flags cover what AppKit hides on macOS. Both
 //! are off on Windows, where the controller behaves as before.
 //! `release_fallback` runs the highlighted segment when the button goes up
@@ -19,7 +25,9 @@
 //! refuse the drop then. `leave_ends_drag` reads a Leave that arrives while
 //! the button is still down, with the cursor still on the wheel's display,
 //! as Esc: Esc ends the AppKit drag session but not the press, and Grape
-//! can't read the key itself (`docs/DECISIONS.md` D7).
+//! can't read the key itself (`docs/DECISIONS.md` D7). A refused drop
+//! brings its Leave within [`REFUSED_LEAVE_WINDOW`] of the button-up; a
+//! button-up later than that after a Leave follows Esc, so nothing runs.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -51,8 +59,17 @@ pub const NO_FILES_GRACE: Duration = Duration::from_millis(300);
 pub const DROP_GRACE: Duration = Duration::from_millis(750);
 /// Under [`ControllerConfig::leave_ends_drag`], how long a Leave with the
 /// button still down waits for the drag to come back before it counts as
-/// Esc. An Enter or Over within this time was a flicker.
+/// Esc. An Enter or Over within this time was a flicker. A button-up
+/// within [`REFUSED_LEAVE_WINDOW`] of the Leave was a refused drop, and a
+/// later one ends the drag with nothing run.
 pub const LEAVE_GRACE: Duration = Duration::from_millis(200);
+/// Under [`ControllerConfig::release_fallback`], how soon after a Leave the
+/// button must go up for the Leave to count as a refused drop, whose
+/// highlighted segment may then run. A refused drop's Leave and the
+/// poller's button-up arrive within a frame or two of each other. A later
+/// button-up follows Esc, which on macOS is a Leave with the button still
+/// down: the wheel closes and nothing runs.
+pub const REFUSED_LEAVE_WINDOW: Duration = Duration::from_millis(50);
 
 /// A modifier key that can be assigned to a wheel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +163,8 @@ impl KeyMap {
 
 /// What the controller needs from the OS.
 pub trait Env {
-    /// The display under the global physical point (`x`, `y`).
+    /// The display under the global point (`x`, `y`): physical pixels on
+    /// Windows, points on macOS.
     fn display_at(&self, x: i32, y: i32) -> Option<DisplayBounds>;
     /// The dragged paths as selection items: folders as folders, everything
     /// else as files.
@@ -159,7 +177,8 @@ pub trait Env {
 /// on in [`for_this_os`](Self::for_this_os) on macOS and off elsewhere.
 /// With both off the controller behaves exactly as it does on Windows.
 /// They work as a pair: a refused drop can bring its Leave just before the
-/// button-up, and `leave_ends_drag` keeps the highlight through it.
+/// button-up (within [`REFUSED_LEAVE_WINDOW`]), and `leave_ends_drag` keeps
+/// the highlight through it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ControllerConfig {
     /// Which key opens which wheel.
@@ -176,15 +195,18 @@ pub struct ControllerConfig {
     /// those keys are held, and wry always answers Copy, so AppKit may
     /// refuse the drop: no Drop event comes although the user released
     /// over a segment. With neither key held a normal drop comes, so
-    /// nothing runs on release.
+    /// nothing runs on release. A button-up just after a Leave counts as
+    /// over the overlay only within [`REFUSED_LEAVE_WINDOW`] of the Leave.
     pub release_fallback: bool,
     /// Read a Leave from the drop target as Esc when it arrives while the
     /// button is still down and the cursor is still on the wheel's
     /// monitor. The wheel keeps its highlight for [`LEAVE_GRACE`]; an
-    /// Enter or Over in that time was a flicker, a button-up is a release,
-    /// and otherwise the wheel closes as for Esc. On macOS Esc cancels the
-    /// drag session (a Leave) while the button stays down, and Grape can't
-    /// read the key itself (`docs/DECISIONS.md` D7).
+    /// Enter or Over in that time was a flicker, a button-up within
+    /// [`REFUSED_LEAVE_WINDOW`] is a refused drop's release, a later one
+    /// ends the drag with nothing run, and otherwise the wheel closes as
+    /// for Esc. On macOS Esc cancels the drag session (a Leave) while the
+    /// button stays down, and Grape can't read the key itself
+    /// (`docs/DECISIONS.md` D7).
     pub leave_ends_drag: bool,
 }
 
@@ -233,7 +255,7 @@ pub struct RunRequest {
     pub items: Vec<SelectionItem>,
     /// The segment's item.
     pub entry: WheelEntry,
-    /// The wheel's center, global physical pixels (to place the toast).
+    /// The wheel's center, in global coordinates (to place the toast).
     pub anchor: (i32, i32),
     /// The display the wheel was on.
     pub display: DisplayBounds,
@@ -280,7 +302,7 @@ impl fmt::Display for DropReport {
 pub enum Effect {
     /// Send `wheel://open`: draw or redraw the wheel.
     Open(WheelOpen),
-    /// Frame the overlay on this monitor (global physical) and show it.
+    /// Frame the overlay on this monitor (global coordinates) and show it.
     ShowOverlay {
         /// The whole monitor.
         monitor: Rect,
@@ -308,8 +330,9 @@ enum State {
     },
     /// The wheel is open.
     Open(Box<OpenWheel>),
-    /// The wheel was closed or refused for this drag (Esc, not a file drag,
-    /// a drop, Pause): stay out of the way until the drag ends.
+    /// The wheel was closed or refused for this drag (Esc with or without a
+    /// wheel, not a file drag, a drop, Pause): stay out of the way until the
+    /// drag ends.
     Dismissed,
 }
 
@@ -361,6 +384,13 @@ impl OpenWheel {
         contains(self.display.monitor, self.cursor)
     }
 
+    /// `true` if a pending Leave came at most [`REFUSED_LEAVE_WINDOW`]
+    /// before `now`, so a button-up now may be its refused drop.
+    fn left_just_before(&self, now: Instant) -> bool {
+        self.left_at
+            .is_some_and(|at| now.saturating_duration_since(at) <= REFUSED_LEAVE_WINDOW)
+    }
+
     /// Clears the highlight, with the event the overlay needs if there was
     /// one.
     fn clear_highlight(&mut self) -> Vec<Effect> {
@@ -374,7 +404,7 @@ impl OpenWheel {
         }
     }
 
-    /// A global physical point as a logical offset from the anchor (y
+    /// A global point as a logical offset from the anchor (y
     /// down), which is what `hit_test` takes.
     fn offset(&self, x: i32, y: i32) -> Point {
         let monitor = self.display.monitor;
@@ -389,7 +419,7 @@ impl OpenWheel {
         hit_test(offset.x, offset.y, self.segment_count())
     }
 
-    /// The anchor in global physical pixels.
+    /// The anchor in global coordinates.
     fn anchor_global(&self) -> (i32, i32) {
         let monitor = self.display.monitor;
         (
@@ -544,15 +574,24 @@ impl<E: Env> WheelController<E> {
             DragSignal::Modifiers(held) => self.on_modifiers(held, now),
             DragSignal::Escape => match self.state {
                 State::Open(_) => self.close(CloseReason::Escape, State::Dismissed),
-                _ => Vec::new(),
+                // Esc before any wheel: Explorer cancels its drag on Esc, so
+                // a key tapped before the button goes up mustn't open a
+                // wheel over a drag that's gone.
+                State::Dragging { .. } => {
+                    self.state = State::Dismissed;
+                    vec![Effect::Log(
+                        "Esc during the drag: no wheel until the button goes up".to_owned(),
+                    )]
+                }
+                State::Idle | State::Dismissed => Vec::new(),
             },
             DragSignal::Ended => {
                 let release_fallback = self.config.release_fallback;
                 match &mut self.state {
-                    // Over the overlay, or just after a Leave that may be a
+                    // Over the overlay, or right after a Leave that may be a
                     // refused drop: wait for the drop.
                     State::Open(open)
-                        if open.inside || (release_fallback && open.left_at.is_some()) =>
+                        if open.inside || (release_fallback && open.left_just_before(now)) =>
                     {
                         open.last_event = now;
                         open.left_at = None;
@@ -562,7 +601,21 @@ impl<E: Env> WheelController<E> {
                         }
                         Vec::new()
                     }
-                    State::Open(_) => self.close(CloseReason::DragEnded, State::Idle),
+                    State::Open(open) => {
+                        // A Leave too long before the button-up for a
+                        // refused drop was Esc: nothing runs.
+                        let log = open.left_at.filter(|_| release_fallback).map(|at| {
+                            format!(
+                                "wheel {}: the button went up {} ms after a Leave, later than a refused drop's {} ms; taking the Leave as Esc, so nothing runs",
+                                open.seq,
+                                now.saturating_duration_since(at).as_millis(),
+                                REFUSED_LEAVE_WINDOW.as_millis()
+                            )
+                        });
+                        let mut out = self.close(CloseReason::DragEnded, State::Idle);
+                        out.extend(log.map(Effect::Log));
+                        out
+                    }
                     _ => {
                         self.state = State::Idle;
                         Vec::new()
@@ -917,6 +970,8 @@ mod tests {
     use grape_platform::mock::scripts;
 
     const NONE: Modifiers = Modifiers::NONE;
+    /// How far the clock moves before each input.
+    const STEP: Duration = Duration::from_millis(10);
 
     /// A fake OS: one 1920×1080 monitor at `scale`, offset to (`x`, `y`),
     /// with a 48 px taskbar at the bottom. Paths ending in `/` are folders.
@@ -1036,10 +1091,16 @@ mod tests {
         }
 
         fn input(&mut self, input: Input) -> &mut Self {
-            self.now += Duration::from_millis(10);
+            self.now += STEP;
             let effects = self.ctl.handle(input, self.now);
             self.effects.extend(effects);
             self
+        }
+
+        /// `signal`, exactly `after` the last input (at least one [`STEP`]).
+        fn signal_after(&mut self, after: Duration, signal: DragSignal) -> &mut Self {
+            self.wait(after.saturating_sub(STEP));
+            self.input(Input::Signal(signal))
         }
 
         fn drop_event(&mut self, event: DropEvent) -> &mut Self {
@@ -1375,6 +1436,36 @@ mod tests {
             keys(Modifiers::SHIFT),
         ]);
         assert_eq!(run.opens().len(), 1);
+    }
+
+    #[test]
+    fn esc_before_the_wheel_keeps_it_shut_until_the_button_goes_up() {
+        let mut run = Run::new();
+        run.signals(vec![
+            started(),
+            moved(400, 300),
+            DragSignal::Escape,
+            keys(Modifiers::SHIFT),
+        ]);
+        assert!(run.opens().is_empty());
+        assert!(matches!(run.ctl.state, State::Dismissed));
+        // Nor does any other key or move later in the same press.
+        run.signals(vec![
+            moved(420, 310),
+            keys(NONE),
+            keys(Modifiers::ALT),
+            DragSignal::Escape,
+        ]);
+        assert!(run.opens().is_empty());
+        assert_eq!(run.shows(), 0);
+        run.signals(vec![DragSignal::Ended]);
+        assert!(matches!(run.ctl.state, State::Idle));
+        assert!(run.closes().is_empty());
+        // The next drag opens normally.
+        run.signals(vec![started(), moved(10, 10), keys(Modifiers::SHIFT)]);
+        assert_eq!(run.opens().len(), 1);
+        assert_eq!(run.shows(), 1);
+        assert!(run.ctl.is_open());
     }
 
     #[test]
@@ -1914,6 +2005,94 @@ mod tests {
         assert!(!run.ctl.is_open());
         run.signals(vec![started(), moved(10, 10), keys(Modifiers::SHIFT)]);
         assert_eq!(run.shows(), 2);
+    }
+
+    #[test]
+    fn esc_then_a_release_within_the_leave_grace_runs_nothing() {
+        // On macOS Esc is a Leave with the button still down. The button
+        // goes up 100 ms later, before LEAVE_GRACE takes it as Esc.
+        for key in [Modifiers::CTRL, Modifiers::META] {
+            let mut run = mac_wheel(key);
+            run.drop_event(DropEvent::Leave);
+            run.signal_after(Duration::from_millis(100), DragSignal::Ended);
+            assert_eq!(run.closes(), vec![CloseReason::DragEnded], "{key:?}");
+            assert_eq!(run.hides(), 1);
+            assert!(!run.ctl.is_open());
+            assert_eq!(run.ctl.next_deadline(), None);
+            assert!(
+                run.logs()
+                    .iter()
+                    .any(|line| line.contains("100 ms after a Leave")
+                        && line.contains("nothing runs"))
+            );
+            run.wait(DROP_GRACE * 2);
+            assert!(run.runs().is_empty(), "{key:?}: {:?}", run.effects);
+            assert_eq!(run.closes(), vec![CloseReason::DragEnded]);
+            // Idle: the next drag opens a wheel.
+            run.signals(vec![started(), moved(10, 10), keys(Modifiers::SHIFT)]);
+            assert_eq!(run.shows(), 2);
+        }
+    }
+
+    #[test]
+    fn a_release_20_ms_after_a_leave_with_control_held_runs_once() {
+        let mut run = mac_wheel(Modifiers::CTRL);
+        run.drop_event(DropEvent::Leave);
+        run.signal_after(Duration::from_millis(20), DragSignal::Ended);
+        run.wait(DROP_GRACE / 2);
+        assert!(run.closes().is_empty());
+        assert!(run.runs().is_empty());
+        run.wait(DROP_GRACE);
+        assert_eq!(run.closes(), vec![CloseReason::Drop]);
+        let runs = run.runs();
+        let [request] = runs.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(request.entry, WheelEntry::Action(ActionKey::Share));
+        assert_eq!(request.items, png_item());
+        run.wait(DROP_GRACE * 2);
+        assert_eq!(run.runs().len(), 1);
+        assert_eq!(run.closes(), vec![CloseReason::Drop]);
+    }
+
+    #[test]
+    fn the_refused_leave_window_includes_its_end() {
+        let mut run = mac_wheel(Modifiers::META);
+        run.drop_event(DropEvent::Leave);
+        run.signal_after(REFUSED_LEAVE_WINDOW, DragSignal::Ended);
+        run.wait(DROP_GRACE * 2);
+        assert_eq!(run.runs().len(), 1);
+        let mut run = mac_wheel(Modifiers::META);
+        run.drop_event(DropEvent::Leave);
+        run.signal_after(
+            REFUSED_LEAVE_WINDOW + Duration::from_millis(1),
+            DragSignal::Ended,
+        );
+        run.wait(DROP_GRACE * 2);
+        assert!(run.runs().is_empty());
+        assert_eq!(run.closes(), vec![CloseReason::DragEnded]);
+    }
+
+    #[test]
+    fn on_windows_a_release_after_a_leave_closes_at_once() {
+        // Both flags off: a Leave only clears the highlight, and the button
+        // going up outside the overlay closes at once, however soon.
+        for after in [Duration::from_millis(20), Duration::from_millis(100)] {
+            let mut run = Run::new();
+            run.signals(vec![started(), moved(400, 300), keys(Modifiers::CTRL)]);
+            run.drop_event(enter(png(), 400, 216));
+            run.drop_event(DropEvent::Leave);
+            assert_eq!(run.highlights(), vec![Some(0), None]);
+            run.signal_after(after, DragSignal::Ended);
+            assert_eq!(run.closes(), vec![CloseReason::DragEnded], "{after:?}");
+            assert!(run
+                .logs()
+                .iter()
+                .all(|line| !line.contains("after a Leave")));
+            run.wait(DROP_GRACE * 2);
+            assert!(run.runs().is_empty());
+            assert_eq!(run.closes(), vec![CloseReason::DragEnded]);
+        }
     }
 
     #[test]
