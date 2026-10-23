@@ -26,7 +26,7 @@ mod overlay;
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{describe_ex_style, ex_style, harden_overlay};
 
-pub(crate) use actions::{copy_files, copy_text, move_to_chosen_folder, open_terminal};
+pub(crate) use actions::{copy_files, copy_paths, move_to_chosen_folder, open_terminal};
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};
 

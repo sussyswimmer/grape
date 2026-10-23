@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use grape_core::{ActionKey, ItemKind, SelectionItem};
-use grape_platform::file_actions::{self, MoveOutcome};
+use grape_platform::file_actions::{self, MoveOutcome, MovedItem};
 use grape_platform::{DisplayBounds, PlatformError};
 use tauri::{AppHandle, Manager};
 
@@ -202,39 +202,58 @@ fn moved(result: Result<MoveOutcome, PlatformError>) -> Option<Report> {
             "Already there",
             Some(format!("Everything is already in {}.", name(&to))),
         )),
-        MoveOutcome::Moved { moved, .. } if moved.is_empty() => Some(Report::new(
+        MoveOutcome::Moved {
+            to,
+            moved,
+            unsure,
+            of,
+        } => Some(moved_report(&to, &moved, &unsure, of)),
+    }
+}
+
+/// The toast after a move ran: what left, and what Grape can't be sure of.
+fn moved_report(to: &Path, moved: &[MovedItem], unsure: &[PathBuf], of: usize) -> Report {
+    let folder = name(to);
+    // Part of a folder may be in each place (a merge, a skip inside it, a
+    // cancel), or an old place can't be read: say so and show the folder,
+    // never "moved" or "stayed put".
+    if let Some(first) = unsure.first() {
+        let detail = match unsure {
+            [_] => format!("Check {} in its old place and in {folder}.", name(first)),
+            _ => format!("Check their old places and {folder}."),
+        };
+        return Report::new(
+            ToastTone::Info,
+            "Some of it may not have moved",
+            Some(detail),
+        )
+        .revealing(to.to_path_buf());
+    }
+    let Some(first) = moved.first() else {
+        return Report::new(
             ToastTone::Info,
             "Nothing moved",
             Some("Every item stayed where it was.".to_owned()),
-        )),
-        MoveOutcome::Moved { to, moved, of } => {
-            // The first item in its new place, or the folder if it was
-            // renamed on the way (a name clash the user kept both of).
-            let reveal = moved[0]
-                .file_name()
-                .map(|file| to.join(file))
-                .filter(|path| path.exists())
-                .unwrap_or_else(|| to.clone());
-            let report = match (moved.as_slice(), of) {
-                ([one], 1) => Report::new(
-                    ToastTone::Done,
-                    format!("Moved {}", name(one)),
-                    Some(format!("to {}", name(&to))),
-                ),
-                (all, of) if all.len() == of => Report::new(
-                    ToastTone::Done,
-                    format!("Moved {of} items"),
-                    Some(format!("to {}", name(&to))),
-                ),
-                (some, of) => Report::new(
-                    ToastTone::Info,
-                    format!("Moved {} of {of} items", some.len()),
-                    Some(format!("to {}. The rest stayed put.", name(&to))),
-                ),
-            };
-            Some(report.revealing(reveal))
-        }
-    }
+        );
+    };
+    let report = match (moved, of) {
+        ([one], 1) => Report::new(
+            ToastTone::Done,
+            format!("Moved {}", name(&one.from)),
+            Some(format!("to {folder}")),
+        ),
+        (all, of) if all.len() == of => Report::new(
+            ToastTone::Done,
+            format!("Moved {of} items"),
+            Some(format!("to {folder}")),
+        ),
+        (some, of) => Report::new(
+            ToastTone::Info,
+            format!("Moved {} of {of} items", some.len()),
+            Some(format!("to {folder}. The rest stayed put.")),
+        ),
+    };
+    report.revealing(first.now.clone())
 }
 
 /// Share and Float, until they're built.
@@ -313,61 +332,79 @@ mod tests {
         assert_eq!(moved(Ok(MoveOutcome::Cancelled)), None);
     }
 
+    fn item(from: &str, now: &str) -> MovedItem {
+        MovedItem {
+            from: PathBuf::from(from),
+            now: PathBuf::from(now),
+        }
+    }
+
+    fn outcome(moved: Vec<MovedItem>, unsure: Vec<PathBuf>, of: usize) -> MoveOutcome {
+        MoveOutcome::Moved {
+            to: PathBuf::from("/b/into"),
+            moved,
+            unsure,
+            of,
+        }
+    }
+
     #[test]
-    fn a_full_move_is_done_and_reveals_the_folder_when_the_item_is_gone() {
-        let report = moved(Ok(MoveOutcome::Moved {
-            to: PathBuf::from("/nowhere/into"),
-            moved: vec![PathBuf::from("/a/photo.png")],
-            of: 1,
-        }))
+    fn a_full_move_is_done_and_reveals_where_the_first_item_is_now() {
+        let report = moved(Ok(outcome(
+            vec![item("/a/photo.png", "/b/into/photo (2).png")],
+            vec![],
+            1,
+        )))
         .unwrap();
         assert_eq!(report.tone, ToastTone::Done);
         assert_eq!(report.title, "Moved photo.png");
         assert_eq!(report.detail.as_deref(), Some("to into"));
-        assert_eq!(report.reveal, Some(PathBuf::from("/nowhere/into")));
+        assert_eq!(report.reveal, Some(PathBuf::from("/b/into/photo (2).png")));
 
-        let many = moved(Ok(MoveOutcome::Moved {
-            to: PathBuf::from("/into"),
-            moved: vec![PathBuf::from("/a"), PathBuf::from("/b")],
-            of: 2,
-        }))
+        let many = moved(Ok(outcome(
+            vec![item("/a", "/b/into/a"), item("/b", "/b/into/b")],
+            vec![],
+            2,
+        )))
         .unwrap();
         assert_eq!(many.title, "Moved 2 items");
-    }
-
-    #[test]
-    fn a_move_reveals_the_first_item_in_its_new_place() {
-        let into = std::env::temp_dir().join(format!("grape-reveal-{}", std::process::id()));
-        std::fs::create_dir_all(&into).unwrap();
-        std::fs::write(into.join("photo.png"), b"grape").unwrap();
-        let report = moved(Ok(MoveOutcome::Moved {
-            to: into.clone(),
-            moved: vec![PathBuf::from("/a/photo.png")],
-            of: 1,
-        }))
-        .unwrap();
-        let _ = std::fs::remove_dir_all(&into);
-        assert_eq!(report.reveal, Some(into.join("photo.png")));
+        assert_eq!(many.reveal, Some(PathBuf::from("/b/into/a")));
     }
 
     #[test]
     fn a_partial_move_says_how_many_and_none_says_so() {
-        let some = moved(Ok(MoveOutcome::Moved {
-            to: PathBuf::from("/into"),
-            moved: vec![PathBuf::from("/a")],
-            of: 3,
-        }))
-        .unwrap();
+        let some = moved(Ok(outcome(vec![item("/a", "/b/into/a")], vec![], 3))).unwrap();
         assert_eq!(some.tone, ToastTone::Info);
         assert_eq!(some.title, "Moved 1 of 3 items");
-        let none = moved(Ok(MoveOutcome::Moved {
-            to: PathBuf::from("/into"),
-            moved: vec![],
-            of: 3,
-        }))
-        .unwrap();
+        assert_eq!(
+            some.detail.as_deref(),
+            Some("to into. The rest stayed put.")
+        );
+        let none = moved(Ok(outcome(vec![], vec![], 3))).unwrap();
         assert_eq!(none.title, "Nothing moved");
         assert_eq!(none.reveal, None);
+    }
+
+    #[test]
+    fn an_unsure_item_never_reads_as_moved_or_stayed() {
+        let one = moved(Ok(outcome(vec![], vec![PathBuf::from("/a/Trip")], 1))).unwrap();
+        assert_eq!(one.tone, ToastTone::Info);
+        assert_eq!(one.title, "Some of it may not have moved");
+        assert_eq!(
+            one.detail.as_deref(),
+            Some("Check Trip in its old place and in into.")
+        );
+        assert_eq!(one.reveal, Some(PathBuf::from("/b/into")));
+        let many = moved(Ok(outcome(
+            vec![item("/a/x.png", "/b/into/x.png")],
+            vec![PathBuf::from("/a/Trip"), PathBuf::from("/a/Pics")],
+            3,
+        )))
+        .unwrap();
+        assert_eq!(
+            many.detail.as_deref(),
+            Some("Check their old places and into.")
+        );
     }
 
     #[test]

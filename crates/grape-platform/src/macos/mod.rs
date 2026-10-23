@@ -22,7 +22,7 @@ pub(crate) fn copy_files(_paths: &[PathBuf]) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
 
-pub(crate) fn copy_text(_text: &str) -> Result<(), PlatformError> {
+pub(crate) fn copy_paths(_paths: &[PathBuf]) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
 

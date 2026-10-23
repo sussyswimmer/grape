@@ -155,10 +155,12 @@ pub fn toast_clicked(id: u64, toaster: State<'_, Toaster>) {
 fn reveal_in_file_manager(path: &std::path::Path) {
     #[cfg(target_os = "windows")]
     {
-        let mut select = std::ffi::OsString::from("/select,");
-        select.push(path.as_os_str());
+        use std::os::windows::process::CommandExt;
+        // Raw, because `Command::arg` would quote the whole switch when the
+        // path has a space and leave a comma bare, and Explorer then
+        // ignores the switch or cuts the path at the comma.
         if let Err(err) = std::process::Command::new("explorer.exe")
-            .arg(select)
+            .raw_arg(select_arg(path))
             .spawn()
         {
             log::error!("could not reveal {}: {err}", path.display());
@@ -166,6 +168,16 @@ fn reveal_in_file_manager(path: &std::path::Path) {
     }
     #[cfg(not(target_os = "windows"))]
     log::info!("reveal {} (not wired on this OS yet)", path.display());
+}
+
+/// Explorer's own form, `/select,"<path>"`. A Windows path can't hold `"`,
+/// so the quotes can't be broken out of.
+#[cfg(any(target_os = "windows", test))]
+fn select_arg(path: &std::path::Path) -> std::ffi::OsString {
+    let mut select = std::ffi::OsString::from("/select,\"");
+    select.push(path.as_os_str());
+    select.push("\"");
+    select
 }
 
 /// An info toast for a drop Grape can't run yet.
@@ -238,6 +250,12 @@ mod tests {
             toaster.reveal_path(first + 40),
             Some(PathBuf::from("b.png"))
         );
+    }
+
+    #[test]
+    fn reveal_quotes_the_path_after_select() {
+        let arg = select_arg(std::path::Path::new(r"C:\My Pictures\a,b\photo 3,4.png"));
+        assert_eq!(arg, r#"/select,"C:\My Pictures\a,b\photo 3,4.png""#);
     }
 
     #[test]

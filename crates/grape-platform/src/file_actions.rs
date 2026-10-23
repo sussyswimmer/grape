@@ -14,8 +14,8 @@ use crate::{imp, PlatformError};
 /// What a Move did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MoveOutcome {
-    /// The user closed the folder picker or said no to moving to another
-    /// drive. Nothing moved.
+    /// Nothing moved: the user closed the folder picker, said no to moving
+    /// to another drive, or cancelled the move before anything left.
     Cancelled,
     /// Every item is already in the folder the user picked. Nothing moved.
     AlreadyThere {
@@ -27,11 +27,26 @@ pub enum MoveOutcome {
         /// The folder the user picked.
         to: PathBuf,
         /// The items that left their original place, in selection order.
-        /// Fewer than `of` when the user skipped some (a name clash, say).
-        moved: Vec<PathBuf>,
-        /// How many items were asked to move.
+        moved: Vec<MovedItem>,
+        /// Items that may now be partly or wholly in both places: a folder
+        /// still in its old place after a merge, a skip inside it or a
+        /// cancel, or an item whose old place can't be read any more. Grape
+        /// can't tell, so it says so instead of guessing.
+        unsure: Vec<PathBuf>,
+        /// How many items were asked to move. The ones in neither list
+        /// stayed where they were (skipped in a name clash, say).
         of: usize,
     },
+}
+
+/// One item a Move took out of its original place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MovedItem {
+    /// Where it was.
+    pub from: PathBuf,
+    /// Where it is now: its new path, or the folder it went into when the
+    /// new path isn't known (the shell renamed it in a name clash, say).
+    pub now: PathBuf,
 }
 
 /// Puts the files on the clipboard so pasting them in a folder makes
@@ -45,12 +60,14 @@ pub fn copy_files(paths: &[PathBuf]) -> Result<(), PlatformError> {
 }
 
 /// Puts the absolute paths on the clipboard as text, one per line,
-/// unquoted ([`path_lines`]).
+/// unquoted. On Windows the lines are joined with `\r\n` and every path
+/// goes on exactly as the file system spells it, even a name that isn't
+/// valid Unicode.
 ///
 /// # Errors
 /// As [`copy_files`].
 pub fn copy_paths(paths: &[PathBuf]) -> Result<(), PlatformError> {
-    imp::copy_text(&path_lines(paths))
+    imp::copy_paths(paths)
 }
 
 /// Opens a terminal in `dir`: Windows Terminal if it's installed, else
@@ -76,38 +93,13 @@ pub fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, PlatformE
     imp::move_to_chosen_folder(paths)
 }
 
-/// The line break between copied paths on this OS.
-const LINE_BREAK: &str = if cfg!(windows) { "\r\n" } else { "\n" };
-
-/// Absolute paths, one per line, unquoted: `\r\n` between them on Windows
-/// and `\n` elsewhere, with no break after the last one.
-pub fn path_lines(paths: &[PathBuf]) -> String {
-    paths
-        .iter()
-        .map(|path| path.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(LINE_BREAK)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn one_path_has_no_line_break() {
-        assert_eq!(path_lines(&[PathBuf::from("/a/b.png")]), "/a/b.png");
-        assert_eq!(path_lines(&[]), "");
-    }
-
-    #[test]
-    fn paths_are_one_per_line_and_unquoted() {
-        let lines = path_lines(&[PathBuf::from("/a/b c.png"), PathBuf::from("/d")]);
-        assert_eq!(lines, format!("/a/b c.png{LINE_BREAK}/d"));
-    }
-
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn actions_are_unsupported_off_windows() {
+        use super::*;
+
         let paths = [PathBuf::from("/a/b.png")];
         assert_eq!(copy_files(&paths), Err(PlatformError::Unsupported));
         assert_eq!(copy_paths(&paths), Err(PlatformError::Unsupported));

@@ -50,12 +50,16 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
 - [ ] win: Alt-drop one file on COPY PATH → the toast says "Copied the path" and shows it. Paste into Notepad → the full path, unquoted. With three files → three lines.
+- [ ] win: with clipboard history on (Win+V), `cargo test -p grape-platform` passes a few runs in a row (the clipboard tests retry while the history reads what they wrote).
 - [ ] win: Alt-drop a file on TERMINAL → Windows Terminal opens in the file's folder. Do the same with a folder → it opens in that folder. Without Windows Terminal, or with a `;` in the folder name, PowerShell opens there instead.
 - [ ] win: Alt-drop two scratch files on MOVE → a folder picker titled "Move 2 items to…" opens in front of Explorer, starting in their folder. (If it only flashes in the taskbar, note it.) Pick another folder → both move there, the toast says "Moved 2 items / to {folder}", and clicking the toast shows the first one selected in Explorer.
 - [ ] win: right after a Move, Ctrl+Z in Explorer → note whether the files come back. Grape asks the shell for an undo record (`FOFX_ADDUNDORECORD`), but nobody has checked yet whether Explorer's undo picks it up.
 - [ ] win: Move, then close the picker → nothing moves and no toast appears.
 - [ ] win: Move into the folder the files are already in → the toast says "Already there", and nothing moves.
-- [ ] win: Move onto a folder that already has a file with the same name → Windows asks what to do. Skip → that file stays put, and the toast says "Moved 1 of 2 items".
+- [ ] win: Move onto a folder that already has a file with the same name → Windows asks what to do. Skip → that file stays put, and the toast says "Moved 1 of 2 items". Keep both → the toast says the move is done, and clicking it selects the renamed file ("name (2)"), or at least opens the folder. It must never select the file that was already there.
+- [ ] win: Move a folder into a folder that already holds a folder of the same name with one clashing file, and Skip the clash → the toast says "Some of it may not have moved" and shows the destination. It never says "Nothing moved".
+- [ ] win: Move into a folder whose name has a space and a comma (`a b,c`), then click the toast → Explorer opens that folder with the moved file selected.
+- [ ] win: make a junction to another drive (`mklink /J C:\scratch\other D:\scratch`), then Move a file from C: into `C:\scratch\other` → Grape asks "Move to another drive?" first.
 - [ ] win: Move to a folder on another drive (a USB stick) → Grape first asks "Move to another drive?" with No as the default. No → nothing moves. Yes → the items move.
 - [ ] win: Share and Float → a "Not in this build yet" toast, and nothing else happens.
 
