@@ -67,8 +67,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Every crate's tests, even after one fails: the Mac runs are new.
       - name: Test
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --locked --no-fail-fast
 
   # A Mac build anyone can download from the run's Artifacts: a universal
   # (Apple silicon + Intel) Grape.app in a DMG. It's ad-hoc signed, not

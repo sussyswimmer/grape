@@ -210,7 +210,14 @@ mod tests {
             anchor: Point { x: 400.0, y: 300.0 },
             scale,
             geometry: GEOMETRY,
-            keys: KeyNames::of(KeyMap::WINDOWS),
+            // The fixtures spell the Windows keys. `KeyNames::of` names
+            // keys the way this OS does ("Option" on a Mac), so build the
+            // fixture's names by hand.
+            keys: KeyNames {
+                conversions: "Shift".to_owned(),
+                tools: "Ctrl".to_owned(),
+                actions: "Alt".to_owned(),
+            },
             sounds,
             content,
         }
