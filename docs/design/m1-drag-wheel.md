@@ -83,7 +83,7 @@ Sections 0 and 1 are for everyone. Sections A to I are addressed to each agent. 
 - EXIF orientation: `ImageDecoder::orientation()` defaults to reading the EXIF chunk (`io/decoder.rs:53-58`; overridden by jpeg `:140`, webp `:95` and tiff `:337`). Then call `DynamicImage::apply_orientation(o)` (`images/dynimage.rs:1161`). Flow: `ImageReader::new(BufReader)`, `.with_guessed_format()` (`io/image_reader_type.rs:254`), `.into_decoder()` (`:219`), `let o = dec.orientation()?`, `DynamicImage::from_decoder(dec)?`, `img.apply_orientation(o)`.
 - ICC: `ImageDecoder::icc_profile()` plus `ImageEncoder::set_icc_profile()` for png, jpeg, webp and tiff (`png.rs:780`, `jpeg/encoder.rs:752`, `webp/encoder.rs:96`, `tiff.rs:612`). Carry the profile over and ignore `UnsupportedError`. Default decode limit: `max_alloc` 512 MiB (`io/limits.rs:54`). Keep it; it guards against decompression bombs.
 - Test helper: `JpegEncoder::set_exif_metadata` (`jpeg/encoder.rs:757`) can write an Orientation=6 EXIF for the orientation test.
-- **No-clobber finalize without `unsafe` or new dependencies:** call `std::fs::hard_link(tmp, final)`, which is `CreateHardLinkW` on Windows and `link(2)` on Unix. It fails with `ErrorKind::AlreadyExists` if `final` exists, on NTFS and every Unix filesystem, and makes the name appear atomically with the full content. Then `remove_file(tmp)`. If hard links are unsupported (FAT32/exFAT, some SMB shares; any error other than `AlreadyExists`), fall back to `OpenOptions::new().write(true).create_new(true).open(final)`, which is an exclusive create, then copy, `sync_all`, and remove `tmp`. If the copy fails, remove the partial `final` (we created it, so deleting it is safe). That fallback is no-clobber but not atomic; it's acceptable and noted in D19. `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` would need `unsafe` in engines, which `#![forbid(unsafe_code)]` rules out.
+- **No-clobber finalize without `unsafe` or new dependencies:** call `std::fs::hard_link(tmp, final)`, which is `CreateHardLinkW` on Windows and `link(2)` on Unix. It fails with `ErrorKind::AlreadyExists` if `final` exists, on NTFS and every Unix filesystem, and makes the name appear atomically with the full content. Then `remove_file(tmp)`. If hard links are unsupported (FAT32/exFAT, some SMB shares; any error other than `AlreadyExists`), fall back to `OpenOptions::new().write(true).create_new(true).open(final)`, which is an exclusive create, then copy, `sync_all`, and remove `tmp`. If the copy fails, remove the partial `final` (we created it, so deleting it is safe). That fallback is no-clobber but not atomic; it's acceptable and noted in D16. `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` would need `unsafe` in engines, which `#![forbid(unsafe_code)]` rules out.
 
 ---
 
@@ -581,7 +581,7 @@ pub fn run_job(job: &Job, ctx: &EngineCtx, progress: &mut dyn FnMut(f32)) -> Res
 - Errors map to user messages: `ReadFailed` "Grape couldn't read {name}.", `DecodeFailed` "{name} isn't a readable {FROM} image." (or "{name} is too large to convert." when a memory limit refuses it), `EncodeFailed` "Grape couldn't write a {TO} file.", `WriteFailed` "Grape couldn't save into {folder}.", `NameTaken` "A file named {name} keeps appearing; try again." `detail` = the `io` or `image` error's `Display`, plus paths. Never include file contents.
 - Animated or multi-page inputs use the first frame or page (documented).
 
-### E.3 Dependency (D18)
+### E.3 Dependency (D16)
 In `crates/grape-engines/Cargo.toml`:
 ```toml
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
@@ -590,7 +590,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 ```bash
 curl -s "https://crates.io/api/v1/crates/$name/$version" -H 'User-Agent: grape-dev' | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"]["created_at"])'
 ```
-If anything is too young: `cargo update -p <name> --precise <older>`. Record every new crate, its version and license in your summary for D18.
+If anything is too young: `cargo update -p <name> --precise <older>`. Record every new crate, its version and license in your summary for D16.
 
 ### E.4 Tests (`tests/image.rs`; no binary fixtures, everything generated into a unique dir under `std::env::temp_dir()` with a small `TestDir` helper that cleans up)
 - Generate a 64×48 RGBA gradient with partial alpha and encode it to each input format using `image` itself.
@@ -694,7 +694,7 @@ The pure modules get unit tests (§B.4, coords, golden JSON for events, `edge_mo
 ---
 
 ## H. Docs (orchestrator, after merge)
-- **DECISIONS** (all "proposed, confirm"):
+- **DECISIONS** (all "proposed, confirm"). The numbers below were this plan's working numbers. What landed in `DECISIONS.md` is D13–D17: the image crate and the no-clobber finalize (D18 and D19 here) are both in D16, and `hit_test` is D17. D18 onward in `DECISIONS.md` are later, unrelated decisions.
   - **D13 Own drop target on every Grape window.** The evidence is §1.1. The overlay accepts as COPY, always written, including in `Drop`. Settings and toast refuse with NONE. wry still gets `dragDropEnabled: true` so it disables WebView2's external drop. Revisit if wry starts writing the effect in `Drop`.
   - **D14 Esc on Windows.** It closes the wheel, and the OS cancels the drag (standard OLE). Amend INTERACTION_SPEC §6 / ROADMAP M1 / TESTING. Optional later: a "dismiss but keep dragging" gesture.
   - **D15 Overlay hit-testing.** The overlay is non-layered (blur-behind); never set ignore-cursor-events; a near-transparent hit fill. Confirm on the PC.
