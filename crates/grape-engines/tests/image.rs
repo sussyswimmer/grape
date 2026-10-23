@@ -390,9 +390,7 @@ fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
 #[test]
 fn a_profile_over_the_size_cap_is_left_out() {
     // Over the 255 × 65,519 bytes a JPEG can hold, the cap for every target
-    // (the zeros compress well in the PNG). Then one that inflates past
-    // what the PNG decoder may allocate besides the pixels: dropped while
-    // reading, not after.
+    // (the zeros compress well in the PNG), and far over it.
     for len in [17 * 1024 * 1024, 80 * 1024 * 1024] {
         let source = png_with_profile(&rgb_profile(len));
         for to in [Format::Jpg, Format::Webp, Format::Tiff] {
@@ -456,7 +454,11 @@ fn crc32(bytes: &[u8]) -> u32 {
 /// `img` as a small PNG whose header claims `width`×`height`, with the
 /// header's CRC fixed: a decompression bomb.
 fn png_claiming(img: &DynamicImage, width: u32, height: u32) -> Vec<u8> {
-    let mut png = encode(img, Format::Png);
+    claiming(encode(img, Format::Png), width, height)
+}
+
+/// `png` with its header changed to claim `width`×`height`.
+fn claiming(mut png: Vec<u8>, width: u32, height: u32) -> Vec<u8> {
     // Signature (8), length (4), "IHDR", width, height, 5 more bytes, CRC.
     assert_eq!(&png[12..16], b"IHDR");
     png[16..20].copy_from_slice(&width.to_be_bytes());
@@ -555,9 +557,9 @@ fn pad_to(path: &Path, len: u64) {
 }
 
 #[test]
-fn a_source_file_over_the_size_limit_is_refused_before_reading() {
+fn a_jpeg_or_webp_file_over_the_size_limit_is_refused_before_reading() {
     let rgb = DynamicImage::ImageRgb8(RgbImage::new(16, 16));
-    for (name, f) in [("huge.jpg", Format::Jpg), ("huge.png", Format::Png)] {
+    for (name, f) in [("huge.jpg", Format::Jpg), ("huge.webp", Format::Webp)] {
         let dir = TestDir::new("huge-file");
         let (src, job) = plan_one(
             &dir,
@@ -574,7 +576,8 @@ fn a_source_file_over_the_size_limit_is_refused_before_reading() {
         assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
         assert_eq!(err.user_message, format!("{name} is too large to convert."));
         assert!(
-            err.detail.contains("over the 512 MiB limit for a source"),
+            err.detail
+                .contains("over the 512 MiB limit for a JPEG or WebP source"),
             "{}",
             err.detail
         );
@@ -584,15 +587,49 @@ fn a_source_file_over_the_size_limit_is_refused_before_reading() {
 }
 
 #[test]
+fn png_and_tiff_files_of_any_size_convert_their_first_image() {
+    // Their decoders read as they go, so a file that is mostly other layers
+    // or pages (here padding) converts like a small one.
+    let rgb = DynamicImage::ImageRgb8(RgbImage::new(16, 16));
+    for (name, f) in [("layered.tiff", Format::Tiff), ("long.png", Format::Png)] {
+        let dir = TestDir::new("big-file");
+        let (src, job) = plan_one(
+            &dir,
+            name,
+            &encode(&rgb, f),
+            Operation::convert(Format::Bmp),
+        );
+        pad_to(&src, 512 * 1024 * 1024 + 1);
+        let before = SourceState::of(&src);
+
+        let outcome = run(&job).unwrap_or_else(|e| panic!("{name}: {e} ({})", e.detail));
+
+        let output = decode(&fs::read(&outcome.outputs[0]).unwrap());
+        assert_eq!(output.dimensions(), (16, 16));
+        before.assert_unchanged();
+        assert_no_leftovers(&dir.path);
+    }
+}
+
+/// `jpeg` with its frame header marked progressive (SOF2), so its headers
+/// say the decoder keeps coefficients for the whole image. (The scan data
+/// stays sequential; it is refused before anyone tries to decode it.)
+fn progressive(mut jpeg: Vec<u8>) -> Vec<u8> {
+    let sof = jpeg.windows(2).position(|w| w == [0xFF, 0xC0]).unwrap();
+    jpeg[sof + 1] = 0xC2;
+    jpeg
+}
+
+#[test]
 fn a_jpeg_file_counts_toward_the_working_set() {
-    // 10,901² RGB is 340 MiB decoded, and the decoder's coefficients take
-    // the estimate to 1,020 MiB: just under the 1 GiB limit. The JPEG
+    // A progressive 10,901² RGB frame: 340 MiB decoded plus 680 MiB of
+    // coefficients is 1,020 MiB, just under the 1 GiB limit. The JPEG
     // decoder also holds the whole file, here 8 MiB, which tips it over.
     let dir = TestDir::new("jpeg-held");
     let (src, job) = plan_one(
         &dir,
         "tall.jpg",
-        &jpeg_claiming(10_901, 10_901),
+        &progressive(jpeg_claiming(10_901, 10_901)),
         Operation::convert(Format::Bmp),
     );
     pad_to(&src, 8 * 1024 * 1024);
@@ -613,13 +650,110 @@ fn a_jpeg_file_counts_toward_the_working_set() {
 }
 
 #[test]
-fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
-    // The PNG decoder holds its text chunks and the inflated ICC profile to
-    // 64 MiB (so an ICC profile that inflates past it is dropped while
-    // reading). A 65 MiB comment takes it past that.
+fn the_profile_carried_over_counts_toward_the_working_set() {
+    // 16,288² gray to BMP is estimated at 1,012 MiB: 1 byte decoded and 3
+    // converted per pixel. A 15 MiB ICC profile, held from decoding to
+    // encoding, takes it past 1 GiB.
+    let mut png = Vec::new();
+    let mut encoder = PngEncoder::new(&mut png);
+    encoder
+        .set_icc_profile(rgb_profile(15 * 1024 * 1024))
+        .unwrap();
+    DynamicImage::ImageLuma8(GrayImage::new(16, 16))
+        .write_with_encoder(encoder)
+        .unwrap();
+    let dir = TestDir::new("icc-held");
+    let (src, job) = plan_one(
+        &dir,
+        "scan.png",
+        &claiming(png, 16_288, 16_288),
+        Operation::convert(Format::Bmp),
+    );
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.user_message, "scan.png is too large to convert.");
+    assert!(
+        err.detail
+            .contains("needs about 1027 MiB, over the 1024 MiB limit"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
+
+/// A RIFF chunk: tag, little-endian length, data, padded to even length.
+fn riff_chunk(tag: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut chunk = tag.to_vec();
+    chunk.extend(u32::try_from(data.len()).unwrap().to_le_bytes());
+    chunk.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        chunk.push(0);
+    }
+    chunk
+}
+
+/// An animated WebP with a `width`×`height` RGBA canvas and one small
+/// lossless frame: a few kilobytes that claim a huge canvas.
+fn animated_webp(width: u32, height: u32) -> Vec<u8> {
+    let still = encode(&gradient(), Format::Webp);
+    assert_eq!(&still[12..16], b"VP8L");
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    // Flags: alpha (0x10) and animation (0x02).
+    let mut vp8x = vec![0x12, 0, 0, 0];
+    vp8x.extend(u24(width - 1));
+    vp8x.extend(u24(height - 1));
+    // The 64×48 frame at (0, 0), shown for 100 ms.
+    let mut anmf = [u24(0), u24(0), u24(63), u24(47), u24(100)].concat();
+    anmf.push(0);
+    anmf.extend_from_slice(&still[12..]);
+    let body = [
+        b"WEBP".to_vec(),
+        riff_chunk(b"VP8X", &vp8x),
+        riff_chunk(b"ANIM", &[0; 6]),
+        riff_chunk(b"ANMF", &anmf),
+    ]
+    .concat();
+    riff_chunk(b"RIFF", &body)
+}
+
+#[test]
+fn an_animated_webp_counts_its_canvas() {
+    // An 11,585² RGBA canvas: 4 bytes decoded, 4 for the decoder's frame
+    // and 4 for its canvas per pixel is 1,536 MiB. Without the canvas it
+    // would be 1,024 MiB, just under the limit.
+    let dir = TestDir::new("webp-canvas");
+    let (src, job) = plan_one(
+        &dir,
+        "loop.webp",
+        &animated_webp(11_585, 11_585),
+        Operation::convert(Format::Bmp),
+    );
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.user_message, "loop.webp is too large to convert.");
+    assert!(
+        err.detail
+            .contains("needs about 1535 MiB, over the 1024 MiB limit"),
+        "{}",
+        err.detail
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
+
+/// The 16×16 RGB image as a PNG with a `len`-byte `tEXt` comment after its
+/// header.
+fn png_with_comment(len: usize) -> Vec<u8> {
     let mut png = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Png);
     let mut chunk = b"tEXtComment\0".to_vec();
-    chunk.resize(chunk.len() + 65 * 1024 * 1024, b'a');
+    chunk.resize(chunk.len() + len, b'a');
     let mut text = u32::try_from(chunk.len() - 4)
         .unwrap()
         .to_be_bytes()
@@ -628,8 +762,32 @@ fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
     text.extend_from_slice(&crc32(&chunk).to_be_bytes());
     // After the signature (8) and IHDR (25).
     png.splice(33..33, text);
+    png
+}
+
+#[test]
+fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
+    // The PNG decoder holds its text chunks and the inflated ICC profile to
+    // 128 MiB, charging a text chunk about twice its size. A 40 MiB comment
+    // (a bloated XMP packet is about that) fits; an 80 MiB one doesn't.
     let dir = TestDir::new("png-metadata");
-    let (src, job) = plan_one(&dir, "notes.png", &png, Operation::convert(Format::Bmp));
+    let (src, job) = plan_one(
+        &dir,
+        "notes.png",
+        &png_with_comment(40 * 1024 * 1024),
+        Operation::convert(Format::Bmp),
+    );
+    let before = SourceState::of(&src);
+    run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+    before.assert_unchanged();
+
+    let dir = TestDir::new("png-metadata");
+    let (src, job) = plan_one(
+        &dir,
+        "notes.png",
+        &png_with_comment(80 * 1024 * 1024),
+        Operation::convert(Format::Bmp),
+    );
     let before = SourceState::of(&src);
     let names_before = dir.names();
 
@@ -861,6 +1019,14 @@ fn a_fallback_job_creates_the_fallback_folder() {
     before.assert_unchanged();
 }
 
+/// The context the app gives every job: Grape's fallback folder.
+fn ctx_with_fallback(fallback: &Path) -> EngineCtx {
+    EngineCtx {
+        fallback_dir: Some(fallback.to_path_buf()),
+        ..EngineCtx::default()
+    }
+}
+
 #[test]
 fn an_output_folder_that_is_the_missing_fallback_is_created() {
     // The output setting names Grape's own fallback folder, which doesn't
@@ -881,12 +1047,88 @@ fn an_output_folder_that_is_the_missing_fallback_is_created() {
     assert!(!job.used_fallback);
     let before = SourceState::of(&src);
 
-    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+    let outcome = run_job(&job, &ctx_with_fallback(&fallback), &mut |_| {})
+        .unwrap_or_else(|e| panic!("{e} ({})", e.detail));
 
     assert_eq!(outcome.outputs, [fallback.join("photo.webp")]);
     assert_eq!(names_in(&fallback), ["photo.webp"]);
     before.assert_unchanged();
     assert_no_leftovers(&dir.path);
+}
+
+/// Renames `from` to `to`, retrying for a moment in case a scanner still
+/// has a file in it open (Windows refuses to rename the folder then).
+fn rename_retrying(from: &Path, to: &Path) {
+    for _ in 0..20 {
+        if fs::rename(from, to).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    fs::rename(from, to).unwrap();
+}
+
+#[test]
+fn a_destination_that_vanishes_after_planning_is_not_recreated() {
+    let dir = TestDir::new("vanished");
+    let fallback = dir.join("Downloads").join("Grape");
+    let ctx = ctx_with_fallback(&fallback);
+
+    // The output folder setting's folder is moved away between planning
+    // and the run.
+    let src = dir.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let work = dir.join("Work");
+    let exports = work.join("Exports");
+    fs::create_dir_all(&exports).unwrap();
+    let settings = Settings {
+        output: OutputLocation::Folder(exports.clone()),
+        ..Settings::new(&fallback)
+    };
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Jpg), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert_eq!(planned_file(&job), exports.join("photo.jpg"));
+    rename_retrying(&work, &dir.join("Archive"));
+    let before = SourceState::of(&src);
+
+    let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "Grape couldn't save into Exports.");
+    assert!(!work.exists(), "the old folder came back");
+    assert!(names_in(&dir.join("Archive").join("Exports")).is_empty());
+    assert!(!fallback.exists());
+    before.assert_unchanged();
+
+    // Next to the source: its folder is renamed while the image converts,
+    // after the source was read.
+    let shoot = dir.join("Shoot");
+    fs::create_dir(&shoot).unwrap();
+    let src = shoot.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let settings = Settings::new(&fallback);
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Jpg), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    let before = SourceState::of(&src);
+    let renamed = dir.join("Shoot 2");
+
+    let err = run_job(&job, &ctx, &mut |done| {
+        if done >= 0.5 && !renamed.exists() {
+            rename_retrying(&shoot, &renamed);
+        }
+    })
+    .unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+    assert!(!shoot.exists(), "the old folder came back");
+    assert_eq!(names_in(&renamed), ["photo.png"]);
+    assert_eq!(content_digest(&renamed.join("photo.png")), before.content);
 }
 
 #[cfg(unix)]

@@ -4,7 +4,7 @@
 mod common;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use common::{assert_no_leftovers, TestDir};
 use grape_core::{
@@ -119,7 +119,27 @@ fn a_missing_fallback_under_a_missing_parent_probes_the_nearest_folder() {
     assert!(sel.dirs[&fallback].writable);
 }
 
-#[cfg(unix)]
+/// Makes `link` a link to `target`, which is then gone: a symlink on Unix,
+/// a junction on Windows (which needs no privilege).
+fn dangling_link(link: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        fs::create_dir(target).unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(made.status.success(), "mklink /J failed: {made:?}");
+        fs::remove_dir(target).unwrap();
+    }
+    assert!(fs::symlink_metadata(link).is_ok());
+    assert!(!link.exists(), "the link should lead nowhere");
+}
+
 #[test]
 fn a_link_to_nowhere_on_the_fallback_path_is_not_writable() {
     // `exists` calls a dangling link missing, but nothing can be created
@@ -130,7 +150,7 @@ fn a_link_to_nowhere_on_the_fallback_path_is_not_writable() {
     let downloads = dir.join("Downloads");
     fs::create_dir(&downloads).unwrap();
     let fallback = downloads.join("Grape");
-    std::os::unix::fs::symlink(dir.join("gone"), &fallback).unwrap();
+    dangling_link(&fallback, &dir.join("gone"));
     let settings = Settings::new(&fallback);
 
     let sel = build_selection(std::slice::from_ref(&src), &settings);

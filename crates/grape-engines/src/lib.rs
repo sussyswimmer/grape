@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod cancel;
+mod headers;
 mod image;
 mod output;
 mod selection;
@@ -62,7 +63,8 @@ impl CancelToken {
     }
 }
 
-/// What every engine gets besides the job: sidecar paths and a cancel token.
+/// What every engine gets besides the job: sidecar paths, a cancel token
+/// and Grape's fallback folder.
 #[derive(Debug, Clone, Default)]
 pub struct EngineCtx {
     /// Where the bundled sidecar executables are.
@@ -70,6 +72,12 @@ pub struct EngineCtx {
     /// Checked between steps, at every read of the source and write of the
     /// output, and while Grape's own pixel loops run.
     pub cancel: CancelToken,
+    /// `Settings::fallback_dir` (`Downloads\Grape`), the one folder an
+    /// engine creates when it is missing: for a job that fell back
+    /// (`Job::used_fallback`) or whose output setting names this folder.
+    /// Any other missing destination is a write error. `None` creates it
+    /// only for jobs that fell back.
+    pub fallback_dir: Option<PathBuf>,
 }
 
 /// What a successful job wrote.

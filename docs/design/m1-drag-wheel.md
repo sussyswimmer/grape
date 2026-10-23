@@ -83,7 +83,7 @@ Sections 0 and 1 are for everyone. Sections A to I are addressed to each agent. 
 - EXIF orientation: `ImageDecoder::orientation()` defaults to reading the EXIF chunk (`io/decoder.rs:53-58`; overridden by jpeg `:140`, webp `:95` and tiff `:337`). Then call `DynamicImage::apply_orientation(o)` (`images/dynimage.rs:1161`). Flow: `ImageReader::new(BufReader)`, `.with_guessed_format()` (`io/image_reader_type.rs:254`), `.into_decoder()` (`:219`), `let o = dec.orientation()?`, `DynamicImage::from_decoder(dec)?`, `img.apply_orientation(o)`.
 - ICC: `ImageDecoder::icc_profile()` plus `ImageEncoder::set_icc_profile()` for png, jpeg, webp and tiff (`png.rs:780`, `jpeg/encoder.rs:752`, `webp/encoder.rs:96`, `tiff.rs:612`). Carry the profile over and ignore `UnsupportedError`. Default decode limit: `max_alloc` 512 MiB (`io/limits.rs:54`). Keep it; it guards against decompression bombs.
 - Test helper: `JpegEncoder::set_exif_metadata` (`jpeg/encoder.rs:757`) can write an Orientation=6 EXIF for the orientation test.
-- **No-clobber finalize without `unsafe` or new dependencies:** call `std::fs::hard_link(tmp, final)`, which is `CreateHardLinkW` on Windows and `link(2)` on Unix. It fails with `ErrorKind::AlreadyExists` if `final` exists, on NTFS and every Unix filesystem, and makes the name appear atomically with the full content. Then `remove_file(tmp)`. If hard links are unsupported (FAT32/exFAT, some SMB shares; any error other than `AlreadyExists`), fall back to `OpenOptions::new().write(true).create_new(true).open(final)`, which is an exclusive create, then copy, `sync_all`, and remove `tmp`. If the copy fails, remove the partial `final` (we created it, so deleting it is safe). That fallback is no-clobber but not atomic; it's acceptable and noted in D19. `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` would need `unsafe` in engines, which `#![forbid(unsafe_code)]` rules out.
+- **No-clobber finalize without `unsafe` or new dependencies:** call `std::fs::hard_link(tmp, final)`, which is `CreateHardLinkW` on Windows and `link(2)` on Unix. It fails with `ErrorKind::AlreadyExists` if `final` exists, on NTFS and every Unix filesystem, and makes the name appear atomically with the full content. Then `remove_file(tmp)`. If hard links are unsupported (FAT32/exFAT, some SMB shares; any error other than `AlreadyExists`), fall back to `OpenOptions::new().write(true).create_new(true).open(final)`, which is an exclusive create, then copy, `sync_all`, and remove `tmp`. If the copy fails, remove the partial `final` (we created it, so deleting it is safe). That fallback is no-clobber but not atomic; it's acceptable and noted in D16. `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` would need `unsafe` in engines, which `#![forbid(unsafe_code)]` rules out.
 
 ---
 
@@ -531,7 +531,7 @@ impl CancelToken {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EngineCtx { pub sidecars: SidecarPaths, pub cancel: CancelToken }
+pub struct EngineCtx { pub sidecars: SidecarPaths, pub cancel: CancelToken, pub fallback_dir: Option<PathBuf> }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobOutcome {
@@ -566,7 +566,7 @@ pub fn run_job(job: &Job, ctx: &EngineCtx, progress: &mut dyn FnMut(f32)) -> Res
 - Steps:
   1. If cancelled → `Cancelled`.
   2. `File::open(src)` (read-only) into a `BufReader`, then `ImageReader::new(..).with_guessed_format()`, `into_decoder()`, `orientation()`, `icc_profile()` (ok to fail), `DynamicImage::from_decoder`, `apply_orientation`. Report `progress(0.5)`.
-     - **[Grape] Memory limits** (D16), all checked before any pixel is decoded: a source file over 512 MiB is refused unread; the PNG decoder may hold at most 64 MiB of metadata (text chunks, the inflated ICC profile); an ICC profile over 255 × 65,519 bytes (what a JPEG can hold) is dropped for every target; the decoded image must fit the `image` crate's 512 MiB default; and the estimated peak of the whole conversion (including the file the JPEG decoder holds and the profile) must fit 1 GiB.
+     - **[Grape] Memory limits** (D16), all checked before any pixel is decoded: a JPEG or WebP file over 512 MiB is refused unread (PNG, TIFF and BMP files can be any size); the PNG decoder may hold at most 128 MiB of metadata (text chunks, the inflated ICC profile); an ICC profile over 255 × 65,519 bytes (what a JPEG can hold) is dropped for every target; the decoded image must fit the `image` crate's 512 MiB default; and the estimated peak of the whole conversion must fit 1 GiB. That estimate counts what the decoder keeps, read from the headers first (the JPEG file and, for a progressive or split-scan frame, its coefficients; the WebP frame and, when animated, its canvas), and the profile carried over.
   3. Convert per target:
      - **jpg:** if the image has alpha, composite onto white (`to_rgba8` then a manual blend), then `to_rgb8`. `JpegEncoder::new_with_quality(w, 90)`.
      - **png:** keep the color type.
@@ -581,7 +581,7 @@ pub fn run_job(job: &Job, ctx: &EngineCtx, progress: &mut dyn FnMut(f32)) -> Res
 - Errors map to user messages: `ReadFailed` "Grape couldn't read {name}.", `DecodeFailed` "{name} isn't a readable {FROM} image." (or "{name} is too large to convert." when a memory limit refuses it), `EncodeFailed` "Grape couldn't write a {TO} file.", `WriteFailed` "Grape couldn't save into {folder}.", `NameTaken` "A file named {name} keeps appearing; try again." `detail` = the `io` or `image` error's `Display`, plus paths. Never include file contents.
 - Animated or multi-page inputs use the first frame or page (documented).
 
-### E.3 Dependency (D18)
+### E.3 Dependency (D16)
 In `crates/grape-engines/Cargo.toml`:
 ```toml
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
@@ -590,7 +590,7 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 ```bash
 curl -s "https://crates.io/api/v1/crates/$name/$version" -H 'User-Agent: grape-dev' | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["version"]["created_at"])'
 ```
-If anything is too young: `cargo update -p <name> --precise <older>`. Record every new crate, its version and license in your summary for D18.
+If anything is too young: `cargo update -p <name> --precise <older>`. Record every new crate, its version and license in your summary for D16.
 
 ### E.4 Tests (`tests/image.rs`; no binary fixtures, everything generated into a unique dir under `std::env::temp_dir()` with a small `TestDir` helper that cleans up)
 - Generate a 64×48 RGBA gradient with partial alpha and encode it to each input format using `image` itself.
@@ -658,10 +658,10 @@ Modules: `controller.rs`, `coords.rs`, `keys.rs` (KeyMap, edge_mode), `events.rs
 - Otherwise `spawn_blocking`:
   1. Build the `Selection`: for each distinct parent folder, plus the fallback `app.path().download_dir()?.join("Grape")`, build a `DirSnapshot{ names: read_dir file names (lossy), writable: probe }`.
      - Probe: `OpenOptions::create_new` on `.grape-probe-{pid}-{nanos}` then `remove_file`.
-     - A missing fallback dir counts as `writable = true` if its parent exists; it's created with `create_dir_all` only if a job has `used_fallback`.
+     - A missing fallback dir counts as `writable = true` if its parent exists; it's created with `create_dir_all` only when a job writes into it (`used_fallback`, or an output setting that names it; the app passes it as `EngineCtx::fallback_dir`). Any other missing destination is a `WriteFailed`.
   2. Plan with `grape_core::plan(&sel, &op, &Settings::new(fallback))`. A `PlanError` gives an error toast whose message is the error's `Display`.
   3. Toast `working` `Making {display_path file name}…` (id = batch id, an `AtomicU64`). Position the toast window on `r.display`: centered at `anchor_phys.x`, top = `anchor_phys.y + (BACKDROP_R + 16)·scale`, clamped into the work area. `set_position`, `set_size(320×64 logical × scale)`, `show`.
-  4. Run the jobs sequentially with `EngineCtx::default()`. Report progress per job as `(done + fraction) / n`, throttled to 10 Hz.
+  4. Run the jobs sequentially with an `EngineCtx` whose `fallback_dir` is the settings' fallback. Report progress per job as `(done + fraction) / n`, throttled to 10 Hz.
   5. Finish: `done`, `error` or partial. `revealable` = at least one output exists. Remember `outputs[0]` for that id. Hide after 3 s (done or info) or 6 s (error) unless a newer id has been shown since.
 - `toast_clicked(id)`: if it's revealable, run `explorer.exe` with `raw_arg(format!("/select,\"{}\"", path.display()))` (Windows only, via `std::os::windows::process::CommandExt`). Elsewhere, log it.
 - Concurrency: one blocking task per drop. That's fine for this slice; queueing comes later.
@@ -694,7 +694,7 @@ The pure modules get unit tests (§B.4, coords, golden JSON for events, `edge_mo
 ---
 
 ## H. Docs (orchestrator, after merge)
-- **DECISIONS** (all "proposed, confirm"):
+- **DECISIONS** (all "proposed, confirm"). The numbers below were this plan's working numbers. What landed in `DECISIONS.md` is D13–D17: the image crate and the no-clobber finalize (D18 and D19 here) are both in D16, and `hit_test` is D17. D18 onward in `DECISIONS.md` are later, unrelated decisions.
   - **D13 Own drop target on every Grape window.** The evidence is §1.1. The overlay accepts as COPY, always written, including in `Drop`. Settings and toast refuse with NONE. wry still gets `dragDropEnabled: true` so it disables WebView2's external drop. Revisit if wry starts writing the effect in `Drop`.
   - **D14 Esc on Windows.** It closes the wheel, and the OS cancels the drag (standard OLE). Amend INTERACTION_SPEC §6 / ROADMAP M1 / TESTING. Optional later: a "dismiss but keep dragging" gesture.
   - **D15 Overlay hit-testing.** The overlay is non-layered (blur-behind); never set ignore-cursor-events; a near-transparent hit fill. Confirm on the PC.

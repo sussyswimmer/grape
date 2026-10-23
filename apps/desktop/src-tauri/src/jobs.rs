@@ -147,7 +147,11 @@ fn run(
         }
     };
     let jobs = planned.jobs;
-    let ctx = EngineCtx::default();
+    // The engine creates the fallback folder on first use, and no other.
+    let ctx = EngineCtx {
+        fallback_dir: Some(settings.fallback_dir.clone()),
+        ..EngineCtx::default()
+    };
     let mut results = Vec::with_capacity(jobs.len());
     let mut last_update: Option<Instant> = None;
     for (done, job) in jobs.iter().enumerate() {
