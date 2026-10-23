@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod cancel;
+mod headers;
 mod image;
 mod output;
 mod selection;
