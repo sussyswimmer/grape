@@ -69,12 +69,14 @@ pub fn build_selection(paths: &[PathBuf], settings: &Settings) -> Selection {
 /// The fallback folder's snapshot: a normal one when it exists, otherwise
 /// no names and `writable` when the folder could be created, i.e. its
 /// nearest existing ancestor is a folder that passes the probe. A path
-/// blocked by a file is not writable.
+/// blocked by a file, or by a link to nowhere (which `exists` would call
+/// missing, though nothing can be created in its place), is not writable.
 fn fallback_snapshot(fallback: &Path) -> DirSnapshot {
-    if fallback.exists() {
+    let present = |path: &Path| fs::symlink_metadata(path).is_ok();
+    if present(fallback) {
         return snapshot(fallback);
     }
-    let ancestor = fallback.ancestors().skip(1).find(|dir| dir.exists());
+    let ancestor = fallback.ancestors().skip(1).find(|dir| present(dir));
     DirSnapshot {
         names: HashSet::new(),
         writable: ancestor.is_some_and(|dir| dir.is_dir() && probe_writable(dir)),

@@ -119,6 +119,30 @@ fn a_missing_fallback_under_a_missing_parent_probes_the_nearest_folder() {
     assert!(sel.dirs[&fallback].writable);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_link_to_nowhere_on_the_fallback_path_is_not_writable() {
+    // `exists` calls a dangling link missing, but nothing can be created
+    // in its place, so the planner must not count on the fallback.
+    let dir = TestDir::new("fallback-link");
+    let src = dir.join("photo.png");
+    fs::write(&src, b"x").unwrap();
+    let downloads = dir.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let fallback = downloads.join("Grape");
+    std::os::unix::fs::symlink(dir.join("gone"), &fallback).unwrap();
+    let settings = Settings::new(&fallback);
+
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    assert!(!sel.dirs[&fallback].writable);
+
+    // The same for a link to nowhere in place of a parent folder.
+    let deeper = Settings::new(fallback.join("More"));
+    let sel = build_selection(std::slice::from_ref(&src), &deeper);
+    assert!(!sel.dirs[&deeper.fallback_dir].writable);
+    assert_no_leftovers(&downloads);
+}
+
 #[test]
 fn the_output_folder_setting_gets_a_snapshot_but_is_never_created() {
     let dir = TestDir::new("output-folder");
