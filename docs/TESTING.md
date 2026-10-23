@@ -6,7 +6,7 @@
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
 | Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
-| Platform | `grape-platform` | build only | compile both `cfg`s; logic behind traits gets mock tests |
+| Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS (never a dialog or AirDrop) |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
 
@@ -24,7 +24,7 @@
 
 ## Manual QA checklist (both OSes unless marked)
 
-In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC. Skip the **mac:** items until M8.
+In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC. The **mac:** items need a Mac with the DMG from CI (`PLATFORM_MACOS.md` → "Running a CI build"); the Mac port started early (D18).
 
 App shell
 - [ ] win: the tray menu shows Settings…, Pause Grape and Quit. Settings opens the settings window; Pause toggles its check mark and the tooltip.
@@ -78,6 +78,27 @@ File actions, M5 (win; use scratch copies of files)
 - [ ] win: make a junction to another drive in PowerShell (`New-Item -ItemType Junction -Path C:\scratch\other -Target D:\scratch`), then Move a file from C: into `C:\scratch\other` → Grape asks "Move to another drive?" first.
 - [ ] win: Move to a folder on another drive (a USB stick) → Grape first asks "Move to another drive?" with No as the default. No → nothing moves. Yes → the items move.
 - [ ] win: Share and Float → a "Not in this build yet" toast, and nothing else happens.
+
+macOS, first build (D18; mac; use scratch copies of files)
+- [ ] mac: Grape shows only in the menu bar: no Dock icon, no Cmd-Tab entry. Opening Grape.app again from Applications opens Settings.
+- [ ] mac: no permission prompt appears at launch or during a drag (no Accessibility, Input Monitoring, Screen Recording or "paste from" prompt). Note any "access files in your Desktop/Documents folder" prompt and what triggered it.
+- [ ] mac: drag a PNG from Finder, tap Shift → a ring appears at the cursor, then fills in with PNG's targets. The log (`~/Library/Logs/io.github.sussyswimmer.grape/`) shows `wheel 1 open…`, `1 item(s) entered` and the overlay's `level 101`.
+- [ ] mac: hover the segments → each highlights with a tick, and a Force Touch trackpad gives a light haptic.
+- [ ] mac: after the wheel closes, Finder is still the active app (its menu bar still shows), and the ring never covers the dragged file's image.
+- [ ] mac: Shift-drop on JPG → "Making photo.jpg…" then "Done"; `photo.jpg` is next to the original, and Finder didn't move or copy the original anywhere. One click on the toast → Finder shows `photo.jpg` selected.
+- [ ] mac: hold Command, drop on a tool, then hold Control and drop on COPY → each runs exactly once. Note whether the log says it ran "on release because no drop arrived" (AppKit refused the drop) or shows a normal drop.
+- [ ] mac: Esc mid-drag → the ring hides within about a quarter second, Finder cancels its drag, and the file is untouched. Moving on and releasing reopens nothing.
+- [ ] mac: drop in the middle or off the ring, including over a Finder window under the overlay → nothing happens, and the file doesn't land in that window.
+- [ ] mac: drag selected text from Safari or TextEdit and tap Shift → no ring.
+- [ ] mac: two displays (one Retina, one not; also with the second one left of or above the main one) → the ring appears at the cursor on each, and the highlighted segment is the one under the cursor.
+- [ ] mac: a full-screen app in front, another Space, and Stage Manager on → the ring appears over it and drops work.
+- [ ] mac: Control-drop two files on COPY → "Copied 2 items"; Cmd+V in a Finder window pastes copies. COPY PATH → pasting into TextEdit gives two lines.
+- [ ] mac: Control-drop a file on TERMINAL → Terminal opens in its folder.
+- [ ] mac: Control-drop two files on MOVE → a "Move 2 items to…" folder picker comes to the front (note if it opens behind Finder). Pick a folder → both move, and the toast says "Moved 2 items". Close the picker → nothing moves and no toast.
+- [ ] mac: MOVE onto a folder holding a file with the same name → that file stays where it was, nothing is overwritten, and the toast says "Moved 1 of 2 items".
+- [ ] mac: MOVE to a USB stick → "Move to another drive?" with Cancel as the default (Return cancels). Move → the items move.
+- [ ] mac: Control-drop on SHARE → the AirDrop window opens with the files.
+- [ ] mac: Quit from the menu bar → no Grape process is left in Activity Monitor.
 
 Drag + wheel
 - [ ] Drag a file from Finder/Explorer → tap the conversions key → the wheel appears at the cursor, clamped on screen.

@@ -6,33 +6,42 @@ Target: macOS 13+ on **Apple silicon and Intel**. Ship a universal binary, since
 
 Goal: no Accessibility or Input Monitoring prompt. **[Grape design]** It's *inferred*, not observed, that Tangerine works similarly, since it ships sandboxed on the Mac App Store.
 
-1. **Drag pasteboard.** `NSPasteboard(name: .drag)` (`NSPasteboardNameDrag`) changes its `changeCount` when a new drag session begins anywhere in the system.
-2. **Poll only while the mouse is down.** `NSEvent.pressedMouseButtons() & 1` is cheap. Run a ~120 Hz timer only while the left button is held; idle cost is a 10 Hz check of the button state.
-   - Alternative: a global `NSEvent` monitor for `.leftMouseDown/.leftMouseDragged/.leftMouseUp`. Mouse monitors don't need Accessibility (key monitors do). Spike both in M1 and keep the cheaper one.
-3. **When `changeCount` increments while the button is down and the pointer moved > 4 px** → `DragSignal::Started`. Read `readObjects(forClasses: [NSURL], options: [.urlReadingFileURLsOnly: true])` from the drag pasteboard to get file URLs **before** showing the overlay, so the wheel renders instantly.
-4. **Modifiers:** poll `NSEvent.modifierFlags()` (class property, no permission needed) on the same timer. Map `.shift`, `.command`, `.control`, `.option`.
-5. **Cursor:** `NSEvent.mouseLocation()` is in *bottom-left-origin* global coordinates. Convert to top-left-origin using the primary screen's height before sending to the app. Multi-monitor setups have negative coordinates; test that.
-6. **Drag ends** when the button goes up → `DragSignal::Ended`.
+Built as `grape_platform::macos::MacDragMonitor` (D18):
 
-If the drag pasteboard holds no file URLs (text, browser images, promised files), don't open the wheel.
+1. **Drag pasteboard.** `NSPasteboard(name: .drag)` (`NSPasteboardNameDrag`) changes its `changeCount` when a new drag session begins anywhere in the system.
+2. **Poll only while the mouse is down.** A `grape-drag` thread checks `NSEvent.pressedMouseButtons() & 1` every 100 ms while the button is up, and every 8 ms (~120 Hz) while the left button is held. (A global `NSEvent` mouse monitor was the alternative; polling needs no run loop and was simpler.)
+3. **Started:** once the drag pasteboard's `changeCount` differs from its value at the press, its `types` include `public.file-url`, and the pointer moved more than 4 points, the tracker sends `DragSignal::Started`. Grape checks only the *types*. It never reads the pasteboard's contents, because recent macOS can ask the user before an app reads a pasteboard. The paths arrive with the overlay's drop `Enter`, as on Windows.
+4. **Modifiers:** poll `NSEvent.modifierFlags()` (class property, no permission needed) on the same thread. Map `.shift`, `.control`, `.option` and `.command` to shift, ctrl, alt and meta.
+5. **Cursor:** `NSEvent.mouseLocation()` is in *bottom-left-origin* points. Grape's global coordinates on macOS are **points with the origin at the top-left of the primary (menu-bar) screen**, y down, the same space as `CGDisplayBounds`. With H the primary screen's height: cursor = (x, H − y), and a screen frame F becomes {F.x, H − (F.y + F.h), F.w, F.h}. `DisplayBounds.scale` is 1.0, so 1 unit = 1 point = 1 CSS pixel in the overlay. Screens left of or above the primary one have negative coordinates.
+6. **Drag ends** when the button goes up → `DragSignal::Ended`.
+7. **Esc** can't be read without Input Monitoring (D7), so `Escape` is never sent. Esc cancels the AppKit drag session, which the overlay sees as a drop `Leave` while the button is still down; the controller treats that as Esc (below).
+
+If the drag pasteboard has no file URL type (text, browser images, promised files), the wheel never opens.
 
 **File promises** (e.g. dragging from Photos or Mail) arrive as `NSFilePromiseReceiver`. Treat them as v2 and close the wheel for now.
 
 ## Overlay window
-- Tauri window as described in `ARCHITECTURE.md`. Set `NSWindow.collectionBehavior` to include `.canJoinAllSpaces`, `.fullScreenAuxiliary` and `.stationary`, with level `.popUpMenu` or higher.
-- If drops over full-screen apps fail, switch to a non-activating `NSPanel` (`tauri-nspanel`). Logged as a known M1 risk.
-- The overlay must not activate Grape, so the frontmost app keeps focus. Use `ActivationPolicy::Accessory` for the whole app (menu-bar only, no Dock icon).
-- Coordinates: Tauri positions are physical pixels, AppKit uses points. Convert with the monitor's scale factor.
+- Tauri window as described in `ARCHITECTURE.md`. `macos::harden_window` (main thread) sets level `.popUpMenu` (101) and adds `.canJoinAllSpaces`, `.fullScreenAuxiliary`, `.stationary` and `.ignoresCycle` to `collectionBehavior`, with `hidesOnDeactivate` off. Never use a level of 500 or more: the system's drag image sits there, and covering it hides what the user is dragging. The toast gets the same treatment.
+- **Showing:** `macos::frame_and_show` sets the frame (Grape's top-left points turned into a Cocoa rect) and calls `orderFrontRegardless`. Never `makeKeyAndOrderFront`, `activate`, `set_focus`, `set_always_on_top` or `set_fullscreen` on the overlay or the toast: Tauri's `show()` makes the window key. Hiding uses Tauri's `hide()`.
+- `"backgroundThrottling": "disabled"` keeps a hidden overlay's page running (macOS 14+), so the wheel is drawn by the time the window appears. The toast has `"acceptFirstMouse": true`, so one click on it reveals the output while another app is active.
+- If drops over full-screen apps fail, switch to a non-activating `NSPanel` (`tauri-nspanel`). Logged as a known risk; check it with the `mac:` QA lines.
+- The overlay must not activate Grape, so the frontmost app keeps focus. The whole app uses `ActivationPolicy::Accessory` (menu-bar only, no Dock icon), set before the event loop starts, with `LSUIElement` in `Info.plist`. Opening Grape.app again opens Settings.
+
+## Drops on the overlay
+- wry's own drop handler is the drop target, reported as Tauri's `WindowEvent::DragDrop` (`dragDropEnabled: true`). It accepts the drag as a **copy**, so Finder never moves the file. Its positions are points relative to the window's top-left (typed as `PhysicalPosition`), and the app adds the overlay's frame origin to make global `DropEvent`s.
+- **Command or Control held:** Finder limits the drag to "generic" or "link" while those keys are down, and AppKit may then refuse wry's copy, so no `Drop` arrives. With Command or Control held at release over the overlay and no `Drop` within the drop grace, the controller runs the highlighted segment itself (`ControllerConfig::release_fallback`). It never runs twice. Shift drops are normal drops.
+- **Esc:** a `Leave` while the button is still down, with the cursor still on the wheel's display, starts a 200 ms grace. An `Enter` or `Over` cancels it; otherwise the wheel closes as for Esc and stays out of the way until the button goes up (`ControllerConfig::leave_ends_drag`).
 
 ## Haptics and sound
-- Tick: `NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)`.
+- Tick: `NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)`, as `grape_platform::haptic_tick()`, on each new highlighted segment while sounds are on.
 - Sound: play our own short tick via `NSSound` (preloaded) or WebAudio in the overlay. It must start within 10 ms.
 
 ## File actions
-- Share: `NSSharingService(named: .sendViaAirDrop)?.perform(withItems: urls)`.
-- Copy: write `NSURL`s to `NSPasteboard.general` after `clearContents()`.
-- Move: `NSOpenPanel` (canChooseDirectories, !canChooseFiles), then `FileManager.moveItem`. There's no system undo for this, so confirm before moving across volumes and show a "Moved to …" toast with Reveal.
-- Terminal: `open -a Terminal <dir>`, or `open -a iTerm <dir>`.
+- Share: `NSSharingService(named: .sendViaAirDrop)?.perform(withItems: urls)` on the main thread.
+- Copy: write `NSURL`s to `NSPasteboard.general` after `clearContents()`. Copy Path: the paths as one string, one per line.
+- Move: `NSOpenPanel` ("Move Here", directories only) on the main thread, then `FileManager.moveItem` on the action's own thread. It never overwrites: an item whose name is taken in the chosen folder stays where it was. There's no system undo for this, so moving to another volume asks "Move to another drive?" first, with Cancel as the default button. The toast says what moved and reveals it.
+- Terminal: `open -a Terminal <dir>`. (iTerm can be a setting later.)
+- Reveal (toast click): `open -R <path>`.
 
 ## Conversions that use Apple frameworks
 - **HEIC encode/decode:** ImageIO (`CGImageDestination` with `public.heic`). It's the native, licence-free path, so prefer it over libheif on macOS.
@@ -61,3 +70,4 @@ Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silic
 - Drag from Finder, the Desktop, Downloads stack, Spotlight results, and the Finder sidebar.
 - Full-screen app in front. Two displays with different scale factors. Stage Manager on.
 - Drop outside the ring cancels and Finder does **not** move the file.
+- The full list is in `TESTING.md` → "macOS, first build (D18)".

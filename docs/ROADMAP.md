@@ -92,9 +92,10 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 # Phase 2: macOS port
 
 ## M8: macOS platform layer
-*Started early, 2026-10-23 (DECISIONS D18).* CI builds a downloadable universal DMG on every run (`PLATFORM_MACOS.md` → "Running a CI build"). The platform layer is next.
-- [ ] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), AppKit file actions, haptics.
-- [ ] Overlay over full-screen apps (`tauri-nspanel` if needed). `ActivationPolicy::Accessory`.
+*Started early, 2026-10-23 (DECISIONS D18).* CI builds a downloadable universal DMG on every run (`PLATFORM_MACOS.md` → "Running a CI build"). The platform layer and the app wiring are built and pass CI on macOS. Nothing has run on a real Mac yet: `TESTING.md` → "macOS, first build" lists what to check.
+- [x] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), display bounds in points, AppKit file actions (Share is AirDrop), haptics.
+- [x] The app on macOS: `ActivationPolicy::Accessory`, the overlay and toast shown without focus, drops through wry, and the two macOS controller rules (D18).
+- [ ] Overlay over full-screen apps confirmed on a Mac (`tauri-nspanel` if needed).
 - [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds.
 - [ ] The full `TESTING.md` QA checklist passes on a Mac.
 

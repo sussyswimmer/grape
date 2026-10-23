@@ -44,10 +44,11 @@
 
 ### `grape-platform` (OS glue, `#[cfg(target_os)]` modules)
 - `DragMonitor` (`start(SyncSender<DragSignal>)`, `stop()`): emits `DragSignal::{Started{modifiers}, Moved{x,y}, Modifiers(Modifiers), Escape, Ended}` on a bounded channel, and drops signals rather than block. `Started` carries the keys already held, which don't open a wheel (`DECISIONS.md` D14). The pure `tracker::DragTracker` holds the drag rules; the Windows hook thread and worker feed it. `drag_monitor()` returns the one for this OS. `mock::ScriptedMonitor` replays scripts for tests.
-- `display_bounds_at(x, y) -> Result<DisplayBounds, PlatformError>`: the monitor under the point, as `DisplayBounds { monitor: Rect, work_area: Rect, scale: f64 }` in global physical pixels. The overlay is sized to `monitor` (`rcMonitor`), and the anchor is clamped to `work_area` (`rcWork`). Returns `Unsupported` on macOS until M8.
+- `display_bounds_at(x, y) -> Result<DisplayBounds, PlatformError>`: the monitor under the point, as `DisplayBounds { monitor: Rect, work_area: Rect, scale: f64 }` in global coordinates. Those are physical pixels on Windows (`rcMonitor`, `rcWork`). On macOS they're points from the top-left of the primary screen, with `scale` 1.0, read from a screen cache that the main thread refreshes, with a CoreGraphics fallback (D18). The overlay is sized to `monitor`, and the anchor is clamped to `work_area`.
 - `windows::install_drop_target(hwnd, sink)`: Grape's own `IDropTarget` on the overlay and its child windows. It sends `DropEvent::{Enter{paths,x,y}, Over{x,y}, Leave, Drop{paths,x,y}}` and never reports a move (`DECISIONS.md` D13).
-- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built so far on Windows (M5): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir)` and `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}`. Each returns `Unsupported` elsewhere. The app's `actions.rs` runs them on a thread of their own and writes the toasts.
-- `haptics::tick()` is a no-op on Windows.
+- `macos::{harden_window, frame_and_show, describe_window}` (main thread only): the overlay's and the toast's NSWindow level, Spaces behavior, and a show that never makes the window key (D18).
+- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir)`, `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}` and `reveal(path)`. `share(paths)` is AirDrop on macOS. Each returns `Unsupported` where it isn't built yet (Share on Windows, everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
+- `haptic_tick()`: a light trackpad tick on macOS, a no-op elsewhere.
 - See `PLATFORM_MACOS.md` / `PLATFORM_WINDOWS.md`.
 
 ### `apps/desktop/src-tauri` (the app)
@@ -71,19 +72,19 @@ Requirements:
 
 Plan:
 - One Tauri `WebviewWindow` labelled `overlay`, created hidden at startup with `transparent(true)`, `decorations(false)`, `always_on_top(true)`, `skip_taskbar(true)`, `focused(false)`, `focusable(false)` (on Windows this is what sets `WS_EX_NOACTIVATE`), `shadow(false)` and `visible_on_all_workspaces(true)`. On Windows, `grape_platform::windows::harden_overlay` adds `WS_EX_TOOLWINDOW` and keeps shows from activating the window through a subclass, because tao rewrites the extended style on every show and hide (`DECISIONS.md` D11). `"macOSPrivateApi": true` stays in `tauri.conf.json`; it has been a no-op since Tauri 2.12.1 (the transparency APIs are always on), but tauri-build still requires the matching `macos-private-api` Cargo feature.
-- When opened: `set_position`/`set_size` to the display's frame, then `show()`.
-- **Drag events come from the overlay's drop target.** On Windows that's Grape's own `IDropTarget`, sending `grape_platform::DropEvent` in global physical pixels (`DECISIONS.md` D13). On macOS it's Tauri's `WindowEvent::DragDrop` unless M8 finds a reason to do the same. The events:
+- When opened on Windows: `set_position`/`set_size` to the display's frame, then `show()`. On macOS, `grape_platform::macos::frame_and_show` sets the frame in points and calls `orderFrontRegardless` on the main thread, because Tauri's `show()` makes the window key.
+- **Drag events come from the overlay's drop target.** On Windows that's Grape's own `IDropTarget`, sending `grape_platform::DropEvent` in global physical pixels (`DECISIONS.md` D13). On macOS it's wry's own handler, reported as Tauri's `WindowEvent::DragDrop`: wry accepts the drag as a copy, and the app adds the overlay's frame to its window-relative points to make the same `DropEvent`s (D18). The events:
   - `Enter { paths, … }`: **this is where the overlay learns which files are being dragged** on both OSes. Feed `paths` to `grape-core` to build the wheel. No paths means it isn't a file drag: close the wheel.
   - `Over { … }`: hit test → highlight.
   - `Drop { paths, … }`: hit test → run or cancel.
-  - `Leave`: the cursor left the display. Keep the wheel and wait.
+  - `Leave`: the cursor left the display. Keep the wheel and wait. On macOS, a `Leave` while the button is still down with the cursor still on the wheel's display is how Esc shows up (Grape can't read keys without permission), so the controller closes the wheel if no `Enter` or `Over` follows within 200 ms (D18).
 - The UI events (`wheel://open|highlight|close`, `toast://show|hide`) and their JSON are specified in `docs/design/m1-drag-wheel.md` §C; both sides test against the same golden fixtures. The wheel opens pending and fills in once `Enter` brings the paths.
 - During an OS drag the webview gets **no pointer events**. All highlighting is driven from `Over` positions sent to the UI. Don't rely on DOM `pointermove`.
-- **Known risk (spike in M1):** `Enter` may not fire until the cursor moves after the overlay appears. Until it does, the wheel shows a neutral ring (M1: the numbered placeholder ring). On macOS the drag pasteboard is readable *before* the overlay shows (see `PLATFORM_MACOS.md`), so the wheel can render immediately.
+- **Known risk (spike in M1):** `Enter` may not fire until the cursor moves after the overlay appears. Until it does, the wheel shows a neutral ring (M1: the numbered placeholder ring). macOS works the same way: Grape checks only the drag pasteboard's *types* and never reads its contents (see `PLATFORM_MACOS.md`), so the paths arrive with `Enter` there too.
 - macOS full-screen Spaces may need a non-activating `NSPanel`. If a plain Tauri window can't float over full-screen apps, use the `tauri-nspanel` plugin and log it in DECISIONS.
 
 ## Threads and timing
-- The platform monitor runs on its own thread (macOS: a timer on a dedicated run loop; Windows: the hook thread *must* pump messages). It sends signals through a bounded channel.
+- The platform monitor runs on its own thread (macOS: a polling thread; Windows: the hook thread *must* pump messages). It sends signals through a bounded channel.
 - The controller runs on the Tauri async runtime. UI updates go out as Tauri events (`wheel://open`, `wheel://highlight`, `wheel://close`).
 - Engines run on a worker pool (`tokio::task::spawn_blocking` or a dedicated `rayon` pool). Max concurrency = number of CPUs, and FFmpeg jobs = 2.
 - **Budget:** under 16 ms from modifier signal to `wheel://open`, and under 100 ms until the wheel is painted.

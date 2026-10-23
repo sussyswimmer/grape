@@ -174,6 +174,13 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - The app wires the overlay for macOS.
   - CI lints and tests on `macos-latest` and builds an ad-hoc-signed, un-notarized universal DMG as a downloadable artifact on every run.
   - Notarization and the release workflow stay in M9.
+- **Details decided while building it:**
+  - **Coordinates.** On macOS, `grape-platform`'s global coordinates are points with the origin at the top-left of the primary screen, y down (the `CGDisplayBounds` space), and `DisplayBounds.scale` is 1.0. Windows keeps physical pixels.
+  - **Drops.** wry's own drop handler is the overlay's drop target on macOS (Tauri's `WindowEvent::DragDrop`). Unlike WebView2 it accepts the drag as a copy, so D13's replacement isn't needed there. The app offsets its window-relative points by the overlay's frame.
+  - **Showing windows.** The overlay and toast are shown with `orderFrontRegardless` at level 101 (`.popUpMenu`), never made key, never at level 500 or more.
+  - **Two controller rules for macOS only** (`ControllerConfig` flags, off on Windows): run the highlighted segment on release when Command or Control was held and no drop arrived (AppKit may refuse those drops), and treat a `Leave` with the button still down on the same display as Esc after 200 ms (Grape can't read Esc without permission).
+  - **No pasteboard reads.** The monitor checks only the drag pasteboard's change count and types. The paths come from the drop.
+  - **New dependencies, macOS only:** `objc2` 0.6 (MIT), `objc2-foundation` 0.3 (MIT), `objc2-app-kit` 0.3, `objc2-core-graphics` 0.3 and `dispatch2` 0.3 (each Zlib OR Apache-2.0 OR MIT). All were already in `Cargo.lock` through tao and wry; `grape-platform` now names them.
 - **Tested:** CI only, until Maxwell runs the DMG on a Mac. Every Mac behavior that CI can't check has a `mac:` line in `TESTING.md`.
 - **Revisit if:** the Mac work starts slowing Windows v1 down.
 
