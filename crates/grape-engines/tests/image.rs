@@ -861,6 +861,14 @@ fn a_fallback_job_creates_the_fallback_folder() {
     before.assert_unchanged();
 }
 
+/// The context the app gives every job: Grape's fallback folder.
+fn ctx_with_fallback(fallback: &Path) -> EngineCtx {
+    EngineCtx {
+        fallback_dir: Some(fallback.to_path_buf()),
+        ..EngineCtx::default()
+    }
+}
+
 #[test]
 fn an_output_folder_that_is_the_missing_fallback_is_created() {
     // The output setting names Grape's own fallback folder, which doesn't
@@ -881,12 +889,88 @@ fn an_output_folder_that_is_the_missing_fallback_is_created() {
     assert!(!job.used_fallback);
     let before = SourceState::of(&src);
 
-    let outcome = run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+    let outcome = run_job(&job, &ctx_with_fallback(&fallback), &mut |_| {})
+        .unwrap_or_else(|e| panic!("{e} ({})", e.detail));
 
     assert_eq!(outcome.outputs, [fallback.join("photo.webp")]);
     assert_eq!(names_in(&fallback), ["photo.webp"]);
     before.assert_unchanged();
     assert_no_leftovers(&dir.path);
+}
+
+/// Renames `from` to `to`, retrying for a moment in case a scanner still
+/// has a file in it open (Windows refuses to rename the folder then).
+fn rename_retrying(from: &Path, to: &Path) {
+    for _ in 0..20 {
+        if fs::rename(from, to).is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    fs::rename(from, to).unwrap();
+}
+
+#[test]
+fn a_destination_that_vanishes_after_planning_is_not_recreated() {
+    let dir = TestDir::new("vanished");
+    let fallback = dir.join("Downloads").join("Grape");
+    let ctx = ctx_with_fallback(&fallback);
+
+    // The output folder setting's folder is moved away between planning
+    // and the run.
+    let src = dir.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let work = dir.join("Work");
+    let exports = work.join("Exports");
+    fs::create_dir_all(&exports).unwrap();
+    let settings = Settings {
+        output: OutputLocation::Folder(exports.clone()),
+        ..Settings::new(&fallback)
+    };
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Jpg), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert_eq!(planned_file(&job), exports.join("photo.jpg"));
+    rename_retrying(&work, &dir.join("Archive"));
+    let before = SourceState::of(&src);
+
+    let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "Grape couldn't save into Exports.");
+    assert!(!work.exists(), "the old folder came back");
+    assert!(names_in(&dir.join("Archive").join("Exports")).is_empty());
+    assert!(!fallback.exists());
+    before.assert_unchanged();
+
+    // Next to the source: its folder is renamed while the image converts,
+    // after the source was read.
+    let shoot = dir.join("Shoot");
+    fs::create_dir(&shoot).unwrap();
+    let src = shoot.join("photo.png");
+    fs::write(&src, encode(&gradient(), Format::Png)).unwrap();
+    let settings = Settings::new(&fallback);
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+    let job = plan(&sel, &Operation::convert(Format::Jpg), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    let before = SourceState::of(&src);
+    let renamed = dir.join("Shoot 2");
+
+    let err = run_job(&job, &ctx, &mut |done| {
+        if done >= 0.5 && !renamed.exists() {
+            rename_retrying(&shoot, &renamed);
+        }
+    })
+    .unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+    assert!(!shoot.exists(), "the old folder came back");
+    assert_eq!(names_in(&renamed), ["photo.png"]);
+    assert_eq!(content_digest(&renamed.join("photo.png")), before.content);
 }
 
 #[cfg(unix)]

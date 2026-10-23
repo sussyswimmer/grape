@@ -531,7 +531,7 @@ impl CancelToken {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct EngineCtx { pub sidecars: SidecarPaths, pub cancel: CancelToken }
+pub struct EngineCtx { pub sidecars: SidecarPaths, pub cancel: CancelToken, pub fallback_dir: Option<PathBuf> }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JobOutcome {
@@ -658,10 +658,10 @@ Modules: `controller.rs`, `coords.rs`, `keys.rs` (KeyMap, edge_mode), `events.rs
 - Otherwise `spawn_blocking`:
   1. Build the `Selection`: for each distinct parent folder, plus the fallback `app.path().download_dir()?.join("Grape")`, build a `DirSnapshot{ names: read_dir file names (lossy), writable: probe }`.
      - Probe: `OpenOptions::create_new` on `.grape-probe-{pid}-{nanos}` then `remove_file`.
-     - A missing fallback dir counts as `writable = true` if its parent exists; it's created with `create_dir_all` only if a job has `used_fallback`.
+     - A missing fallback dir counts as `writable = true` if its parent exists; it's created with `create_dir_all` only when a job writes into it (`used_fallback`, or an output setting that names it; the app passes it as `EngineCtx::fallback_dir`). Any other missing destination is a `WriteFailed`.
   2. Plan with `grape_core::plan(&sel, &op, &Settings::new(fallback))`. A `PlanError` gives an error toast whose message is the error's `Display`.
   3. Toast `working` `Making {display_path file name}…` (id = batch id, an `AtomicU64`). Position the toast window on `r.display`: centered at `anchor_phys.x`, top = `anchor_phys.y + (BACKDROP_R + 16)·scale`, clamped into the work area. `set_position`, `set_size(320×64 logical × scale)`, `show`.
-  4. Run the jobs sequentially with `EngineCtx::default()`. Report progress per job as `(done + fraction) / n`, throttled to 10 Hz.
+  4. Run the jobs sequentially with an `EngineCtx` whose `fallback_dir` is the settings' fallback. Report progress per job as `(done + fraction) / n`, throttled to 10 Hz.
   5. Finish: `done`, `error` or partial. `revealable` = at least one output exists. Remember `outputs[0]` for that id. Hide after 3 s (done or info) or 6 s (error) unless a newer id has been shown since.
 - `toast_clicked(id)`: if it's revealable, run `explorer.exe` with `raw_arg(format!("/select,\"{}\"", path.display()))` (Windows only, via `std::os::windows::process::CommandExt`). Elsewhere, log it.
 - Concurrency: one blocking task per drop. That's fine for this slice; queueing comes later.
