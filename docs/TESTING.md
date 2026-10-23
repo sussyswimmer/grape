@@ -47,6 +47,21 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: the log's `painted N ms after the key` stays under 100 ms.
 - [ ] win: the log never shows `wry's drop handler saw` (that would mean Grape's drop target missed a window).
 
+Wheel look and image conversions, M3 first slice (win; use scratch copies of files)
+- [ ] win: switch Windows between light and dark mode → the wheel's glass, segments and labels and the toast follow the theme. No colour looks borrowed from another app.
+- [ ] win: Settings → Accessibility → Visual effects → Animation effects off → the wheel appears with no scale or fade, and the working toast's dot doesn't pulse.
+- [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
+- [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
+- [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
+- Once the app runs `grape-engines` jobs (until then, the "Not in this build yet" toast above applies):
+- [ ] win: Shift-drop `photo.png` on JPG → the toast reads "Making photo.jpg…" then "Done / photo.jpg"; `photo.jpg` appears next to the original and opens in Photos. `Get-FileHash` of `photo.png` is the same before and after.
+- [ ] win: do it again → `photo 2.jpg`; the first `photo.jpg` is untouched.
+- [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.
+- [ ] win: a PNG with a transparent background → JPG has a white background. A phone photo that displays rotated → its PNG is upright.
+- [ ] win: drop on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
+- [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist) and the toast says so.
+- [ ] win: with hidden files shown, no `.grape-tmp-…` or `.grape-probe-…` file is left in any folder you converted in, also after a failed or cancelled conversion.
+
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
 - [ ] win: Alt-drop one file on COPY PATH → the toast says "Copied the path" and shows it. Paste into Notepad → the full path, unquoted. With three files → three lines.
