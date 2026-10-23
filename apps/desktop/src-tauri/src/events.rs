@@ -164,7 +164,7 @@ pub struct ToastShow {
     pub detail: Option<String>,
     /// 0–1 when known.
     pub progress: Option<f32>,
-    /// Whether clicking reveals the output in Explorer.
+    /// Whether clicking reveals the output in Explorer or Finder.
     pub revealable: bool,
 }
 

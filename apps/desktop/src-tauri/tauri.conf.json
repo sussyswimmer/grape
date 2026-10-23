@@ -33,6 +33,7 @@
         "visibleOnAllWorkspaces": true,
         "resizable": false,
         "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       },
       {
@@ -52,6 +53,8 @@
         "visibleOnAllWorkspaces": true,
         "resizable": false,
         "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
+        "acceptFirstMouse": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       }
     ]

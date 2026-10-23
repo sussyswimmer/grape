@@ -10,12 +10,13 @@ The Tauri 2 app: windows, tray, `WheelController` state machine, IPC and setting
 | `float` | file shelf | small, topmost, draggable out |
 | `toast` | progress and done messages | small, topmost, click → reveal |
 
-The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `"macOSPrivateApi": true` is set in `tauri.conf.json` (a no-op since Tauri 2.12.1, but it must match tauri's `macos-private-api` feature). On Windows the Cargo feature `overlay-subclass` (default on) adds the tool-window and no-activate styles (`docs/DECISIONS.md` D11).
+The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `"macOSPrivateApi": true` is set in `tauri.conf.json` (a no-op since Tauri 2.12.1, but it must match tauri's `macos-private-api` feature). On Windows the Cargo feature `overlay-subclass` (default on) adds the tool-window and no-activate styles (`docs/DECISIONS.md` D11). On macOS the overlay and toast are hardened and shown through `grape_platform::macos` on the main thread (`orderFrontRegardless`, never key), and drops come from wry through `WindowEvent::DragDrop` (D18).
 
 ## WheelController
 - Implements the state machine in `docs/INTERACTION_SPEC.md` §1, exactly. Unit-test it with `grape_platform::mock` signal scripts. It's pure state, so it doesn't need a real OS.
 - Lives in `src/controller.rs` (pure) and `src/wheel.rs` (wiring to the monitor, the drop target and the overlay).
-- Inputs: `DragSignal`s (including `Escape`), the overlay's drop events (`grape_platform::DropEvent` from Grape's own drop target on Windows, `docs/DECISIONS.md` D13), Pause, and `wheel_painted` from the overlay.
+- Inputs: `DragSignal`s (including `Escape`), the overlay's drop events (`grape_platform::DropEvent` from Grape's own drop target on Windows, `docs/DECISIONS.md` D13, or from wry's on macOS, D18), Pause, and `wheel_painted` from the overlay.
+- macOS-only rules sit behind `ControllerConfig` flags, `release_fallback` and `leave_ends_drag` (D18). Keep both off on Windows.
 - Outputs: the events in `src/events.rs`, which follow `docs/design/m1-drag-wheel.md` §C and are tested against the UI's golden JSON in `ui/src/shared/fixtures/`: `wheel://open {seq, mode, anchor, scale, geometry, keys, sounds, content}`, `wheel://highlight {seq, index|null}`, `wheel://close {seq, reason}`, `toast://show`, `toast://hide`.
 - The toast (`src/toast.rs`) sits under the wheel (above it near the bottom of the screen), never takes focus, refuses drops, and hides itself after a few seconds unless it's a "working" toast. Clicks come back as `toast_clicked(id)`; only Rust knows the paths.
 - The wheel opens pending and fills in with `grape_core::wheel_content` when the drop target's Enter brings the paths. A drop on a segment becomes a `RunRequest`: file actions run in `src/actions.rs`, conversions in `src/jobs.rs` (`build_selection` → `plan` → `run_job` on a worker thread, with the toast), and tools say they arrive later.

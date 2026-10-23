@@ -4,6 +4,9 @@
 //! - On Windows, Grape's own drop target on the overlay sends
 //!   [`DropEvent`]s (DECISIONS D13). wry's handler is replaced; if it ever
 //!   reports an event anyway, that's logged as a gap in coverage.
+//! - On macOS, wry's drop handler is the drop target (it answers Copy).
+//!   Its window-relative positions are offset by the overlay's frame to
+//!   become [`DropEvent`]s in global points (DECISIONS D18).
 //! - Both feed one channel. A controller thread handles each input and
 //!   applies the [`Effect`]s: overlay frame and visibility, the
 //!   `wheel://open`, `wheel://highlight` and `wheel://close` events
@@ -21,7 +24,9 @@ use std::time::Instant;
 use grape_core::{SelectionItem, WheelEntry};
 use grape_platform::{DisplayBounds, DragMonitor, DragSignal, DropEvent, PlatformError, Rect};
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+#[cfg(not(target_os = "macos"))]
+use tauri::{PhysicalPosition, PhysicalSize};
 
 use crate::actions;
 use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
@@ -51,10 +56,17 @@ impl WheelInputs {
 struct Monitor(Mutex<Option<Box<dyn DragMonitor>>>);
 
 /// Where the overlay's drop target sends events. Kept so the target can be
-/// re-registered before each show.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// re-registered before each show (Windows) or so wry's drop events can be
+/// passed on (macOS).
+#[cfg_attr(not(any(target_os = "windows", target_os = "macos")), allow(dead_code))]
 #[derive(Clone)]
 struct DropSink(SyncSender<DropEvent>);
+
+/// Where the overlay was last framed, in global points. wry reports drop
+/// positions relative to the window on macOS.
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct OverlayFrame(Mutex<Option<Rect>>);
 
 /// The real OS for the controller: display bounds from `grape-platform`,
 /// and the filesystem to tell folders from files.
@@ -95,6 +107,9 @@ pub fn start(app: &AppHandle) {
     app.manage(WheelInputs(tx.clone()));
 
     app.manage(Monitor(Mutex::new(start_monitor(&tx))));
+
+    #[cfg(target_os = "macos")]
+    app.manage(OverlayFrame::default());
 
     let (drop_tx, drop_rx) = mpsc::sync_channel(SOURCE_CAPACITY);
     let drop_sink = DropSink(drop_tx);
@@ -171,7 +186,10 @@ fn forward<T: Send + 'static>(
 }
 
 fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
-    let mut controller = WheelController::new(OsEnv, ControllerConfig::for_this_os());
+    let config = ControllerConfig::for_this_os();
+    // The haptic tick follows the sounds setting (INTERACTION_SPEC.md).
+    let haptics = config.sounds;
+    let mut controller = WheelController::new(OsEnv, config);
     loop {
         let input = match controller.next_deadline() {
             Some(deadline) => rx.recv_timeout(deadline.saturating_duration_since(Instant::now())),
@@ -184,16 +202,22 @@ fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
             Err(RecvTimeoutError::Disconnected) => break,
         };
         for effect in effects {
-            apply(app, effect);
+            apply(app, effect, haptics);
         }
     }
 }
 
-fn apply(app: &AppHandle, effect: Effect) {
+fn apply(app: &AppHandle, effect: Effect, haptics: bool) {
     match effect {
         Effect::Open(open) => emit(app, "wheel://open", open),
         Effect::ShowOverlay { monitor } => show_overlay(app, monitor),
-        Effect::Highlight(highlight) => emit(app, "wheel://highlight", highlight),
+        Effect::Highlight(highlight) => {
+            // A light trackpad tick on macOS; nothing elsewhere.
+            if haptics && highlight.index.is_some() {
+                grape_platform::haptic_tick();
+            }
+            emit(app, "wheel://highlight", highlight);
+        }
         Effect::Close(close) => emit(app, "wheel://close", close),
         Effect::HideOverlay => {
             if let Some(overlay) = overlay(app) {
@@ -227,6 +251,7 @@ fn run(app: &AppHandle, request: &RunRequest) {
 /// Frames the overlay on the monitor and shows it. The wheel was already
 /// sent, so it's drawn by the time the window appears. Never focuses it:
 /// the app under the cursor keeps the keyboard.
+#[cfg(not(target_os = "macos"))]
 fn show_overlay(app: &AppHandle, frame: Rect) {
     let Some(overlay) = overlay(app) else {
         return;
@@ -260,6 +285,41 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
         "overlay shown in {:.1} ms",
         began.elapsed().as_secs_f64() * 1000.0
     );
+}
+
+/// Frames the overlay on the monitor (in points) and orders it to the
+/// front on the main thread, without making it key or activating Grape:
+/// Tauri's `show()` would make it the key window and take the keyboard.
+#[cfg(target_os = "macos")]
+fn show_overlay(app: &AppHandle, frame: Rect) {
+    let Some(overlay) = overlay(app) else {
+        return;
+    };
+    if let Some(last) = app.try_state::<OverlayFrame>() {
+        *last.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(frame);
+    }
+    let began = Instant::now();
+    let queued = app.run_on_main_thread(move || {
+        let ns_window = match overlay.ns_window() {
+            Ok(ns_window) => ns_window,
+            Err(err) => {
+                log::error!("could not show the overlay: no NSWindow: {err}");
+                return;
+            }
+        };
+        // SAFETY: this runs on the main thread, and `ns_window` is the
+        // overlay's NSWindow, which Tauri keeps alive while `overlay` is.
+        match unsafe { grape_platform::macos::frame_and_show(ns_window, frame) } {
+            Ok(()) => log::info!(
+                "overlay shown in {:.1} ms",
+                began.elapsed().as_secs_f64() * 1000.0
+            ),
+            Err(err) => log::error!("could not show the overlay: {err}"),
+        }
+    });
+    if let Err(err) = queued {
+        log::error!("could not show the overlay: no main thread: {err}");
+    }
 }
 
 fn overlay(app: &AppHandle) -> Option<WebviewWindow> {
@@ -313,11 +373,94 @@ fn install_drop_target(app: &AppHandle, sink: &DropSink) {
 /// wry's own drop handler should never fire once Grape's target is
 /// registered. If it does, some overlay window was missed: log it, because
 /// wry doesn't set the drop effect (DECISIONS D13).
+#[cfg(not(target_os = "macos"))]
 pub fn on_overlay_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     if window.label() != OVERLAY {
         return;
     }
     if let tauri::WindowEvent::DragDrop(drag) = event {
         log::warn!("overlay: wry's drop handler saw {drag:?}; Grape's drop target missed a window");
+    }
+}
+
+/// On macOS wry's drop handler is the overlay's drop target. Its events
+/// become [`DropEvent`]s in global points, like Grape's own target sends
+/// on Windows.
+#[cfg(target_os = "macos")]
+pub fn on_overlay_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    use tauri::DragDropEvent;
+
+    if window.label() != OVERLAY {
+        return;
+    }
+    let tauri::WindowEvent::DragDrop(drag) = event else {
+        return;
+    };
+    let app = window.app_handle();
+    let frame = app.try_state::<OverlayFrame>().and_then(|last| {
+        let frame = *last.0.lock().unwrap_or_else(PoisonError::into_inner);
+        frame
+    });
+    let at = |position: &tauri::PhysicalPosition<f64>| match frame {
+        Some(frame) => Some(to_global(frame, position.x, position.y)),
+        None => {
+            log::warn!("overlay: a drop event before the overlay was framed");
+            None
+        }
+    };
+    let event = match drag {
+        DragDropEvent::Enter { paths, position } => match at(position) {
+            Some((x, y)) => DropEvent::Enter {
+                paths: paths.clone(),
+                x,
+                y,
+            },
+            None => return,
+        },
+        DragDropEvent::Over { position } => match at(position) {
+            Some((x, y)) => DropEvent::Over { x, y },
+            None => return,
+        },
+        DragDropEvent::Drop { paths, position } => match at(position) {
+            Some((x, y)) => DropEvent::Drop {
+                paths: paths.clone(),
+                x,
+                y,
+            },
+            None => return,
+        },
+        DragDropEvent::Leave => DropEvent::Leave,
+        _ => return,
+    };
+    if let Some(sink) = app.try_state::<DropSink>() {
+        if sink.0.try_send(event).is_err() {
+            log::warn!("overlay: drop queue full or gone; a drop event was dropped");
+        }
+    }
+}
+
+/// A position relative to the overlay's top-left corner, in points, as
+/// global points. wry types it as physical, but on macOS it's in points.
+#[cfg(any(target_os = "macos", test))]
+fn to_global(frame: Rect, x: f64, y: f64) -> (i32, i32) {
+    // `as` saturates, and positions inside a window are far from the limits.
+    let (x, y) = (x.round() as i32, y.round() as i32);
+    (frame.x.saturating_add(x), frame.y.saturating_add(y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drop_positions_are_offset_by_the_overlay_frame() {
+        let frame = Rect {
+            x: -1440,
+            y: -200,
+            width: 1440,
+            height: 900,
+        };
+        assert_eq!(to_global(frame, 0.0, 0.0), (-1440, -200));
+        assert_eq!(to_global(frame, 720.4, 450.6), (-720, 251));
     }
 }

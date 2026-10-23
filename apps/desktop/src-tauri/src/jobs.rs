@@ -31,7 +31,7 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 /// Grape's own folder in Downloads, for outputs whose folder is read-only.
 const FALLBACK_FOLDER: &str = "Grape";
 
-/// What the toast says. `reveal` is what clicking it shows in Explorer.
+/// What the toast says. `reveal` is what clicking it shows in Explorer or Finder.
 #[derive(Debug, Clone, PartialEq)]
 struct Report {
     tone: ToastTone,

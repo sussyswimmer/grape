@@ -2,7 +2,8 @@
 //! controller. See `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
-//! area; on macOS it will be a menu-bar accessory app (M8).
+//! area; on macOS it's a menu-bar accessory app with no Dock icon
+//! (DECISIONS D18).
 
 mod actions;
 pub mod controller;
@@ -39,7 +40,11 @@ pub struct GrapeState {
 /// icon means no way to reach Settings or Quit). The others are logged and
 /// Grape keeps running.
 pub fn run() -> anyhow::Result<()> {
-    let app = tauri::Builder::default()
+    #[cfg_attr(
+        not(target_os = "macos"),
+        expect(unused_mut, reason = "only macOS changes the app before it runs")
+    )]
+    let mut app = tauri::Builder::default()
         // Registered first so a second launch is caught before anything else
         // starts: it opens Settings in the running instance and exits.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -85,6 +90,11 @@ pub fn run() -> anyhow::Result<()> {
         .build(tauri::generate_context!())
         .context("failed to build the Tauri app")?;
 
+    // Before the loop starts, so Grape launches as an accessory app instead
+    // of flashing a Dock icon first (tao applies this policy at launch).
+    #[cfg(target_os = "macos")]
+    app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
     app.run(|app, event| match event {
         // A tray app keeps running when its last window closes. Only an
         // explicit exit (tray → Quit calls `app.exit(0)`) carries a code.
@@ -93,6 +103,10 @@ pub fn run() -> anyhow::Result<()> {
         } => api.prevent_exit(),
         // Unhook the mouse before the process goes.
         RunEvent::Exit => wheel::stop(app),
+        // Opening Grape again while it runs (Finder, Launchpad, Spotlight)
+        // opens Settings, like a second launch does on Windows.
+        #[cfg(target_os = "macos")]
+        RunEvent::Reopen { .. } => ui_windows::request_settings(app),
         _ => {}
     });
     Ok(())

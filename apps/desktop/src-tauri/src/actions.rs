@@ -3,7 +3,8 @@
 //!
 //! The work itself is in `grape_platform::file_actions`. This module picks
 //! what each action works on, runs it on a thread of its own (Move waits on
-//! a dialog) and words the toast. Share and Float arrive in a later build.
+//! a dialog) and words the toast. Share is AirDrop on macOS and arrives
+//! later on Windows; Float arrives in a later build.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -22,7 +23,7 @@ struct Report {
     tone: ToastTone,
     title: String,
     detail: Option<String>,
-    /// What clicking the toast reveals in Explorer.
+    /// What clicking the toast reveals in Explorer or Finder.
     reveal: Option<PathBuf>,
 }
 
@@ -87,7 +88,8 @@ fn perform(action: ActionKey, paths: &[PathBuf], terminal_dir: Option<&Path>) ->
             )),
         },
         ActionKey::Move => word(action, file_actions::move_to_chosen_folder(paths), moved),
-        ActionKey::Share | ActionKey::Float => Some(later(action)),
+        ActionKey::Share => word(action, file_actions::share(paths), shared),
+        ActionKey::Float => Some(later(action)),
     };
     log::info!(
         "{} on {} item(s): {}",
@@ -100,8 +102,8 @@ fn perform(action: ActionKey, paths: &[PathBuf], terminal_dir: Option<&Path>) ->
     report
 }
 
-/// Words `result` with `words`. Before M8 nothing is wired on macOS, so an
-/// unsupported OS gets "coming", not a failure.
+/// Words `result` with `words`. An action this OS doesn't have yet (Share
+/// on Windows) gets "coming", not a failure.
 fn word<T>(
     action: ActionKey,
     result: Result<T, PlatformError>,
@@ -188,6 +190,11 @@ fn opened_terminal(result: Result<(), PlatformError>) -> Option<Report> {
     result
         .err()
         .map(|err| failed("Couldn't open a terminal", &err))
+}
+
+fn shared(result: Result<(), PlatformError>) -> Option<Report> {
+    // The AirDrop sheet is the answer; only a failure needs a toast.
+    result.err().map(|err| failed("Couldn't share", &err))
 }
 
 fn moved(result: Result<MoveOutcome, PlatformError>) -> Option<Report> {
@@ -423,15 +430,30 @@ mod tests {
     }
 
     #[test]
-    fn share_and_float_are_coming() {
-        let share = perform(ActionKey::Share, &[PathBuf::from("/a")], None).unwrap();
-        assert_eq!(share.tone, ToastTone::Info);
-        assert_eq!(share.detail.as_deref(), Some("Sharing is coming."));
+    fn share_is_quiet_unless_it_fails() {
+        assert_eq!(shared(Ok(())), None);
+        let failed = shared(Err(os_error())).unwrap();
+        assert_eq!(failed.tone, ToastTone::Error);
+        assert_eq!(failed.title, "Couldn't share");
+    }
+
+    #[test]
+    fn float_is_coming() {
         let float = perform(ActionKey::Float, &[PathBuf::from("/a")], None).unwrap();
+        assert_eq!(float.tone, ToastTone::Info);
         assert_eq!(float.detail.as_deref(), Some("The float shelf is coming."));
     }
 
-    #[cfg(not(target_os = "windows"))]
+    // On macOS Share opens AirDrop, so it's never run from a test there.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn share_is_coming_where_there_is_no_airdrop() {
+        let share = perform(ActionKey::Share, &[PathBuf::from("/a")], None).unwrap();
+        assert_eq!(share.tone, ToastTone::Info);
+        assert_eq!(share.detail.as_deref(), Some("Sharing is coming."));
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn off_windows_every_action_is_coming_not_failing() {
         for action in [ActionKey::Copy, ActionKey::CopyPath, ActionKey::Move] {

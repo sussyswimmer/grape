@@ -3,8 +3,9 @@
 //! clicked. Rust owns the copy, the placement and the timing; the page in
 //! `ui/toast.html` only renders `toast://show` / `toast://hide`.
 //!
-//! The toast never takes focus (it gets the overlay's tool-window,
-//! no-activate styles) and refuses drops (DECISIONS D13).
+//! The toast never takes focus (on Windows it gets the overlay's
+//! tool-window, no-activate styles; on macOS it's ordered front without
+//! becoming key) and refuses drops (DECISIONS D13).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -14,8 +15,8 @@ use std::thread;
 use std::time::Duration;
 
 use grape_core::GEOMETRY;
-use grape_platform::{DisplayBounds, Rect};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
+use grape_platform::{DisplayBounds, PlatformError, Rect};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::events::{ToastHide, ToastShow, ToastTone};
 
@@ -106,16 +107,10 @@ pub fn show(app: &AppHandle, toast: ToastShow, anchor: (i32, i32), display: &Dis
     let (id, tone) = (toast.id, toast.tone);
 
     let (x, y) = place(anchor, display);
-    if let Err(err) = window.set_position(PhysicalPosition::new(x, y)) {
-        log::warn!("could not place the toast: {err}");
-    }
     if let Err(err) = app.emit_to(TOAST, "toast://show", toast) {
         log::error!("could not send toast://show: {err}");
     }
-    // Never `set_focus`: the app under the cursor keeps the keyboard.
-    if let Err(err) = window.show() {
-        log::error!("could not show the toast: {err}");
-    }
+    place_and_show(app, window, x, y);
 
     if let Some(delay) = linger(tone) {
         let app = app.clone();
@@ -126,6 +121,48 @@ pub fn show(app: &AppHandle, toast: ToastShow, anchor: (i32, i32), display: &Dis
                 hide(&app, id);
             }
         });
+    }
+}
+
+/// Moves the toast to (x, y) and shows it. Never `set_focus`: the app
+/// under the cursor keeps the keyboard.
+#[cfg(not(target_os = "macos"))]
+fn place_and_show(_app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32) {
+    if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
+        log::warn!("could not place the toast: {err}");
+    }
+    if let Err(err) = window.show() {
+        log::error!("could not show the toast: {err}");
+    }
+}
+
+/// Moves the toast to (x, y), in points, and orders it front on the main
+/// thread. Tauri's `show()` would make it the key window.
+#[cfg(target_os = "macos")]
+fn place_and_show(app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32) {
+    // Points on macOS (the display's scale is 1.0).
+    let frame = Rect {
+        x,
+        y,
+        width: WIDTH as i32,
+        height: HEIGHT as i32,
+    };
+    let queued = app.run_on_main_thread(move || {
+        let ns_window = match window.ns_window() {
+            Ok(ns_window) => ns_window,
+            Err(err) => {
+                log::error!("could not show the toast: no NSWindow: {err}");
+                return;
+            }
+        };
+        // SAFETY: this runs on the main thread, and `ns_window` is the
+        // toast's NSWindow, which Tauri keeps alive while `window` is.
+        if let Err(err) = unsafe { grape_platform::macos::frame_and_show(ns_window, frame) } {
+            log::error!("could not show the toast: {err}");
+        }
+    });
+    if let Err(err) = queued {
+        log::error!("could not show the toast: no main thread: {err}");
     }
 }
 
@@ -141,43 +178,20 @@ pub fn hide(app: &AppHandle, id: u64) {
     }
 }
 
-/// The page reports a click on toast `id`: reveal its output in Explorer.
+/// The page reports a click on toast `id`: reveal its output in Explorer
+/// or Finder.
 #[tauri::command]
 pub fn toast_clicked(id: u64, toaster: State<'_, Toaster>) {
     let Some(path) = toaster.reveal_path(id) else {
         return;
     };
-    reveal_in_file_manager(&path);
-}
-
-/// Opens the folder holding `path` with `path` selected. Local only: it
-/// starts Explorer, nothing else.
-fn reveal_in_file_manager(path: &std::path::Path) {
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // Raw, because `Command::arg` would quote the whole switch when the
-        // path has a space and leave a comma bare, and Explorer then
-        // ignores the switch or cuts the path at the comma.
-        if let Err(err) = std::process::Command::new("explorer.exe")
-            .raw_arg(select_arg(path))
-            .spawn()
-        {
-            log::error!("could not reveal {}: {err}", path.display());
+    match grape_platform::file_actions::reveal(&path) {
+        Ok(()) => {}
+        Err(PlatformError::Unsupported) => {
+            log::info!("reveal {} (not wired on this OS)", path.display());
         }
+        Err(err) => log::error!("could not reveal {}: {err}", path.display()),
     }
-    #[cfg(not(target_os = "windows"))]
-    log::info!("reveal {} (not wired on this OS yet)", path.display());
-}
-
-/// Explorer's own form, `/select,"<path>"`. A Windows path can't hold `"`,
-/// so the quotes can't be broken out of.
-#[cfg(any(target_os = "windows", test))]
-fn select_arg(path: &std::path::Path) -> std::ffi::OsString {
-    let mut select = std::ffi::OsString::from("/select,\"");
-    select.push(path.as_os_str());
-    select.push("\"");
-    select
 }
 
 #[cfg(test)]
@@ -238,12 +252,6 @@ mod tests {
             toaster.reveal_path(first + 40),
             Some(PathBuf::from("b.png"))
         );
-    }
-
-    #[test]
-    fn reveal_quotes_the_path_after_select() {
-        let arg = select_arg(std::path::Path::new(r"C:\My Pictures\a,b\photo 3,4.png"));
-        assert_eq!(arg, r#"/select,"C:\My Pictures\a,b\photo 3,4.png""#);
     }
 
     #[test]

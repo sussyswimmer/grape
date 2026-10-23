@@ -29,8 +29,10 @@ static SETTINGS_LOCK: Mutex<()> = Mutex::new(());
 
 /// Gets the overlay ready at startup. On Windows this hardens the window
 /// (tool window, topmost, not activated when shown or moved) and logs its
-/// extended style. Never call `set_focus` on the overlay: a direct
-/// activation still works.
+/// extended style. On macOS it lifts the window to the pop-up menu level,
+/// over the menu bar, the Dock and full-screen apps, on every Space. Never
+/// call `set_focus`, `set_always_on_top` or `set_fullscreen` on the overlay:
+/// the first activates Grape, and on macOS the others reset the level.
 ///
 /// Must run on the main thread (Tauri's `setup`), which owns the window.
 ///
@@ -43,7 +45,9 @@ pub fn prepare_overlay(app: &AppHandle) -> anyhow::Result<()> {
 
     #[cfg(target_os = "windows")]
     windows_overlay::harden(&overlay);
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    mac_overlay::harden(&overlay);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let _ = overlay;
 
     Ok(())
@@ -60,6 +64,8 @@ pub fn prepare_toast(app: &AppHandle) -> anyhow::Result<()> {
         .context("the toast window from tauri.conf.json is missing")?;
     #[cfg(target_os = "windows")]
     windows_overlay::harden(&toast);
+    #[cfg(target_os = "macos")]
+    mac_overlay::harden(&toast);
     refuse_drops(app, &toast);
     Ok(())
 }
@@ -105,6 +111,10 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
 /// which Explorer can read as a move (DECISIONS D13), so a refusing target
 /// replaces them. Runs on the main thread, which owns the window; failures
 /// are logged.
+///
+/// On macOS nothing is replaced: wry answers every file drag with Copy and
+/// never touches the file (DECISIONS D18), so a file dropped on Settings or
+/// the toast is ignored, never moved.
 fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
@@ -216,6 +226,31 @@ mod windows_overlay {
                 grape_platform::windows::describe_ex_style(style)
             ),
             Err(err) => log::warn!("overlay ex-style ({when}): unreadable: {err}"),
+        }
+    }
+}
+
+/// The macOS side of [`prepare_overlay`] and [`prepare_toast`].
+#[cfg(target_os = "macos")]
+mod mac_overlay {
+    /// Lifts `window` over the menu bar, the Dock and full-screen apps, on
+    /// every Space, and logs how it ended up. Main thread only.
+    pub(super) fn harden(window: &tauri::WebviewWindow) {
+        let ns_window = match window.ns_window() {
+            Ok(ns_window) => ns_window,
+            Err(err) => {
+                log::error!("{}: no NSWindow: {err}", window.label());
+                return;
+            }
+        };
+        // SAFETY: `ns_window` came from Tauri on this, the main thread
+        // (setup), just now, so it's a live NSWindow for this call.
+        match unsafe { grape_platform::macos::harden_window(ns_window) } {
+            // SAFETY: as above.
+            Ok(()) => log::info!("{}: {}", window.label(), unsafe {
+                grape_platform::macos::describe_window(ns_window)
+            }),
+            Err(err) => log::error!("could not harden the {} window: {err}", window.label()),
         }
     }
 }
