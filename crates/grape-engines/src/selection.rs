@@ -30,9 +30,11 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 ///   with `create_new`, then delete it (on Windows, the OS deletes it as
 ///   its handle closes); any error means `false`. A missing or unreadable
 ///   folder gets no names and `writable = false`.
-/// - **The fallback folder** is Grape's own (`Downloads\Grape`), so it is
-///   created with `create_dir_all` if it doesn't exist yet, before it is
-///   probed. No other folder is ever created.
+/// - **The fallback folder** is Grape's own (`Downloads\Grape`) and may not
+///   exist yet. It is never created here: a missing fallback gets no names
+///   and counts as writable when its nearest existing ancestor is a folder
+///   that passes the probe. The engine creates it only when a job actually
+///   uses it (`Job::used_fallback`). No folder is ever created here.
 ///
 /// Never panics; problems show up as `writable = false` and the planner
 /// then falls back or reports `NoWritableDestination`.
@@ -49,24 +51,34 @@ pub fn build_selection(paths: &[PathBuf], settings: &Settings) -> Selection {
         dirs.insert(dir.clone());
     }
     let fallback = &settings.fallback_dir;
-    if !fallback.as_os_str().is_empty() {
-        // Grape's own folder: make it so it can be probed (and used). A
-        // failure here shows up as `writable = false` below.
-        let _ = fs::create_dir_all(fallback);
-        dirs.insert(fallback.clone());
-    }
 
     let mut selection = Selection::new(items);
-    for dir in dirs {
-        let snapshot = snapshot(&dir);
-        selection = selection.with_dir(dir, snapshot);
+    for dir in dirs.iter().filter(|dir| *dir != fallback) {
+        selection = selection.with_dir(dir.clone(), snapshot(dir));
     }
-    if fallback.as_os_str().is_empty() {
-        // No fallback folder: a snapshot nobody can write to, so the
-        // planner reports `NoWritableDestination`, not a missing snapshot.
-        selection = selection.with_dir(fallback.clone(), DirSnapshot::default());
+    // An empty fallback path gets a snapshot nobody can write to, so the
+    // planner reports `NoWritableDestination`, not a missing snapshot.
+    let fallback_snapshot = if fallback.as_os_str().is_empty() {
+        DirSnapshot::default()
+    } else {
+        fallback_snapshot(fallback)
+    };
+    selection.with_dir(fallback.clone(), fallback_snapshot)
+}
+
+/// The fallback folder's snapshot: a normal one when it exists, otherwise
+/// no names and `writable` when the folder could be created, i.e. its
+/// nearest existing ancestor is a folder that passes the probe. A path
+/// blocked by a file is not writable.
+fn fallback_snapshot(fallback: &Path) -> DirSnapshot {
+    if fallback.exists() {
+        return snapshot(fallback);
     }
-    selection
+    let ancestor = fallback.ancestors().skip(1).find(|dir| dir.exists());
+    DirSnapshot {
+        names: HashSet::new(),
+        writable: ancestor.is_some_and(|dir| dir.is_dir() && probe_writable(dir)),
+    }
 }
 
 /// One dropped path as a folder or a file.

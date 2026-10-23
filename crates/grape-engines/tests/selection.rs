@@ -69,9 +69,9 @@ fn the_source_folder_snapshot_lists_names_and_is_writable() {
     let mut names: Vec<&str> = snapshot.names.iter().map(String::as_str).collect();
     names.sort_unstable();
     assert_eq!(names, ["a.jpg", "a.png", "b.webp", "sub"]);
-    // The probe cleaned up after itself.
+    // The probe cleaned up after itself, and the fallback wasn't created.
     assert_no_leftovers(&photos);
-    assert_no_leftovers(&fallback);
+    assert!(!fallback.exists());
 
     // The snapshot keys are exactly what the planner looks up.
     let job = plan(
@@ -87,20 +87,36 @@ fn the_source_folder_snapshot_lists_names_and_is_writable() {
 }
 
 #[test]
-fn a_missing_fallback_folder_is_created_and_probed() {
+fn a_missing_fallback_folder_is_probed_but_not_created() {
     let dir = TestDir::new("fallback");
     let src = dir.join("photo.png");
     fs::write(&src, b"x").unwrap();
-    let fallback = dir.join("Downloads").join("Grape");
-    assert!(!fallback.exists());
+    let downloads = dir.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let fallback = downloads.join("Grape");
 
     let sel = build_selection(&[src], &Settings::new(&fallback));
 
-    assert!(fallback.is_dir());
+    // Only a job that really falls back creates it.
+    assert!(!fallback.exists());
     let snapshot = &sel.dirs[&fallback];
     assert!(snapshot.writable);
     assert!(snapshot.names.is_empty());
-    assert_no_leftovers(&fallback);
+    // The probe ran in the nearest existing ancestor and cleaned up.
+    assert_no_leftovers(&downloads);
+}
+
+#[test]
+fn a_missing_fallback_under_a_missing_parent_probes_the_nearest_folder() {
+    let dir = TestDir::new("fallback-deep");
+    let src = dir.join("photo.png");
+    fs::write(&src, b"x").unwrap();
+    let fallback = dir.join("Downloads").join("Grape");
+
+    let sel = build_selection(&[src], &Settings::new(&fallback));
+
+    assert!(!dir.join("Downloads").exists());
+    assert!(sel.dirs[&fallback].writable);
 }
 
 #[test]
