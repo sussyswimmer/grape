@@ -1,11 +1,14 @@
 //! What a source's headers say about how much its decoder will hold, read
 //! before decoding so the memory estimate in [`crate::image`] can count it.
 //!
-//! Every reader opens the source read-only and reads only headers (chunk
-//! bodies are skipped with seeks). A JPEG's headers are read by zune-jpeg
-//! itself, the decoder that will decode it, so nothing here can read them
-//! differently. The WebP and PNG walks follow their decoders' own rules for
-//! where to look and where to stop.
+//! Every reader opens the source read-only. The PNG and WebP walks read
+//! only chunk headers (bodies are skipped with seeks) and follow their
+//! decoders' own rules for where to look and where to stop. A JPEG's
+//! headers are read by zune-jpeg itself, the decoder that will decode it,
+//! so nothing here can read them differently; [`first_scan_components`]
+//! then reads back three bytes of the first scan's header. [`jpeg_scan`]
+//! is the exception: it reads a JPEG whole, once and through the cancel
+//! token, to bound what its decoder holds and how long its headers take.
 //! - The JPEG and WebP readers answer with the larger case when the headers
 //!   can't be read or look unusual: a wrong guess may refuse an image, never
 //!   let one past the limits.
@@ -479,8 +482,9 @@ mod tests {
     fn the_jpeg_scan_counts_xmp_extensions_and_ff_bytes() {
         let dir = Scratch::new();
         let cancel = CancelToken::new();
-        // One namespace split across the scan's 64 KiB reads, one whole,
-        // and FF bytes around them.
+        // Two namespaces: the first inside the scan's first read (64 KiB
+        // plus the 34 bytes it keeps), the second across its end; and FF
+        // bytes around them.
         let mut bytes = vec![0x11; 64 * 1024 - 10];
         bytes.extend_from_slice(XMP_EXTENSION);
         bytes.extend([0xFF, 0xFF, 0x00]);

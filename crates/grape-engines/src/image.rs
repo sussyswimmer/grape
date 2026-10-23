@@ -118,11 +118,15 @@ pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
 const PNG_METADATA_LIMIT: u64 = 128 * MIB;
 
 /// The most work the JPEG decoder's header parse may do, as
-/// [`headers::JpegScan::header_work`] bounds it: about a few seconds per
-/// parse. It re-checks every pending extended-XMP segment after every
-/// marker, so a file with many of them and many markers can take hours;
-/// real files have none, or under a hundred.
-const MAX_JPEG_HEADER_WORK: u64 = 1 << 30;
+/// [`headers::JpegScan::header_work`] bounds it. The parse re-checks every
+/// pending extended-XMP segment after every marker, so a file with many of
+/// both can take hours; real files have none, or tens. A job parses the
+/// headers five times: once in [`headers::jpeg_layout`], which the cancel
+/// token can stop, and four times inside the `image` crate (opening the
+/// file, its orientation, its ICC profile and decoding), from memory,
+/// where it can't. At this bound each parse takes about half a second, so
+/// a job about three.
+const MAX_JPEG_HEADER_WORK: u64 = 1 << 27;
 
 /// How many rows Grape's own pixel loops process between cancel checks
 /// (at most a few milliseconds of work).
@@ -996,9 +1000,9 @@ mod tests {
             "{err}"
         );
         // Many segments and many markers: the parse would take too long.
-        let err = admit_jpeg(MIB, &scan(1 << 15, 1 << 16)).unwrap_err();
-        assert!(err.contains("32768 extended XMP segments"), "{err}");
-        assert!(admit_jpeg(MIB, &scan(1 << 14, 1 << 16)).is_ok());
+        let err = admit_jpeg(MIB, &scan(1 << 12, 1 << 16)).unwrap_err();
+        assert!(err.contains("4096 extended XMP segments"), "{err}");
+        assert!(admit_jpeg(MIB, &scan(1 << 11, 1 << 16)).is_ok());
     }
 
     #[test]
