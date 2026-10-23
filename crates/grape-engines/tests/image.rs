@@ -215,16 +215,18 @@ fn a_name_taken_after_planning_gets_the_next_number() {
 #[test]
 fn a_case_variant_taken_after_planning_is_never_replaced() {
     let dir = TestDir::new("collision-case");
-    let (_src, job) = plan_one(
+    let (src, job) = plan_one(
         &dir,
         "photo.png",
         &encode(&gradient(), Format::Png),
         Operation::convert(Format::Webp),
     );
     fs::write(dir.join("PHOTO.webp"), b"not ours").unwrap();
+    let before = SourceState::of(&src);
 
     let outcome = run(&job).unwrap();
 
+    before.assert_unchanged();
     assert_eq!(fs::read(dir.join("PHOTO.webp")).unwrap(), b"not ours");
     // A case-sensitive filesystem (Linux) has room for `photo.webp`; a
     // case-insensitive one (NTFS, APFS) refuses it and the name is re-planned.
@@ -294,12 +296,13 @@ fn jpeg_output_flattens_alpha_onto_white() {
         }
     }));
     let dir = TestDir::new("alpha");
-    let (_src, job) = plan_one(
+    let (src, job) = plan_one(
         &dir,
         "logo.png",
         &encode(&img, Format::Png),
         Operation::convert(Format::Jpg),
     );
+    let before = SourceState::of(&src);
     let outcome = run(&job).unwrap();
 
     let out = decode(&fs::read(&outcome.outputs[0]).unwrap()).to_rgb8();
@@ -310,6 +313,7 @@ fn jpeg_output_flattens_alpha_onto_white() {
         "transparent area {clear:?}"
     );
     assert!(solid[1] > 150 && solid[0] < 60, "opaque area {solid:?}");
+    before.assert_unchanged();
 }
 
 /// A minimal RGB profile header padded with zeros to `len` bytes; the
@@ -350,8 +354,10 @@ fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
 
     for to in [Format::Jpg, Format::Webp, Format::Tiff, Format::Bmp] {
         let dir = TestDir::new("icc");
-        let (_src, job) = plan_one(&dir, "photo.png", &source, Operation::convert(to));
+        let (src, job) = plan_one(&dir, "photo.png", &source, Operation::convert(to));
+        let before = SourceState::of(&src);
         let outcome = run(&job).unwrap();
+        before.assert_unchanged();
         let carried = embedded_profile(fs::read(&outcome.outputs[0]).unwrap());
         if to == Format::Bmp {
             assert_eq!(carried, None, "BMP can't hold a profile");
@@ -584,6 +590,7 @@ fn tools_multiple_inputs_and_folder_outputs_are_not_supported() {
     fs::write(&a, encode(&gradient(), Format::Png)).unwrap();
     fs::write(&b, encode(&gradient(), Format::Png)).unwrap();
     let names_before = dir.names();
+    let sources_before = [SourceState::of(&a), SourceState::of(&b)];
     let jobs = [
         Job {
             inputs: vec![a.clone()],
@@ -619,6 +626,9 @@ fn tools_multiple_inputs_and_folder_outputs_are_not_supported() {
         "Tools arrive in a later build."
     );
     assert_eq!(dir.names(), names_before);
+    for before in &sources_before {
+        before.assert_unchanged();
+    }
 }
 
 #[test]
