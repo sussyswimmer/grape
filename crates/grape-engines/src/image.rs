@@ -11,8 +11,9 @@
 //!   bomb) can exhaust memory:
 //!   - a JPEG or WebP source file must fit [`MAX_SOURCE`], checked before
 //!     reading it (the JPEG decoder reads the whole file into memory);
-//!   - the PNG decoder's own buffers (text chunks, the inflated ICC
-//!     profile) must fit [`PNG_METADATA_LIMIT`];
+//!   - the metadata the PNG decoder keeps (text and EXIF chunks, counted
+//!     from the chunk headers; the inflated ICC profile, held by the
+//!     decoder itself) must fit [`PNG_METADATA_LIMIT`];
 //!   - an ICC profile over [`MAX_ICC`] is dropped as soon as it is read;
 //!   - from the headers: the decoded image must fit the `image` crate's
 //!     default 512 MiB allocation limit (`into_decoder` hands that limit to
@@ -20,9 +21,9 @@
 //!     buffer to it, so Grape reserves it itself), and the whole
 //!     conversion's peak (what the decoder keeps, a rotated copy, the
 //!     converted copy, the encoder's in-memory output and the profile
-//!     carried over) must fit [`WORKING_SET_LIMIT`]. What the JPEG and WebP
-//!     decoders keep depends on how the file is coded, so their headers
-//!     are read first ([`crate::headers`]).
+//!     carried over) must fit [`WORKING_SET_LIMIT`]. What the JPEG, WebP
+//!     and PNG decoders keep depends on how the file is laid out, so their
+//!     headers are read first ([`crate::headers`]).
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
 //!   its first frame or page.
 //! - **Targets:** JPEG at quality 90 with any alpha flattened onto white;
@@ -58,7 +59,7 @@ use ::image::{
 use grape_core::{Format, Job};
 
 use crate::cancel::Cancellable;
-use crate::headers::{self, JpegLayout};
+use crate::headers::{self, JpegLayout, WebpLayout};
 use crate::output::{place_no_clobber, TempFile};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome};
 
@@ -100,12 +101,14 @@ pub(crate) const WORKING_SET_LIMIT: u64 = 1024 * MIB;
 /// multi-page scan converts its first image.
 pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
 
-/// What the PNG decoder may allocate besides the pixels: its text chunks,
-/// the inflated ICC profile and its row buffers. It charges a text chunk
-/// about twice its size (a growing buffer, then the parsed copy), so one
-/// chunk of up to about 64 MiB fits. More is refused as too large; a
-/// profile that would inflate past it is dropped by the decoder, and the
-/// image still converts.
+/// What the PNG decoder may keep besides the pixels. Two checks hold it:
+/// - the text and EXIF chunks ahead of the image data, as
+///   [`headers::png_metadata`] counts them from their headers before
+///   decoding (a text chunk costs up to twice its size, plus its entry, so
+///   one chunk of up to about 40 MiB fits); more is refused as too large;
+/// - the decoder's own limit, which also covers the inflated ICC profile
+///   and its row buffers: a profile that would inflate past it is dropped,
+///   and the image still converts.
 const PNG_METADATA_LIMIT: u64 = 128 * MIB;
 
 /// How many rows Grape's own pixel loops process between cancel checks
@@ -240,7 +243,21 @@ fn decode(
             layout: headers::jpeg_layout(src),
         },
         Some(ImageFormat::WebP) => DecoderKeeps::WebP {
-            animated: headers::webp_is_animated(src),
+            layout: headers::webp_layout(src),
+        },
+        Some(ImageFormat::Png) => match headers::png_metadata(src) {
+            Some(metadata) if metadata <= PNG_METADATA_LIMIT => DecoderKeeps::Png { metadata },
+            counted => {
+                let why = match counted {
+                    Some(metadata) => format!("its metadata needs about {} MiB", metadata / MIB),
+                    None => "it has too many metadata chunks to count".to_owned(),
+                };
+                return Err(names.too_large(format!(
+                    "decode {}: {why}, over the {} MiB limit for PNG metadata",
+                    src.display(),
+                    PNG_METADATA_LIMIT / MIB
+                )));
+            }
         },
         _ => DecoderKeeps::Little,
     };
@@ -320,18 +337,23 @@ fn decode(
 /// [`working_set`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecoderKeeps {
-    /// Nothing worth counting: the PNG, TIFF and BMP decoders read the file
-    /// as they go. The PNG decoder's own allocations are held to
-    /// [`PNG_METADATA_LIMIT`] and the TIFF decoder's to what the 512 MiB
-    /// decode limit leaves beside the image, so they can't bring decoding
-    /// near the working-set limit.
+    /// Nothing worth counting: the TIFF and BMP decoders read the file as
+    /// they go, and the TIFF decoder holds its buffers to what the 512 MiB
+    /// decode limit leaves beside the image.
     Little,
+    /// The PNG decoder: the `metadata` [`headers::png_metadata`] counted.
+    /// The pixel data is read as it goes.
+    Png { metadata: u64 },
     /// The JPEG decoder: the whole `file`, plus 16-bit coefficients for
     /// every component of the whole image when the `layout` needs them.
     Jpeg { file: u64, layout: JpegLayout },
-    /// The WebP decoder: an RGBA frame, plus an RGBA canvas to compose it
-    /// on when `animated`.
-    WebP { animated: bool },
+    /// The WebP decoder, by `layout`:
+    /// - a simple file: up to an RGBA frame (lossless without alpha decodes
+    ///   to RGBA first; lossy keeps 1.5 bytes per pixel of YUV planes);
+    /// - a still image with alpha: lossy keeps its YUV planes, the `ALPH`
+    ///   chunk decoded as RGBA and the alpha plane, 6.5 bytes per pixel;
+    /// - an animation: an RGBA frame and an RGBA canvas.
+    WebP { layout: WebpLayout },
 }
 
 /// The most memory converting a `width`×`height` `color` image to `to`
@@ -369,9 +391,12 @@ fn working_set(
             };
             file.saturating_add(coefficients)
         }
-        DecoderKeeps::WebP { animated } => {
-            size(ColorType::Rgba8).saturating_mul(if animated { 2 } else { 1 })
-        }
+        DecoderKeeps::Png { metadata } => metadata,
+        DecoderKeeps::WebP { layout } => match layout {
+            WebpLayout::Simple | WebpLayout::Still { alpha: false } => size(ColorType::Rgba8),
+            WebpLayout::Still { alpha: true } => pixels.saturating_mul(13) / 2,
+            WebpLayout::Animated => size(ColorType::Rgba8).saturating_mul(2),
+        },
     };
     let rotated = match orientation {
         Orientation::Rotate90
@@ -857,11 +882,29 @@ mod tests {
         assert!(pano(false) < WORKING_SET_LIMIT);
         assert!(pano(true) > WORKING_SET_LIMIT);
 
-        // WebP keeps an RGBA frame, and an RGBA canvas too when animated.
-        let webp = |animated| DecoderKeeps::WebP { animated };
-        assert_eq!(mib(Rgba8, webp(false), none, Format::Bmp), 8);
-        assert_eq!(mib(Rgba8, webp(true), none, Format::Bmp), 12);
-        assert_eq!(mib(Rgb8, webp(true), none, Format::Bmp), 11);
+        // WebP: up to an RGBA frame; a lossy still with alpha keeps 6.5
+        // bytes per pixel; an animation an RGBA frame and an RGBA canvas.
+        let webp = |layout| DecoderKeeps::WebP { layout };
+        let simple = webp(WebpLayout::Simple);
+        assert_eq!(mib(Rgba8, simple, none, Format::Bmp), 8);
+        let opaque = webp(WebpLayout::Still { alpha: false });
+        assert_eq!(mib(Rgb8, opaque, none, Format::Bmp), 7);
+        let alpha = webp(WebpLayout::Still { alpha: true });
+        assert_eq!(
+            working_set(1024, 1024, Rgba8, alpha, none, Format::Bmp, 0),
+            21 * MIB / 2
+        );
+        assert_eq!(
+            mib(Rgba8, webp(WebpLayout::Animated), none, Format::Bmp),
+            12
+        );
+        assert_eq!(mib(Rgb8, webp(WebpLayout::Animated), none, Format::Bmp), 11);
+
+        // PNG: the metadata its headers say the decoder keeps.
+        let png = DecoderKeeps::Png {
+            metadata: 100 * MIB,
+        };
+        assert_eq!(mib(Rgb8, png, none, Format::Tiff), 103);
 
         // The profile counts throughout: gray to BMP with 2 MiB of it.
         assert_eq!(

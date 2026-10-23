@@ -8,6 +8,9 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 
 use crate::CancelToken;
 
+/// The most [`Cancellable::read_to_end`] reads between cancel checks.
+const READ_STEP: usize = 64 * 1024;
+
 /// `inner`, with every read, write and flush failing once the token is
 /// cancelled. Seeking is passed through.
 #[derive(Debug)]
@@ -40,10 +43,35 @@ impl<T> Cancellable<T> {
     }
 }
 
-impl<T: Read> Read for Cancellable<T> {
+impl<T: Read + Seek> Read for Cancellable<T> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.check()?;
         self.inner.read(buf)
+    }
+
+    /// Reads the rest of the stream in steps of [`READ_STEP`], checking the
+    /// token before each. What is left is reserved first, as
+    /// `File::read_to_end` does: the default grows the buffer by doubling,
+    /// so a decoder that reads a whole file into memory (JPEG) could hold
+    /// up to twice its size.
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        let here = self.inner.stream_position()?;
+        let end = self.inner.seek(SeekFrom::End(0))?;
+        self.inner.seek(SeekFrom::Start(here))?;
+        let left = usize::try_from(end.saturating_sub(here))
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        buf.try_reserve_exact(left)
+            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let start = buf.len();
+        let mut step = [0u8; READ_STEP];
+        loop {
+            match self.read(&mut step) {
+                Ok(0) => return Ok(buf.len() - start),
+                Ok(n) => buf.extend_from_slice(&step[..n]),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
@@ -91,5 +119,32 @@ mod tests {
         // Seeking still works, and nothing more was written.
         assert_eq!(reader.seek(SeekFrom::Start(0)).unwrap(), 0);
         assert_eq!(writer.into_inner().into_inner(), [1, 2]);
+    }
+
+    #[test]
+    fn reading_to_the_end_holds_the_file_size_not_the_next_power_of_two() {
+        // A power of two is the worst case for a buffer that doubles.
+        let bytes: Vec<u8> = (0..1u32 << 20).map(|i| (i % 251) as u8).collect();
+        let token = CancelToken::new();
+        let mut reader = io::BufReader::new(Cancellable::new(Cursor::new(bytes.clone()), &token));
+        // Like a decoder: sniff the first bytes, then seek back.
+        let mut magic = [0u8; 4];
+        reader.read_exact(&mut magic).unwrap();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+
+        let mut all = Vec::new();
+        assert_eq!(reader.read_to_end(&mut all).unwrap(), bytes.len());
+
+        assert_eq!(all, bytes);
+        assert!(
+            all.capacity() < bytes.len() + 64 * 1024,
+            "{}",
+            all.capacity()
+        );
+
+        // Cancelled, it stops at the next step.
+        let mut reader = Cancellable::new(Cursor::new(bytes), &token);
+        token.cancel();
+        assert!(reader.read_to_end(&mut Vec::new()).is_err());
     }
 }
