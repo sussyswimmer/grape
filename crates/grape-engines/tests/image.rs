@@ -390,8 +390,10 @@ fn icc_profiles_are_carried_over_where_the_target_can_hold_them() {
 #[test]
 fn a_profile_over_the_size_cap_is_left_out() {
     // Over the 255 × 65,519 bytes a JPEG can hold, the cap for every target
-    // (the zeros compress well in the PNG), and far over it.
-    for len in [17 * 1024 * 1024, 80 * 1024 * 1024] {
+    // (the zeros compress well in the PNG). Then one that would inflate
+    // past the PNG decoder's 128 MiB limit: it is dropped while the PNG is
+    // read, and the image still converts.
+    for len in [17 * 1024 * 1024, 136 * 1024 * 1024] {
         let source = png_with_profile(&rgb_profile(len));
         for to in [Format::Jpg, Format::Webp, Format::Tiff] {
             let dir = TestDir::new("icc-large");
@@ -720,6 +722,37 @@ fn animated_webp(width: u32, height: u32) -> Vec<u8> {
     riff_chunk(b"RIFF", &body)
 }
 
+/// A still extended WebP with alpha on a `width`×`height` canvas, holding
+/// a small lossless image: a few kilobytes that claim a huge canvas.
+fn still_webp_with_alpha(width: u32, height: u32) -> Vec<u8> {
+    let simple = encode(&gradient(), Format::Webp);
+    assert_eq!(&simple[12..16], b"VP8L");
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    // Flags: alpha (0x10).
+    let mut vp8x = vec![0x10, 0, 0, 0];
+    vp8x.extend(u24(width - 1));
+    vp8x.extend(u24(height - 1));
+    let body = [
+        b"WEBP".to_vec(),
+        riff_chunk(b"VP8X", &vp8x),
+        simple[12..].to_vec(),
+    ]
+    .concat();
+    riff_chunk(b"RIFF", &body)
+}
+
+#[test]
+fn a_still_webp_with_alpha_counts_its_alpha_decoding() {
+    // An 11,585² RGBA canvas: 4 bytes decoded, and 6.5 for what a lossy
+    // image with an alpha chunk keeps while decoding, is 1,344 MiB. With
+    // just an RGBA frame it would be 1,024 MiB, just under the limit.
+    assert_too_large(
+        "cutout.webp",
+        &still_webp_with_alpha(11_585, 11_585),
+        "needs about 1343 MiB, over the 1024 MiB limit",
+    );
+}
+
 #[test]
 fn an_animated_webp_counts_its_canvas() {
     // An 11,585² RGBA canvas: 4 bytes decoded, 4 for the decoder's frame
@@ -765,11 +798,29 @@ fn png_with_comment(len: usize) -> Vec<u8> {
     png
 }
 
+/// Plans `bytes` as `name` for BMP, expects it refused as too large with
+/// `why` in the detail, and checks that nothing changed.
+fn assert_too_large(name: &str, bytes: &[u8], why: &str) {
+    let dir = TestDir::new("too-large");
+    let (src, job) = plan_one(&dir, name, bytes, Operation::convert(Format::Bmp));
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run(&job).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, format!("{name} is too large to convert."));
+    assert!(err.detail.contains(why), "{}", err.detail);
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
+
 #[test]
 fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
-    // The PNG decoder holds its text chunks and the inflated ICC profile to
-    // 128 MiB, charging a text chunk about twice its size. A 40 MiB comment
-    // (a bloated XMP packet is about that) fits; an 80 MiB one doesn't.
+    // Its text chunks are counted from their headers before decoding: a
+    // text chunk can cost twice its size, so a 40 MiB comment (a bloated
+    // XMP packet is about that) fits the 128 MiB limit, and an 80 MiB one
+    // doesn't.
     let dir = TestDir::new("png-metadata");
     let (src, job) = plan_one(
         &dir,
@@ -781,26 +832,53 @@ fn a_png_with_more_metadata_than_its_decoder_may_hold_is_refused() {
     run(&job).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
     before.assert_unchanged();
 
-    let dir = TestDir::new("png-metadata");
-    let (src, job) = plan_one(
-        &dir,
+    assert_too_large(
         "notes.png",
         &png_with_comment(80 * 1024 * 1024),
-        Operation::convert(Format::Bmp),
+        "its metadata needs about 240 MiB, over the 128 MiB limit for PNG metadata",
     );
-    let before = SourceState::of(&src);
-    let names_before = dir.names();
+}
 
-    let err = run(&job).unwrap_err();
+/// The 16×16 RGB image as a PNG with `count` empty `tEXt` chunks (keyword
+/// "a") ahead of its image data.
+fn png_with_empty_comments(count: usize) -> Vec<u8> {
+    let png = encode(&DynamicImage::ImageRgb8(RgbImage::new(16, 16)), Format::Png);
+    let data = b"tEXta\0";
+    let mut text = 2u32.to_be_bytes().to_vec();
+    text.extend_from_slice(data);
+    text.extend_from_slice(&crc32(data).to_be_bytes());
+    // After the signature (8) and IHDR (25).
+    [&png[..33], &text.repeat(count), &png[33..]].concat()
+}
 
-    assert_eq!(err.user_message, "notes.png is too large to convert.");
-    assert!(
-        err.detail.contains("Memory limit exceeded"),
-        "{}",
-        err.detail
+#[test]
+fn a_png_with_a_million_tiny_text_chunks_is_refused() {
+    // The decoder keeps an entry of about a hundred bytes for every text
+    // chunk, though each is only 14 bytes in the file: 1.03 million of them
+    // come to about 130 MiB.
+    assert_too_large(
+        "chatty.png",
+        &png_with_empty_comments(1_030_000),
+        "its metadata needs about 129 MiB, over the 128 MiB limit for PNG metadata",
     );
-    assert_eq!(dir.names(), names_before);
-    before.assert_unchanged();
+    // Past about a million chunks, the walk stops counting.
+    assert_too_large(
+        "chatty.png",
+        &png_with_empty_comments(1_100_000),
+        "it has too many metadata chunks to count",
+    );
+}
+
+#[test]
+fn the_png_decoder_is_held_to_its_own_limit() {
+    // A 16-bit RGBA row 2^24 pixels wide takes a 128 MiB line buffer: past
+    // the decoder's own 128 MiB limit, though the image (one row) fits.
+    let rgba16 = DynamicImage::ImageRgba16(::image::ImageBuffer::new(16, 16));
+    assert_too_large(
+        "strip.png",
+        &png_claiming(&rgba16, (1 << 24) + 16, 1),
+        "Memory limit exceeded",
+    );
 }
 
 #[test]
