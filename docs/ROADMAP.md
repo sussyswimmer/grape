@@ -82,6 +82,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Reduce Motion, light/dark glass following the Windows theme, accessibility labels.
 
 ## M7: Ship Grape for Windows v1 (lane A)
+*Status 2026-10-24:* CI builds an unsigned per-user NSIS installer, `Grape-Windows-x64`, on every run (`PLATFORM_WINDOWS.md` → "Running a CI build"), so the PC can test release builds without the dev setup. The tagged release workflow, signing and notices are still to do.
 - [ ] GitHub Actions release workflow on tag: NSIS installer (`Grape-Setup-x64.exe`), plus ARM64 and a portable zip if time allows.
 - [ ] Code signing: apply to SignPath Foundation (free for OSS); ship unsigned until approved and explain the SmartScreen "More info → Run anyway" step in the README.
 - [ ] `THIRD_PARTY_NOTICES.md`, `licenses/`, source links for GPL sidecars (ENGINES rule 3).

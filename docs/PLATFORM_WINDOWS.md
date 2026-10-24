@@ -27,6 +27,18 @@ npm install -g pnpm@10
 - The first `cargo build` takes several minutes, because Tauri has many dependencies. Later builds are incremental.
 - Windows Defender can slow builds a lot. Optionally add the repo folder as an exclusion in Windows Security → Virus & threat protection → Exclusions.
 
+## Running a CI build
+
+To try Grape without the dev setup above, install the build CI makes on every run. It's a release build, unsigned until M7.
+
+1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-Windows-x64` and unzip it.
+2. Run `Grape_<version>_x64-setup.exe`. It installs for your user only, so no admin prompt.
+3. SmartScreen says "Windows protected your PC". Click **More info**, then **Run anyway**.
+4. Grape starts in the notification area (it may be under the ^ overflow arrow). As a release build, its first launch also turns on launch at login (D19); turn that off in Settings if you don't want it.
+5. To remove it: Settings → Apps → Installed apps → Grape → Uninstall. Your settings stay in `%APPDATA%\io.github.sussyswimmer.grape\`.
+
+The installer is made by Tauri's NSIS bundler. If WebView2 is missing (rare on Windows 10, never on Windows 11), the installer fetches it; Grape itself still makes no network calls.
+
 ## Detecting a file drag
 
 Windows has no system-wide "drag in progress" signal, and the dragged data object is only visible to a window the cursor enters. So detection is a **heuristic**, and the overlay is what learns the file list.

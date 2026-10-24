@@ -24,7 +24,7 @@
 
 ## Manual QA checklist (both OSes unless marked)
 
-In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC. The **mac:** items need a Mac with the DMG from CI (`PLATFORM_MACOS.md` → "Running a CI build"); the Mac port started early (D18).
+In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC, either with `pnpm tauri dev` or with the installer from CI (`PLATFORM_WINDOWS.md` → "Running a CI build"; the "Debug: flash overlay" item needs `pnpm tauri dev`). The **mac:** items need a Mac with the DMG from CI (`PLATFORM_MACOS.md` → "Running a CI build"); the Mac port started early (D18).
 
 App shell
 - [ ] win: the tray menu shows Settings…, Pause Grape and Quit. Settings opens the settings window; Pause toggles its check mark and the tooltip.

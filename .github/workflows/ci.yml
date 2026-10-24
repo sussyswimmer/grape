@@ -71,6 +71,33 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
 
+  # A Windows build anyone can download from the run's Artifacts: the
+  # per-user NSIS installer (no admin needed). It's unsigned until M7, so
+  # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
+  build-windows:
+    name: Build (Windows installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Build Grape and the installer
+        working-directory: apps/desktop
+        run: pnpm tauri build --bundles nsis --ci
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Grape-Windows-x64
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
   # A Mac build anyone can download from the run's Artifacts: a universal
   # (Apple silicon + Intel) Grape.app in a DMG. It's ad-hoc signed, not
   # notarized, so the first open needs the steps in docs/PLATFORM_MACOS.md
