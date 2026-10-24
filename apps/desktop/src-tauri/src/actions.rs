@@ -3,18 +3,20 @@
 //!
 //! The work itself is in `grape_platform::file_actions`. This module picks
 //! what each action works on, runs it on a thread of its own (Move waits on
-//! a dialog) and words the toast. Share is AirDrop on macOS and arrives
-//! later on Windows; Float arrives in a later build.
+//! a dialog) and words the toast. Terminal opens the app chosen in
+//! Settings. Share is AirDrop on macOS and arrives later on Windows; Float
+//! arrives in a later build.
 
 use std::path::{Path, PathBuf};
 use std::thread;
 
 use grape_core::{ActionKey, ItemKind, SelectionItem};
-use grape_platform::file_actions::{self, MoveOutcome, MovedItem};
+use grape_platform::file_actions::{self, MoveOutcome, MovedItem, TerminalApp};
 use grape_platform::{DisplayBounds, PlatformError};
 use tauri::{AppHandle, Manager};
 
 use crate::events::{ToastShow, ToastTone};
+use crate::settings;
 use crate::toast::{self, Toaster};
 
 /// What the toast says after an action.
@@ -59,7 +61,9 @@ pub fn run(
     let spawned = thread::Builder::new()
         .name("grape-action".to_owned())
         .spawn(move || {
-            let report = perform(action, &paths, terminal_dir.as_deref());
+            // Copied out of the settings here, off the wheel's thread.
+            let terminal_app = settings::terminal_app(&app_for_thread);
+            let report = perform(action, &paths, terminal_dir.as_deref(), terminal_app);
             if let Some(report) = report {
                 show(&app_for_thread, report, anchor, &display);
             }
@@ -70,8 +74,14 @@ pub fn run(
 }
 
 /// Runs the action and words the result. `None`: nothing to say (the
-/// terminal opened, or the user closed the folder picker).
-fn perform(action: ActionKey, paths: &[PathBuf], terminal_dir: Option<&Path>) -> Option<Report> {
+/// terminal opened, or the user closed the folder picker). Terminal opens
+/// `terminal_app` in `terminal_dir`.
+fn perform(
+    action: ActionKey,
+    paths: &[PathBuf],
+    terminal_dir: Option<&Path>,
+    terminal_app: TerminalApp,
+) -> Option<Report> {
     let report = match action {
         ActionKey::Copy => word(action, file_actions::copy_files(paths), |result| {
             Some(copied(paths, result))
@@ -80,7 +90,11 @@ fn perform(action: ActionKey, paths: &[PathBuf], terminal_dir: Option<&Path>) ->
             Some(copied_paths(paths, result))
         }),
         ActionKey::Terminal => match terminal_dir {
-            Some(dir) => word(action, file_actions::open_terminal(dir), opened_terminal),
+            Some(dir) => word(
+                action,
+                file_actions::open_terminal(dir, terminal_app),
+                opened_terminal,
+            ),
             None => Some(Report::new(
                 ToastTone::Error,
                 "Couldn't open a terminal",
@@ -439,7 +453,13 @@ mod tests {
 
     #[test]
     fn float_is_coming() {
-        let float = perform(ActionKey::Float, &[PathBuf::from("/a")], None).unwrap();
+        let float = perform(
+            ActionKey::Float,
+            &[PathBuf::from("/a")],
+            None,
+            TerminalApp::WindowsTerminal,
+        )
+        .unwrap();
         assert_eq!(float.tone, ToastTone::Info);
         assert_eq!(float.detail.as_deref(), Some("The float shelf is coming."));
     }
@@ -448,7 +468,13 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn share_is_coming_where_there_is_no_airdrop() {
-        let share = perform(ActionKey::Share, &[PathBuf::from("/a")], None).unwrap();
+        let share = perform(
+            ActionKey::Share,
+            &[PathBuf::from("/a")],
+            None,
+            TerminalApp::WindowsTerminal,
+        )
+        .unwrap();
         assert_eq!(share.tone, ToastTone::Info);
         assert_eq!(share.detail.as_deref(), Some("Sharing is coming."));
     }
@@ -456,17 +482,27 @@ mod tests {
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn off_windows_every_action_is_coming_not_failing() {
+        let any = TerminalApp::WindowsTerminal;
         for action in [ActionKey::Copy, ActionKey::CopyPath, ActionKey::Move] {
-            let report = perform(action, &[PathBuf::from("/a")], Some(Path::new("/"))).unwrap();
+            let report =
+                perform(action, &[PathBuf::from("/a")], Some(Path::new("/")), any).unwrap();
             assert_eq!(report.tone, ToastTone::Info, "{action:?}");
             assert_eq!(report.title, "Not in this build yet");
         }
-        let terminal = perform(
-            ActionKey::Terminal,
-            &[PathBuf::from("/a")],
-            Some(Path::new("/")),
-        )
-        .unwrap();
-        assert_eq!(terminal.detail.as_deref(), Some("Terminal is coming."));
+        for app in [
+            TerminalApp::WindowsTerminal,
+            TerminalApp::PowerShell,
+            TerminalApp::Terminal,
+            TerminalApp::ITerm2,
+        ] {
+            let terminal = perform(
+                ActionKey::Terminal,
+                &[PathBuf::from("/a")],
+                Some(Path::new("/")),
+                app,
+            )
+            .unwrap();
+            assert_eq!(terminal.detail.as_deref(), Some("Terminal is coming."));
+        }
     }
 }

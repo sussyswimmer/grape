@@ -13,6 +13,8 @@ fn main() {
             "settings_pick_folder",
             "settings_use_default_fallback",
             "settings_set_toggle",
+            "settings_set_terminal",
+            "settings_dismiss_welcome",
         ]));
     if let Err(err) = tauri_build::try_build(attributes) {
         panic!("tauri-build failed: {err:#}");

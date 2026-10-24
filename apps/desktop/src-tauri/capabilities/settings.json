@@ -9,6 +9,8 @@
     "allow-settings-set-output-next-to-source",
     "allow-settings-pick-folder",
     "allow-settings-use-default-fallback",
-    "allow-settings-set-toggle"
+    "allow-settings-set-toggle",
+    "allow-settings-set-terminal",
+    "allow-settings-dismiss-welcome"
   ]
 }

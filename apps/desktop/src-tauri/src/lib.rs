@@ -69,9 +69,10 @@ pub fn run() -> anyhow::Result<()> {
         // store's own commands; Settings goes through `settings_*`.
         .plugin(tauri_plugin_store::Builder::new().build())
         // Launch at login (a Launch Agent on macOS). Driven from Rust only.
+        // The argument lets a login launch skip the welcome card.
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            None,
+            Some(vec![settings::LOGIN_ARG]),
         ))
         .manage(GrapeState::default())
         .manage(toast::Toaster::default())
@@ -83,7 +84,9 @@ pub fn run() -> anyhow::Result<()> {
             settings::settings_set_output_next_to_source,
             settings::settings_pick_folder,
             settings::settings_use_default_fallback,
-            settings::settings_set_toggle
+            settings::settings_set_toggle,
+            settings::settings_set_terminal,
+            settings::settings_dismiss_welcome
         ])
         .on_window_event(wheel::on_overlay_window_event)
         .setup(|app| {
@@ -111,6 +114,11 @@ pub fn run() -> anyhow::Result<()> {
                 settings.controller_config(),
                 settings.haptics(),
             );
+            // The welcome card, until it's dismissed: Settings opens the way
+            // the tray's Settings… opens it, off this thread.
+            if settings.welcome_at_launch(settings::launched_at_login()) {
+                ui_windows::request_settings(app.handle());
+            }
             log::info!("Grape {} is running", env!("CARGO_PKG_VERSION"));
             Ok(())
         })

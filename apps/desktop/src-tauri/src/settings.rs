@@ -3,12 +3,12 @@
 //!
 //! - [`AppSettings`] is loaded once in setup from `settings.json`
 //!   (tauri-plugin-store, in the app data folder). Loading is total: a
-//!   value that's missing, of the wrong type, a key this OS doesn't offer
-//!   or a relative path falls back to its default, with a warning that
-//!   names the key and never the file's contents. A `settings.json` that's
-//!   there but can't be read or parsed is first renamed aside
-//!   (`settings.unreadable.json`), because the store would write over it
-//!   ([`settle_settings_file`]).
+//!   value that's missing, of the wrong type, a key or terminal app this
+//!   OS doesn't offer or a relative path falls back to its default, with a
+//!   warning that names the key and never the file's contents. A
+//!   `settings.json` that's there but can't be read or parsed is first
+//!   renamed aside (`settings.unreadable.json`), because the store would
+//!   write over it ([`settle_settings_file`]).
 //! - Every change applies at once and is saved at once. Keys and sounds go
 //!   to the wheel controller ([`Input::Configure`]), haptics to the flag
 //!   the wheel reads on every highlight, and the folders to the next job
@@ -23,6 +23,8 @@
 //!   at its first launch ([`first_launch_rule`]); a debug build never
 //!   touches it on its own, so `pnpm tauri dev` doesn't register a dev
 //!   binary at login.
+//! - Until the welcome card is dismissed, setup opens Settings at launch
+//!   to show it ([`SettingsState::welcome_at_launch`]).
 //!
 //! The model (loading, the key swap rule, the view, what to store) is pure
 //! and tested here without Tauri.
@@ -63,6 +65,8 @@ const OUTPUT_FALLBACK_DIR: &str = "output.fallback_dir";
 const SOUNDS: &str = "sounds";
 const HAPTICS: &str = "haptics";
 const LAUNCH_AT_LOGIN: &str = "launch_at_login";
+const TERMINAL_APP: &str = "terminal_app";
+const ONBOARDING_DONE: &str = "onboarding.done";
 /// `output.location` for "next to the original".
 const NEXT_TO_SOURCE: &str = "next_to_source";
 
@@ -73,6 +77,7 @@ const NO_HAPTICS: &str = "Haptics are a Mac setting.";
 const LAUNCH_FAILED: &str = "Couldn't change launch at login.";
 const PICKER_FAILED: &str = "Couldn't open the folder picker.";
 const NOT_A_FOLDER: &str = "Grape can't use that folder.";
+const TERMINAL_NOT_OFFERED: &str = "That app isn't offered here.";
 
 /// The settings Grape follows.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +95,10 @@ pub struct AppSettings {
     pub haptics: bool,
     /// The user's choice, or `None` if nothing was ever stored.
     pub launch_at_login: Option<bool>,
+    /// The app the Terminal action opens. Always one this OS offers.
+    pub terminal_app: TerminalId,
+    /// `true` once the user dismissed the welcome card with "Got it".
+    pub onboarding_done: bool,
 }
 
 impl AppSettings {
@@ -102,6 +111,8 @@ impl AppSettings {
             sounds: true,
             haptics: true,
             launch_at_login: None,
+            terminal_app: default_terminal(platform),
+            onboarding_done: false,
         }
     }
 }
@@ -138,6 +149,99 @@ fn key_from_id(id: &str) -> Option<Key> {
     [Key::Shift, Key::Ctrl, Key::Alt, Key::Meta]
         .into_iter()
         .find(|&key| key_id(key) == id)
+}
+
+/// An app the Terminal action can open, as the view and the window name it.
+/// The store spells it in snake case ([`TerminalId::store_id`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TerminalId {
+    /// Windows Terminal (`wt`), or PowerShell if it can't start.
+    #[serde(rename = "windowsTerminal")]
+    WindowsTerminal,
+    /// PowerShell, straight away.
+    #[serde(rename = "powershell")]
+    PowerShell,
+    /// macOS's Terminal.
+    #[serde(rename = "terminal")]
+    Terminal,
+    /// iTerm2, or Terminal if it isn't installed.
+    #[serde(rename = "iterm2")]
+    ITerm2,
+}
+
+impl TerminalId {
+    const ALL: [TerminalId; 4] = [
+        TerminalId::WindowsTerminal,
+        TerminalId::PowerShell,
+        TerminalId::Terminal,
+        TerminalId::ITerm2,
+    ];
+
+    /// The app's own name.
+    const fn name(self) -> &'static str {
+        match self {
+            TerminalId::WindowsTerminal => "Windows Terminal",
+            TerminalId::PowerShell => "PowerShell",
+            TerminalId::Terminal => "Terminal",
+            TerminalId::ITerm2 => "iTerm2",
+        }
+    }
+
+    /// Its value under `terminal_app`.
+    const fn store_id(self) -> &'static str {
+        match self {
+            TerminalId::WindowsTerminal => "windows_terminal",
+            TerminalId::PowerShell => "powershell",
+            TerminalId::Terminal => "terminal",
+            TerminalId::ITerm2 => "iterm2",
+        }
+    }
+
+    fn from_store_id(id: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|terminal| terminal.store_id() == id)
+    }
+
+    /// What `grape_platform` opens for it.
+    const fn app(self) -> file_actions::TerminalApp {
+        match self {
+            TerminalId::WindowsTerminal => file_actions::TerminalApp::WindowsTerminal,
+            TerminalId::PowerShell => file_actions::TerminalApp::PowerShell,
+            TerminalId::Terminal => file_actions::TerminalApp::Terminal,
+            TerminalId::ITerm2 => file_actions::TerminalApp::ITerm2,
+        }
+    }
+}
+
+/// The app the Terminal action opens by default on `platform`: Windows
+/// Terminal on Windows, Terminal on macOS.
+pub const fn default_terminal(platform: Platform) -> TerminalId {
+    match platform {
+        Platform::Windows => TerminalId::WindowsTerminal,
+        Platform::MacOs => TerminalId::Terminal,
+    }
+}
+
+/// The apps the Terminal action may open on `platform`, in the order
+/// Settings lists them, the default first.
+pub const fn offered_terminals(platform: Platform) -> &'static [TerminalId] {
+    match platform {
+        Platform::Windows => &[TerminalId::WindowsTerminal, TerminalId::PowerShell],
+        Platform::MacOs => &[TerminalId::Terminal, TerminalId::ITerm2],
+    }
+}
+
+/// `terminal`, if `platform` offers it.
+///
+/// # Errors
+/// The sentence for the UI when it doesn't.
+pub fn set_terminal(terminal: TerminalId, platform: Platform) -> Result<TerminalId, &'static str> {
+    if offered_terminals(platform).contains(&terminal) {
+        Ok(terminal)
+    } else {
+        Err(TERMINAL_NOT_OFFERED)
+    }
 }
 
 /// One of the three wheels, as the Settings window names it.
@@ -267,6 +371,10 @@ pub fn load(
     let fallback_dir = read(&stored, &mut report, OUTPUT_FALLBACK_DIR, parse_folder);
     let mut flag = |store_key| read(&stored, &mut report, store_key, parse_bool);
     let (sounds, haptics, launch_at_login) = (flag(SOUNDS), flag(HAPTICS), flag(LAUNCH_AT_LOGIN));
+    let terminal_app = read(&stored, &mut report, TERMINAL_APP, |value| {
+        parse_terminal(value, platform)
+    });
+    let onboarding_done = read(&stored, &mut report, ONBOARDING_DONE, parse_bool);
     let settings = AppSettings {
         keys,
         output: output.unwrap_or(defaults.output),
@@ -274,6 +382,8 @@ pub fn load(
         sounds: sounds.unwrap_or(defaults.sounds),
         haptics: haptics.unwrap_or(defaults.haptics),
         launch_at_login,
+        terminal_app: terminal_app.unwrap_or(defaults.terminal_app),
+        onboarding_done: onboarding_done.unwrap_or(defaults.onboarding_done),
     };
     (settings, report)
 }
@@ -317,6 +427,14 @@ fn parse_key(value: &Value, platform: Platform) -> Result<Key, &'static str> {
     }
 }
 
+fn parse_terminal(value: &Value, platform: Platform) -> Result<TerminalId, &'static str> {
+    let terminal = value
+        .as_str()
+        .and_then(TerminalId::from_store_id)
+        .ok_or("isn't a terminal app Grape knows")?;
+    set_terminal(terminal, platform).map_err(|_| "names an app this OS doesn't offer")
+}
+
 fn parse_output(value: &Value) -> Result<OutputLocation, &'static str> {
     if value.as_str() == Some(NEXT_TO_SOURCE) {
         return Ok(OutputLocation::NextToSource);
@@ -344,7 +462,7 @@ fn folder_value(path: &Path) -> Value {
 /// key, `None` removes it. The three keys are written together whenever
 /// one changes, so the store never holds half of a swap. Keys that didn't
 /// change aren't touched, nor are keys this module doesn't know
-/// (`terminal_app`, `features.v2`).
+/// (`features.v2`).
 pub fn store_changes(old: &AppSettings, new: &AppSettings) -> Vec<(&'static str, Option<Value>)> {
     let mut changes = Vec::new();
     if old.keys != new.keys {
@@ -378,6 +496,13 @@ pub fn store_changes(old: &AppSettings, new: &AppSettings) -> Vec<(&'static str,
     }
     if old.launch_at_login != new.launch_at_login {
         changes.push((LAUNCH_AT_LOGIN, new.launch_at_login.map(Value::Bool)));
+    }
+    if old.terminal_app != new.terminal_app {
+        let id = new.terminal_app.store_id();
+        changes.push((TERMINAL_APP, Some(Value::from(id))));
+    }
+    if old.onboarding_done != new.onboarding_done {
+        changes.push((ONBOARDING_DONE, Some(Value::Bool(new.onboarding_done))));
     }
     changes
 }
@@ -430,6 +555,10 @@ pub struct SettingsView {
     pub launch_at_login: Option<bool>,
     /// What a key swap moved, right after one.
     pub note: Option<String>,
+    /// The app the Terminal action opens, and the ones this OS offers.
+    pub terminal: TerminalView,
+    /// `true` until the welcome card is dismissed.
+    pub welcome: bool,
 }
 
 /// A key a wheel may use.
@@ -438,6 +567,24 @@ pub struct KeyChoice {
     /// Its id.
     pub key: Key,
     /// Its name on this OS, e.g. "Option".
+    pub name: &'static str,
+}
+
+/// The Terminal action's app, for the view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TerminalView {
+    /// The one it opens.
+    pub choice: TerminalId,
+    /// The ones it may open, in menu order, with their names.
+    pub choices: Vec<TerminalChoice>,
+}
+
+/// An app the Terminal action may open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TerminalChoice {
+    /// Its id.
+    pub id: TerminalId,
+    /// Its name, e.g. "Windows Terminal".
     pub name: &'static str,
 }
 
@@ -503,6 +650,17 @@ pub fn view(
         haptics: matches!(platform, Platform::MacOs).then_some(settings.haptics),
         launch_at_login,
         note,
+        terminal: TerminalView {
+            choice: settings.terminal_app,
+            choices: offered_terminals(platform)
+                .iter()
+                .map(|&id| TerminalChoice {
+                    id,
+                    name: id.name(),
+                })
+                .collect(),
+        },
+        welcome: !settings.onboarding_done,
     }
 }
 
@@ -753,6 +911,69 @@ impl SettingsState {
             if real { "on" } else { "off" }
         );
     }
+
+    /// Whether setup opens Settings to show the welcome card
+    /// ([`welcome_rule`]). `at_login`: this launch came from launch at
+    /// login ([`LOGIN_ARG`]). Logs what it decided.
+    pub fn welcome_at_launch(&self, at_login: bool) -> bool {
+        let onboarding_done = self.lock().onboarding_done;
+        // The store opens even where it can't write, so try a save: only a
+        // store that saves can remember "Got it".
+        let can_save = !onboarding_done
+            && self
+                .store
+                .as_ref()
+                .is_some_and(|store| store.save().is_ok());
+        match welcome_rule(onboarding_done, can_save, at_login) {
+            Welcome::Open => {
+                log::info!("settings: the welcome card isn't dismissed yet; opening Settings");
+                true
+            }
+            Welcome::Leave(why) => {
+                log::info!("settings: not opening Settings at launch: {why}");
+                false
+            }
+        }
+    }
+}
+
+/// What setup does about the welcome card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Welcome {
+    /// Open Settings, which shows the card.
+    Open,
+    /// Don't open Settings, for this reason.
+    Leave(&'static str),
+}
+
+/// Settings opens at launch to show the welcome card until "Got it"
+/// stores `onboarding.done`, and only where that can be saved: otherwise
+/// (an unwritable data folder, say) it would open at every launch for
+/// good. It never opens when Grape started at login, so it doesn't jump
+/// in front of whatever the user opens first after signing in. The card
+/// still shows when Settings is opened from the tray.
+fn welcome_rule(onboarding_done: bool, can_save: bool, at_login: bool) -> Welcome {
+    if onboarding_done {
+        return Welcome::Leave("the welcome card was dismissed");
+    }
+    if !can_save {
+        return Welcome::Leave(
+            "settings can't be saved, so the welcome card couldn't be dismissed",
+        );
+    }
+    if at_login {
+        return Welcome::Leave("Grape started at login");
+    }
+    Welcome::Open
+}
+
+/// The argument launch at login starts Grape with, so a launch can tell
+/// it came from there.
+pub const LOGIN_ARG: &str = "--at-login";
+
+/// `true` when this process was started by launch at login.
+pub fn launched_at_login() -> bool {
+    std::env::args().skip(1).any(|arg| arg == LOGIN_ARG)
 }
 
 /// What [`settle_settings_file`] found at `settings.json`, before the store
@@ -1088,6 +1309,41 @@ pub async fn settings_set_toggle(
     })
 }
 
+/// The Terminal action opens `terminal` from now on.
+#[tauri::command]
+pub async fn settings_set_terminal(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+    terminal: TerminalId,
+) -> Result<SettingsView, String> {
+    state.change(&app, |old| {
+        let terminal_app = set_terminal(terminal, THIS_OS)?;
+        log::info!("settings: Terminal opens {} now", terminal_app.name());
+        let new = AppSettings {
+            terminal_app,
+            ..old.clone()
+        };
+        Ok((new, None))
+    })
+}
+
+/// "Got it" on the welcome card: the card goes, and Settings no longer
+/// opens at launch.
+#[tauri::command]
+pub async fn settings_dismiss_welcome(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<SettingsView, String> {
+    state.change(&app, |old| {
+        log::info!("settings: welcome card dismissed");
+        let new = AppSettings {
+            onboarding_done: true,
+            ..old.clone()
+        };
+        Ok((new, None))
+    })
+}
+
 /// Opens the folder picker for `target`, at the folder it has now. A
 /// picked folder becomes the output folder or the fallback folder;
 /// cancelling changes nothing.
@@ -1200,6 +1456,20 @@ pub fn planning_settings(app: &AppHandle) -> Settings {
     }
 }
 
+/// The app the Terminal action opens: the user's choice, copied out of
+/// the settings, or this OS's default if they aren't loaded (they always
+/// are once setup ran).
+pub fn terminal_app(app: &AppHandle) -> file_actions::TerminalApp {
+    let terminal = match app.try_state::<SettingsState>() {
+        Some(state) => state.lock().terminal_app,
+        None => {
+            log::warn!("settings: not loaded; Terminal opens the default app");
+            default_terminal(THIS_OS)
+        }
+    };
+    terminal.app()
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1245,6 +1515,7 @@ mod tests {
 
     #[test]
     fn the_windows_view_matches_the_fixture() {
+        // The defaults: Windows Terminal, and the welcome card not dismissed.
         let settings = AppSettings::defaults(Platform::Windows);
         let default_fallback = Path::new(r"C:\Users\max\Downloads\Grape");
         let view = view(
@@ -1280,6 +1551,8 @@ mod tests {
             sounds: false,
             haptics: true,
             launch_at_login: Some(false),
+            terminal_app: TerminalId::ITerm2,
+            onboarding_done: true,
         };
         let default_fallback = Path::new("/Users/max/Downloads/Grape");
         let view = view(&settings, Platform::MacOs, default_fallback, None, note);
@@ -1305,13 +1578,22 @@ mod tests {
     fn the_defaults_follow_each_os() {
         let win = AppSettings::defaults(Platform::Windows);
         assert_eq!(win.keys, keys(Key::Shift, Key::Ctrl, Key::Alt));
+        assert_eq!(win.terminal_app, TerminalId::WindowsTerminal);
         let mac = AppSettings::defaults(Platform::MacOs);
         assert_eq!(mac.keys, keys(Key::Shift, Key::Meta, Key::Ctrl));
+        assert_eq!(mac.terminal_app, TerminalId::Terminal);
         for defaults in [win, mac] {
             assert_eq!(defaults.output, OutputLocation::NextToSource);
             assert_eq!(defaults.fallback_dir, None);
             assert!(defaults.sounds && defaults.haptics);
             assert_eq!(defaults.launch_at_login, None);
+            assert!(!defaults.onboarding_done);
+        }
+        for platform in [Platform::Windows, Platform::MacOs] {
+            assert_eq!(
+                offered_terminals(platform).first(),
+                Some(&default_terminal(platform))
+            );
         }
     }
 
@@ -1331,7 +1613,9 @@ mod tests {
                     OUTPUT_FALLBACK_DIR,
                     SOUNDS,
                     HAPTICS,
-                    LAUNCH_AT_LOGIN
+                    LAUNCH_AT_LOGIN,
+                    TERMINAL_APP,
+                    ONBOARDING_DONE
                 ]
             );
         }
@@ -1348,8 +1632,9 @@ mod tests {
             (SOUNDS, json!(false)),
             (HAPTICS, json!(false)),
             (LAUNCH_AT_LOGIN, json!(false)),
+            (TERMINAL_APP, json!("iterm2")),
+            (ONBOARDING_DONE, json!(true)),
             // Not this slice's: ignored, and never rewritten.
-            ("terminal_app", json!("iTerm2")),
             ("features.v2", json!(true)),
         ]);
         let (settings, report) = from_map(map, Platform::MacOs);
@@ -1362,6 +1647,8 @@ mod tests {
                 sounds: false,
                 haptics: false,
                 launch_at_login: Some(false),
+                terminal_app: TerminalId::ITerm2,
+                onboarding_done: true,
             }
         );
         assert_eq!(report, LoadReport::default());
@@ -1390,12 +1677,12 @@ mod tests {
 
     #[test]
     fn values_of_the_wrong_type_fall_back() {
-        for store_key in [SOUNDS, HAPTICS, LAUNCH_AT_LOGIN] {
+        for store_key in [SOUNDS, HAPTICS, LAUNCH_AT_LOGIN, ONBOARDING_DONE] {
             for value in [json!("true"), json!(1), json!(null), json!([true])] {
                 falls_back(store_key, value, Platform::Windows);
             }
         }
-        for store_key in [KEYS_CONVERSIONS, KEYS_TOOLS, KEYS_ACTIONS] {
+        for store_key in [KEYS_CONVERSIONS, KEYS_TOOLS, KEYS_ACTIONS, TERMINAL_APP] {
             for value in [json!(1), json!(null), json!({"key": "shift"})] {
                 falls_back(store_key, value, Platform::MacOs);
             }
@@ -1425,6 +1712,72 @@ mod tests {
             warning,
             "keys.conversions names a key that can't open a wheel on this OS; using the default"
         );
+    }
+
+    #[test]
+    fn unknown_terminal_apps_fall_back() {
+        // The view's ids, the apps' names and commands aren't store ids.
+        for name in [
+            "iTerm2",
+            "windowsTerminal",
+            "Windows Terminal",
+            "wt",
+            "cmd",
+            "",
+        ] {
+            for platform in [Platform::Windows, Platform::MacOs] {
+                let warning = falls_back(TERMINAL_APP, json!(name), platform);
+                assert_eq!(
+                    warning,
+                    "terminal_app isn't a terminal app Grape knows; using the default"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_terminal_app_this_os_does_not_offer_falls_back() {
+        for (name, platform) in [
+            ("terminal", Platform::Windows),
+            ("iterm2", Platform::Windows),
+            ("windows_terminal", Platform::MacOs),
+            ("powershell", Platform::MacOs),
+        ] {
+            let warning = falls_back(TERMINAL_APP, json!(name), platform);
+            assert_eq!(
+                warning,
+                "terminal_app names an app this OS doesn't offer; using the default"
+            );
+        }
+    }
+
+    #[test]
+    fn every_offered_terminal_app_loads() {
+        for platform in [Platform::Windows, Platform::MacOs] {
+            for &terminal in offered_terminals(platform) {
+                let map = HashMap::from([(TERMINAL_APP, json!(terminal.store_id()))]);
+                let (settings, report) = from_map(map, platform);
+                assert_eq!(settings.terminal_app, terminal);
+                assert!(report.warnings.is_empty(), "{report:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn onboarding_is_done_only_when_true_is_stored() {
+        let (settings, report) = from_map(
+            HashMap::from([(ONBOARDING_DONE, json!(false))]),
+            Platform::Windows,
+        );
+        assert!(!settings.onboarding_done);
+        assert!(report.warnings.is_empty());
+        for value in [json!("true"), json!(1)] {
+            let warning = falls_back(ONBOARDING_DONE, value, Platform::MacOs);
+            assert_eq!(
+                warning,
+                "onboarding.done isn't true or false; using the default"
+            );
+        }
     }
 
     #[test]
@@ -1633,6 +1986,140 @@ mod tests {
     }
 
     #[test]
+    fn terminal_ids_are_the_view_ids_and_store_ids_round_trip() {
+        let ids = [
+            (
+                TerminalId::WindowsTerminal,
+                "windowsTerminal",
+                "windows_terminal",
+            ),
+            (TerminalId::PowerShell, "powershell", "powershell"),
+            (TerminalId::Terminal, "terminal", "terminal"),
+            (TerminalId::ITerm2, "iterm2", "iterm2"),
+        ];
+        for (terminal, view_id, store_id) in ids {
+            assert_eq!(serde_json::to_value(terminal).unwrap(), json!(view_id));
+            assert_eq!(
+                serde_json::from_value::<TerminalId>(json!(view_id)).unwrap(),
+                terminal
+            );
+            assert_eq!(terminal.store_id(), store_id);
+            assert_eq!(TerminalId::from_store_id(store_id), Some(terminal));
+        }
+        assert_eq!(ids.len(), TerminalId::ALL.len());
+        assert!(serde_json::from_value::<TerminalId>(json!("windows_terminal")).is_err());
+        assert!(serde_json::from_value::<TerminalId>(json!("iTerm2")).is_err());
+    }
+
+    #[test]
+    fn each_terminal_id_opens_its_own_app() {
+        use file_actions::TerminalApp;
+        assert_eq!(
+            TerminalId::WindowsTerminal.app(),
+            TerminalApp::WindowsTerminal
+        );
+        assert_eq!(TerminalId::PowerShell.app(), TerminalApp::PowerShell);
+        assert_eq!(TerminalId::Terminal.app(), TerminalApp::Terminal);
+        assert_eq!(TerminalId::ITerm2.app(), TerminalApp::ITerm2);
+    }
+
+    #[test]
+    fn terminal_choices_follow_the_os() {
+        let default_fallback = abs("Downloads");
+        let choices = |platform| {
+            let view = view(
+                &AppSettings::defaults(platform),
+                platform,
+                &default_fallback,
+                None,
+                None,
+            );
+            assert_eq!(view.terminal.choice, default_terminal(platform));
+            view.terminal
+                .choices
+                .iter()
+                .map(|choice| (choice.id, choice.name))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            choices(Platform::Windows),
+            [
+                (TerminalId::WindowsTerminal, "Windows Terminal"),
+                (TerminalId::PowerShell, "PowerShell")
+            ]
+        );
+        assert_eq!(
+            choices(Platform::MacOs),
+            [
+                (TerminalId::Terminal, "Terminal"),
+                (TerminalId::ITerm2, "iTerm2")
+            ]
+        );
+    }
+
+    #[test]
+    fn only_this_oss_terminal_apps_can_be_chosen() {
+        for platform in [Platform::Windows, Platform::MacOs] {
+            for terminal in TerminalId::ALL {
+                let chosen = set_terminal(terminal, platform);
+                if offered_terminals(platform).contains(&terminal) {
+                    assert_eq!(chosen, Ok(terminal));
+                } else {
+                    assert_eq!(chosen, Err("That app isn't offered here."));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_welcome_card_shows_until_onboarding_is_done() {
+        let default_fallback = abs("Downloads");
+        for platform in [Platform::Windows, Platform::MacOs] {
+            let settings = AppSettings::defaults(platform);
+            assert!(view(&settings, platform, &default_fallback, None, None).welcome);
+            // Other changes leave it.
+            let (keys, _) = set_key(settings.keys, Wheel::Tools, Key::Shift, platform).unwrap();
+            let changed = AppSettings {
+                keys,
+                sounds: false,
+                terminal_app: offered_terminals(platform)[1],
+                ..settings.clone()
+            };
+            assert!(view(&changed, platform, &default_fallback, None, None).welcome);
+            assert!(!store_changes(&settings, &changed)
+                .iter()
+                .any(|(key, _)| *key == ONBOARDING_DONE));
+            let done = AppSettings {
+                onboarding_done: true,
+                ..settings
+            };
+            assert!(!view(&done, platform, &default_fallback, None, None).welcome);
+        }
+    }
+
+    #[test]
+    fn settings_opens_at_launch_until_the_card_is_dismissed() {
+        assert_eq!(welcome_rule(false, true, false), Welcome::Open);
+        // Dismissed, nowhere to remember that it was, or started at login.
+        for (onboarding_done, can_save, at_login) in [
+            (true, true, false),
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+            (true, true, true),
+            (false, false, true),
+        ] {
+            assert!(
+                matches!(
+                    welcome_rule(onboarding_done, can_save, at_login),
+                    Welcome::Leave(_)
+                ),
+                "{onboarding_done} {can_save} {at_login}"
+            );
+        }
+    }
+
+    #[test]
     fn haptics_show_on_macos_only() {
         let settings = AppSettings {
             haptics: false,
@@ -1709,6 +2196,32 @@ mod tests {
     }
 
     #[test]
+    fn the_terminal_app_and_onboarding_are_written_on_their_own() {
+        let old = AppSettings::defaults(Platform::MacOs);
+        let new = AppSettings {
+            terminal_app: TerminalId::ITerm2,
+            ..old.clone()
+        };
+        assert_eq!(
+            store_changes(&old, &new),
+            [(TERMINAL_APP, Some(json!("iterm2")))]
+        );
+        let old = AppSettings::defaults(Platform::Windows);
+        let new = AppSettings {
+            terminal_app: TerminalId::PowerShell,
+            onboarding_done: true,
+            ..old.clone()
+        };
+        assert_eq!(
+            store_changes(&old, &new),
+            [
+                (TERMINAL_APP, Some(json!("powershell"))),
+                (ONBOARDING_DONE, Some(json!(true)))
+            ]
+        );
+    }
+
+    #[test]
     fn switches_are_written_one_by_one() {
         let old = AppSettings::defaults(Platform::MacOs);
         let new = AppSettings {
@@ -1737,6 +2250,8 @@ mod tests {
                 sounds: false,
                 haptics: false,
                 launch_at_login: Some(true),
+                terminal_app: offered_terminals(platform)[1],
+                onboarding_done: true,
             };
             let mut store: HashMap<&'static str, Value> = HashMap::new();
             for (key, value) in store_changes(&old, &new) {
