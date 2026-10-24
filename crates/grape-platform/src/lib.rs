@@ -27,6 +27,9 @@ mod mac_rules;
 pub mod macos;
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 mod unsupported;
+// The pure rules under the Windows layer, tested on every OS.
+#[cfg(any(target_os = "windows", test))]
+mod win_rules;
 #[cfg(target_os = "windows")]
 pub mod windows;
 

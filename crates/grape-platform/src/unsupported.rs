@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::file_actions::MoveOutcome;
+use crate::file_actions::{MoveOutcome, TerminalApp};
 use crate::{DisplayBounds, DragMonitor, PlatformError};
 
 pub(crate) fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
@@ -22,7 +22,7 @@ pub(crate) fn copy_paths(_paths: &[PathBuf]) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
 
-pub(crate) fn open_terminal(_dir: &Path) -> Result<(), PlatformError> {
+pub(crate) fn open_terminal(_dir: &Path, _app: TerminalApp) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }
 

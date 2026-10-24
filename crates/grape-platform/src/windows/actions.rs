@@ -4,8 +4,9 @@
 //!   clipboard, so pasting in Explorer makes copies.
 //! - Copy Path: `CF_UNICODETEXT`, one path per line, in the exact UTF-16
 //!   the file system uses.
-//! - Terminal: `wt.exe -d <dir>`, or PowerShell when Windows Terminal isn't
-//!   there.
+//! - Terminal: Windows Terminal (`wt.exe -d <dir>`), or PowerShell when wt
+//!   can't start, the folder's path has a `;`, or the user picked
+//!   PowerShell (`crate::win_rules::terminal_plan`).
 //! - Move: `IFileOpenDialog` picks a folder, then `IFileOperation` moves the
 //!   items with undo. Moving to another drive is confirmed first. What
 //!   moved is read back from the disk, with the shell's own reports (a
@@ -61,7 +62,8 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 
-use crate::file_actions::{MoveOutcome, MovedItem};
+use crate::file_actions::{MoveOutcome, MovedItem, TerminalApp};
+use crate::win_rules::{terminal_plan, WinTerminal};
 use crate::PlatformError;
 
 /// Tries at opening the clipboard, which another app may hold for a moment.
@@ -97,16 +99,20 @@ pub(crate) fn copy_paths(paths: &[PathBuf]) -> Result<(), PlatformError> {
     with_clipboard(|| put(u32::from(CF_UNICODETEXT.0), &bytes))
 }
 
-pub(crate) fn open_terminal(dir: &Path) -> Result<(), PlatformError> {
-    // wt splits its command line at `;`, so such a path goes to PowerShell.
-    if !dir
-        .as_os_str()
-        .encode_wide()
-        .any(|unit| unit == u16::from(b';'))
-    {
+pub(crate) fn open_terminal(dir: &Path, app: TerminalApp) -> Result<(), PlatformError> {
+    let (start, notes) = terminal_plan(app, dir);
+    for note in notes {
+        log::info!("terminal: {note}");
+    }
+    if start == WinTerminal::WindowsTerminal {
         // Any failure (not installed, say) falls through to PowerShell.
-        if Command::new("wt.exe").args(wt_args(dir)).spawn().is_ok() {
-            return Ok(());
+        match Command::new("wt.exe").args(wt_args(dir)).spawn() {
+            Ok(_) => return Ok(()),
+            Err(err) => {
+                log::info!(
+                    "terminal: Windows Terminal couldn't start ({err}), so PowerShell opens"
+                );
+            }
         }
     }
     match Command::new("powershell.exe")

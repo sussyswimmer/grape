@@ -15,6 +15,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::file_actions::TerminalApp;
 use crate::{DisplayBounds, Rect};
 
 /// A rectangle in Cocoa's global space: points, origin at the bottom-left of
@@ -134,10 +135,60 @@ pub(crate) fn path_lines(paths: &[PathBuf]) -> String {
         .join("\n")
 }
 
+/// iTerm2's bundle id: Launch Services finds the app by it, and `open -b`
+/// opens it.
+pub(crate) const ITERM_BUNDLE_ID: &str = "com.googlecode.iterm2";
+
+/// The app Terminal opens on macOS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MacTerminal {
+    /// Terminal ([`terminal_args`]).
+    Terminal,
+    /// iTerm2 ([`iterm_args`]).
+    ITerm2,
+}
+
+/// The app Terminal opens on macOS for the user's `app`, and, when that
+/// isn't `app`, why, for the log. iTerm2 opens only while it's installed,
+/// which `iterm_installed` answers; nothing else asks it. Windows Terminal
+/// and PowerShell aren't on a Mac, so they get Terminal, the default.
+pub(crate) fn terminal_plan(
+    app: TerminalApp,
+    iterm_installed: impl FnOnce() -> bool,
+) -> (MacTerminal, Option<&'static str>) {
+    match app {
+        TerminalApp::Terminal => (MacTerminal::Terminal, None),
+        TerminalApp::ITerm2 => {
+            if iterm_installed() {
+                (MacTerminal::ITerm2, None)
+            } else {
+                (
+                    MacTerminal::Terminal,
+                    Some("iTerm2 (com.googlecode.iterm2) isn't installed, so Terminal opens"),
+                )
+            }
+        }
+        TerminalApp::WindowsTerminal | TerminalApp::PowerShell => (
+            MacTerminal::Terminal,
+            Some("Windows Terminal and PowerShell aren't offered on macOS, so Terminal opens"),
+        ),
+    }
+}
+
 /// `open -a Terminal <dir>`: the folder goes as its own argument, never
 /// through a shell.
 pub(crate) fn terminal_args(dir: &Path) -> [OsString; 3] {
     ["-a".into(), "Terminal".into(), dir.as_os_str().to_owned()]
+}
+
+/// `open -b com.googlecode.iterm2 <dir>`: iTerm2 opens a window in the
+/// folder. The folder goes as its own argument, never through a shell.
+pub(crate) fn iterm_args(dir: &Path) -> [OsString; 3] {
+    [
+        "-b".into(),
+        ITERM_BUNDLE_ID.into(),
+        dir.as_os_str().to_owned(),
+    ]
 }
 
 /// `open -R <path>`: Finder opens the folder holding `path` with it
@@ -558,6 +609,14 @@ mod tests {
                 OsString::from("/Users/max/My Files; $(whoami)"),
             ]
         );
+        assert_eq!(
+            iterm_args(dir),
+            [
+                OsString::from("-b"),
+                OsString::from("com.googlecode.iterm2"),
+                OsString::from("/Users/max/My Files; $(whoami)"),
+            ]
+        );
         let file = Path::new("/Users/max/a \"b\" $c.png");
         assert_eq!(
             reveal_args(file),
@@ -566,5 +625,39 @@ mod tests {
                 OsString::from("/Users/max/a \"b\" $c.png")
             ]
         );
+    }
+
+    #[test]
+    fn iterm2_opens_only_when_it_is_chosen_and_installed() {
+        assert_eq!(
+            terminal_plan(TerminalApp::ITerm2, || true),
+            (MacTerminal::ITerm2, None)
+        );
+        let (app, note) = terminal_plan(TerminalApp::ITerm2, || false);
+        assert_eq!(app, MacTerminal::Terminal);
+        assert!(note.is_some_and(|note| note.contains("com.googlecode.iterm2")));
+    }
+
+    #[test]
+    fn terminal_never_asks_whether_iterm2_is_installed() {
+        let asked = std::cell::Cell::new(false);
+        let installed = || {
+            asked.set(true);
+            true
+        };
+        assert_eq!(
+            terminal_plan(TerminalApp::Terminal, installed),
+            (MacTerminal::Terminal, None)
+        );
+        assert!(!asked.get());
+    }
+
+    #[test]
+    fn the_windows_apps_get_terminal_on_a_mac() {
+        for app in [TerminalApp::WindowsTerminal, TerminalApp::PowerShell] {
+            let (opens, note) = terminal_plan(app, || panic!("only iTerm2 asks"));
+            assert_eq!(opens, MacTerminal::Terminal);
+            assert!(note.is_some());
+        }
     }
 }

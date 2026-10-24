@@ -9,13 +9,14 @@ Windows came first (DECISIONS D8). The macOS port (D18) is real code now: drag p
 src/
   lib.rs              trait DragMonitor, DragSignal, DropEvent, display_bounds_at, haptic_tick
   tracker.rs          the pure candidate-drag rules (threshold or start_now, baseline keys, Esc, missed release)
-  file_actions.rs     copy, copy path, terminal, move, share, reveal, pick_folder (Settings): the API the app calls, per-OS dispatch
-  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, volume roots, judge_move); tested on every OS
+  file_actions.rs     copy, copy path, terminal (TerminalApp), move, share, reveal, pick_folder (Settings): the API the app calls, per-OS dispatch
+  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move); tested on every OS
+  win_rules.rs        pure Windows rules (Terminal: wt, or PowerShell for a `;` path or by choice); tested on every OS
   macos/
     drag.rs           the drag thread: pressedMouseButtons + modifierFlags + drag-pasteboard changeCount/types; starts at once on a file drag session, holds an App Nap activity
     display.rs        screen cache filled on the main thread (refresh_screens), CoreGraphics fallback
     window.rs         overlay/toast NSWindow: level per WindowRole (overlay 101, toast 100), collection behavior, frame + orderFrontRegardless
-    actions.rs        pasteboard copy, open -a Terminal / open -R, AirDrop, NSOpenPanel + NSFileManager move (per-item snapshot, volume roots stay, focus handed back), the same panel for pick_folder, haptics
+    actions.rs        pasteboard copy, open -a Terminal or -b iTerm2 (only if NSWorkspace finds it) / open -R, AirDrop, NSOpenPanel + NSFileManager move (per-item snapshot, volume roots stay, focus handed back), the same panel for pick_folder, haptics
   windows/
     hook.rs           WH_MOUSE_LL on a message-pumping thread
     drag.rs           the drag worker: allowlist, GetAsyncKeyState polling, DragTracker
@@ -36,6 +37,7 @@ src/
 - **macOS Move.** A mounted volume's root (its own `lstat` device isn't its folder's) never moves and isn't counted as moved or unsure. Each item is judged (`mac_rules::judge_move`) from a snapshot taken right after its own move, before the next item moves. Grape activates itself for the panel and alert, then hands activation back to the app that was in front; never `NSApp.hide`. Share does the same through an AirDrop delegate (`ShareDone`), kept alive with its service until AirDrop reports back, and only once no AirDrop window is key. Settings' `pick_folder` shares Move's panel but neither activates nor hands back: the Settings window is already key.
 - **macOS threads.** `NSScreen`, `NSWindow`, `NSOpenPanel` and `NSAlert` are main-thread only (`MainThreadMarker`). Main-thread UI from a worker goes through `dispatch2::run_on_main`, which waits: never call it from a thread the main thread is waiting for. Tauri's `ns_window()` pointer is only good on the main thread until the autorelease pool drains, so retain it at once. Wrap AppKit work on Grape's own threads in `autoreleasepool`.
 - Every `unsafe` block gets a `// SAFETY:` comment.
+- **Logging** (`log`) is only for saying why an action did something other than what was asked (Terminal opening another app than the one picked). Never log a path or a file name.
 - Gate code with `#[cfg(target_os = "macos")]` / `"windows"`. Both must compile in CI even if you only tested one. From Linux, check the Mac target with `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy -p grape-platform --all-targets --target aarch64-apple-darwin -- -D warnings`.
 - Tests never open a panel, an alert or AirDrop, and never call `run_on_main` (nothing serves the main queue under `cargo test`).
 

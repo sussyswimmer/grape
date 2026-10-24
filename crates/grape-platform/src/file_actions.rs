@@ -73,14 +73,32 @@ pub fn copy_paths(paths: &[PathBuf]) -> Result<(), PlatformError> {
     imp::copy_paths(paths)
 }
 
-/// Opens a terminal in `dir`: Windows Terminal if it's installed, else
-/// PowerShell; Terminal on macOS.
+/// Which app Terminal opens (Settings → Terminal). Each OS offers two; one
+/// it doesn't offer gets that OS's default, and the log says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalApp {
+    /// Windows Terminal, or PowerShell when it can't start. Windows'
+    /// default.
+    WindowsTerminal,
+    /// PowerShell in a console of its own (Windows).
+    PowerShell,
+    /// Terminal. macOS' default.
+    Terminal,
+    /// iTerm2 (macOS), or Terminal when it isn't installed.
+    ITerm2,
+}
+
+/// Opens a terminal in `dir` with `app`. On Windows: Windows Terminal if it
+/// starts, else PowerShell; or PowerShell straight away. On macOS: Terminal,
+/// or iTerm2 if it's installed (else Terminal). An app this OS doesn't
+/// offer gets its default (Windows Terminal, Terminal), and the log says
+/// why whenever what opens isn't `app`.
 ///
 /// # Errors
 /// [`PlatformError::Unsupported`] except on Windows and macOS, or an OS
 /// error if no terminal could start.
-pub fn open_terminal(dir: &Path) -> Result<(), PlatformError> {
-    imp::open_terminal(dir)
+pub fn open_terminal(dir: &Path, app: TerminalApp) -> Result<(), PlatformError> {
+    imp::open_terminal(dir, app)
 }
 
 /// Asks the user for a folder and moves the items there. Asks again before
@@ -167,10 +185,17 @@ mod tests {
         let paths = [PathBuf::from("/a/b.png")];
         assert_eq!(copy_files(&paths), Err(PlatformError::Unsupported));
         assert_eq!(copy_paths(&paths), Err(PlatformError::Unsupported));
-        assert_eq!(
-            open_terminal(Path::new("/a")),
-            Err(PlatformError::Unsupported)
-        );
+        for app in [
+            TerminalApp::WindowsTerminal,
+            TerminalApp::PowerShell,
+            TerminalApp::Terminal,
+            TerminalApp::ITerm2,
+        ] {
+            assert_eq!(
+                open_terminal(Path::new("/a"), app),
+                Err(PlatformError::Unsupported)
+            );
+        }
         assert_eq!(
             move_to_chosen_folder(&paths),
             Err(PlatformError::Unsupported)

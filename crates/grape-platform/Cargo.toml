@@ -9,6 +9,9 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Notes for the app's log, such as why Terminal opened another app than the
+# one picked in Settings. The app already builds this version (DECISIONS D9).
+log = "0.4.34"
 
 # Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
 # so this shares that build. wry and tao already enable every feature below

@@ -14,9 +14,9 @@
 //!   for [`WindowRole::Toast`], so an open wheel covers the toast),
 //!   [`frame_and_show`], [`describe_window`].
 //! - `actions`: the file actions behind [`crate::file_actions`]: the general
-//!   pasteboard, Terminal, Finder, AirDrop and the Move panel (a volume's
-//!   root never moves, and each item is judged right after its own move);
-//!   the same panel for Settings' folders; and the haptic tick behind
+//!   pasteboard, Terminal or iTerm2, Finder, AirDrop and the Move panel (a
+//!   volume's root never moves, and each item is judged right after its own
+//!   move); the same panel for Settings' folders; and the haptic tick behind
 //!   [`crate::haptic_tick`].
 //!
 //! Coordinates are points with the origin at the top-left of the primary
@@ -26,9 +26,10 @@
 //!
 //! Threads: `NSScreen`, `NSWindow`, `NSOpenPanel` and `NSAlert` are
 //! main-thread only, and the bindings enforce it with `MainThreadMarker`.
-//! `NSEvent`'s class methods, `NSPasteboard` and `NSFileManager` are not
-//! marked main-thread only, so the drag thread and the callers' worker
-//! threads use them directly, each inside an autorelease pool.
+//! `NSEvent`'s class methods, `NSPasteboard`, `NSFileManager` and
+//! `NSWorkspace` are not marked main-thread only, so the drag thread and the
+//! callers' worker threads use them directly, each inside an autorelease
+//! pool.
 
 mod actions;
 mod display;

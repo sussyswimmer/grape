@@ -4,7 +4,9 @@
 //! - Copy: file URLs on the general pasteboard, so pasting in Finder makes
 //!   copies.
 //! - Copy Path: the paths as text, one per line.
-//! - Terminal: `open -a Terminal <dir>`. Reveal: `open -R <path>`.
+//! - Terminal: `open -a Terminal <dir>`, or `open -b com.googlecode.iterm2
+//!   <dir>` when the user picked iTerm2 and Launch Services finds it
+//!   (`crate::mac_rules::terminal_plan`). Reveal: `open -R <path>`.
 //! - Share: AirDrop through `NSSharingService`.
 //! - Move: `NSOpenPanel` picks a folder, an `NSAlert` confirms a move to
 //!   another volume, then `NSFileManager` moves each item. It never
@@ -51,10 +53,10 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSError, NSFileManager, NSString, NSURL};
 
 use super::{io_error, FEATURE_UNSUPPORTED, NO_CODE};
-use crate::file_actions::{MoveOutcome, MovedItem};
+use crate::file_actions::{MoveOutcome, MovedItem, TerminalApp};
 use crate::mac_rules::{
-    judge_move, path_lines, picker_message, reveal_args, terminal_args, ItemDevices, MoveSnapshot,
-    MoveVerdict, OldPlace,
+    iterm_args, judge_move, path_lines, picker_message, reveal_args, terminal_args, terminal_plan,
+    ItemDevices, MacTerminal, MoveSnapshot, MoveVerdict, OldPlace, ITERM_BUNDLE_ID,
 };
 use crate::PlatformError;
 
@@ -100,8 +102,27 @@ pub(crate) fn copy_paths(paths: &[PathBuf]) -> Result<(), PlatformError> {
     })
 }
 
-pub(crate) fn open_terminal(dir: &Path) -> Result<(), PlatformError> {
-    open(terminal_args(dir), "start open -a Terminal")
+pub(crate) fn open_terminal(dir: &Path, app: TerminalApp) -> Result<(), PlatformError> {
+    let (start, note) = terminal_plan(app, iterm_installed);
+    if let Some(note) = note {
+        log::info!("terminal: {note}");
+    }
+    match start {
+        MacTerminal::Terminal => open(terminal_args(dir), "start open -a Terminal"),
+        MacTerminal::ITerm2 => open(iterm_args(dir), "start open -b com.googlecode.iterm2"),
+    }
+}
+
+/// Whether iTerm2 is installed: Launch Services knows an app with its
+/// bundle id. `NSWorkspace` isn't main-thread only, so the caller's thread
+/// asks.
+fn iterm_installed() -> bool {
+    autoreleasepool(|_| {
+        let id = NSString::from_str(ITERM_BUNDLE_ID);
+        NSWorkspace::sharedWorkspace()
+            .URLForApplicationWithBundleIdentifier(&id)
+            .is_some()
+    })
 }
 
 pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
@@ -897,5 +918,11 @@ mod tests {
     #[test]
     fn haptic_tick_is_safe_off_the_main_thread() {
         haptic_tick();
+    }
+
+    #[test]
+    fn the_iterm2_lookup_is_safe_off_the_main_thread() {
+        // Installed or not: it only asks Launch Services and opens nothing.
+        let _ = iterm_installed();
     }
 }
