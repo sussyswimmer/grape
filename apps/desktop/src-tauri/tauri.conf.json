@@ -1,0 +1,87 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "Grape",
+  "version": "0.1.0",
+  "identifier": "io.github.sussyswimmer.grape",
+  "build": {
+    "beforeDevCommand": "pnpm -C ui dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm -C ui build",
+    "frontendDist": "../ui/dist"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "macOSPrivateApi": true,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost"
+    },
+    "windows": [
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "Grape Overlay",
+        "width": 400,
+        "height": 400,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
+        "visibleOnAllWorkspaces": true,
+        "resizable": false,
+        "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
+      },
+      {
+        "label": "toast",
+        "url": "toast.html",
+        "title": "Grape",
+        "width": 320,
+        "height": 64,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "shadow": false,
+        "visibleOnAllWorkspaces": true,
+        "resizable": false,
+        "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
+        "acceptFirstMouse": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "sussyswimmer",
+    "copyright": "Copyright (c) 2026 sussyswimmer",
+    "category": "Utility",
+    "shortDescription": "Drag a file, tap a key, drop it on the wheel. Offline file conversion.",
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    }
+  }
+}

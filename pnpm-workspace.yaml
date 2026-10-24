@@ -1,0 +1,7 @@
+packages:
+  - apps/desktop
+  - apps/desktop/ui
+
+# Only resolve npm releases that are at least 14 days old (20160 minutes).
+# See docs/DECISIONS.md D9.
+minimumReleaseAge: 20160

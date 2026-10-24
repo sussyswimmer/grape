@@ -1,0 +1,17 @@
+[package]
+name = "grape-engines"
+description = "Executes grape-core job plans: images, FFmpeg sidecar, PDF, archives, subtitles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+grape-core.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+zune-jpeg = "0.5.15"
+thiserror.workspace = true
+
+[lints]
+workspace = true
