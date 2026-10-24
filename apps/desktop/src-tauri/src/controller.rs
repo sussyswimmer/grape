@@ -38,6 +38,7 @@ use grape_core::{
     WheelEntry, WheelMode, GEOMETRY,
 };
 use grape_platform::{DisplayBounds, DragSignal, DropEvent, Modifiers, Rect};
+use serde::{Deserialize, Serialize};
 
 use crate::events::{CloseReason, KeyNames, UiContent, WheelClose, WheelHighlight, WheelOpen};
 
@@ -71,8 +72,18 @@ pub const LEAVE_GRACE: Duration = Duration::from_millis(200);
 /// down: the wheel closes and nothing runs.
 pub const REFUSED_LEAVE_WINDOW: Duration = Duration::from_millis(50);
 
-/// A modifier key that can be assigned to a wheel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The OS Grape is running on, for titles and key names.
+pub const THIS_OS: Platform = if cfg!(target_os = "macos") {
+    Platform::MacOs
+} else {
+    Platform::Windows
+};
+
+/// A modifier key that can be assigned to a wheel. Serialized as its id
+/// (`"shift"`, `"ctrl"`, `"alt"`, `"meta"`): the settings store and the
+/// Settings window use these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Key {
     /// Shift.
     Shift,
@@ -96,7 +107,12 @@ impl Key {
 
     /// The key's name as this OS's keyboards label it.
     pub const fn name(self) -> &'static str {
-        let mac = cfg!(target_os = "macos");
+        self.name_on(THIS_OS)
+    }
+
+    /// The key's name as `platform`'s keyboards label it.
+    pub const fn name_on(self, platform: Platform) -> &'static str {
+        let mac = matches!(platform, Platform::MacOs);
         match self {
             Key::Shift => "Shift",
             Key::Ctrl if mac => "Control",
@@ -109,9 +125,9 @@ impl Key {
     }
 }
 
-/// Which key opens which wheel (`docs/INTERACTION_SPEC.md` §2). Settings
-/// make this remappable in M6.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Which key opens which wheel (`docs/INTERACTION_SPEC.md` §2). The user
+/// remaps it in Settings ([`crate::settings`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct KeyMap {
     /// Opens the conversions wheel.
     pub conversions: Key,
@@ -171,7 +187,8 @@ pub trait Env {
     fn classify(&self, paths: &[PathBuf]) -> Vec<SelectionItem>;
 }
 
-/// The settings the controller follows. Settings become editable in M6.
+/// The settings the controller follows. The user's keys and sounds come
+/// from [`crate::settings`] and change through [`Input::Configure`].
 ///
 /// `release_fallback` and `leave_ends_drag` are macOS behaviors. They are
 /// on in [`for_this_os`](Self::for_this_os) on macOS and off elsewhere.
@@ -214,15 +231,11 @@ impl ControllerConfig {
     /// The defaults for the OS Grape is running on: its keys, v1 only,
     /// sounds on, and the macOS drop workarounds on macOS only.
     pub const fn for_this_os() -> Self {
-        let mac = cfg!(target_os = "macos");
+        let mac = matches!(THIS_OS, Platform::MacOs);
         Self {
             keys: KeyMap::for_this_os(),
             features: Features::V1_ONLY,
-            platform: if mac {
-                Platform::MacOs
-            } else {
-                Platform::Windows
-            },
+            platform: THIS_OS,
             sounds: true,
             release_fallback: mac,
             leave_ends_drag: mac,
@@ -244,6 +257,14 @@ pub enum Input {
     },
     /// Tray → Pause Grape was toggled.
     SetPaused(bool),
+    /// The user changed the keys or sounds in Settings. They apply from the
+    /// next modifier the controller sees; an open wheel isn't redrawn.
+    Configure {
+        /// Which key opens which wheel.
+        keys: KeyMap,
+        /// Whether the overlay plays its highlight tick.
+        sounds: bool,
+    },
 }
 
 /// A drop on a segment: what to run, on what.
@@ -463,6 +484,7 @@ impl<E: Env> WheelController<E> {
             Input::Drop(event) => self.on_drop_event(event, now),
             Input::Painted { seq } => self.on_painted(seq, now),
             Input::SetPaused(paused) => self.on_paused(paused),
+            Input::Configure { keys, sounds } => self.on_configure(keys, sounds),
         };
         out.extend(self.tick(now));
         out
@@ -859,6 +881,21 @@ impl<E: Env> WheelController<E> {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// New keys and sounds from Settings. An open wheel keeps what it shows
+    /// and its mode; the next modifier is read with the new keys, and the
+    /// next `wheel://open` carries their names and the new sounds setting.
+    fn on_configure(&mut self, keys: KeyMap, sounds: bool) -> Vec<Effect> {
+        self.config.keys = keys;
+        self.config.sounds = sounds;
+        vec![Effect::Log(format!(
+            "settings: wheels open with {} / {} / {}, sounds {}",
+            keys.conversions.name_on(self.config.platform),
+            keys.tools.name_on(self.config.platform),
+            keys.actions.name_on(self.config.platform),
+            if sounds { "on" } else { "off" }
+        ))]
     }
 
     fn on_paused(&mut self, paused: bool) -> Vec<Effect> {
@@ -1271,6 +1308,101 @@ mod tests {
                 ("Shift", "Ctrl", "Alt")
             );
         }
+    }
+
+    #[test]
+    fn key_names_can_be_asked_for_either_os() {
+        let names = |platform| {
+            [Key::Shift, Key::Ctrl, Key::Alt, Key::Meta].map(|key| key.name_on(platform))
+        };
+        assert_eq!(
+            names(Platform::Windows),
+            ["Shift", "Ctrl", "Alt", "Windows"]
+        );
+        assert_eq!(
+            names(Platform::MacOs),
+            ["Shift", "Control", "Option", "Command"]
+        );
+        assert_eq!(Key::Alt.name(), Key::Alt.name_on(THIS_OS));
+    }
+
+    #[test]
+    fn keys_serialize_as_their_ids() {
+        let ids: Vec<String> = [Key::Shift, Key::Ctrl, Key::Alt, Key::Meta]
+            .iter()
+            .map(|key| {
+                serde_json::to_value(key)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(ids, ["shift", "ctrl", "alt", "meta"]);
+        let key: Key = serde_json::from_value(serde_json::json!("meta")).unwrap();
+        assert_eq!(key, Key::Meta);
+        assert!(serde_json::from_value::<Key>(serde_json::json!("Shift")).is_err());
+    }
+
+    /// Windows keys with Conversions and Tools swapped.
+    const SWAPPED: KeyMap = KeyMap {
+        conversions: Key::Ctrl,
+        tools: Key::Shift,
+        actions: Key::Alt,
+    };
+
+    #[test]
+    fn configure_applies_from_the_next_wheel() {
+        let mut run = Run::new();
+        run.input(Input::Configure {
+            keys: SWAPPED,
+            sounds: false,
+        });
+        assert!(run.opens().is_empty());
+        run.signals(vec![started(), moved(400, 300), keys(Modifiers::CTRL)]);
+        let opens = run.opens();
+        let [open] = opens.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(open.mode, WheelMode::Conversions);
+        assert!(!open.sounds);
+        assert_eq!(open.keys, KeyNames::of(SWAPPED));
+        assert_eq!(
+            (open.keys.conversions.as_str(), open.keys.tools.as_str()),
+            (Key::Ctrl.name(), Key::Shift.name())
+        );
+    }
+
+    #[test]
+    fn configure_leaves_an_open_wheel_as_it_is() {
+        let mut run = png_wheel();
+        let before = run.effects.len();
+        run.input(Input::Configure {
+            keys: SWAPPED,
+            sounds: false,
+        });
+        let after: Vec<&Effect> = run.effects[before..].iter().collect();
+        assert!(
+            after.iter().all(|effect| matches!(effect, Effect::Log(_))),
+            "{after:?}"
+        );
+        assert!(run.ctl.is_open());
+        assert_eq!(
+            run.opens().last().map(|o| o.mode),
+            Some(WheelMode::Conversions)
+        );
+
+        // The next key is read with the new map: Shift now opens Tools.
+        run.signals(vec![keys(NONE), keys(Modifiers::SHIFT)]);
+        let opens = run.opens();
+        let Some(last) = opens.last() else {
+            panic!("no open");
+        };
+        assert_eq!(last.mode, WheelMode::Tools);
+        assert_eq!(last.seq, 1);
+        assert!(!last.sounds);
+        assert_eq!(last.keys, KeyNames::of(SWAPPED));
+        assert_eq!(run.shows(), 1);
     }
 
     #[test]

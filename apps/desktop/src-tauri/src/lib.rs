@@ -1,5 +1,6 @@
-//! Grape's Tauri app: a tray icon, a hidden overlay window and the wheel
-//! controller. See `CLAUDE.md` in this crate.
+//! Grape's Tauri app: a tray icon, a hidden overlay window, the wheel
+//! controller and the Settings window's settings. See `CLAUDE.md` in this
+//! crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it's a menu-bar accessory app with no Dock icon
@@ -9,6 +10,7 @@ mod actions;
 pub mod controller;
 pub mod events;
 mod jobs;
+mod settings;
 mod toast;
 mod tray;
 mod ui_windows;
@@ -17,8 +19,11 @@ mod wheel;
 use std::sync::atomic::AtomicBool;
 
 use anyhow::Context as _;
-use tauri::RunEvent;
+use tauri::{Manager, RunEvent};
+use tauri_plugin_autostart::MacosLauncher;
 use tauri_plugin_log::RotationStrategy;
+
+use crate::settings::SettingsState;
 
 /// App-wide state, shared by the tray handlers and the controller.
 #[derive(Debug, Default)]
@@ -60,11 +65,25 @@ pub fn run() -> anyhow::Result<()> {
                 .max_file_size(1_000_000)
                 .build(),
         )
+        // settings.json in the app data folder. No window may call the
+        // store's own commands; Settings goes through `settings_*`.
+        .plugin(tauri_plugin_store::Builder::new().build())
+        // Launch at login (a Launch Agent on macOS). Driven from Rust only.
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            None,
+        ))
         .manage(GrapeState::default())
         .manage(toast::Toaster::default())
         .invoke_handler(tauri::generate_handler![
             wheel::wheel_painted,
-            toast::toast_clicked
+            toast::toast_clicked,
+            settings::settings_get,
+            settings::settings_set_key,
+            settings::settings_set_output_next_to_source,
+            settings::settings_pick_folder,
+            settings::settings_use_default_fallback,
+            settings::settings_set_toggle
         ])
         .on_window_event(wheel::on_overlay_window_event)
         .setup(|app| {
@@ -83,7 +102,15 @@ pub fn run() -> anyhow::Result<()> {
             if let Err(err) = ui_windows::prepare_toast(app.handle()) {
                 log::error!("could not prepare the toast window: {err:#}");
             }
-            wheel::start(app.handle());
+            // Before the wheel, which starts with the user's keys, sounds
+            // and haptics.
+            app.manage(SettingsState::load(app.handle()));
+            let settings = app.state::<SettingsState>();
+            wheel::start(
+                app.handle(),
+                settings.controller_config(),
+                settings.haptics(),
+            );
             log::info!("Grape {} is running", env!("CARGO_PKG_VERSION"));
             Ok(())
         })

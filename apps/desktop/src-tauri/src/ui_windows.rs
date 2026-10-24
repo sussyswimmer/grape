@@ -96,8 +96,8 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     }
     let window = WebviewWindowBuilder::new(app, SETTINGS, WebviewUrl::App("settings.html".into()))
         .title("Grape Settings")
-        .inner_size(560.0, 420.0)
-        .min_inner_size(420.0, 320.0)
+        .inner_size(560.0, 640.0)
+        .min_inner_size(420.0, 400.0)
         .center()
         .additional_browser_args(BROWSER_ARGS)
         .build()?;

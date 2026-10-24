@@ -10,6 +10,8 @@
 //!   `grape_engines::run_job`, and finish with done, partial or error.
 //!   Clicking the finished toast reveals the first output.
 //! - Tools arrive in a later build.
+//! - Where outputs go and the fallback folder come from Settings
+//!   ([`crate::settings`]), read when the drop is planned.
 //!
 //! The engines never touch a source and never replace an existing file
 //! (DECISIONS D16); this module only reads what they report.
@@ -24,12 +26,11 @@ use grape_platform::DisplayBounds;
 use tauri::{AppHandle, Manager};
 
 use crate::events::{ToastShow, ToastTone};
+use crate::settings;
 use crate::toast::{self, Toaster};
 
 /// At most this often, a progress update goes to the toast.
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
-/// Grape's own folder in Downloads, for outputs whose folder is read-only.
-const FALLBACK_FOLDER: &str = "Grape";
 
 /// What the toast says. `reveal` is what clicking it shows in Explorer or Finder.
 #[derive(Debug, Clone, PartialEq)]
@@ -80,11 +81,14 @@ pub fn submit(
         return;
     }
     let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
-    let settings = Settings::new(fallback_dir(app));
     let app = app.clone();
     let spawned = thread::Builder::new()
         .name("grape-jobs".to_owned())
-        .spawn(move || run(&app, &op, &paths, &settings, anchor, &display));
+        .spawn(move || {
+            // On this thread: it checks the fallback folder on disk.
+            let settings = settings::planning_settings(&app);
+            run(&app, &op, &paths, &settings, anchor, &display);
+        });
     if let Err(err) = spawned {
         log::error!("jobs: could not start the job thread: {err}");
     }
@@ -108,17 +112,6 @@ fn not_runnable(op: &Operation, items: &[SelectionItem]) -> Option<Report> {
                 // One line: the detail row is cut with an ellipsis.
                 Some(format!("{from} to {} is coming.", to.display_name())),
             ))
-        }
-    }
-}
-
-/// `Downloads\Grape`. It's created only when a job actually uses it.
-fn fallback_dir(app: &AppHandle) -> PathBuf {
-    match app.path().download_dir() {
-        Ok(downloads) => downloads.join(FALLBACK_FOLDER),
-        Err(err) => {
-            log::warn!("jobs: no Downloads folder ({err}); falling back to the temp folder");
-            std::env::temp_dir().join(FALLBACK_FOLDER)
         }
     }
 }
@@ -148,6 +141,9 @@ fn run(
     };
     let jobs = planned.jobs;
     // The engine creates the fallback folder on first use, and no other.
+    // It's an existing folder or Grape's own `Downloads/Grape`
+    // (`settings::core_settings`), so a folder the user chose is never
+    // created.
     let ctx = EngineCtx {
         fallback_dir: Some(settings.fallback_dir.clone()),
         ..EngineCtx::default()

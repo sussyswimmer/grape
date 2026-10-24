@@ -14,10 +14,14 @@
 //!   [`crate::actions`], conversions and tools in [`crate::jobs`].
 //! - The overlay calls `wheel_painted` once a wheel is on screen, for the
 //!   latency log.
+//! - Settings reach the controller as [`Input::Configure`] (keys, sounds)
+//!   and a shared haptics flag read on every highlight
+//!   ([`crate::settings`]).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -99,10 +103,12 @@ impl Env for OsEnv {
     }
 }
 
-/// Starts drag detection and the controller. Call from `setup`, on the
-/// main thread (it registers the overlay's drop target there). Nothing in
-/// here is fatal: without a monitor Grape just never opens the wheel.
-pub fn start(app: &AppHandle) {
+/// Starts drag detection and the controller with `config` (the user's
+/// keys and sounds). `haptics` is the user's haptics setting, read on every
+/// highlight. Call from `setup`, on the main thread (it registers the
+/// overlay's drop target there). Nothing in here is fatal: without a
+/// monitor Grape just never opens the wheel.
+pub fn start(app: &AppHandle, config: ControllerConfig, haptics: Arc<AtomicBool>) {
     let (tx, rx) = mpsc::sync_channel(INPUT_CAPACITY);
     app.manage(WheelInputs(tx.clone()));
 
@@ -120,7 +126,7 @@ pub fn start(app: &AppHandle) {
     let app = app.clone();
     let spawned = thread::Builder::new()
         .name("grape-wheel".to_owned())
-        .spawn(move || run_controller(&app, &rx));
+        .spawn(move || run_controller(&app, &rx, config, &haptics));
     if let Err(err) = spawned {
         log::error!("could not start the wheel controller thread: {err}");
     }
@@ -185,10 +191,12 @@ fn forward<T: Send + 'static>(
     }
 }
 
-fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
-    let config = ControllerConfig::for_this_os();
-    // The haptic tick follows the sounds setting (INTERACTION_SPEC.md).
-    let haptics = config.sounds;
+fn run_controller(
+    app: &AppHandle,
+    rx: &Receiver<Input>,
+    config: ControllerConfig,
+    haptics: &AtomicBool,
+) {
     let mut controller = WheelController::new(OsEnv, config);
     loop {
         let input = match controller.next_deadline() {
@@ -207,13 +215,14 @@ fn run_controller(app: &AppHandle, rx: &Receiver<Input>) {
     }
 }
 
-fn apply(app: &AppHandle, effect: Effect, haptics: bool) {
+fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) {
     match effect {
         Effect::Open(open) => emit(app, "wheel://open", open),
         Effect::ShowOverlay { monitor } => show_overlay(app, monitor),
         Effect::Highlight(highlight) => {
-            // A light trackpad tick on macOS; nothing elsewhere.
-            if haptics && highlight.index.is_some() {
+            // A light trackpad tick on macOS; nothing elsewhere. It has
+            // its own setting, whatever the sounds setting says.
+            if highlight.index.is_some() && haptics.load(Ordering::Acquire) {
                 grape_platform::haptic_tick();
             }
             emit(app, "wheel://highlight", highlight);

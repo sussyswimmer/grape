@@ -23,16 +23,16 @@ tauri-build = { version = "=2.7.1", features = [] }
 tauri = { version = "=2.12.1", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-single-instance = "=2.5.2"
 tauri-plugin-log = "=2.10.0"
+tauri-plugin-store = "=2.5.0"
+tauri-plugin-autostart = "=2.7.0"
 anyhow = "1.0.104"
 log = "0.4.34"
 serde.workspace = true
+# The settings store holds JSON values (settings.rs).
+serde_json.workspace = true
 grape-core.workspace = true
 grape-engines.workspace = true
 grape-platform.workspace = true
-
-[dev-dependencies]
-# Event payloads are checked against the UI's golden JSON (events.rs).
-serde_json.workspace = true
 
 [features]
 default = ["overlay-subclass"]
