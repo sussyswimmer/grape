@@ -14,16 +14,19 @@
 //!   erase it. Each item is read back from the disk right after its own
 //!   move, before the next one moves, and judged by
 //!   `crate::mac_rules::judge_move`.
+//! - Pick a folder (Settings): the same `NSOpenPanel` as Move's, with
+//!   "Choose" on its button.
 //!
 //! The panel, the alert and AirDrop are AppKit UI, so they run on the main
 //! thread: inline when the caller is on it, otherwise through the main
 //! queue, waiting for it. Grape is an accessory app that's rarely active,
-//! so it activates itself first, or they could open behind the frontmost
-//! window. Move then hands activation back to the app that was in front,
-//! whatever the user answered; Share does the same when AirDrop reports
-//! that it's done or was cancelled. The rest runs on the calling thread inside
-//! an autorelease pool. `open` runs as its own process with each path as
-//! its own argument, never through a shell.
+//! so Move and Share activate it first, or they could open behind the
+//! frontmost window. Move then hands activation back to the app that was in
+//! front, whatever the user answered; Share does the same when AirDrop
+//! reports that it's done or was cancelled. Settings' picker does neither:
+//! the Settings window is already key when the user asks for it. The rest
+//! runs on the calling thread inside an autorelease pool. `open` runs as its
+//! own process with each path as its own argument, never through a shell.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsString;
@@ -260,7 +263,10 @@ enum Answer<'a> {
 /// Asks for the folder, then whether to move to another volume if that's
 /// where it is.
 fn ask_where(paths: &[PathBuf]) -> Result<Answer<'_>, PlatformError> {
-    let Some(to) = on_main("the Move folder picker", |mtm| Ok(pick_folder(mtm, paths)))? else {
+    let picked = on_main("the Move folder picker", |mtm| {
+        Ok(pick_move_folder(mtm, paths))
+    })?;
+    let Some(to) = picked else {
         return Ok(Answer::Cancelled);
     };
     let sources: Vec<&Path> = paths
@@ -277,6 +283,20 @@ fn ask_where(paths: &[PathBuf]) -> Result<Answer<'_>, PlatformError> {
         return Ok(Answer::Cancelled);
     }
     Ok(Answer::Move { sources, to })
+}
+
+pub(crate) fn pick_folder(
+    _owner: Option<isize>,
+    title: &str,
+    start: Option<&Path>,
+) -> Result<Option<PathBuf>, PlatformError> {
+    // No owner here: the panel is modal to the whole app.
+    let start = start.filter(|dir| dir.is_dir());
+    // Settings is the key window already, so the panel opens in front of
+    // it: no activating, and nothing to hand back.
+    on_main("the folder picker", |mtm| {
+        Ok(folder_panel(mtm, "Choose", title, start))
+    })
 }
 
 pub(crate) fn haptic_tick() {
@@ -392,22 +412,31 @@ fn hand_back(mtm: MainThreadMarker, app: &NSRunningApplication) {
     }
 }
 
-/// The folder picker, starting next to the first item. `None` when the user
-/// cancels.
-fn pick_folder(mtm: MainThreadMarker, sources: &[PathBuf]) -> Option<PathBuf> {
+/// Move's folder picker, starting next to the first item. `None` when the
+/// user cancels.
+fn pick_move_folder(mtm: MainThreadMarker, sources: &[PathBuf]) -> Option<PathBuf> {
     activate(mtm);
+    let start = sources.first().and_then(|source| source.parent());
+    folder_panel(mtm, "Move Here", &picker_message(sources), start)
+}
+
+/// An open panel that picks one folder, with `prompt` on its button and
+/// `message` above the files, opening at `start` if there is one. Modal to
+/// the whole app. `None` when the user cancels.
+fn folder_panel(
+    mtm: MainThreadMarker,
+    prompt: &str,
+    message: &str,
+    start: Option<&Path>,
+) -> Option<PathBuf> {
     let panel = NSOpenPanel::openPanel(mtm);
     panel.setCanChooseDirectories(true);
     panel.setCanChooseFiles(false);
     panel.setAllowsMultipleSelection(false);
     panel.setCanCreateDirectories(true);
-    panel.setPrompt(Some(&NSString::from_str("Move Here")));
-    panel.setMessage(Some(&NSString::from_str(&picker_message(sources))));
-    if let Some(start) = sources
-        .first()
-        .and_then(|source| source.parent())
-        .and_then(NSURL::from_directory_path)
-    {
+    panel.setPrompt(Some(&NSString::from_str(prompt)));
+    panel.setMessage(Some(&NSString::from_str(message)));
+    if let Some(start) = start.and_then(NSURL::from_directory_path) {
         panel.setDirectoryURL(Some(&start));
     }
     if panel.runModal() != NSModalResponseOK {

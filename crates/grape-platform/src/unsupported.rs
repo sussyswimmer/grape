@@ -30,6 +30,14 @@ pub(crate) fn move_to_chosen_folder(_paths: &[PathBuf]) -> Result<MoveOutcome, P
     Err(PlatformError::Unsupported)
 }
 
+pub(crate) fn pick_folder(
+    _owner: Option<isize>,
+    _title: &str,
+    _start: Option<&Path>,
+) -> Result<Option<PathBuf>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
 pub(crate) fn share(_paths: &[PathBuf]) -> Result<(), PlatformError> {
     Err(PlatformError::Unsupported)
 }

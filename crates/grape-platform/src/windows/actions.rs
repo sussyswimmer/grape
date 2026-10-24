@@ -10,6 +10,8 @@
 //!   items with undo. Moving to another drive is confirmed first. What
 //!   moved is read back from the disk, with the shell's own reports (a
 //!   progress sink) as hints for where things went.
+//! - Pick a folder (Settings): the same `IFileOpenDialog` as Move's,
+//!   owned by the caller's window.
 //! - Reveal: `explorer.exe /select,"<path>"`.
 //! - Share: not yet (the Windows share sheet comes later).
 //!
@@ -148,19 +150,21 @@ pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
 
 pub(crate) fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
     let paths = paths.to_vec();
-    // The picker needs a single-threaded COM apartment. A thread of its own
-    // gets one whatever the caller's thread is.
-    let mover = thread::Builder::new()
-        .name("grape-move".to_owned())
-        .spawn(move || with_sta(|| choose_and_move(&paths)))
-        .map_err(|_| PlatformError::Os {
-            context: "start the move thread",
-            code: E_UNEXPECTED.0,
-        })?;
-    mover.join().unwrap_or(Err(PlatformError::Os {
-        context: "the move thread",
-        code: E_UNEXPECTED.0,
-    }))
+    on_sta_thread(&MOVE_THREAD, move || choose_and_move(&paths))
+}
+
+pub(crate) fn pick_folder(
+    owner: Option<isize>,
+    title: &str,
+    start: Option<&Path>,
+) -> Result<Option<PathBuf>, PlatformError> {
+    let title = title.to_owned();
+    let start = start.filter(|dir| dir.is_dir()).map(Path::to_path_buf);
+    on_sta_thread(&PICKER_THREAD, move || {
+        // The raw handle crosses threads as a number: an `HWND` can't.
+        let owner = owner.map(|raw| HWND(raw as *mut c_void));
+        folder_dialog(owner, &title, None, start.as_deref())
+    })
 }
 
 /// A `CF_HDROP` block: a `DROPFILES` header, then each path in UTF-16 with a
@@ -316,6 +320,51 @@ fn powershell_args(dir: &Path) -> [OsString; 3] {
     ]
 }
 
+/// A thread of Grape's own for a shell dialog, and how errors name it.
+struct DialogThread {
+    /// The thread's name.
+    name: &'static str,
+    /// The error context when the thread can't start.
+    start: &'static str,
+    /// The error context when the thread panics.
+    join: &'static str,
+}
+
+/// Move's thread: the folder picker, the question and the move.
+const MOVE_THREAD: DialogThread = DialogThread {
+    name: "grape-move",
+    start: "start the move thread",
+    join: "the move thread",
+};
+
+/// The thread of the folder picker on its own ([`pick_folder`]).
+const PICKER_THREAD: DialogThread = DialogThread {
+    name: "grape-pick-folder",
+    start: "start the folder picker thread",
+    join: "the folder picker thread",
+};
+
+/// Runs `work` on a new thread with COM initialized single-threaded there,
+/// and waits for it. The shell's dialogs need a single-threaded apartment,
+/// and a thread of their own gets one whatever the caller's thread is (a
+/// worker pool's thread may already be in the other kind).
+fn on_sta_thread<T: Send + 'static>(
+    which: &DialogThread,
+    work: impl FnOnce() -> Result<T, PlatformError> + Send + 'static,
+) -> Result<T, PlatformError> {
+    let worker = thread::Builder::new()
+        .name(which.name.to_owned())
+        .spawn(move || with_sta(work))
+        .map_err(|_| PlatformError::Os {
+            context: which.start,
+            code: E_UNEXPECTED.0,
+        })?;
+    worker.join().unwrap_or(Err(PlatformError::Os {
+        context: which.join,
+        code: E_UNEXPECTED.0,
+    }))
+}
+
 /// Runs `work` with COM initialized single-threaded on this thread.
 fn with_sta<T>(work: impl FnOnce() -> Result<T, PlatformError>) -> Result<T, PlatformError> {
     // SAFETY: no reserved pointer. Balanced by CoUninitialize below.
@@ -330,7 +379,7 @@ fn with_sta<T>(work: impl FnOnce() -> Result<T, PlatformError>) -> Result<T, Pla
 }
 
 fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
-    let Some(to) = pick_folder(sources)? else {
+    let Some(to) = pick_move_folder(sources)? else {
         return Ok(MoveOutcome::Cancelled);
     };
     let sources: Vec<&Path> = sources
@@ -347,16 +396,32 @@ fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
     move_items(&sources, &to)
 }
 
-/// The folder picker, starting next to the first item. `None` when the user
+/// Move's folder picker, starting next to the first item. `None` when the
+/// user closes it.
+fn pick_move_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
+    let start = sources.first().and_then(|source| source.parent());
+    folder_dialog(None, &picker_title(sources), Some(w!("Move here")), start)
+}
+
+/// The shell's folder picker, titled `title`, with `ok` on its OK button
+/// (the shell's own label when `None`), opening at `start`. It runs its own
+/// message loop on this STA thread, modal to `owner` when there is one:
+/// that window, on another thread, is disabled until it closes, and its
+/// thread must keep pumping messages meanwhile. `None` when the user
 /// closes it.
-fn pick_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
+fn folder_dialog(
+    owner: Option<HWND>,
+    title: &str,
+    ok: Option<PCWSTR>,
+    start: Option<&Path>,
+) -> Result<Option<PathBuf>, PlatformError> {
     // SAFETY: creates the shell's file dialog on this STA thread.
     let dialog: IFileOpenDialog =
         unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER) }
             .map_err(|err| os_err("CoCreateInstance(FileOpenDialog)", &err))?;
-    let title = HSTRING::from(picker_title(sources));
+    let title = HSTRING::from(title);
     // SAFETY: plain calls on a live dialog, with NUL-terminated strings that
-    // outlive them.
+    // outlive them (`ok` is a static `w!` literal).
     unsafe {
         let options = dialog
             .GetOptions()
@@ -367,20 +432,24 @@ fn pick_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
         dialog
             .SetTitle(&title)
             .map_err(|err| os_err("IFileDialog::SetTitle", &err))?;
-        dialog
-            .SetOkButtonLabel(w!("Move here"))
-            .map_err(|err| os_err("IFileDialog::SetOkButtonLabel", &err))?;
+        if let Some(ok) = ok {
+            dialog
+                .SetOkButtonLabel(ok)
+                .map_err(|err| os_err("IFileDialog::SetOkButtonLabel", &err))?;
+        }
         // A start folder that can't be opened leaves the dialog's own.
-        if let Some(parent) = sources.first().and_then(|source| source.parent()) {
-            let parent = HSTRING::from(parent.as_os_str());
-            if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&parent, None) {
+        if let Some(start) = start {
+            let start = HSTRING::from(start.as_os_str());
+            if let Ok(folder) = SHCreateItemFromParsingName::<_, _, IShellItem>(&start, None) {
                 let _ = dialog.SetFolder(&folder);
             }
         }
     }
-    // SAFETY: shows the modal dialog without an owner window; it runs its
-    // own message loop on this thread.
-    match unsafe { dialog.Show(None) } {
+    // SAFETY: shows the modal dialog, owned by `owner` or by no window. A
+    // window handle is a value the OS checks, not memory, so a stale one
+    // can only make the call fail. It runs its own message loop on this
+    // thread.
+    match unsafe { dialog.Show(owner) } {
         Ok(()) => {}
         Err(err) if err.code() == CANCELLED => return Ok(None),
         Err(err) => return Err(os_err("IFileDialog::Show", &err)),
@@ -832,6 +901,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    use ::windows::Win32::System::Com::{
+        CoGetApartmentType, APTTYPE, APTTYPEQUALIFIER, APTTYPE_MAINSTA, APTTYPE_STA,
+    };
     use ::windows::Win32::System::DataExchange::GetClipboardData;
     use ::windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
 
@@ -997,6 +1069,35 @@ mod tests {
         assert_eq!(
             args[2],
             "Set-Location -LiteralPath 'C:\\Max''s \u{2019}\u{2019}files'"
+        );
+    }
+
+    #[test]
+    fn a_dialog_thread_is_its_own_single_threaded_apartment() {
+        let seen = on_sta_thread(&PICKER_THREAD, || {
+            let mut kind = APTTYPE::default();
+            let mut qualifier = APTTYPEQUALIFIER::default();
+            // SAFETY: two live out-parameters on this thread's stack.
+            unsafe { CoGetApartmentType(&mut kind, &mut qualifier) }
+                .map_err(|err| os_err("CoGetApartmentType", &err))?;
+            Ok((thread::current().name().map(str::to_owned), kind))
+        })
+        .unwrap();
+        assert_eq!(seen.0.as_deref(), Some("grape-pick-folder"));
+        // The process's first STA is its main one.
+        assert!(seen.1 == APTTYPE_STA || seen.1 == APTTYPE_MAINSTA);
+    }
+
+    #[test]
+    fn a_dialog_thread_that_panics_is_an_error() {
+        let outcome: Result<(), PlatformError> =
+            on_sta_thread(&PICKER_THREAD, || panic!("the picker fell over"));
+        assert_eq!(
+            outcome,
+            Err(PlatformError::Os {
+                context: "the folder picker thread",
+                code: E_UNEXPECTED.0,
+            })
         );
     }
 

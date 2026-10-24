@@ -1,6 +1,7 @@
 //! File actions (`docs/TOOLS_AND_ACTIONS.md` → File actions): Copy, Copy
-//! Path, Terminal, Move and Share, plus Reveal for the toasts. Float lives
-//! in the app because it's a window.
+//! Path, Terminal, Move and Share, plus Reveal for the toasts and Move's
+//! folder picker on its own for Settings. Float lives in the app because
+//! it's a window.
 //!
 //! Only Move touches the originals, and only after the user picks a folder
 //! (golden rule 2). The others read paths and nothing else.
@@ -103,6 +104,36 @@ pub fn move_to_chosen_folder(paths: &[PathBuf]) -> Result<MoveOutcome, PlatformE
     imp::move_to_chosen_folder(paths)
 }
 
+/// Asks the user for a folder, for Settings: Move's folder picker, titled
+/// `title` (on macOS that's the panel's message, and its button says
+/// "Choose"), opening at `start` when that's an existing folder. Returns
+/// the folder's absolute path, or `Ok(None)` when the user cancels.
+/// Nothing on disk changes.
+///
+/// `owner` is the raw handle (`HWND.0 as isize`) of the window asking, on
+/// Windows: the picker is modal to it, so that window stays disabled
+/// behind it until the user is done. Other OSes ignore it.
+///
+/// Blocks until the user is done: call it from a worker thread, never the
+/// main thread or one the main thread is waiting for. On Windows the
+/// picker runs its own modal loop on a thread of its own, as Move's does,
+/// and the caller waits for that thread; the owner's thread (the main
+/// one) must keep pumping messages meanwhile, as the picker talks to its
+/// window. On macOS the panel runs on the main thread, so the caller waits
+/// for the main thread; it's modal to the whole app, and Grape isn't
+/// activated for it because the window asking is already in front.
+///
+/// # Errors
+/// [`PlatformError::Unsupported`] except on Windows and macOS, or an OS
+/// error if the picker couldn't open.
+pub fn pick_folder(
+    owner: Option<isize>,
+    title: &str,
+    start: Option<&Path>,
+) -> Result<Option<PathBuf>, PlatformError> {
+    imp::pick_folder(owner, title, start)
+}
+
 /// Shares the files. On macOS that's AirDrop: its window opens and the
 /// user picks a device there. That runs on the main thread, so the caller
 /// waits for it: never call this from a thread the main thread is waiting
@@ -147,6 +178,21 @@ mod tests {
         assert_eq!(share(&paths), Err(PlatformError::Unsupported));
         assert_eq!(
             reveal(Path::new("/a/b.png")),
+            Err(PlatformError::Unsupported)
+        );
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn the_folder_picker_is_unsupported_off_windows_and_macos() {
+        use super::*;
+
+        assert_eq!(
+            pick_folder(None, "Choose a folder", Some(Path::new("/a"))),
+            Err(PlatformError::Unsupported)
+        );
+        assert_eq!(
+            pick_folder(Some(1), "Choose a folder", None),
             Err(PlatformError::Unsupported)
         );
     }

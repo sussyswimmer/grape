@@ -16,7 +16,8 @@
 //! - `actions`: the file actions behind [`crate::file_actions`]: the general
 //!   pasteboard, Terminal, Finder, AirDrop and the Move panel (a volume's
 //!   root never moves, and each item is judged right after its own move);
-//!   and the haptic tick behind [`crate::haptic_tick`].
+//!   the same panel for Settings' folders; and the haptic tick behind
+//!   [`crate::haptic_tick`].
 //!
 //! Coordinates are points with the origin at the top-left of the primary
 //! (menu-bar) screen, y down; `DisplayBounds::scale` is always 1.0. The
@@ -38,7 +39,8 @@ pub use display::refresh_screens;
 pub use window::{describe_window, frame_and_show, harden_window, WindowRole};
 
 pub(crate) use actions::{
-    copy_files, copy_paths, haptic_tick, move_to_chosen_folder, open_terminal, reveal, share,
+    copy_files, copy_paths, haptic_tick, move_to_chosen_folder, open_terminal, pick_folder, reveal,
+    share,
 };
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};
