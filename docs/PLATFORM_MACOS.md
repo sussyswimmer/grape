@@ -42,7 +42,7 @@ If the drag pasteboard has no file URL type (text, browser images, promised file
 - Share: `NSSharingService(named: .sendViaAirDrop)?.perform(withItems: urls)` on the main thread, after activating Grape so the AirDrop window comes to the front. A delegate hands activation back to the app that was in front once AirDrop reports it's done, failed or was cancelled, unless an AirDrop window is still open; then Grape stays active until the user clicks elsewhere.
 - Copy: write `NSURL`s to `NSPasteboard.general` after `clearContents()`. Copy Path: the paths as one string, one per line.
 - Move: `NSOpenPanel` ("Move Here", directories only) on the main thread, then `FileManager.moveItem` on the action's own thread. It never overwrites: an item whose name is taken in the chosen folder stays where it was. A mounted volume's root (a USB stick, a DMG or a network share dragged from the Desktop or the sidebar) is never moved, because moving it would copy its contents and then erase them. There's no system undo for this, so moving to another volume asks "Move to another drive?" first, with Cancel as the default button. Grape activates itself for the panel and the alert, then hands activation back to the app that was in front. Each item's result is recorded right after its own move, and the toast says what moved and reveals it.
-- Terminal: `open -a Terminal <dir>`. (iTerm can be a setting later.)
+- Terminal: `open -a Terminal <dir>`, or `open -b com.googlecode.iterm2 <dir>` when the user chose iTerm2 in Settings and Launch Services finds it (otherwise Terminal, with a log line).
 - Reveal (toast click): `open -R <path>`.
 
 ## Conversions that use Apple frameworks

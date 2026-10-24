@@ -97,6 +97,12 @@ Settings, M6 (D19; use scratch copies of files)
 - [ ] Launch at login: a release build's first launch turns it on (win: Task Manager → Startup apps; mac: System Settings → General → Login Items). Turning it off removes it, and it stays off after a relaunch. `pnpm tauri dev` never registers itself.
 - [ ] mac: open Grape straight from the DMG (not Applications) on a fresh install → launch at login isn't turned on; after copying to Applications and launching there, it is, and the login item points at /Applications/Grape.app. A quarantined copy launched from Downloads (translocated) doesn't turn it on either.
 - [ ] Re-run "Shift-drop never deletes the source" ×10 (the Move picker code was shared with Settings).
+- [ ] First launch (no settings.json) → Settings opens by itself with the welcome card, which names your keys (Shift, then Ctrl/Alt on Windows; Shift, Command, Control on a Mac) and animates unless reduced motion is on. Close the window without "Got it" and relaunch → it opens again. Click "Got it" → the card goes, and the next launch doesn't open Settings.
+- [ ] With launch at login on and "Got it" not clicked, sign out and in → Grape starts, but Settings doesn't open.
+- [ ] Narrow Settings to its smallest width → each welcome step shows its picture beside its text, with nothing cut off.
+- [ ] mac: VoiceOver reads the welcome steps as "list, 3 items".
+- [ ] win: Terminal set to PowerShell → Alt-drop on TERMINAL opens PowerShell in the folder, not Windows Terminal. Set back to Windows Terminal → Windows Terminal opens.
+- [ ] mac: Terminal set to iTerm2 with iTerm2 installed → Control-drop on TERMINAL opens iTerm2 in the folder. Uninstall iTerm2 (or pick it without it installed) → Terminal opens, and the log says why.
 
 macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Grape shows only in the menu bar: no Dock icon, no Cmd-Tab entry. Opening Grape.app again from Applications opens Settings.

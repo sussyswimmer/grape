@@ -47,7 +47,7 @@
 - `display_bounds_at(x, y) -> Result<DisplayBounds, PlatformError>`: the monitor under the point, as `DisplayBounds { monitor: Rect, work_area: Rect, scale: f64 }` in global coordinates. Those are physical pixels on Windows (`rcMonitor`, `rcWork`). On macOS they're points from the top-left of the primary screen, with `scale` 1.0, read from a screen cache that the main thread refreshes, with a CoreGraphics fallback (D18). The overlay is sized to `monitor`, and the anchor is clamped to `work_area`.
 - `windows::install_drop_target(hwnd, sink)`: Grape's own `IDropTarget` on the overlay and its child windows. It sends `DropEvent::{Enter{paths,x,y}, Over{x,y}, Leave, Drop{paths,x,y}}` and never reports a move (`DECISIONS.md` D13).
 - `macos::{harden_window, frame_and_show, describe_window}` (main thread only): the overlay's and the toast's NSWindow level, Spaces behavior, and a show that never makes the window key (D18).
-- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir)`, `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}` and `reveal(path)`. `share(paths)` is AirDrop on macOS. Each returns `Unsupported` where it isn't built yet (Share on Windows, everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
+- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir, app)` (the `terminal_app` setting), `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}` and `reveal(path)`. `share(paths)` is AirDrop on macOS. Each returns `Unsupported` where it isn't built yet (Share on Windows, everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
 - `haptic_tick()`: a light trackpad tick on macOS, a no-op elsewhere.
 - `file_actions::pick_folder(owner, title, start)`: the native folder picker for Settings, sharing Move's code. It runs on a blocking worker thread (D19).
 - See `PLATFORM_MACOS.md` / `PLATFORM_WINDOWS.md`.
@@ -104,7 +104,8 @@ Stored in `settings.json` in the app's data folder by `tauri-plugin-store` (D19)
 | `sounds` | on | the highlight tick |
 | `haptics` | on (mac) | the trackpad tick, separate from `sounds` |
 | `launch_at_login` | on | the user's choice. A release build turns it on at first launch (D19). |
-| `terminal_app` | Terminal / Windows Terminal | iTerm2, PowerShell |
+| `terminal_app` | Terminal / Windows Terminal | `"terminal"` or `"iterm2"` on macOS, `"windows_terminal"` or `"powershell"` on Windows |
+| `onboarding.done` | absent | `true` once the welcome card's "Got it" is clicked; until then Settings opens at launch (not at login) |
 | `features.v2` | off | dev toggle until v2 ships |
 
 ## Error model
