@@ -1,3 +1,7 @@
+/*
+ * The Settings window: the header, one card per section, and the offline
+ * note. Grape's palette only, via tokens.css.
+ */
 html,
 body {
   margin: 0;
@@ -47,31 +51,281 @@ body {
 }
 
 .lead {
-  margin: 0 0 1.25rem;
+  margin: 0 0 1rem;
 }
 
-h2 {
-  margin: 0 0 0.5rem;
-  font-size: 1rem;
-  font-weight: 600;
+/* Flex and grid rows below would otherwise beat the hidden attribute. */
+[hidden] {
+  display: none !important;
 }
 
-.planned {
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+/*
+ * Errors, under the sections. Always in the page (an empty live region
+ * takes no room); with text, it sticks to the window's bottom edge so it
+ * stays in view however far the page is scrolled.
+ */
+.settings-status {
+  position: sticky;
+  bottom: 0.75rem;
   margin: 0 0 1.25rem;
-  padding: 0.75rem 1rem;
-  list-style: none;
+  padding: 0.5rem 0.75rem;
+  color: var(--color-error);
+  font-weight: 550;
+  background: var(--color-surface);
+  border: 1px solid var(--color-error);
+  border-radius: 8px;
+  box-shadow: 0 1px 4px var(--shadow-soft);
+}
+
+.settings-status:empty {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  box-shadow: none;
+}
+
+.settings-sections {
+  display: grid;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+
+.settings-section {
+  padding: 0.875rem 1rem 1rem;
   background: var(--color-surface);
   border: 1px solid var(--color-border);
   border-radius: 10px;
 }
 
-.planned li + li {
-  margin-top: 0.4rem;
+.section-title {
+  margin: 0 0 0.75rem;
+  font-size: 1rem;
+  font-weight: 600;
 }
 
-.planned strong {
+/* A hint sits between the title and the controls. */
+.section-title:has(+ .section-hint) {
+  margin-bottom: 0;
+}
+
+.section-hint {
+  margin: 0.15rem 0 0.75rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+/* Keys: a label and its select on one line. */
+.field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.field + .field {
+  margin-top: 0.5rem;
+}
+
+.field-select,
+.button {
+  min-height: 2rem;
+  padding: 0.25rem 0.65rem;
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.field-select {
+  min-width: 9rem;
+}
+
+.button:hover {
+  border-color: var(--color-accent);
+}
+
+.button:active {
+  background: var(--track-fill);
+}
+
+/* The key-swap note. */
+.settings-note {
+  margin: 0.75rem 0 0;
   color: var(--color-accent);
-  font-weight: 600;
+  font-size: 0.875rem;
+  font-weight: 550;
+}
+
+.settings-note:empty {
+  margin: 0;
+}
+
+/* Where files go: two radios, the folder row under the second. */
+.choices {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.choice {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 0.5rem;
+}
+
+.choice-input {
+  width: 1rem;
+  height: 1rem;
+  margin: 0;
+  accent-color: var(--color-accent);
+}
+
+.folder-row {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+}
+
+/* Paths are long and have few spaces: let them break anywhere. */
+.folder-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+}
+
+/* The output folder's Choose… button sits at the row's end. */
+.folder-row .button {
+  margin-left: auto;
+}
+
+.folder-badge {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.folder-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+/* On/off rows: text on the left, the switch on the right. */
+.toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.toggle + .toggle {
+  margin-top: 0.65rem;
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.toggle-label {
+  font-weight: 550;
+}
+
+.toggle-detail {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+/*
+ * A checkbox drawn as a switch (role="switch"). The outline and the knob
+ * use the muted text color, so the off state stays visible on the surface.
+ */
+.toggle-switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 2.25rem;
+  height: 1.25rem;
+  margin: 0;
+  background: var(--color-bg);
+  border: 1px solid var(--color-text-muted);
+  border-radius: 999px;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease;
+}
+
+.toggle-switch::before {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(1.25rem - 6px);
+  height: calc(1.25rem - 6px);
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  transition: transform 120ms ease;
+}
+
+.toggle-switch:checked {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.toggle-switch:checked::before {
+  background: var(--color-on-accent);
+  transform: translateX(1rem);
+}
+
+/* Its state couldn't be read: aria-disabled, so it keeps focus and stays in the Tab order. */
+.toggle-switch[aria-disabled="true"] {
+  opacity: 0.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toggle-switch,
+  .toggle-switch::before {
+    transition: none;
+  }
+}
+
+/* High contrast on Windows: draw the switch in the system's colors. */
+@media (forced-colors: active) {
+  .toggle-switch,
+  .toggle-switch::before {
+    forced-color-adjust: none;
+  }
+
+  .toggle-switch {
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .toggle-switch::before {
+    background: CanvasText;
+  }
+
+  .toggle-switch:checked {
+    background: Highlight;
+    border-color: Highlight;
+  }
+
+  .toggle-switch:checked::before {
+    background: HighlightText;
+  }
+
+  .toggle-switch[aria-disabled="true"] {
+    border-color: GrayText;
+  }
 }
 
 .note {

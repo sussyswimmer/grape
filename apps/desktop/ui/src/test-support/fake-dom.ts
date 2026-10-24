@@ -1,8 +1,10 @@
 /**
  * A tiny stand-in for the DOM, just big enough for the wheel and toast
- * renderers, so their tests run in Node without a new dependency. It
- * models elements, attributes, classes, inline style, children, text and
- * click listeners; nothing else. Test code only.
+ * renderers and the settings page, so their tests run in Node without a
+ * new dependency. It models elements, attributes, classes, inline style,
+ * children, text, listeners, focus, and a form control's `value` and
+ * `checked` (plain fields: a test sets them, then dispatches `change`);
+ * nothing else. Test code only.
  */
 
 export class FakeClassList {
@@ -59,6 +61,8 @@ export class FakeElement {
   readonly listeners = new Map<string, Listener[]>();
   children: FakeElement[] = [];
   parent: FakeElement | null = null;
+  value = "";
+  checked = false;
   private text = "";
 
   constructor(
@@ -131,6 +135,10 @@ export class FakeElement {
     this.listeners.set(type, list);
   }
 
+  focus(): void {
+    this.ownerDocument.activeElement = this;
+  }
+
   removeEventListener(type: string, listener: Listener): void {
     const list = this.listeners.get(type) ?? [];
     this.listeners.set(
@@ -139,11 +147,14 @@ export class FakeElement {
     );
   }
 
-  /** Test helper: fires `type` on this element and every ancestor (bubbling). */
-  dispatch(type: string): void {
+  /**
+   * Test helper: fires `type` on this element and every ancestor
+   * (bubbling). `fields` go on the event, e.g. `{ key: "Enter" }`.
+   */
+  dispatch(type: string, fields: Readonly<Record<string, unknown>> = {}): void {
     let node: FakeElement | null = this;
     while (node !== null) {
-      for (const listener of node.listeners.get(type) ?? []) listener({ type });
+      for (const listener of node.listeners.get(type) ?? []) listener({ ...fields, type });
       node = node.parent;
     }
   }
@@ -151,6 +162,7 @@ export class FakeElement {
 
 export class FakeDocument {
   readonly defaultView = null;
+  activeElement: FakeElement | null = null;
 
   createElementNS(namespaceURI: string, name: string): FakeElement {
     return new FakeElement(this, namespaceURI, name);
@@ -180,6 +192,16 @@ export function byTag(element: FakeElement, name: string): FakeElement[] {
 /** Descendants with this class. */
 export function byClass(element: FakeElement, name: string): FakeElement[] {
   return descendants(element).filter((node) => node.classList.contains(name));
+}
+
+/** The only descendant with this id; throws otherwise. */
+export function byId(element: FakeElement, id: string): FakeElement {
+  const found = descendants(element).filter((node) => node.getAttribute("id") === id);
+  const [only] = found;
+  if (found.length !== 1 || only === undefined) {
+    throw new Error(`expected one #${id}, found ${found.length}`);
+  }
+  return only;
 }
 
 /** The only descendant with this class; throws otherwise. */

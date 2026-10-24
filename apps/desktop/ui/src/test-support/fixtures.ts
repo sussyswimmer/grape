@@ -9,6 +9,7 @@ import {
   type ToastShowPayload,
   type WheelOpenPayload,
 } from "../shared/events";
+import { isSettingsView, type SettingsView } from "../settings/model";
 
 const raw = import.meta.glob<string>("../shared/fixtures/*.json", {
   query: "?raw",
@@ -39,6 +40,15 @@ export function toastFixture(name: string): ToastShowPayload {
   const value = fixtureJson(name);
   if (!isToastShowPayload(value)) {
     throw new Error(`${name} is not a toast://show payload`);
+  }
+  return value;
+}
+
+/** A `SettingsView` fixture, guarded. */
+export function settingsFixture(name: string): SettingsView {
+  const value = fixtureJson(name);
+  if (!isSettingsView(value)) {
+    throw new Error(`${name} is not a SettingsView`);
   }
   return value;
 }

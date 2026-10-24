@@ -10,6 +10,7 @@ The TypeScript UI for Grape's windows: the wheel **overlay**, **settings**, and 
 ## The UI never decides behavior
 - Rust owns the state machine (`docs/INTERACTION_SPEC.md` §1), the hit test and the job runner. The UI renders what Rust sends and reports drops back.
 - Events in: `wheel://open`, `wheel://highlight`, `wheel://close`, `toast://show`, `toast://hide`, as specified in `docs/design/m1-drag-wheel.md` §C. The golden JSON in `src/shared/fixtures/` is shared with the Rust tests. Out: the `wheel_painted(seq)` command after each wheel render (`docs/DECISIONS.md` D15), and `toast_clicked(id)` when a revealable toast is clicked. Types and runtime guards live in `src/shared/events.ts`; every payload is guarded before use.
+- Settings (`src/settings/`): each change is one `settings_*` command, and Rust answers with the whole `SettingsView` (or rejects with a short sentence the page shows). `isSettingsView` in `src/settings/model.ts` guards every answer against the golden `settings-view-*.json`. Rust swaps keys, opens the folder pickers and stores everything; the page never sends a path and has no Save button.
 - **No pointer events arrive during an OS drag.** Highlighting is driven by `wheel://highlight`, which comes from the drop target's `Over` positions. Don't use DOM `pointermove`. The UI can't re-check the rounded corners with `isPointInFill`, so `grape_core::hit_test` honors them itself (§4); `src/wheel/geometry.ts` draws the same shape.
 - Geometry comes from `grape-core`: the segments in `wheel://open`, and the exported `GEOMETRY` constants. Never hard-code radii, gaps or angles here.
 
@@ -29,7 +30,7 @@ The TypeScript UI for Grape's windows: the wheel **overlay**, **settings**, and 
 - Webview permissions live in `src-tauri/capabilities/`. Ask for the narrowest permission that works.
 
 ## Tests (Vitest)
-Cover: segment path generation, label placement, empty-state messages, and key-name substitution. These are pure functions, so they don't need a DOM environment.
+Cover: segment path generation, label placement, empty-state messages, and key-name substitution. These are pure functions, so they don't need a DOM environment. The renderers (wheel, toast, settings) run against the small stand-in DOM in `src/test-support/fake-dom.ts`.
 
 ## Commands
 ```bash

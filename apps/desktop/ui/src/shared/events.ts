@@ -10,6 +10,8 @@
  * drawing a half-broken wheel.
  */
 
+import { type Fields, hasExactKeys, isOneOf } from "./guards";
+
 // ---------------------------------------------------------------------------
 // Types (§C, verbatim)
 // ---------------------------------------------------------------------------
@@ -80,21 +82,6 @@ const TOAST_TONES: readonly ToastTone[] = ["working", "done", "error", "info"];
 // Guard helpers
 // ---------------------------------------------------------------------------
 
-type Fields = Readonly<Record<string, unknown>>;
-
-/**
- * True when `value` is a plain object with exactly these keys: none
- * missing, none extra. The Rust structs serialize every field (an `Option`
- * becomes `null`), so an unknown key means the two sides drifted apart.
- */
-function hasExactKeys(value: unknown, keys: readonly string[]): value is Fields {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-  const own = Object.keys(value);
-  return own.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -102,10 +89,6 @@ function isFiniteNumber(value: unknown): value is number {
 /** A Rust `u64`/`usize` that survived JSON: a non-negative safe integer. */
 function isCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function isOneOf<T extends string>(value: unknown, options: readonly T[]): value is T {
-  return typeof value === "string" && (options as readonly string[]).includes(value);
 }
 
 function isPoint(value: unknown): value is Point {
