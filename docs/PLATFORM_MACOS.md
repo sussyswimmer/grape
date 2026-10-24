@@ -35,7 +35,7 @@ If the drag pasteboard has no file URL type (text, browser images, promised file
 - **The toast** has `dragDropEnabled` too, so wry accepts a file dropped on it as a copy and nothing happens; the file is never moved. While a wheel is open, the overlay covers it.
 
 ## Haptics and sound
-- Tick: `NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)`, as `grape_platform::haptic_tick()`, on each new highlighted segment while sounds are on.
+- Tick: `NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)`, as `grape_platform::haptic_tick()`, on each new highlighted segment while the "haptics" setting is on (D19).
 - Sound: play our own short tick via `NSSound` (preloaded) or WebAudio in the overlay. It must start within 10 ms.
 
 ## File actions

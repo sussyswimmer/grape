@@ -75,7 +75,9 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 *Status 2026-10-22:* copy, copyPath, terminal and move are built, with toasts. CI's Windows runner checks the clipboard contents and a real shell move. The picker, the terminals and undo still need the PC (`TESTING.md` → "File actions, M5"). Share and float aren't started.
 
 ## M6: Settings + polish (lane A)
-- [ ] Key remapping with conflict detection (defaults Shift / Ctrl / Alt). Output location and fallback. Sounds toggle. Launch at login.
+*Status 2026-10-24:* the first slice is built (D19): keys with swap-on-conflict, output location and fallback folder, sounds, haptics on macOS, and launch at login, all saved and applied at once. CI checks it; nothing has run on the PC or a Mac yet (`TESTING.md` → "Settings, M6").
+- [x] Key remapping with conflict detection (defaults Shift / Ctrl / Alt). Output location and fallback. Sounds toggle. Launch at login.
+- [ ] Terminal app choice (`terminal_app`).
 - [ ] Pause Grape (tray). First-run onboarding: a 3-step animated "drag, tap, drop" card in Grape's own style.
 - [ ] Reduce Motion, light/dark glass following the Windows theme, accessibility labels.
 

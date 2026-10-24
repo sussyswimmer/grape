@@ -49,6 +49,7 @@
 - `macos::{harden_window, frame_and_show, describe_window}` (main thread only): the overlay's and the toast's NSWindow level, Spaces behavior, and a show that never makes the window key (D18).
 - `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir)`, `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}` and `reveal(path)`. `share(paths)` is AirDrop on macOS. Each returns `Unsupported` where it isn't built yet (Share on Windows, everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
 - `haptic_tick()`: a light trackpad tick on macOS, a no-op elsewhere.
+- `file_actions::pick_folder(owner, title, start)`: the native folder picker for Settings, sharing Move's code. It runs on a blocking worker thread (D19).
 - See `PLATFORM_MACOS.md` / `PLATFORM_WINDOWS.md`.
 
 ### `apps/desktop/src-tauri` (the app)
@@ -91,16 +92,18 @@ Plan:
 
 ## Settings (persisted)
 
+Stored in `settings.json` in the app's data folder by `tauri-plugin-store` (D19). The app's `settings.rs` owns the model, and the Settings window changes it only through the `settings_*` commands.
+
 | Key | Default | Notes |
 |---|---|---|
-| `keys.conversions` | Shift | |
+| `keys.conversions` | Shift | `"shift"`, `"ctrl"`, `"alt"` or `"meta"`. The three keys are always different. Windows never offers `meta`. |
 | `keys.tools` | Command / Ctrl | |
 | `keys.actions` | Control / Alt | |
-| `output.location` | `next_to_source` | or a fixed folder |
-| `output.fallback_dir` | `~/Downloads/Grape` | used when the source folder isn't writable |
-| `sounds` | on | |
-| `haptics` | on (mac) | |
-| `launch_at_login` | on | |
+| `output.location` | `next_to_source` | or an absolute folder path |
+| `output.fallback_dir` | `~/Downloads/Grape` | used when the destination isn't writable. Absent means the default. A chosen folder is used only while it exists. |
+| `sounds` | on | the highlight tick |
+| `haptics` | on (mac) | the trackpad tick, separate from `sounds` |
+| `launch_at_login` | on | the user's choice. A release build turns it on at first launch (D19). |
 | `terminal_app` | Terminal / Windows Terminal | iTerm2, PowerShell |
 | `features.v2` | off | dev toggle until v2 ships |
 

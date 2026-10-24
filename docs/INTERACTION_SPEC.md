@@ -29,6 +29,7 @@ WheelOpen(mode)
 - **[observed]** The user can release the key and keep dragging. The wheel stays open until drop or cancel.
 - **[Grape]** On Windows the defaults are Shift / Ctrl / Alt, because the Windows key opens the Start menu.
 - **[Grape]** The wheel opens on **key-down** during an active drag. The user can tap (press and release) or keep holding; both work. Some apps, like Explorer, change the drag's drop effect while a modifier is held. That stops mattering because the drop then lands on Grape's overlay (see `PLATFORM_WINDOWS.md`).
+- **[Grape]** Keys are remappable in Settings. The three wheels always use three different keys: choosing a key another wheel uses swaps the two (D19). Windows never offers the Windows key.
 - **[Grape]** A key already held when the drag starts isn't a key-down: holding Shift before dragging keeps Explorer's "move" and opens no wheel. Releasing it and pressing it again during the drag does (`DECISIONS.md` D14).
 - **[observed]** The wheel only counts as active after the pointer has moved more than 4 px since mouse-down. Grape uses `GetSystemMetrics(SM_CXDRAG/SM_CYDRAG)` on Windows. On macOS the drag counts as started once AppKit's own file drag session exists, which already needs the pointer to move (`PLATFORM_MACOS.md`).
 
@@ -66,7 +67,7 @@ These are Grape's values, in points/DIPs at 1Ã— scale. The site's values were â‰
   - Conversions or Actions empty: "No conversions for this format. Tap {actions key} for file actions."
   - Tools empty: "No editing tools for this format. Tap {conversions key} to convert or {actions key} for file actions."
   - **[Grape]** Use the user's *current* key names in these messages. Write the copy in our own words.
-- **[Grape]** On macOS, also trigger a light trackpad haptic on segment change (`NSHapticFeedbackManager`). Respect the "sounds" setting.
+- **[Grape]** On macOS, also trigger a light trackpad haptic on segment change (`NSHapticFeedbackManager`). It has its own "haptics" setting (D19).
 - **[Grape]** Honor Reduce Motion: no scale or opacity animation, the wheel just appears.
 
 ## 6. Dropping

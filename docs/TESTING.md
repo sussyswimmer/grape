@@ -80,6 +80,24 @@ File actions, M5 (win; use scratch copies of files)
 - [ ] win: Move to a folder on another drive (a USB stick) → Grape first asks "Move to another drive?" with No as the default. No → nothing moves. Yes → the items move.
 - [ ] win: Share and Float → a "Not in this build yet" toast, and nothing else happens.
 
+Settings, M6 (D19; use scratch copies of files)
+- [ ] Open Settings from the tray (the menu bar on a Mac) → it shows each wheel's key, where files go, the fallback folder, Sounds and Launch at login. The Windows key is never offered. A Mac also has Haptics and offers Shift, Control, Option and Command.
+- [ ] Set Conversions to the Tools key → Settings says the two swapped ("Ctrl now opens Conversions, and Shift opens Tools." on Windows). The next drag opens Conversions with the new key, and an empty wheel names the new keys.
+- [ ] win: with the keyboard, tab to a key list and press Down twice, pausing a few seconds between presses → nothing changes until you press Enter or Tab away; then only the final choice is applied (one swap note), and the third wheel's key is unchanged unless you chose it. A pick from the open list with the mouse applies at once.
+- [ ] win: step a key list with the keyboard and close Settings without leaving it → reopen Settings: the key you stepped to is applied.
+- [ ] With a screen reader (Narrator or VoiceOver): every control is announced with its label, the swap note and errors are read out, and Launch at login reads "Couldn't check" when its state is unknown, and can still be reached with Tab.
+- [ ] "In a folder I choose" → the folder picker opens in front of Settings (on Windows, Settings is disabled behind it). Cancel → nothing changes. Pick a folder → its path shows, and the next conversion writes there; the original stays put.
+- [ ] Fallback "Choose…" and "Use the default" → the path and "(default)" update. With a read-only source folder, the output lands in the chosen fallback. Delete the chosen fallback folder, then convert from a read-only folder → the output lands in `Downloads/Grape` and the deleted folder isn't recreated.
+- [ ] Sounds off → no tick. mac: Haptics off → no trackpad tick, even with Sounds on; Haptics on with Sounds off → the trackpad tick still comes.
+- [ ] Quit and relaunch → every setting is kept (`%APPDATA%\io.github.sussyswimmer.grape\settings.json` on Windows, `~/Library/Application Support/io.github.sussyswimmer.grape/settings.json` on a Mac).
+- [ ] Quit, write `not json` into settings.json, relaunch → Grape starts on the defaults, `settings.unreadable.json` holds the old file, and the log names neither the file's contents nor any setting's value. Do it again → the next one is `settings.unreadable 2.json`, and the first is untouched.
+- [ ] Release build with Launch at login off: quit, break settings.json as above, relaunch twice → launch at login stays off both times.
+- [ ] win: deny Delete on settings.json in its Security settings, write invalid JSON into it, launch and quit → the file is byte-for-byte unchanged, and the log says it was left as it is and changes won't be saved.
+- [ ] Release build: put `"launch_at_login": "off"` (a string) in settings.json → autostart is left as it is, and the log says why.
+- [ ] Launch at login: a release build's first launch turns it on (win: Task Manager → Startup apps; mac: System Settings → General → Login Items). Turning it off removes it, and it stays off after a relaunch. `pnpm tauri dev` never registers itself.
+- [ ] mac: open Grape straight from the DMG (not Applications) on a fresh install → launch at login isn't turned on; after copying to Applications and launching there, it is, and the login item points at /Applications/Grape.app. A quarantined copy launched from Downloads (translocated) doesn't turn it on either.
+- [ ] Re-run "Shift-drop never deletes the source" ×10 (the Move picker code was shared with Settings).
+
 macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Grape shows only in the menu bar: no Dock icon, no Cmd-Tab entry. Opening Grape.app again from Applications opens Settings.
 - [ ] mac: no permission prompt appears at launch or during a drag (no Accessibility, Input Monitoring, Screen Recording or "paste from" prompt). Note any "access files in your Desktop/Documents folder" prompt and what triggered it.

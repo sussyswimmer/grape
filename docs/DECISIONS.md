@@ -196,6 +196,21 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Tested:** CI only, until Maxwell runs the DMG on a Mac. Every Mac behavior that CI can't check has a `mac:` line in `TESTING.md`.
 - **Revisit if:** the Mac work starts slowing Windows v1 down.
 
+## D19: Settings, first slice (2026-10-24, proposed, confirm)
+- **Decision:** the Settings window (M6) shows real settings. Every change applies at once (no Save button) and is saved in `settings.json` in the app's data folder through `tauri-plugin-store`, with the keys in `ARCHITECTURE.md` → Settings.
+  - **Keys.** Each wheel's key is a choice of Shift, Ctrl and Alt on Windows (never the Windows key, which opens Start), and Shift, Control, Option and Command on macOS. The three wheels always have three different keys: choosing one another wheel uses swaps the two, and Settings says so ("Ctrl now opens Conversions, and Shift opens Tools."). The controller takes the new keys for the next modifier; an open wheel isn't touched.
+  - **Where files go.** Next to the original, or a folder the user picks in the native folder picker (`grape_platform::file_actions::pick_folder`, the same picker Move uses). The fallback folder can be picked too. A picked fallback folder is used only while it exists, so the engines still only ever create Grape's own `Downloads/Grape`.
+  - **Sounds and haptics** are separate settings now; haptics is macOS only.
+  - **Launch at login** uses `tauri-plugin-autostart`. ARCHITECTURE's default is on, so a release build turns it on at its first launch when nothing is stored. Debug builds never do this on their own, and macOS skips it when Grape runs from the DMG or a translocated copy. Settings shows the real state.
+  - **Bad settings never cost the user's file.** A missing or unusable value falls back to its default, with a log line that names the key but never the value. A `settings.json` that can't be read is moved aside as `settings.unreadable.json` before anything can write over it.
+  - The UI never sends a path: folders are always picked on the Rust side. The commands are granted to the Settings window only.
+  - Not in this slice: `terminal_app`, `features.v2`, first-run onboarding (stored values are left alone).
+- **New dependencies:**
+  - Direct, pinned exactly: `tauri-plugin-store` 2.5.0 and `tauri-plugin-autostart` 2.7.0 (both Apache-2.0 OR MIT).
+  - New in `Cargo.lock`: `auto-launch` 0.6.0, `smappservice-rs` 0.1.3, `os_info` 3.15.0, `nix` 0.31.3, `cfg_aliases` 0.2.2 and `tokio-macros` 2.7.2 (MIT); `dirs` 6.0.0 and `windows-registry` 0.6.1 (MIT OR Apache-2.0); `objc2-service-management` 0.3.2 and `objc2-security` 0.3.2 (Zlib OR Apache-2.0 OR MIT).
+  - All were published more than 14 days ago (D9). `dirs` 6 reuses the `option-ext` that O6 already covers.
+- **Revisit if:** remapping should allow two keys at once, or Maxwell wants launch at login off by default.
+
 ---
 
 ## Open questions
