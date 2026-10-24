@@ -7,16 +7,25 @@ import {
   GENERIC_ERROR,
   isKeyId,
   isSettingsView,
+  isTerminalId,
+  keyNames,
   leadText,
   outputFolder,
+  SETTINGS_DISMISS_WELCOME,
   SETTINGS_GET,
   SETTINGS_PICK_FOLDER,
   SETTINGS_SET_KEY,
   SETTINGS_SET_OUTPUT_NEXT_TO_SOURCE,
+  SETTINGS_SET_TERMINAL,
   SETTINGS_SET_TOGGLE,
   SETTINGS_USE_DEFAULT_FALLBACK,
+  type SettingsView,
+  terminalHint,
+  terminalSignature,
   toggleRows,
   UNKNOWN_STATE,
+  WELCOME_COPY,
+  welcomeSteps,
   WHEEL_LABELS,
   WHEELS,
 } from "./model";
@@ -50,6 +59,8 @@ describe("command names", () => {
     expect(SETTINGS_PICK_FOLDER).toBe("settings_pick_folder");
     expect(SETTINGS_USE_DEFAULT_FALLBACK).toBe("settings_use_default_fallback");
     expect(SETTINGS_SET_TOGGLE).toBe("settings_set_toggle");
+    expect(SETTINGS_SET_TERMINAL).toBe("settings_set_terminal");
+    expect(SETTINGS_DISMISS_WELCOME).toBe("settings_dismiss_welcome");
   });
 });
 
@@ -78,6 +89,14 @@ describe("golden views", () => {
     expect(windows.haptics).toBeNull();
     expect(windows.launchAtLogin).toBe(true);
     expect(windows.note).toBeNull();
+    expect(windows.terminal).toEqual({
+      choice: "windowsTerminal",
+      choices: [
+        { id: "windowsTerminal", name: "Windows Terminal" },
+        { id: "powershell", name: "PowerShell" },
+      ],
+    });
+    expect(windows.welcome).toBe(true);
   });
 
   it("reads the macOS view", () => {
@@ -95,6 +114,14 @@ describe("golden views", () => {
     expect(macos.haptics).toBe(true);
     expect(macos.launchAtLogin).toBeNull();
     expect(macos.note).toBe("Command now opens Conversions, and Shift opens Tools.");
+    expect(macos.terminal).toEqual({
+      choice: "iterm2",
+      choices: [
+        { id: "terminal", name: "Terminal" },
+        { id: "iterm2", name: "iTerm2" },
+      ],
+    });
+    expect(macos.welcome).toBe(false);
   });
 });
 
@@ -105,7 +132,7 @@ describe("malformed views fail", () => {
     it.each(paths(value).map((path) => [path.join(".")] as const))("without %s", (dotted) => {
       const path = paths(value).find((candidate) => candidate.join(".") === dotted);
       if (path === undefined) throw new Error(dotted);
-      // Removing a key choice is a semantic case (below), not a missing field.
+      // Removing a key or terminal choice is a semantic case (below), not a missing field.
       if (typeof path[path.length - 1] === "number") return;
       expect(isSettingsView(mutate(value, path, undefined))).toBe(false);
     });
@@ -148,6 +175,11 @@ describe("semantic checks", () => {
     expect(isSettingsView(mutate(win, ["keyChoices", 0, "key"], "capsLock"))).toBe(false);
     expect(isSettingsView(mutate(win, ["output", "kind"], "nextToOriginal"))).toBe(false);
     expect(isSettingsView(mutate(mac, ["output", "kind"], "Folder"))).toBe(false);
+    // Rust's ids, not the store's snake case or the display name.
+    expect(isSettingsView(mutate(win, ["terminal", "choice"], "windows_terminal"))).toBe(false);
+    expect(isSettingsView(mutate(win, ["terminal", "choice"], "PowerShell"))).toBe(false);
+    expect(isSettingsView(mutate(win, ["terminal", "choices", 1, "id"], "cmd"))).toBe(false);
+    expect(isSettingsView(mutate(mac, ["terminal", "choices", 0, "id"], "iTerm2"))).toBe(false);
   });
 
   it("rejects two wheels on one key", () => {
@@ -181,6 +213,45 @@ describe("semantic checks", () => {
       isSettingsView(mutate(win, ["keyChoices", 1], { key: "shift", name: "Shift again" })),
     ).toBe(false);
     expect(isSettingsView(mutate(win, ["keyChoices", 1, "name"], ""))).toBe(false);
+  });
+
+  it("rejects a terminal app that isn't one of its choices", () => {
+    // Known ids, but not offered here.
+    expect(isSettingsView(mutate(win, ["terminal", "choice"], "iterm2"))).toBe(false);
+    expect(isSettingsView(mutate(mac, ["terminal", "choice"], "powershell"))).toBe(false);
+    // macOS without its iTerm2 choice, while iTerm2 is picked.
+    const choices = get(mac, ["terminal", "choices"]) as Json[];
+    expect(isSettingsView(mutate(mac, ["terminal", "choices"], choices.slice(0, 1)))).toBe(false);
+  });
+
+  it("accepts the terminal choices in any order, and one alone", () => {
+    const choices = get(win, ["terminal", "choices"]) as Json[];
+    expect(isSettingsView(mutate(win, ["terminal", "choices"], [...choices].reverse()))).toBe(true);
+    expect(isSettingsView(mutate(win, ["terminal", "choices"], choices.slice(0, 1)))).toBe(true);
+    expect(isSettingsView(mutate(win, ["terminal", "choice"], "powershell"))).toBe(true);
+  });
+
+  it("rejects empty or repeated terminal choices and empty names", () => {
+    expect(isSettingsView(mutate(win, ["terminal", "choices"], []))).toBe(false);
+    const choices = get(win, ["terminal", "choices"]) as Json[];
+    expect(
+      isSettingsView(mutate(win, ["terminal", "choices"], [...choices, choices[0] ?? null])),
+    ).toBe(false);
+    expect(
+      isSettingsView(
+        mutate(win, ["terminal", "choices", 1], { id: "windowsTerminal", name: "Windows Terminal (again)" }),
+      ),
+    ).toBe(false);
+    expect(isSettingsView(mutate(win, ["terminal", "choices", 1, "name"], ""))).toBe(false);
+    expect(isSettingsView(mutate(win, ["terminal", "choices"], {}))).toBe(false);
+  });
+
+  it("takes welcome only as a bool", () => {
+    for (const bad of [null, "true", 1, {}]) {
+      expect(isSettingsView(mutate(win, ["welcome"], bad)), String(bad)).toBe(false);
+    }
+    expect(isSettingsView(mutate(win, ["welcome"], false))).toBe(true);
+    expect(isSettingsView(mutate(mac, ["welcome"], true))).toBe(true);
   });
 
   it("rejects output fields that belong to the other kind", () => {
@@ -217,6 +288,17 @@ describe("isKeyId", () => {
     }
     for (const bad of ["Shift", "win", "", null, 1, undefined]) {
       expect(isKeyId(bad)).toBe(false);
+    }
+  });
+});
+
+describe("isTerminalId", () => {
+  it("knows the four terminal ids and nothing else", () => {
+    for (const id of ["windowsTerminal", "powershell", "terminal", "iterm2"]) {
+      expect(isTerminalId(id)).toBe(true);
+    }
+    for (const bad of ["windows_terminal", "iTerm2", "cmd", "", null, 1, undefined]) {
+      expect(isTerminalId(bad)).toBe(false);
     }
   });
 });
@@ -291,6 +373,76 @@ describe("outputFolder", () => {
   });
 });
 
+describe("terminalHint", () => {
+  it("names this OS's fallback app", () => {
+    expect(terminalHint("windows")).toBe(
+      "Drop a file on Terminal to open its folder in the app you pick. If Windows Terminal can't start, PowerShell opens instead.",
+    );
+    expect(terminalHint("macos")).toBe(
+      "Drop a file on Terminal to open its folder in the app you pick. If iTerm2 isn't installed, Terminal opens instead.",
+    );
+  });
+});
+
+describe("keyNames", () => {
+  it("names each wheel's key as this OS spells it", () => {
+    expect(keyNames(windows)).toEqual({ conversions: "Shift", tools: "Ctrl", actions: "Alt" });
+    expect(keyNames(macos)).toEqual({ conversions: "Command", tools: "Shift", actions: "Control" });
+  });
+
+  it("follows the current keys and names", () => {
+    const view: SettingsView = {
+      ...windows,
+      keys: { conversions: "alt", tools: "shift", actions: "ctrl" },
+      keyChoices: [
+        { key: "shift", name: "Left Shift" },
+        { key: "ctrl", name: "Ctrl" },
+        { key: "alt", name: "Right Alt" },
+      ],
+    };
+    expect(keyNames(view)).toEqual({ conversions: "Right Alt", tools: "Left Shift", actions: "Ctrl" });
+  });
+});
+
+describe("welcome copy", () => {
+  it("is Grape's own heading, intro and button", () => {
+    expect(WELCOME_COPY).toEqual({
+      heading: "Welcome to Grape",
+      intro: "Grape works while you drag a file, in three moves.",
+      done: "Got it",
+    });
+  });
+
+  it("walks through drag, tap and drop on Windows, with its keys and File Explorer", () => {
+    expect(welcomeSteps("windows", keyNames(windows))).toEqual([
+      {
+        art: "drag",
+        title: "Drag a file",
+        detail: "Start dragging any file in File Explorer or on the desktop.",
+      },
+      { art: "tap", title: "Tap Shift", detail: "Ctrl for tools, Alt for file actions." },
+      { art: "drop", title: "Drop it on a segment", detail: "Drop in the middle to cancel." },
+    ]);
+  });
+
+  it("names Finder and the Mac keys on macOS", () => {
+    const steps = welcomeSteps("macos", keyNames(macos));
+    expect(steps.map((step) => step.art)).toEqual(["drag", "tap", "drop"]);
+    expect(steps[0]?.detail).toBe("Start dragging any file in Finder or on the desktop.");
+    expect(steps[1]).toEqual({
+      art: "tap",
+      title: "Tap Command",
+      detail: "Shift for tools, Control for file actions.",
+    });
+    expect(steps[2]?.title).toBe("Drop it on a segment");
+  });
+
+  it("uses the names as they are, never as patterns", () => {
+    const steps = welcomeSteps("windows", { conversions: "$&", tools: "{tools}", actions: "$1" });
+    expect(steps[1]).toMatchObject({ title: "Tap $&", detail: "{tools} for tools, $1 for file actions." });
+  });
+});
+
 describe("choicesSignature", () => {
   it("changes when a key or a name changes, not otherwise", () => {
     const base = choicesSignature(windows.keyChoices);
@@ -298,6 +450,18 @@ describe("choicesSignature", () => {
     expect(choicesSignature(macos.keyChoices)).not.toBe(base);
     expect(
       choicesSignature([{ key: "shift", name: "Left Shift" }, ...windows.keyChoices.slice(1)]),
+    ).not.toBe(base);
+  });
+});
+
+describe("terminalSignature", () => {
+  it("changes when an id or a name changes, not otherwise", () => {
+    const base = terminalSignature(windows.terminal.choices);
+    expect(terminalSignature(windows.terminal.choices.map((choice) => ({ ...choice })))).toBe(base);
+    expect(terminalSignature(macos.terminal.choices)).not.toBe(base);
+    expect(terminalSignature([...windows.terminal.choices].reverse())).not.toBe(base);
+    expect(
+      terminalSignature([{ id: "windowsTerminal", name: "Terminal" }, ...windows.terminal.choices.slice(1)]),
     ).not.toBe(base);
   });
 });

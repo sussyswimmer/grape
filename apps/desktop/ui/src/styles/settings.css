@@ -154,6 +154,23 @@ body {
   background: var(--track-fill);
 }
 
+/* The welcome card's "Got it". */
+.button-primary {
+  color: var(--color-on-accent);
+  font-weight: 600;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.button-primary:hover {
+  border-color: var(--color-text);
+}
+
+.button-primary:active {
+  background: var(--color-accent);
+  opacity: 0.85;
+}
+
 /* The key-swap note. */
 .settings-note {
   margin: 0.75rem 0 0;
@@ -325,6 +342,319 @@ body {
 
   .toggle-switch[aria-disabled="true"] {
     border-color: GrayText;
+  }
+}
+
+/*
+ * The welcome card, above everything until "Got it": three steps side by
+ * side, each a small illustration over its text.
+ */
+.welcome {
+  margin-bottom: 1rem;
+  padding: 1rem 1rem 1.1rem;
+  background: var(--color-surface);
+  border: 1.5px solid var(--color-accent);
+  border-radius: 12px;
+  box-shadow: 0 1px 4px var(--shadow-soft);
+}
+
+.welcome-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 650;
+  color: var(--color-accent);
+}
+
+.welcome-intro {
+  margin: 0.15rem 0 0.85rem;
+  color: var(--color-text-muted);
+  font-size: 0.9rem;
+}
+
+.welcome-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.welcome-step {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.welcome-step-text {
+  display: flex;
+  flex-direction: column;
+}
+
+.welcome-step-title {
+  font-weight: 600;
+}
+
+.welcome-step-detail {
+  color: var(--color-text-muted);
+  font-size: 0.85rem;
+}
+
+/* A narrow window: one step per row, the picture beside the text. */
+@media (max-width: 30rem) {
+  .welcome-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .welcome-step {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  /* More specific than the base .welcome-art rule below, which would
+     otherwise win by coming later. */
+  .welcome-step .welcome-art {
+    width: 6rem;
+    flex: none;
+  }
+}
+
+.welcome-art {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 3 / 2;
+  background: var(--color-bg);
+  border-radius: 8px;
+}
+
+/* The illustrations' parts (src/settings/welcome-art.ts). Strokes keep their width in a scaled group. */
+.welcome-art path,
+.welcome-art rect,
+.welcome-art circle {
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.art-file,
+.art-key-cap {
+  fill: var(--color-surface);
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+}
+
+.art-stroke {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+}
+
+.art-key-mark {
+  stroke-width: 2;
+}
+
+.art-ghost {
+  fill: none;
+  stroke: var(--color-text-muted);
+  stroke-width: 1.25;
+  stroke-dasharray: 3 2.5;
+}
+
+.art-pointer {
+  fill: var(--color-text);
+  stroke: var(--color-surface);
+  stroke-width: 1.25;
+}
+
+.art-key-base {
+  fill: var(--segment-stroke);
+}
+
+.art-ripple {
+  fill: none;
+  stroke: var(--color-accent);
+  stroke-width: 1.5;
+  opacity: 0.4;
+}
+
+.art-glass {
+  fill: var(--glass-fill);
+  stroke: var(--glass-stroke);
+}
+
+.art-segment {
+  fill: var(--segment-fill);
+  stroke: var(--segment-stroke);
+}
+
+.art-target {
+  fill: var(--segment-highlight);
+}
+
+/*
+ * One gentle 6 s loop across the three pictures, so they play in order:
+ * the file moves off (0–30%), the key goes down (33–45%), the file lands
+ * on a segment (52–90%). Without motion each picture holds its own key
+ * frame: the file moved, the ring around the key, the segment lit with the
+ * file on it. Those are the rules above and the base states here.
+ */
+.art-drag-move {
+  transform: translate(34px, -8px);
+}
+
+.art-ripple,
+.art-drop-move {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .art-drag-move {
+    animation: art-drag 6s ease-in-out infinite;
+  }
+
+  .art-press {
+    animation: art-press 6s ease-in-out infinite;
+  }
+
+  .art-ripple {
+    animation: art-ripple 6s ease-out infinite;
+  }
+
+  .art-drop-move {
+    animation: art-drop 6s ease-in-out infinite;
+  }
+
+  .art-target {
+    animation: art-target 6s ease-in-out infinite;
+  }
+}
+
+@keyframes art-drag {
+  0%,
+  4% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  30%,
+  88% {
+    transform: translate(34px, -8px);
+    opacity: 1;
+  }
+  95% {
+    transform: translate(34px, -8px);
+    opacity: 0;
+  }
+  96% {
+    transform: translate(0, 0);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+}
+
+@keyframes art-press {
+  0%,
+  34%,
+  45%,
+  100% {
+    transform: translate(0, 0);
+  }
+  38%,
+  41% {
+    transform: translate(0, 4px);
+  }
+}
+
+@keyframes art-ripple {
+  0%,
+  38% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  41% {
+    opacity: 0.55;
+  }
+  62%,
+  100% {
+    transform: scale(1.1);
+    opacity: 0;
+  }
+}
+
+@keyframes art-drop {
+  0%,
+  50% {
+    transform: translate(18px, -14px);
+    opacity: 0;
+  }
+  56% {
+    opacity: 1;
+  }
+  68%,
+  78% {
+    transform: translate(0, 0);
+    opacity: 1;
+  }
+  86%,
+  100% {
+    transform: translate(0, 0) scale(0.6);
+    opacity: 0;
+  }
+}
+
+@keyframes art-target {
+  0%,
+  66% {
+    opacity: 0;
+  }
+  70%,
+  86% {
+    opacity: 1;
+  }
+  94%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* High contrast on Windows: the pictures in the system's colors. */
+@media (forced-colors: active) {
+  .welcome-art,
+  .welcome-art * {
+    forced-color-adjust: none;
+  }
+
+  .welcome-art {
+    background: Canvas;
+  }
+
+  .art-file,
+  .art-key-cap,
+  .art-glass,
+  .art-segment {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+
+  .art-stroke,
+  .art-ghost,
+  .art-ripple {
+    stroke: CanvasText;
+  }
+
+  .art-pointer,
+  .art-key-base {
+    fill: CanvasText;
+    stroke: Canvas;
+  }
+
+  .art-target {
+    fill: Highlight;
   }
 }
 

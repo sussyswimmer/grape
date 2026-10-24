@@ -1,6 +1,7 @@
 /**
- * The Settings page (M6): keys, where files go, the fallback folder, and
- * the on/off switches. There's no Save button. Each change is one
+ * The Settings page (M6): the welcome card until it's dismissed, keys,
+ * where files go, the fallback folder, the terminal app, and the on/off
+ * switches. There's no Save button. Each change is one
  * `settings_*` command, and Rust answers with the whole new view, which the
  * page draws. The page decides nothing: Rust swaps keys, opens the folder
  * pickers and stores every change.
@@ -15,9 +16,14 @@
  * The page builds its controls once and only updates them, so keyboard
  * focus survives every redraw.
  *
- * A key picked with the mouse is sent at once. A key reached by stepping
- * with the keyboard is sent only when the user settles on it (see
- * `isStepKey`), and the select keeps showing it until Rust has answered.
+ * A key or terminal app picked with the mouse is sent at once. One reached
+ * by stepping with the keyboard is sent only when the user settles on it
+ * (see `isStepKey`), and the select keeps showing it until Rust has
+ * answered.
+ *
+ * The welcome card shows while the view says `welcome`. "Got it" asks Rust
+ * to dismiss it, and the card goes once Rust's answer says so; focus on
+ * the button moves to the first key select then.
  */
 
 import { type InvokeFn, tauriInvoke } from "../shared/ipc";
@@ -28,25 +34,34 @@ import {
   GENERIC_ERROR,
   isKeyId,
   isSettingsView,
-  type KeyChoice,
+  isTerminalId,
   type KeyId,
+  keyNames,
   leadText,
   outputFolder,
   type Platform,
+  SETTINGS_DISMISS_WELCOME,
   SETTINGS_GET,
   SETTINGS_PICK_FOLDER,
   SETTINGS_SET_KEY,
   SETTINGS_SET_OUTPUT_NEXT_TO_SOURCE,
+  SETTINGS_SET_TERMINAL,
   SETTINGS_SET_TOGGLE,
   SETTINGS_USE_DEFAULT_FALLBACK,
   type SettingsView,
+  terminalHint,
+  terminalSignature,
   TOGGLE_NAMES,
   type ToggleName,
   toggleRows,
+  WELCOME_COPY,
+  type WelcomeArt,
+  welcomeSteps,
   type Wheel,
   WHEEL_LABELS,
   WHEELS,
 } from "./model";
+import { welcomeArt } from "./welcome-art";
 
 /** Keys that step a closed select from one option to the next. */
 const STEP_KEYS: ReadonlySet<string> = new Set([
@@ -65,10 +80,10 @@ const STEP_KEYS: ReadonlySet<string> = new Set([
  * Home, End or a page key, and on both OSes a typed character
  * (type-ahead). Chromium fires `change` for every such step. Sending each
  * one would let the swap rule move a third wheel's key on the way, so
- * after a step a select sends only the key the user settles on: when it
- * loses focus, on Enter, or when the page goes away. No timer: a user
- * reading each option aloud with a screen reader takes as long as they
- * like.
+ * after a step a select sends only the value the user settles on: when it
+ * loses focus, on Enter, or when the page goes away. The Terminal select
+ * follows the same rule. No timer: a user reading each option aloud with a
+ * screen reader takes as long as they like.
  *
  * Keys that open the list instead aren't steps: Space, F4 and
  * Alt+Up/Down, and on macOS the arrows (WebKit opens the menu on them). A
@@ -110,16 +125,25 @@ interface ToggleParts {
   readonly input: HTMLInputElement;
 }
 
-/** One key select's picks that Rust hasn't answered yet. */
-interface KeyEdit {
-  /** The key the select keeps showing: the latest pick, sent or not. `null` shows the view's key. */
-  held: KeyId | null;
-  /** The latest pick hasn't been sent: the user is stepping with the keyboard. */
-  waiting: boolean;
-  /** The user last moved this select with a step key, not the mouse. */
-  stepping: boolean;
-  /** Picks sent that haven't answered yet. */
-  unanswered: number;
+/**
+ * A select whose picks go to Rust (a key select, or the Terminal app),
+ * following the settle rule in `isStepKey`.
+ */
+interface PickSelect<T extends string> {
+  readonly select: HTMLSelectElement;
+  /**
+   * The value the select keeps showing: the latest pick, sent or not,
+   * until Rust has answered it. `null` shows the view's value.
+   */
+  held(): T | null;
+  /** Sends the latest pick, if one is waiting. */
+  settle(): void;
+}
+
+/** The parts of one welcome step the page updates. */
+interface StepParts {
+  readonly title: HTMLElement;
+  readonly detail: HTMLElement;
 }
 
 /**
@@ -137,6 +161,7 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
   let picking = false;
   let queue: Promise<void> = Promise.resolve();
   let drawnChoices: string | null = null;
+  let drawnTerminals: string | null = null;
 
   function element<K extends keyof HTMLElementTagNameMap>(
     tag: K,
@@ -192,102 +217,96 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
     "While you drag a file, tap a key to open its wheel. Each wheel has its own key: pick one that's taken and the two swap.",
   );
 
-  function keyEdit(): KeyEdit {
-    return { held: null, waiting: false, stepping: false, unanswered: 0 };
-  }
-
-  const keyEdits: Readonly<Record<Wheel, KeyEdit>> = {
-    conversions: keyEdit(),
-    tools: keyEdit(),
-    actions: keyEdit(),
-  };
-
-  /** Sends `wheel`'s latest pick, if one is waiting. */
-  function settleKey(wheel: Wheel): void {
-    const edit = keyEdits[wheel];
-    const key = edit.held;
-    if (!edit.waiting || key === null) {
-      return;
-    }
-    edit.waiting = false;
-    edit.unanswered += 1;
-    void send(SETTINGS_SET_KEY, { wheel, key }, () => {
-      edit.unanswered -= 1;
-      // A newer pick, waiting or sent, keeps showing until it has answered.
-      if (edit.unanswered === 0 && !edit.waiting) {
-        edit.held = null;
-      }
-    });
-  }
-
-  /** Sends every waiting pick: the page is going away. */
-  function settleAllKeys(): void {
-    for (const wheel of WHEELS) {
-      settleKey(wheel);
-    }
-  }
-
-  /** Appends a labelled key select for `wheel` to the Keys section. */
-  function keyField(wheel: Wheel): HTMLSelectElement {
-    const id = `key-${wheel}`;
-    const field = element("div", "field");
-    const label = element("label", "field-label", WHEEL_LABELS[wheel]);
-    label.setAttribute("for", id);
+  /**
+   * Builds a select whose picks `message` turns into a command. A pick
+   * from the open list (mouse or keyboard) goes at once; a step on the
+   * closed select waits until the user settles.
+   */
+  function pickSelect<T extends string>(
+    isValue: (value: unknown) => value is T,
+    message: (value: T) => readonly [string, Record<string, unknown>],
+  ): PickSelect<T> {
     const select = element("select", "field-select");
-    select.setAttribute("id", id);
-    const edit = keyEdits[wheel];
+    // The latest pick, sent or not; `null` shows the view's value.
+    let held: T | null = null;
+    // The latest pick hasn't been sent: the user is stepping with the keyboard.
+    let waiting = false;
+    // The user last moved this select with a step key, not the mouse.
+    let stepping = false;
+    // Picks sent that haven't answered yet.
+    let unanswered = 0;
+
+    function settle(): void {
+      const value = held;
+      if (!waiting || value === null) {
+        return;
+      }
+      waiting = false;
+      unanswered += 1;
+      const [command, args] = message(value);
+      void send(command, args, () => {
+        unanswered -= 1;
+        // A newer pick, waiting or sent, keeps showing until it has answered.
+        if (unanswered === 0 && !waiting) {
+          held = null;
+        }
+      });
+    }
+
     select.addEventListener("change", () => {
-      const key = select.value;
-      if (!isKeyId(key)) {
+      const value = select.value;
+      if (!isValue(value)) {
         draw();
         return;
       }
-      edit.held = key;
-      edit.waiting = true;
-      // A pick from the open list (mouse or keyboard) goes at once; a step
-      // on the closed select waits until the user settles.
-      if (!edit.stepping) {
-        settleKey(wheel);
+      held = value;
+      waiting = true;
+      if (!stepping) {
+        settle();
       }
     });
     select.addEventListener("mousedown", () => {
-      edit.stepping = false;
+      stepping = false;
     });
     select.addEventListener("blur", () => {
-      edit.stepping = false;
-      settleKey(wheel);
+      stepping = false;
+      settle();
     });
     select.addEventListener("keydown", (event: KeyboardEvent) => {
       if (event.key === "Enter") {
-        edit.stepping = false;
-        settleKey(wheel);
+        stepping = false;
+        settle();
       } else {
         // Any other key (one that opens the list, Tab, …) ends the steps.
-        edit.stepping = isStepKey(event, shown?.platform ?? "windows");
+        stepping = isStepKey(event, shown?.platform ?? "windows");
       }
     });
-    field.append(label, select);
-    keys.append(field);
-    return select;
+    return { select, held: () => held, settle };
   }
 
-  const selects: Readonly<Record<Wheel, HTMLSelectElement>> = {
+  /** A row with `text` labelling `control`, which gets this `id`. */
+  function field(id: string, text: string, control: HTMLSelectElement): HTMLElement {
+    const row = element("div", "field");
+    const label = element("label", "field-label", text);
+    label.setAttribute("for", id);
+    control.setAttribute("id", id);
+    row.append(label, control);
+    return row;
+  }
+
+  /** Appends a labelled key select for `wheel` to the Keys section. */
+  function keyField(wheel: Wheel): PickSelect<KeyId> {
+    const picks = pickSelect(isKeyId, (key) => [SETTINGS_SET_KEY, { wheel, key }]);
+    keys.append(field(`key-${wheel}`, WHEEL_LABELS[wheel], picks.select));
+    return picks;
+  }
+
+  const selects: Readonly<Record<Wheel, PickSelect<KeyId>>> = {
     conversions: keyField("conversions"),
     tools: keyField("tools"),
     actions: keyField("actions"),
   };
 
-  // Closing Settings must not lose a key the user stepped to and hasn't
-  // left yet. (The test DOM has no window.)
-  const win = doc.defaultView;
-  if (win !== null) {
-    win.addEventListener("pagehide", settleAllKeys);
-    win.document.addEventListener("visibilitychange", () => {
-      if (win.document.visibilityState === "hidden") {
-        settleAllKeys();
-      }
-    });
-  }
   const note = liveLine("settings-note");
   keys.append(note);
 
@@ -356,6 +375,32 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
   fallbackRow.append(fallbackPath, defaultBadge);
   fallback.append(fallbackRow, fallbackButtons);
 
+  // --- File actions ----------------------------------------------------------
+
+  const fileActions = section("file-actions", "File actions");
+  // Its hint names this OS's fallback app, so it comes with each view.
+  const terminalHintLine = element("p", "section-hint");
+  const terminal = pickSelect(isTerminalId, (app) => [SETTINGS_SET_TERMINAL, { terminal: app }]);
+  fileActions.append(terminalHintLine, field("terminal-app", "Terminal", terminal.select));
+
+  // Closing Settings must not lose a key or app the user stepped to and
+  // hasn't left yet. (The test DOM has no window.)
+  function settleAll(): void {
+    for (const wheel of WHEELS) {
+      selects[wheel].settle();
+    }
+    terminal.settle();
+  }
+  const win = doc.defaultView;
+  if (win !== null) {
+    win.addEventListener("pagehide", settleAll);
+    win.document.addEventListener("visibilitychange", () => {
+      if (win.document.visibilityState === "hidden") {
+        settleAll();
+      }
+    });
+  }
+
   // --- Switches --------------------------------------------------------------
 
   const general = section("general", "General");
@@ -394,12 +439,58 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
     launchAtLogin: toggleRow("launchAtLogin"),
   };
 
-  sections.append(keys, output, fallback, general);
+  sections.append(keys, output, fallback, fileActions, general);
+
+  // --- Welcome card ----------------------------------------------------------
+
+  const welcome = element("section", "welcome");
+  welcome.setAttribute("aria-labelledby", "welcome-heading");
+  const welcomeHeading = element("h2", "welcome-title", WELCOME_COPY.heading);
+  welcomeHeading.setAttribute("id", "welcome-heading");
+  const stepList = element("ol", "welcome-steps");
+  // WebKit drops the list role from a list without markers; VoiceOver
+  // should still hear "list, 3 items".
+  stepList.setAttribute("role", "list");
+
+  /** Appends one step, its illustration over its text, to the card. The text comes with each view. */
+  function welcomeStep(art: WelcomeArt): StepParts {
+    const item = element("li", "welcome-step");
+    const text = element("div", "welcome-step-text");
+    const title = element("span", "welcome-step-title");
+    const detail = element("span", "welcome-step-detail");
+    text.append(title, detail);
+    item.append(welcomeArt(doc, art), text);
+    stepList.append(item);
+    return { title, detail };
+  }
+
+  // In the order `welcomeSteps` lists them.
+  const steps: Readonly<Record<WelcomeArt, StepParts>> = {
+    drag: welcomeStep("drag"),
+    tap: welcomeStep("tap"),
+    drop: welcomeStep("drop"),
+  };
+  const gotIt = button(WELCOME_COPY.done, "Got it, hide this card");
+  gotIt.classList.add("button-primary");
+  let dismissing = false;
+  gotIt.addEventListener("click", () => {
+    // Once is enough: a second click while Rust answers sends nothing.
+    if (dismissing) {
+      return;
+    }
+    dismissing = true;
+    void send(SETTINGS_DISMISS_WELCOME, {}).then(() => {
+      dismissing = false;
+    });
+  });
+  welcome.append(welcomeHeading, element("p", "welcome-intro", WELCOME_COPY.intro), stepList, gotIt);
+
+  setHidden(welcome, true);
   setHidden(lead, true);
   setHidden(sections, true);
   // The status line comes after the sections and sticks to the window's
   // bottom edge, so an error stays in view wherever the page is scrolled.
-  root.replaceChildren(lead, sections, status);
+  root.replaceChildren(welcome, lead, sections, status);
 
   // --- Commands --------------------------------------------------------------
 
@@ -494,17 +585,21 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
     }
   }
 
-  /** Like `setHidden`, but first moves focus to `next` if `node` has it, so focus never drops to the page. */
-  function hideKeepingFocus(node: HTMLElement, hidden: boolean, next: HTMLElement): void {
-    if (hidden && doc.activeElement === node) {
+  /**
+   * Like `setHidden`, but first moves focus to `next` if `focused` (`node`
+   * itself, or the one control inside it) has it, so focus never drops to
+   * the page.
+   */
+  function hideKeepingFocus(node: HTMLElement, hidden: boolean, next: HTMLElement, focused = node): void {
+    if (hidden && doc.activeElement === focused) {
       next.focus();
     }
     setHidden(node, hidden);
   }
 
-  function option(choice: KeyChoice): HTMLOptionElement {
-    const node = element("option", "field-option", choice.name);
-    node.setAttribute("value", choice.key);
+  function option(value: string, name: string): HTMLOptionElement {
+    const node = element("option", "field-option", name);
+    node.setAttribute("value", value);
     return node;
   }
 
@@ -518,13 +613,21 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
     setHidden(sections, false);
     lead.textContent = leadText(view.platform);
 
+    for (const step of welcomeSteps(view.platform, keyNames(view))) {
+      steps[step.art].title.textContent = step.title;
+      steps[step.art].detail.textContent = step.detail;
+    }
+    // "Got it" is the card's only control. The first key select is the
+    // next thing on the page, and the key the card just named.
+    hideKeepingFocus(welcome, !view.welcome, selects.conversions.select, gotIt);
+
     const signature = choicesSignature(view.keyChoices);
     for (const wheel of WHEELS) {
-      const select = selects[wheel];
+      const picks = selects[wheel];
       if (signature !== drawnChoices) {
-        select.replaceChildren(...view.keyChoices.map(option));
+        picks.select.replaceChildren(...view.keyChoices.map((choice) => option(choice.key, choice.name)));
       }
-      select.value = keyEdits[wheel].held ?? view.keys[wheel];
+      picks.select.value = picks.held() ?? view.keys[wheel];
     }
     drawnChoices = signature;
     note.textContent = view.note ?? "";
@@ -539,6 +642,15 @@ export function mountSettings(root: HTMLElement, options: SettingsPageOptions = 
     fallbackPath.textContent = view.fallbackDir.path;
     setHidden(defaultBadge, !view.fallbackDir.isDefault);
     hideKeepingFocus(useDefault, view.fallbackDir.isDefault, chooseFallback);
+
+    terminalHintLine.textContent = terminalHint(view.platform);
+    const terminals = terminalSignature(view.terminal.choices);
+    if (terminals !== drawnTerminals) {
+      const apps = view.terminal.choices.map((choice) => option(choice.id, choice.name));
+      terminal.select.replaceChildren(...apps);
+      drawnTerminals = terminals;
+    }
+    terminal.select.value = terminal.held() ?? view.terminal.choice;
 
     const rows = new Map(toggleRows(view).map((row) => [row.name, row]));
     for (const name of TOGGLE_NAMES) {

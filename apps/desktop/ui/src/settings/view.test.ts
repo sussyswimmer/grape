@@ -167,7 +167,8 @@ describe("mountSettings", () => {
       expect(button.getAttribute("aria-label")).toContain(button.textContent.replace("…", ""));
     }
     const sections = byTag(root, "section");
-    expect(sections).toHaveLength(4);
+    // The welcome card and the five settings sections.
+    expect(sections).toHaveLength(6);
     for (const section of sections) {
       const heading = byId(root, section.getAttribute("aria-labelledby") ?? "");
       expect(heading.localName).toBe("h2");
@@ -868,14 +869,317 @@ describe("ordering", () => {
 });
 
 describe("page structure", () => {
-  it("puts the lead, the sections and the status line in the root, in that order", async () => {
+  it("puts the welcome card, the lead, the sections and the status line in the root, in order", async () => {
     const { root } = await shown(windows);
     expect(root.children.map((child) => child.classList.toString())).toEqual([
+      "welcome",
       "lead",
       "settings-sections",
       "settings-status",
     ]);
     const headings = byTag(root, "h2").map((heading) => heading.textContent);
-    expect(headings).toEqual(["Keys", "Where files go", "Fallback folder", "General"]);
+    expect(headings).toEqual([
+      "Welcome to Grape",
+      "Keys",
+      "Where files go",
+      "Fallback folder",
+      "File actions",
+      "General",
+    ]);
+  });
+});
+
+describe("terminal app", () => {
+  function terminalSelect(root: FakeElement): FakeElement {
+    return byId(root, "terminal-app");
+  }
+
+  it("shows the Windows apps in the File actions section, with the PowerShell fallback", async () => {
+    const { root } = await shown(windows);
+    const select = terminalSelect(root);
+    const section = byId(root, "file-actions-heading").parent ?? root;
+    expect(section.localName).toBe("section");
+    expect(byTag(section, "select")).toEqual([select]);
+    expect(select.value).toBe("windowsTerminal");
+    const options = byTag(select, "option");
+    expect(options.map((option) => [option.getAttribute("value"), option.textContent])).toEqual([
+      ["windowsTerminal", "Windows Terminal"],
+      ["powershell", "PowerShell"],
+    ]);
+    const labels = byTag(root, "label").filter((label) => label.getAttribute("for") === "terminal-app");
+    expect(labels.map((label) => label.textContent)).toEqual(["Terminal"]);
+    expect(oneByClass(section, "section-hint").textContent).toContain(
+      "If Windows Terminal can't start, PowerShell opens instead.",
+    );
+  });
+
+  it("shows the Mac apps, iTerm2 picked, with the Terminal fallback", async () => {
+    const { root } = await shown(macos);
+    const select = terminalSelect(root);
+    expect(select.value).toBe("iterm2");
+    expect(byTag(select, "option").map((option) => option.textContent)).toEqual(["Terminal", "iTerm2"]);
+    const section = byId(root, "file-actions-heading").parent ?? root;
+    expect(oneByClass(section, "section-hint").textContent).toContain(
+      "If iTerm2 isn't installed, Terminal opens instead.",
+    );
+  });
+
+  it("sends a pick at once and draws Rust's answer", async () => {
+    const h = await shown(windows, () =>
+      Promise.resolve({ ...windows, terminal: { ...windows.terminal, choice: "powershell" } }),
+    );
+    const select = terminalSelect(h.root);
+    select.dispatch("mousedown");
+    change(select, { value: "powershell" });
+    await h.page.idle();
+    expect(commands(h)).toEqual([["settings_set_terminal", { terminal: "powershell" }]]);
+    expect(select.value).toBe("powershell");
+  });
+
+  it("sends keyboard steps on Windows only once the user settles", async () => {
+    const h = await shown(windows, () =>
+      Promise.resolve({ ...windows, terminal: { ...windows.terminal, choice: "powershell" } }),
+    );
+    const select = terminalSelect(h.root);
+    select.dispatch("keydown", { key: "ArrowDown" });
+    change(select, { value: "powershell" });
+    select.dispatch("keydown", { key: "ArrowUp" });
+    change(select, { value: "windowsTerminal" });
+    select.dispatch("keydown", { key: "ArrowDown" });
+    change(select, { value: "powershell" });
+    await h.page.idle();
+    expect(commands(h)).toEqual([]);
+    expect(select.value).toBe("powershell");
+
+    select.dispatch("keydown", { key: "Enter" });
+    await h.page.idle();
+    expect(commands(h)).toEqual([["settings_set_terminal", { terminal: "powershell" }]]);
+    select.dispatch("blur");
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(1);
+  });
+
+  it("keeps showing a pick through other redraws until Rust answers", async () => {
+    const reply = deferred();
+    const h = await shown(
+      macos,
+      answering({
+        settings_set_toggle: () => Promise.resolve({ ...macos, sounds: true }),
+        settings_set_terminal: () => reply.promise,
+      }),
+    );
+    const select = terminalSelect(h.root);
+    // Type-ahead is a step on macOS too, so the pick waits for the user to settle.
+    select.dispatch("keydown", { key: "t" });
+    change(select, { value: "terminal" });
+    change(byId(h.root, "toggle-sounds"), { checked: true });
+    await h.page.idle();
+    expect(byId(h.root, "toggle-sounds").checked).toBe(true);
+    expect(select.value).toBe("terminal");
+
+    select.dispatch("blur");
+    // Sent, not answered: a redraw still shows it.
+    change(select, { value: "cmd" });
+    expect(select.value).toBe("terminal");
+
+    reply.resolve({ ...macos, sounds: true, terminal: { ...macos.terminal, choice: "terminal" } });
+    await h.page.idle();
+    expect(commands(h)).toEqual([
+      ["settings_set_toggle", { name: "sounds", on: true }],
+      ["settings_set_terminal", { terminal: "terminal" }],
+    ]);
+    expect(select.value).toBe("terminal");
+  });
+
+  it("sends nothing for a value that isn't an app, and puts the select back", async () => {
+    const h = await shown(windows);
+    const select = terminalSelect(h.root);
+    change(select, { value: "cmd" });
+    select.dispatch("blur");
+    await h.page.idle();
+    expect(commands(h)).toEqual([]);
+    expect(select.value).toBe("windowsTerminal");
+  });
+
+  it("shows Rust's refusal and the app it still has", async () => {
+    const h = await shown(
+      macos,
+      answering({
+        settings_set_terminal: () => Promise.reject("That app isn't offered here."),
+        settings_get: () => Promise.resolve(macos),
+      }),
+    );
+    const select = terminalSelect(h.root);
+    change(select, { value: "terminal" });
+    await h.page.idle();
+    expect(commands(h)).toEqual([
+      ["settings_set_terminal", { terminal: "terminal" }],
+      ["settings_get", {}],
+    ]);
+    expect(select.value).toBe("iterm2");
+    expect(oneByClass(h.root, "settings-status").textContent).toBe("That app isn't offered here.");
+  });
+
+  it("keeps the options when the choices don't change", async () => {
+    const h = await shown(windows, () => Promise.resolve({ ...windows, sounds: false }));
+    const before = byTag(terminalSelect(h.root), "option");
+    change(byId(h.root, "toggle-sounds"), { checked: false });
+    await h.page.idle();
+    expect(byTag(terminalSelect(h.root), "option")[0]).toBe(before[0]);
+  });
+});
+
+describe("welcome card", () => {
+  function card(root: FakeElement): FakeElement {
+    return oneByClass(root, "welcome");
+  }
+
+  function steps(root: FakeElement): [string, string][] {
+    return byTag(card(root), "li").map((item) => [
+      oneByClass(item, "welcome-step-title").textContent,
+      oneByClass(item, "welcome-step-detail").textContent,
+    ]);
+  }
+
+  function gotIt(root: FakeElement): FakeElement {
+    return buttonLabelled(root, "Got it, hide this card");
+  }
+
+  const welcomeMac: SettingsView = { ...macos, welcome: true };
+
+  it("stays hidden until the settings arrive, then shows when the view asks", async () => {
+    const reply = deferred();
+    const h = harness(() => reply.promise);
+    expect(isHidden(card(h.root))).toBe(true);
+    reply.resolve(windows);
+    await h.page.idle();
+    expect(isHidden(card(h.root))).toBe(false);
+  });
+
+  it("is hidden when the view doesn't ask for it", async () => {
+    const { root } = await shown(macos);
+    expect(isHidden(card(root))).toBe(true);
+  });
+
+  it("walks through drag, tap and drop with the Windows keys", async () => {
+    const { root } = await shown(windows);
+    const welcome = card(root);
+    expect(welcome.localName).toBe("section");
+    expect(byId(root, welcome.getAttribute("aria-labelledby") ?? "").textContent).toBe("Welcome to Grape");
+    expect(oneByClass(welcome, "welcome-intro").textContent).toBe(
+      "Grape works while you drag a file, in three moves.",
+    );
+    expect(oneByClass(welcome, "welcome-steps").localName).toBe("ol");
+    // Kept as a list for VoiceOver, though it shows no markers.
+    expect(oneByClass(welcome, "welcome-steps").getAttribute("role")).toBe("list");
+    expect(steps(root)).toEqual([
+      ["Drag a file", "Start dragging any file in File Explorer or on the desktop."],
+      ["Tap Shift", "Ctrl for tools, Alt for file actions."],
+      ["Drop it on a segment", "Drop in the middle to cancel."],
+    ]);
+    const button = gotIt(root);
+    expect(button.textContent).toBe("Got it");
+    expect(button.parent).toBe(welcome);
+  });
+
+  it("names Finder and the Mac keys on macOS", async () => {
+    const { root } = await shown(welcomeMac);
+    expect(steps(root)).toEqual([
+      ["Drag a file", "Start dragging any file in Finder or on the desktop."],
+      ["Tap Command", "Shift for tools, Control for file actions."],
+      ["Drop it on a segment", "Drop in the middle to cancel."],
+    ]);
+  });
+
+  it("draws one decorative illustration per step", async () => {
+    const { root } = await shown(windows);
+    const items = byTag(card(root), "li");
+    expect(items.map((item) => byTag(item, "svg").map((svg) => svg.classList.toString()))).toEqual([
+      ["welcome-art welcome-art-drag"],
+      ["welcome-art welcome-art-tap"],
+      ["welcome-art welcome-art-drop"],
+    ]);
+    for (const svg of byTag(card(root), "svg")) {
+      expect(svg.getAttribute("aria-hidden")).toBe("true");
+    }
+  });
+
+  it("follows a key change, and stays: only Got it dismisses it", async () => {
+    const swapped: SettingsView = {
+      ...windows,
+      keys: { conversions: "ctrl", tools: "shift", actions: "alt" },
+      note: "Ctrl now opens Conversions, and Shift opens Tools.",
+    };
+    const h = await shown(windows, () => Promise.resolve(swapped));
+    pickKey(h.root, "conversions", "ctrl");
+    await h.page.idle();
+    expect(isHidden(card(h.root))).toBe(false);
+    expect(steps(h.root)[1]).toEqual(["Tap Ctrl", "Shift for tools, Alt for file actions."]);
+  });
+
+  it("sends the dismissal once, hides on Rust's answer, and moves focus to the first key", async () => {
+    const reply = deferred();
+    const h = await shown(windows, () => reply.promise);
+    const button = gotIt(h.root);
+    button.focus();
+    button.dispatch("click");
+    button.dispatch("click");
+    await flush();
+    expect(commands(h)).toEqual([["settings_dismiss_welcome", {}]]);
+    // The page doesn't decide: the card stays until Rust says so.
+    expect(isHidden(card(h.root))).toBe(false);
+
+    reply.resolve({ ...windows, welcome: false });
+    await h.page.idle();
+    expect(isHidden(card(h.root))).toBe(true);
+    expect(h.doc.activeElement).toBe(byId(h.root, "key-conversions"));
+    expect(commands(h)).toHaveLength(1);
+  });
+
+  it("leaves focus alone when it isn't on the card", async () => {
+    const h = await shown(windows, () => Promise.resolve({ ...windows, welcome: false }));
+    const sounds = byId(h.root, "toggle-sounds");
+    gotIt(h.root).dispatch("click");
+    sounds.focus();
+    await h.page.idle();
+    expect(isHidden(card(h.root))).toBe(true);
+    expect(h.doc.activeElement).toBe(sounds);
+  });
+
+  it("stays, with Rust's message, when the dismissal fails", async () => {
+    const h = await shown(
+      windows,
+      answering({
+        settings_dismiss_welcome: () => Promise.reject("Couldn't save your settings."),
+        settings_get: () => Promise.resolve(windows),
+      }),
+    );
+    const button = gotIt(h.root);
+    button.focus();
+    button.dispatch("click");
+    await h.page.idle();
+    expect(isHidden(card(h.root))).toBe(false);
+    expect(h.doc.activeElement).toBe(button);
+    expect(oneByClass(h.root, "settings-status").textContent).toBe("Couldn't save your settings.");
+
+    // It can be tried again.
+    button.dispatch("click");
+    await h.page.idle();
+    expect(commands(h).filter(([command]) => command === "settings_dismiss_welcome")).toHaveLength(2);
+  });
+
+  it("sets its text with textContent, never markup", async () => {
+    const view: SettingsView = {
+      ...windows,
+      keyChoices: [
+        { key: "shift", name: "<b>Shift</b>" },
+        { key: "ctrl", name: "Ctrl" },
+        { key: "alt", name: "Alt" },
+      ],
+    };
+    const { root } = await shown(view);
+    const title = oneByClass(byTag(card(root), "li")[1] ?? root, "welcome-step-title");
+    expect(title.textContent).toBe("Tap <b>Shift</b>");
+    expect(title.children).toHaveLength(0);
   });
 });
