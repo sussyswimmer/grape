@@ -18,6 +18,7 @@ export default defineConfig({
         overlay: resolve(import.meta.dirname, "overlay.html"),
         settings: resolve(import.meta.dirname, "settings.html"),
         toast: resolve(import.meta.dirname, "toast.html"),
+        float: resolve(import.meta.dirname, "float.html"),
       },
     },
   },

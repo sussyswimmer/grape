@@ -1,10 +1,11 @@
 /**
  * A tiny stand-in for the DOM, just big enough for the wheel and toast
- * renderers and the settings page, so their tests run in Node without a
- * new dependency. It models elements, attributes, classes, inline style,
- * children, text, listeners, focus, and a form control's `value` and
- * `checked` (plain fields: a test sets them, then dispatches `change`);
- * nothing else. Test code only.
+ * renderers, the settings page and the float shelf, so their tests run in
+ * Node without a new dependency. It models elements, attributes, classes,
+ * inline style, children, text, listeners (with bubbling, `target`,
+ * `preventDefault` and `stopPropagation`), focus, pointer capture, and a
+ * form control's `value` and `checked` (plain fields: a test sets them,
+ * then dispatches `change`); nothing else. Test code only.
  */
 
 export class FakeClassList {
@@ -52,7 +53,17 @@ export class FakeStyle {
   }
 }
 
-type Listener = (event: { readonly type: string }) => void;
+/** What `dispatch` hands every listener: one object for the whole bubble. */
+export interface FakeEvent {
+  readonly type: string;
+  readonly target: FakeElement;
+  defaultPrevented: boolean;
+  preventDefault(): void;
+  stopPropagation(): void;
+  readonly [field: string]: unknown;
+}
+
+type Listener = (event: FakeEvent) => void;
 
 export class FakeElement {
   readonly attributes = new Map<string, string>();
@@ -63,6 +74,8 @@ export class FakeElement {
   parent: FakeElement | null = null;
   value = "";
   checked = false;
+  /** Pointer ids captured with `setPointerCapture` and not yet released. */
+  readonly captures = new Set<number>();
   private text = "";
 
   constructor(
@@ -139,6 +152,18 @@ export class FakeElement {
     this.ownerDocument.activeElement = this;
   }
 
+  setPointerCapture(pointerId: number): void {
+    this.captures.add(pointerId);
+  }
+
+  releasePointerCapture(pointerId: number): void {
+    this.captures.delete(pointerId);
+  }
+
+  hasPointerCapture(pointerId: number): boolean {
+    return this.captures.has(pointerId);
+  }
+
   removeEventListener(type: string, listener: Listener): void {
     const list = this.listeners.get(type) ?? [];
     this.listeners.set(
@@ -149,14 +174,30 @@ export class FakeElement {
 
   /**
    * Test helper: fires `type` on this element and every ancestor
-   * (bubbling). `fields` go on the event, e.g. `{ key: "Enter" }`.
+   * (bubbling), until a listener calls `stopPropagation`. `fields` go on
+   * the event, e.g. `{ key: "Enter" }`. Returns the event, so a test can
+   * check `defaultPrevented`.
    */
-  dispatch(type: string, fields: Readonly<Record<string, unknown>> = {}): void {
+  dispatch(type: string, fields: Readonly<Record<string, unknown>> = {}): FakeEvent {
+    let stopped = false;
+    const event: FakeEvent = {
+      target: this,
+      defaultPrevented: false,
+      preventDefault() {
+        event.defaultPrevented = true;
+      },
+      stopPropagation() {
+        stopped = true;
+      },
+      ...fields,
+      type,
+    };
     let node: FakeElement | null = this;
-    while (node !== null) {
-      for (const listener of node.listeners.get(type) ?? []) listener({ ...fields, type });
+    while (node !== null && !stopped) {
+      for (const listener of node.listeners.get(type) ?? []) listener(event);
       node = node.parent;
     }
+    return event;
   }
 }
 

@@ -2,8 +2,10 @@
  * The event contract between Rust and the UI (docs/design/m1-drag-wheel.md
  * §C). Rust emits the `wheel://…` events to the `overlay` window and the
  * `toast://…` events to the `toast` window; the UI answers with two app
- * commands. The types mirror `apps/desktop/src-tauri/src/events.rs`, and
- * both sides test against the same golden JSON in `./fixtures/`.
+ * commands. The float shelf (M5) adds the `float://…` events, emitted to
+ * the `float` window, and five `float_*` commands that name items by id.
+ * The types mirror `apps/desktop/src-tauri/src/events.rs`, and both sides
+ * test against the same golden JSON in `./fixtures/`.
  *
  * Payloads arrive as `unknown`. Every one goes through its guard before the
  * UI touches it, so a contract drift fails loudly in one place instead of
@@ -35,6 +37,16 @@ export type ToastTone = "working" | "done" | "error" | "info";
 export interface ToastShowPayload { id: number; tone: ToastTone; title: string; detail: string | null; progress: number | null; revealable: boolean }
 export interface ToastHidePayload { id: number }
 
+// The float shelf (M5). Rust keeps the paths; the page gets ids and names.
+export type FloatKind = "file" | "folder";
+/** One shelf item. `id` is a safe integer ≥ 1 that Rust never reuses; `name` is a display name, never a path. */
+export interface FloatItem { id: number; name: string; kind: FloatKind; missing: boolean }
+/** What the shelf lists, oldest first. */
+export interface FloatView { items: FloatItem[] }
+/** `nothing`: there was nothing to drag, or the button was already up. */
+export type FloatOutcome = "copied" | "linked" | "cancelled" | "nothing" | "failed";
+export interface FloatDragEnded { outcome: FloatOutcome }
+
 // ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
@@ -55,9 +67,30 @@ export const WHEEL_PAINTED = "wheel_painted";
 /** UI → Rust command, args `{ id }`: the user clicked a revealable toast. */
 export const TOAST_CLICKED = "toast_clicked";
 
+/** Rust → float: what the shelf lists now. Sent after every change and before the window shows. */
+export const FLOAT_VIEW = "float://view";
+/** Rust → float: a drag out of the shelf is over, so the page takes gestures again. */
+export const FLOAT_DRAG_ENDED = "float://drag-ended";
+
+/** UI → Rust command, no args: answers with the current `FloatView`. The page asks once, on load. */
+export const FLOAT_GET_VIEW = "float_view";
+/** UI → Rust command, args `{ id }`: take this item off the shelf (the file is never touched). */
+export const FLOAT_REMOVE = "float_remove";
+/** UI → Rust command, no args: empty the shelf and hide it. */
+export const FLOAT_CLEAR = "float_clear";
+/** UI → Rust command, args `{ id }`: show this item in the file manager. */
+export const FLOAT_REVEAL = "float_reveal";
+/**
+ * UI → Rust command, args `{ ids }`: start a drag of these items, while the
+ * button is still down. Returns at once; `float://drag-ended` follows when
+ * the drag is over.
+ */
+export const FLOAT_DRAG_OUT = "float_drag_out";
+
 /** The Tauri window labels these events are emitted to. */
 export const OVERLAY_WINDOW = "overlay";
 export const TOAST_WINDOW = "toast";
+export const FLOAT_WINDOW = "float";
 
 // ---------------------------------------------------------------------------
 // Enum values, kept next to the types so a new variant is a compile error
@@ -77,6 +110,8 @@ const CLOSE_REASONS: readonly CloseReason[] = [
   "paused",
 ];
 const TOAST_TONES: readonly ToastTone[] = ["working", "done", "error", "info"];
+const FLOAT_KINDS: readonly FloatKind[] = ["file", "folder"];
+const FLOAT_OUTCOMES: readonly FloatOutcome[] = ["copied", "linked", "cancelled", "nothing", "failed"];
 
 // ---------------------------------------------------------------------------
 // Guard helpers
@@ -283,4 +318,40 @@ export function isToastShowPayload(value: unknown): value is ToastShowPayload {
 /** Guards a `toast://hide` payload. */
 export function isToastHidePayload(value: unknown): value is ToastHidePayload {
   return hasExactKeys(value, ["id"]) && isCount(value["id"]);
+}
+
+/** A shelf item id: Rust hands them out from 1 and never reuses one. */
+function isItemId(value: unknown): value is number {
+  return isCount(value) && value >= 1;
+}
+
+function isFloatItem(value: unknown): value is FloatItem {
+  return (
+    hasExactKeys(value, ["id", "name", "kind", "missing"]) &&
+    isItemId(value["id"]) &&
+    typeof value["name"] === "string" &&
+    isOneOf(value["kind"], FLOAT_KINDS) &&
+    typeof value["missing"] === "boolean"
+  );
+}
+
+/**
+ * Guards a `float://view` payload (and the `float_view` answer). Besides
+ * the types, no id may appear twice: the page keys its rows by id.
+ */
+export function isFloatView(value: unknown): value is FloatView {
+  if (!hasExactKeys(value, ["items"])) {
+    return false;
+  }
+  const items = value["items"];
+  if (!Array.isArray(items) || !items.every((item: unknown) => isFloatItem(item))) {
+    return false;
+  }
+  const ids = new Set(items.map((item: FloatItem) => item.id));
+  return ids.size === items.length;
+}
+
+/** Guards a `float://drag-ended` payload. */
+export function isFloatDragEnded(value: unknown): value is FloatDragEnded {
+  return hasExactKeys(value, ["outcome"]) && isOneOf(value["outcome"], FLOAT_OUTCOMES);
 }

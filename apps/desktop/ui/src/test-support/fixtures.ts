@@ -4,6 +4,8 @@
  */
 
 import {
+  type FloatView,
+  isFloatView,
   isToastShowPayload,
   isWheelOpenPayload,
   type ToastShowPayload,
@@ -40,6 +42,15 @@ export function toastFixture(name: string): ToastShowPayload {
   const value = fixtureJson(name);
   if (!isToastShowPayload(value)) {
     throw new Error(`${name} is not a toast://show payload`);
+  }
+  return value;
+}
+
+/** A `float://view` fixture, guarded. */
+export function floatFixture(name: string): FloatView {
+  const value = fixtureJson(name);
+  if (!isFloatView(value)) {
+    throw new Error(`${name} is not a float://view payload`);
   }
   return value;
 }

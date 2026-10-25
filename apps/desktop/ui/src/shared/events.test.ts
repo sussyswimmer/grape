@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
 import {
+  FLOAT_CLEAR,
+  FLOAT_DRAG_ENDED,
+  FLOAT_DRAG_OUT,
+  FLOAT_GET_VIEW,
+  FLOAT_REMOVE,
+  FLOAT_REVEAL,
+  FLOAT_VIEW,
+  FLOAT_WINDOW,
+  isFloatDragEnded,
+  isFloatView,
   isToastHidePayload,
   isToastShowPayload,
   isWheelClosePayload,
@@ -15,9 +25,10 @@ import {
 } from "./events";
 import { clone, get, type Json, mutate, objectPaths, paths, wrongType } from "../test-support/json";
 
-// The golden payloads from docs/design/m1-drag-wheel.md §C. The Rust side
-// `include_str!`s the same files, so both suites test one contract. The
-// Settings views share the folder; src/settings/model.test.ts covers them.
+// The golden payloads from docs/design/m1-drag-wheel.md §C, plus the float
+// shelf's (M5). The Rust side `include_str!`s the same files, so both suites
+// test one contract. The Settings views share the folder;
+// src/settings/model.test.ts covers them.
 const raw = import.meta.glob<string>(["./fixtures/*.json", "!./fixtures/settings-view-*.json"], {
   query: "?raw",
   import: "default",
@@ -44,6 +55,8 @@ const GUARDS: Readonly<Record<string, Guard>> = {
   isWheelClosePayload,
   isToastShowPayload,
   isToastHidePayload,
+  isFloatView,
+  isFloatDragEnded,
 };
 
 /** Each fixture and the one guard that must accept it. */
@@ -57,6 +70,9 @@ const CASES: readonly (readonly [string, string])[] = [
   ["toast-show-working.json", "isToastShowPayload"],
   ["toast-show-done.json", "isToastShowPayload"],
   ["toast-hide.json", "isToastHidePayload"],
+  ["float-view.json", "isFloatView"],
+  ["float-view-empty.json", "isFloatView"],
+  ["float-drag-ended.json", "isFloatDragEnded"],
 ];
 
 function guard(name: string): Guard {
@@ -76,11 +92,19 @@ describe("event names", () => {
     expect(TOAST_HIDE).toBe("toast://hide");
     expect(WHEEL_PAINTED).toBe("wheel_painted");
     expect(TOAST_CLICKED).toBe("toast_clicked");
+    expect(FLOAT_VIEW).toBe("float://view");
+    expect(FLOAT_DRAG_ENDED).toBe("float://drag-ended");
+    expect(FLOAT_GET_VIEW).toBe("float_view");
+    expect(FLOAT_REMOVE).toBe("float_remove");
+    expect(FLOAT_CLEAR).toBe("float_clear");
+    expect(FLOAT_REVEAL).toBe("float_reveal");
+    expect(FLOAT_DRAG_OUT).toBe("float_drag_out");
+    expect(FLOAT_WINDOW).toBe("float");
   });
 });
 
 describe("golden fixtures", () => {
-  it("are exactly the nine payloads from §C", () => {
+  it("are exactly the nine payloads from §C and the float shelf's three", () => {
     expect(Object.keys(raw).sort()).toEqual(CASES.map(([name]) => `./fixtures/${name}`).sort());
   });
 
@@ -173,6 +197,9 @@ describe("semantic checks", () => {
       expect(isWheelHighlightPayload({ seq: 1, index: bad })).toBe(false);
       expect(isWheelClosePayload({ seq: bad, reason: "drop" })).toBe(false);
       expect(isToastHidePayload({ id: bad })).toBe(false);
+      expect(isFloatView({ items: [{ id: bad, name: "a", kind: "file", missing: false }] })).toBe(
+        false,
+      );
     }
     expect(isWheelHighlightPayload({ seq: 0, index: 11 })).toBe(true);
   });
@@ -199,6 +226,32 @@ describe("semantic checks", () => {
     for (const tone of ["working", "done", "error", "info"]) {
       expect(isToastShowPayload(mutate(done, ["tone"], tone))).toBe(true);
     }
+    const shelf = clone(parsed("float-view.json"));
+    expect(isFloatView(mutate(shelf, ["items", 0, "kind"], "File"))).toBe(false);
+    expect(isFloatView(mutate(shelf, ["items", 0, "kind"], "link"))).toBe(false);
+    expect(isFloatDragEnded({ outcome: "moved" })).toBe(false);
+    expect(isFloatDragEnded({ outcome: "Copied" })).toBe(false);
+    for (const outcome of ["copied", "linked", "cancelled", "nothing", "failed"]) {
+      expect(isFloatDragEnded({ outcome })).toBe(true);
+    }
+  });
+
+  it("rejects a shelf item id of 0 (Rust hands them out from 1)", () => {
+    const shelf = clone(parsed("float-view.json"));
+    expect(isFloatView(mutate(shelf, ["items", 0, "id"], 0))).toBe(false);
+    expect(isFloatView(mutate(shelf, ["items", 0, "id"], 2 ** 53 - 1))).toBe(true);
+  });
+
+  it("rejects a shelf that lists one id twice (rows are keyed by id)", () => {
+    const shelf = clone(parsed("float-view.json"));
+    expect(isFloatView(mutate(shelf, ["items", 1, "id"], 1))).toBe(false);
+  });
+
+  it("accepts a shelf item with any name, and items in any id order", () => {
+    const shelf = clone(parsed("float-view.json"));
+    expect(isFloatView(mutate(shelf, ["items", 0, "name"], ""))).toBe(true);
+    const items = get(shelf, ["items"]);
+    expect(isFloatView({ items: [...(items as Json[])].reverse() })).toBe(true);
   });
 
   it("rejects grape-core's own WheelContent shape (kind + value)", () => {

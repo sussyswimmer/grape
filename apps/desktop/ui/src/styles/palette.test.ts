@@ -74,6 +74,7 @@ describe("stylesheets", () => {
     expect(paths).toContain(TOKENS);
     expect(paths).toContain("./overlay.css");
     expect(paths).toContain("./toast.css");
+    expect(paths).toContain("./float.css");
     for (const [, css] of files) {
       expect(css.length).toBeGreaterThan(0);
     }
