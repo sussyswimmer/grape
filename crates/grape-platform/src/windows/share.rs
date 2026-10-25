@@ -7,7 +7,9 @@
 //! 2. The rest are looked up as `StorageFile`s (`GetFileFromPathAsync`,
 //!    all at once, 10 s for the lot) in the multithreaded apartment, each
 //!    kept as an agile reference so it can cross to the share thread. A
-//!    file that fails or doesn't come back in time is left out too.
+//!    file that fails or doesn't come back in time is left out too. The
+//!    apartment is kept for the app's life (`CoIncrementMTAUsage`, once),
+//!    so it isn't torn down under the files the sheet's package holds.
 //! 3. With nothing left, the sheet doesn't open.
 //! 4. Otherwise the share thread gets the request, and the caller waits up
 //!    to 30 s (Chromium's limit) for the sheet to ask for the files.
@@ -33,18 +35,19 @@
 //! calls `FailWithDisplayText` if any of that fails, and always returns
 //! `Ok`.
 //!
-//! Once a share was served, the sheet closing may activate the anchor. It
-//! then hides and hands the foreground back to the window that had it when
-//! the share began, unless that one is gone or Grape's. Otherwise the
-//! anchor stays where it is, invisible, until the next share moves it; it's
-//! never destroyed, as a sheet may still be open on it.
+//! Once the sheet asked for a share's files (whether the package filled or
+//! not), the sheet closing may activate the anchor. It then hands the
+//! foreground back to the window that had it when the share began, unless
+//! that one is gone or Grape's, and hides. Otherwise the anchor stays where
+//! it is, invisible, until the next share moves it; it's never destroyed,
+//! as a sheet may still be open on it.
 
 use core::ffi::c_void;
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,8 +62,8 @@ use ::windows::Win32::Foundation::{
     LRESULT, POINT, RPC_E_CHANGED_MODE, WPARAM,
 };
 use ::windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
-    COINIT_MULTITHREADED,
+    CoIncrementMTAUsage, CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
+    COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED,
 };
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use ::windows::Win32::System::Threading::GetCurrentProcessId;
@@ -121,6 +124,10 @@ static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 /// Tells a request's expiry from a later request's.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The cookie that keeps the multithreaded apartment alive for the app's
+/// life (a raw value), or `None` if it couldn't be had. Never given back.
+static MTA_COOKIE: OnceLock<Option<isize>> = OnceLock::new();
+
 /// One share, as the share thread gets it.
 struct Request {
     id: u64,
@@ -154,8 +161,9 @@ thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
     /// The window in front when the last share began (a raw handle).
     static FRONT: Cell<Option<isize>> = const { Cell::new(None) };
-    /// The last share was served since the anchor was shown, so the anchor
-    /// being activated is the sheet handing it the focus.
+    /// The sheet asked for the last share's files (filled or not) since the
+    /// anchor was shown, so the anchor being activated is the sheet handing
+    /// it the focus.
     static SERVED: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -173,8 +181,9 @@ pub(crate) fn share(
     paths: &[PathBuf],
     near: Option<(i32, i32)>,
 ) -> Result<ShareOutcome, PlatformError> {
-    // The apartment stays until the sheet has the files, so the items
-    // made in it live at least that long.
+    // This thread is in the multithreaded apartment for the lookups. The
+    // apartment itself outlives that (`keep_mta`), so the items made in it
+    // stay usable while the sheet's package holds them.
     with_mta(|| {
         let Prepared {
             items,
@@ -216,11 +225,30 @@ fn with_mta<T>(work: impl FnOnce() -> Result<T, PlatformError>) -> Result<T, Pla
     }
     let result = work();
     if joined.is_ok() {
-        // SAFETY: balances the CoInitializeEx above. The COM objects `work`
-        // made are gone; only agile references to them crossed threads.
+        // SAFETY: balances the CoInitializeEx above, on the same thread.
+        // The storage items `work` made live on in the multithreaded
+        // apartment, held by the sheet's package; only agile references to
+        // them crossed threads, and `keep_mta`'s cookie keeps the apartment
+        // after this thread leaves it.
         unsafe { CoUninitialize() };
     }
     result
+}
+
+/// Keeps the multithreaded apartment alive for the app's life, once per
+/// process. The storage items live in it, and the sheet's package still
+/// holds them after the thread that looked them up has left it: without
+/// the cookie, the last thread leaving would tear the apartment down and
+/// cut them off.
+fn keep_mta() {
+    MTA_COOKIE.get_or_init(|| {
+        // SAFETY: no pointers; any thread may call it, in an apartment or
+        // not. The cookie is kept for the process's life and never handed
+        // to CoDecrementMTAUsage.
+        logged("CoIncrementMTAUsage", unsafe { CoIncrementMTAUsage() })
+            .ok()
+            .map(|cookie| cookie.0 as isize)
+    });
 }
 
 /// The cursor's position, if it can be read.
@@ -280,6 +308,10 @@ fn prepare(paths: &[PathBuf], timeout: Duration) -> Prepared {
 /// `timeout` for the lot. `None` for a file that failed or didn't come
 /// back in time.
 fn look_up(files: &[PathBuf], timeout: Duration) -> Vec<Option<AgileReference<IStorageItem>>> {
+    if files.is_empty() {
+        return Vec::new();
+    }
+    keep_mta();
     let (tx, rx) = mpsc::channel();
     let mut found: Vec<Option<AgileReference<IStorageItem>>> = files.iter().map(|_| None).collect();
     // Kept until the wait is over, so nothing depends on the system
@@ -679,6 +711,9 @@ fn on_data_requested(
         }
         return;
     };
+    // The sheet opened for this share, whatever the fill gives: its closing
+    // hands the foreground back.
+    SERVED.set(true);
     if !in_show.load(Ordering::SeqCst) {
         // After ShowShareUIForWindow returned: remove the handler first.
         if let Ok(manager) = sender.ok() {
@@ -692,9 +727,6 @@ fn on_data_requested(
     }
     let filled = args.ok().and_then(|args| fill(args, &payload));
     let filled = logged("DataRequested (fill)", filled);
-    if filled.is_ok() {
-        SERVED.set(true);
-    }
     let _ = payload
         .reply
         .send(filled.map_err(|err| os_err("DataRequested", &err)));
@@ -754,26 +786,30 @@ fn drop_pending(id: Option<u64>) -> bool {
     true
 }
 
-/// The anchor was activated after a share was served: the sheet closed
-/// and handed it the focus. Hide it and hand the foreground back.
+/// The anchor was activated after the sheet asked for a share's files: the
+/// sheet closed and handed it the focus. Hand the foreground back first,
+/// while the anchor is still the active window, then hide it.
 fn give_back(anchor: HWND) {
     if !SERVED.replace(false) {
         return;
     }
-    // SAFETY: hides this thread's own live window.
-    let _ = unsafe { ShowWindow(anchor, SW_HIDE) };
-    let Some(front) = FRONT.take().map(|raw| HWND(raw as *mut c_void)) else {
-        log::info!("share: the sheet closed; no window was in front before it");
-        return;
-    };
-    if !is_window_of_another_app(front) {
-        log::info!("share: the sheet closed; the window in front before it is gone or Grape's");
-        return;
+    match FRONT.take().map(|raw| HWND(raw as *mut c_void)) {
+        None => log::info!("share: the sheet closed; no window was in front before it"),
+        Some(front) if !is_window_of_another_app(front) => {
+            log::info!("share: the sheet closed; the window in front before it is gone or Grape's");
+        }
+        Some(front) => {
+            // SAFETY: takes the handle by value. The anchor, Grape's own
+            // window, was just activated by the sheet and isn't hidden yet,
+            // so Grape is the foreground process and may set the
+            // foreground.
+            let handed = unsafe { SetForegroundWindow(front) }.as_bool();
+            log::info!("share: the sheet closed; foreground handed back: {handed}");
+        }
     }
-    // SAFETY: takes the handle by value; Grape was just activated, so it
-    // may set the foreground.
-    let handed = unsafe { SetForegroundWindow(front) }.as_bool();
-    log::info!("share: the sheet closed; foreground handed back: {handed}");
+    // SAFETY: hides this thread's own live window. Once `front` is in the
+    // foreground, hiding the anchor activates nothing else.
+    let _ = unsafe { ShowWindow(anchor, SW_HIDE) };
 }
 
 /// `true` if `hwnd` is a live window of another process.

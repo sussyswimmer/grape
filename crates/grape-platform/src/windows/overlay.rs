@@ -28,8 +28,9 @@
 //! off, and nothing added to position changes. A click must activate the
 //! shelf: only the foreground window can capture the mouse, and a drag out
 //! of the shelf needs the capture. Grape still never activates it itself:
-//! [`show_shelf`] shows it with `SWP_NOACTIVATE`, and [`hide_shelf`] hides
-//! it; never use Tauri's `show`, `hide` or `set_focus` on it.
+//! [`show_shelf`] shows it with `SWP_NOACTIVATE` (restoring a minimized
+//! shelf with `SW_SHOWNOACTIVATE` first), and [`hide_shelf`] hides it;
+//! never use Tauri's `show`, `hide` or `set_focus` on it.
 
 use core::ffi::c_void;
 
@@ -41,12 +42,13 @@ use ::windows::Win32::Foundation::{
 use ::windows::Win32::System::Threading::GetCurrentThreadId;
 use ::windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsWindow, SetWindowLongW,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, SetWindowLongW,
     SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SET_WINDOW_POS_FLAGS, STYLESTRUCT,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WINDOWPOS,
-    WINDOW_EX_STYLE, WM_NCDESTROY, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_ACCEPTFILES,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
+    SW_SHOWNOACTIVATE, WINDOWPOS, WINDOW_EX_STYLE, WM_NCDESTROY, WM_STYLECHANGING,
+    WM_WINDOWPOSCHANGING, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_EX_WINDOWEDGE,
 };
 
 use crate::{PlatformError, Rect};
@@ -182,7 +184,10 @@ pub fn harden_shelf(hwnd: isize) -> Result<(), PlatformError> {
 /// `SetWindowPos(HWND_TOPMOST, …, SWP_NOACTIVATE | SWP_SHOWWINDOW)`. Also
 /// moves or resizes a shelf that's already shown. When moving to a monitor
 /// with another scale makes tao resize the window on the way, the frame is
-/// set once more.
+/// set once more. A minimized shelf (Win+Down, say, once a click activated
+/// it) is first restored without activation, with
+/// `ShowWindow(SW_SHOWNOACTIVATE)`: `SetWindowPos` alone leaves it
+/// minimized, out of sight.
 ///
 /// `hwnd` is the raw handle value. Call this on the window's thread
 /// (Tauri's main thread).
@@ -194,6 +199,14 @@ pub fn harden_shelf(hwnd: isize) -> Result<(), PlatformError> {
 ///   fails.
 pub fn show_shelf(hwnd: isize, frame: Rect) -> Result<(), PlatformError> {
     let hwnd = owned_window(hwnd)?;
+    // SAFETY: `hwnd` is a live window owned by this thread (checked above).
+    // IsIconic only reads its state; ShowWindow's return value is only
+    // whether it was visible before.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
     place(hwnd, frame)?;
     if window_rect(hwnd).is_some_and(|now| now != frame) {
         place(hwnd, frame)?;
@@ -477,7 +490,7 @@ mod tests {
     use super::*;
     use ::windows::core::w;
     use ::windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, IsWindowVisible, SendMessageW, WS_POPUP,
+        CreateWindowExW, DestroyWindow, IsWindowVisible, SendMessageW, SW_SHOWMINNOACTIVE, WS_POPUP,
     };
 
     /// A hidden top-level test window, destroyed on drop.
@@ -770,6 +783,35 @@ mod tests {
         // SAFETY: as above.
         assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());
         hide_shelf(window.raw()).unwrap();
+    }
+
+    #[test]
+    fn show_shelf_restores_a_minimized_shelf() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        harden_shelf(window.raw()).unwrap();
+        let frame = Rect {
+            x: 40,
+            y: 60,
+            width: 280,
+            height: 136,
+        };
+        show_shelf(window.raw(), frame).unwrap();
+        // SAFETY: this thread's own live window, minimized without being
+        // activated; the return value is only whether it was visible.
+        let _ = unsafe { ShowWindow(window.0, SW_SHOWMINNOACTIVE) };
+        // SAFETY: a plain query of this thread's own live window.
+        assert!(unsafe { IsIconic(window.0) }.as_bool());
+        show_shelf(window.raw(), frame).unwrap();
+        // SAFETY: plain queries of this thread's own live window.
+        let (iconic, visible) = unsafe {
+            (
+                IsIconic(window.0).as_bool(),
+                IsWindowVisible(window.0).as_bool(),
+            )
+        };
+        assert!(!iconic);
+        assert!(visible);
+        assert_eq!(window_rect(window.0), Some(frame));
     }
 
     #[test]
