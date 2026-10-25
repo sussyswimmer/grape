@@ -55,6 +55,8 @@ cargo fmt --all
 pnpm -C apps/desktop/ui typecheck
 pnpm -C apps/desktop/ui test
 pnpm tauri build                  # local release build for the current OS
+cargo deny --locked check licenses bans sources   # license check (D23)
+cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs   # after a dependency change
 ```
 
 ## Which doc to read

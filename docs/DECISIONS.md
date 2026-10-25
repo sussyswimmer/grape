@@ -263,6 +263,41 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - the snap, and two monitors at different DPI.
 - **Revisit if:** the sheet won't open from the anchor (try an activatable popup on the main thread, then the toast), share targets turn out to take folders, a drag out of the shelf ever moves or deletes a file, or the Mac gets a drag out.
 
+## D23: Third-party notices and the license check (2026-10-25, proposed, confirm)
+- **Decision:** `THIRD_PARTY_NOTICES.md` at the repo root lists the code by other people that Grape ships, with each license's full text. cargo-about generates it from `Cargo.lock`. CI checks that it's up to date, and checks every crate's license and source with cargo-deny. Both bundles ship it next to Grape's own license.
+- **What the notices cover:**
+  - The `grape` app crate's normal dependencies for the three targets Grape ships (`x86_64-pc-windows-msvc`, `aarch64-apple-darwin`, `x86_64-apple-darwin`): 262 crates today. Build and dev dependencies are left out, and so are Grape's own crates, which `LICENSE` covers.
+  - cargo-about counts a proc-macro's dependencies as normal ones, so a few crates that only run while Grape is built are listed too. Four are MPL-2.0: `cssparser`, `cssparser-macros`, `dtoa-short` and `selectors`, through `tauri-macros`. Listing too much does no harm, and the file says that `option-ext` is the one MPL crate compiled in.
+  - When a crate offers a choice, Grape takes MIT, then Apache-2.0, BSD-3-Clause, Zlib and Unicode-3.0, in that order (`about.toml`). Those five, plus MPL-2.0 for five crates, are every license in the file.
+  - The JavaScript in the built UI: `@tauri-apps/api` 2.12.1 (taken as MIT) and Vite 8.3.3's module preload polyfill (MIT). A fresh `vite build` has no other license banners or bundler helpers. That section is written by hand in `about.hbs`, so check it again when the UI's dependencies or Vite change.
+  - **Not yet:** the sidecars and their DLLs (D22). Each gets a folder in `licenses/` and an entry in `about.hbs` (`licenses/README.md`).
+- **Clarifications** (`about.toml`): 25 crates point cargo-about at their real license text, each file pinned by SHA-256 so a changed file fails the run.
+  - windows-rs (`license-mit`) and the Tauri plugins (`LICENSE_MIT`) name their files in ways cargo-about doesn't scan.
+  - `dpi` has libm's MIT text with its copyright lines. `brotli-decompressor` ships only the BSD text of its two options, so Grape takes BSD-3-Clause. cargo-about took a copied code file in `schemars_derive` for a license.
+  - `webview2-com`, `webview2-com-sys`, `webview2-com-macros` and `alloc-stdlib` ship no license file, so the text comes from their GitHub repository at the commit each was published from. That's the one network call generating the file makes (raw.githubusercontent.com), so regenerating needs the network.
+  - The objc2 crates (macOS only) have no license text anywhere, and `dunce` ships only its CC0 option. The file shows the standard MIT and Apache-2.0 texts for them, and says so.
+- **The license check** (`deny.toml`: the same three targets, dev dependencies left out, build dependencies in):
+  - `licenses` allows exactly MIT, Apache-2.0, BSD-3-Clause, Zlib and Unicode-3.0, and an allowed license that nothing uses is an error. MPL-2.0 is allowed only for `option-ext` and the four build-time crates above, by name. No GPL, AGPL or LGPL (golden rule 6).
+  - `bans` warns about duplicate versions and never fails on them (nine crates have two or three today). Wildcard versions fail, except Grape's own path dependencies.
+  - `sources` allows crates.io only. Any other registry or a git source fails.
+  - `advisories` runs as a separate CI step that can't fail the job, because it fetches the RustSec database on every run.
+- **CI:** a `Licenses` job on `ubuntu-latest` installs both tools with taiki-e/install-action (prebuilt binaries checked against its SHA-256 list, no fallback). It runs the check, regenerates the notices, and fails with the regenerate command if `THIRD_PARTY_NOTICES.md` changed.
+  - `.gitattributes` marks the file `-text`, so git keeps it byte for byte. generic-array's license text has CRLF line endings. With the repo's `eol=lf`, a fresh checkout would have LF there, and the regenerated file would never match it.
+- **Shipping:** `bundle.resources` in `tauri.conf.json` maps `THIRD_PARTY_NOTICES.md` and `LICENSE` (as `LICENSE.txt`, so Windows opens it) to the resource root. That's the install folder on Windows (`%LOCALAPPDATA%\Grape` for the per-user installer) and `Grape.app/Contents/Resources` on macOS.
+  - The map form is what keeps them there. A plain list puts a `../` path under `_up_` folders (tauri-utils 2.10.1, `resources.rs`). tauri-bundler 2.10.1, which CLI 2.12.1 uses, installs a map's targets as given in the NSIS installer, and copies them into the `.app`'s `Resources`. The uninstaller removes them.
+  - tauri-build checks the paths on every build and copies the files into `target/<profile>`, so `cargo check -p grape` fails if one is missing.
+- **Tools** (developers and CI only; they never ship and nothing links them):
+
+| Tool | Version | Published | License | Why |
+|---|---|---|---|---|
+| cargo-about | 0.9.2 | 2026-08-18 | MIT OR Apache-2.0 | Generates `THIRD_PARTY_NOTICES.md` |
+| cargo-deny | 0.20.2 | 2026-07-09 | MIT OR Apache-2.0 | The license, ban and source check |
+| taiki-e/install-action | v2.87.27 (commit `ab68953`) | 2026-10-09 | Apache-2.0 OR MIT | Installs both in CI from checksummed prebuilt binaries |
+
+  - Each is the newest release at least 14 days old (D9). v2.87.28 was 13 days old.
+  - To install them locally: `cargo install --locked --features cli cargo-about@0.9.2` (the binary needs the `cli` feature) and `cargo install --locked cargo-deny@0.20.2`.
+- **Revisit if:** Maxwell decides O6 another way (then drop the MPL exceptions and the dependency with them), a clarified crate's file changes (its checksum fails), a sidecar ships (D22), or the UI gets a runtime dependency.
+
 ---
 
 ## Open questions
@@ -273,4 +308,6 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **O4: Optional add-on downloads** (LibreOffice for slides/office in v2). This needs a network call outside the conversion path. Decide before v2.
 - ~~**O5: Show the wheel for drags from any app on Windows,** or only Explorer and the Desktop (the default)?~~ Answered by default in D14: Explorer and the Desktop only, with "Any app" as a possible setting in M6. Confirm or change.
 - **O6: MPL-2.0 crates linked by Tauri.** Tauri 2.12 statically links `option-ext` 0.2.0 (MPL-2.0) through `dirs` → `dirs-sys`. ENGINES rule 1 allows only MIT/Apache/BSD/ISC/Zlib, or LGPL linked dynamically. MPL-2.0 is file-level copyleft: linking it into an MIT app is fine as long as the MPL files' source stays available, which it does (unmodified on crates.io). Proposal: amend rule 1 to allow unmodified MPL-2.0 crates, list them in `THIRD_PARTY_NOTICES.md` in M7, and add a `cargo-deny` license check to CI.
+  - *2026-10-25:* the notices and the check are done (D23). `THIRD_PARTY_NOTICES.md` lists the MPL-2.0 crates with links to their source on crates.io, and says `option-ext` is the only one compiled in. The other four (`cssparser`, `cssparser-macros`, `dtoa-short`, `selectors`) run only inside Tauri's macros at build time. `deny.toml` allows MPL-2.0 for those five by name and nowhere else.
+  - Still Maxwell's call: amend ENGINES rule 1 to allow unmodified MPL-2.0 crates. Until then, a new MPL crate fails CI and needs a name added on purpose. Rule 1 also doesn't name Unicode-3.0, which `deny.toml` allows: a permissive license, used by 19 crates (the ICU crates under `url`, and `unicode-ident`).
 - **O7: Wheel titles.** `TOOLS_AND_ACTIONS.md` lists the wheel titles (METADATA, ADD BG, BLEEP, …) as **[observed]** from the demo, while golden rule 1 bans Tangerine's wording. `grape-core` encodes them exactly as the doc lists them, in one `match` checked by the doc-sync test, so rewording them later is a one-line change on each side. Keep them, or write our own?

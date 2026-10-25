@@ -2,9 +2,9 @@
 
 ## Licensing rules (Grape is free and open source; see DECISIONS D2)
 
-1. **Grape's own binaries** (the Tauri app and our crates) may link only permissive code (MIT/Apache/BSD/ISC/Zlib) or LGPL libraries that are *dynamically* linked.
+1. **Grape's own binaries** (the Tauri app and our crates) may link only permissive code (MIT/Apache/BSD/ISC/Zlib) or LGPL libraries that are *dynamically* linked. CI checks the crates with cargo-deny against `deny.toml` (DECISIONS D23).
 2. **GPL/AGPL tools may ship only as separate sidecar executables** that Grape runs as a child process. Never link them into our binary.
-3. Every bundled third-party binary ships with its license text in `licenses/` and an entry in `THIRD_PARTY_NOTICES.md`. GPL sidecars also need the exact source version and a link to the source (or a source archive on the GitHub Release).
+3. Every bundled third-party binary ships with its license text in `licenses/` and an entry in `THIRD_PARTY_NOTICES.md`. GPL sidecars also need the exact source version and a link to the source (or a source archive on the GitHub Release). `THIRD_PARTY_NOTICES.md` is generated, so the entry goes in its template, `about.hbs`. `licenses/README.md` has the steps.
 4. Record every new library or sidecar in `DECISIONS.md`: name, version, license and why it's needed.
 5. Skip anything with *restrictive non-OSS* terms, like the `unrar` freeware license. Use libarchive (BSD) for RAR reading instead.
 

@@ -126,3 +126,38 @@ jobs:
           name: Grape-macOS-universal
           path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
           if-no-files-found: error
+
+  # Third-party licenses (DECISIONS D23): every crate's license is allowed,
+  # every crate comes from crates.io, and THIRD_PARTY_NOTICES.md matches
+  # Cargo.lock. Linux is enough: both tools read the Windows and Mac graphs
+  # from deny.toml and about.toml.
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binaries at the pinned versions, checked against the
+      # action's SHA-256 list. No fallback to building or other installers.
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: cargo-deny@0.20.2,cargo-about@0.9.2
+          fallback: none
+      - name: Licenses, bans and sources
+        run: cargo deny --locked check licenses bans sources
+      # Needs the RustSec database from the network, so it never fails the
+      # job. A finding shows as a failed step: read it, and take the fix
+      # right away (DECISIONS D9).
+      - name: Advisories (not blocking)
+        continue-on-error: true
+        run: cargo deny --locked check advisories
+      - name: THIRD_PARTY_NOTICES.md is up to date
+        run: |
+          cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs
+          if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md || [ -n "$(git status --porcelain -- THIRD_PARTY_NOTICES.md)" ]; then
+            echo "::error file=THIRD_PARTY_NOTICES.md::THIRD_PARTY_NOTICES.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs"
+            exit 1
+          fi
