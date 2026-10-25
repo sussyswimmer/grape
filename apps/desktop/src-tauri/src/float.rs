@@ -16,15 +16,22 @@
 //!   so dragging an item back onto the shelf does nothing.
 //! - Moved by its header and left within reach of a screen edge, it snaps
 //!   flush to that edge once the mouse button is up.
-//! - `float_drag_out` is async and queues the drag on the main thread (a
-//!   sync command would run it inside WebView2's IPC callback); the page
-//!   hears `float://drag-ended` when it's over.
+//! - It can't be minimized or maximized, and a close request (Alt+F4 once
+//!   a click made it the active window) is turned into the header's ×: the
+//!   shelf is emptied and hidden, never destroyed with its items kept. A
+//!   shelf minimized anyway counts as closed, so the next Float places it
+//!   again.
+//! - `float_drag_out` is async: it drops the items that are gone on its
+//!   own thread, then queues the drag on the main thread (a sync command
+//!   would run it inside WebView2's IPC callback); the page hears
+//!   `float://drag-ended` when it's over.
 //!
 //! macOS and Linux never build the window: Float is "coming" there, and the
 //! commands only see an empty shelf.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "windows")]
 use anyhow::Context as _;
@@ -56,6 +63,9 @@ const ROWS_SHOWN: usize = 6;
 const MARGIN: f64 = 12.0;
 /// How near an edge a moved shelf must be left to snap to it.
 const SNAP_REACH: f64 = 48.0;
+/// How long the look at a drag's items may take before the press that
+/// asked for it counts as over: a local disk answers at once.
+const STALE_PRESS: Duration = Duration::from_secs(1);
 
 /// One item on the shelf.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,6 +192,15 @@ fn display_name(path: &Path) -> String {
 /// drag decides for itself.
 fn exists(path: &Path) -> bool {
     path.try_exists().unwrap_or(true)
+}
+
+/// The paths a drag out can carry: those still there, in order. One whose
+/// state can't be read is left out, as the platform's own check does.
+fn draggable(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    paths
+        .into_iter()
+        .filter(|path| path.try_exists().unwrap_or(false))
+        .collect()
 }
 
 /// The window's height in logical pixels for `count` items: the inset, the
@@ -378,21 +397,35 @@ pub async fn float_remove(app: AppHandle, id: u64) {
     changed(&app);
 }
 
+/// Empties the shelf and hides it: the header's ×, and a close request on
+/// its window. Nothing on disk changes. Looks at the disk (the view), so
+/// never on the main thread.
+fn clear(app: &AppHandle) {
+    app.state::<Shelf>().lock().clear();
+    log::info!("float: shelf cleared");
+    changed(app);
+}
+
 /// The header's ×: clears the shelf and hides it. Nothing on disk changes.
 #[tauri::command]
 pub async fn float_clear(app: AppHandle) {
-    app.state::<Shelf>().lock().clear();
-    log::info!("float: shelf cleared");
-    changed(&app);
+    clear(&app);
 }
 
-/// Double-click or Enter on item `id`: shows it in Explorer.
+/// Double-click or Enter on item `id`: shows it in Explorer. An item that's
+/// gone shows nothing (Explorer would open some other folder); the page
+/// gets a view, so its row turns Missing.
 #[tauri::command]
 pub async fn float_reveal(app: AppHandle, id: u64) {
     let Some(path) = app.state::<Shelf>().lock().path(id) else {
         log::info!("float: reveal of an item that isn't on the shelf");
         return;
     };
+    if !exists(&path) {
+        log::info!("float: reveal of an item that's gone");
+        publish(&app);
+        return;
+    }
     match grape_platform::file_actions::reveal(&path) {
         Ok(()) => {}
         Err(PlatformError::Unsupported) => log::info!("float: reveal isn't wired on this OS"),
@@ -404,13 +437,39 @@ pub async fn float_reveal(app: AppHandle, id: u64) {
 /// Returns at once: the drag runs on the main thread, and the page hears
 /// `float://drag-ended` when it's over. Async, so it never runs inside
 /// WebView2's IPC callback.
+///
+/// The items that are gone are dropped here first, on this thread: a path
+/// on a share that stopped answering can take the network's timeout to
+/// look at, and the main thread must not stall on it while the button is
+/// held. When none is left, no drag is queued. The platform looks again
+/// right before the drag.
 #[tauri::command]
 pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
-    // Copied out: the lock is never held across the drag.
+    // Copied out: the lock is never held across the disk or the drag.
     let paths = app.state::<Shelf>().lock().paths_for(&ids);
     if paths.is_empty() {
         log::info!("float: nothing to drag out");
         drag_ended(&app, FloatOutcome::Nothing);
+        return;
+    }
+    let asked = paths.len();
+    let looked = Instant::now();
+    let paths = draggable(paths);
+    let gone = asked - paths.len();
+    if looked.elapsed() >= STALE_PRESS {
+        // A share that stopped answering held the check up. The press that
+        // asked for this drag may be over, and a new one (on another row,
+        // or in another app) would carry these items off: drag nothing.
+        log::info!("float: looking at the items took too long; no drag");
+        drag_ended(&app, FloatOutcome::Cancelled);
+        publish(&app);
+        return;
+    }
+    if paths.is_empty() {
+        log::info!("float: none of the {asked} item(s) to drag out is there any more");
+        drag_ended(&app, FloatOutcome::Nothing);
+        // Their rows turn Missing.
+        publish(&app);
         return;
     }
     #[cfg(target_os = "windows")]
@@ -423,9 +482,16 @@ pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
         );
         drag_ended(&app, FloatOutcome::Failed);
     }
+    if gone > 0 {
+        // The drag is queued: the rows of the ones left out turn Missing.
+        log::info!("float: {gone} of {asked} item(s) to drag out are gone");
+        publish(&app);
+    }
 }
 
-/// The shelf window's events: a move arms the snap (Windows). wry's drop
+/// The shelf window's events: a move arms the snap (Windows), and a close
+/// request (Alt+F4 on the active shelf) does what the header's × does
+/// instead of destroying the window while its items stay. wry's drop
 /// handler should never fire once Grape's refusing target is registered;
 /// if it does, a window was missed.
 pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
@@ -435,6 +501,14 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     match event {
         #[cfg(target_os = "windows")]
         tauri::WindowEvent::Moved(_) => win::moved(window.app_handle()),
+        tauri::WindowEvent::CloseRequested { api, .. } => {
+            api.prevent_close();
+            log::info!("float: close request on the shelf, taken as its ×");
+            // This is the main thread, and clearing looks at the disk and
+            // queues the hide back here: do it on a worker.
+            let app = window.app_handle().clone();
+            tauri::async_runtime::spawn_blocking(move || clear(&app));
+        }
         tauri::WindowEvent::DragDrop(_) => {
             log::warn!(
                 "float: wry's drop handler saw a drag; Grape's refusing target missed a window"
@@ -488,7 +562,11 @@ mod win {
         // Not `focusable(false)`: clicking the shelf must activate Grape,
         // or the drag out can't take the mouse capture. Drag and drop stays
         // enabled, so WebView2 never handles a drop itself; Grape's
-        // refusing target replaces tao's and wry's handlers.
+        // refusing target replaces tao's and wry's handlers. Active, it
+        // hears the window keys: no minimize or maximize (a minimized tool
+        // window has no button to come back from), and Alt+F4 still gets
+        // through as a close request, which `on_window_event` turns into
+        // the header's ×.
         let window = WebviewWindowBuilder::new(app, FLOAT, WebviewUrl::App("float.html".into()))
             .title("Grape Shelf")
             .inner_size(WIDTH, height(1))
@@ -499,6 +577,8 @@ mod win {
             .skip_taskbar(true)
             .focused(false)
             .resizable(false)
+            .minimizable(false)
+            .maximizable(false)
             .shadow(false)
             .visible_on_all_workspaces(true)
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
@@ -578,16 +658,21 @@ mod win {
         };
         let hwnd = window.hwnd().context("the shelf has no window handle")?.0 as isize;
         let count = app.state::<Shelf>().lock().items.len();
-        let open = window
+        let shown = window
             .is_visible()
             .context("could not ask if the shelf is open")?;
         if count == 0 {
-            if open {
+            if shown {
                 platform::hide_shelf(hwnd).context("could not hide the shelf")?;
                 log::info!("float: shelf hidden");
             }
             return Ok(());
         }
+        // A minimized shelf is still "visible" to Windows, but nobody can
+        // see or reach it (a tool window has no taskbar button): it counts
+        // as closed, so a drop places it again and `show_shelf` restores
+        // it.
+        let open = shown && !minimized(&window)?;
         let frame = if open {
             let frame = frame_of(&window)?;
             match display_under(frame).or(open_on) {
@@ -613,6 +698,18 @@ mod win {
             log::info!("float: shelf shown with {count} item(s)");
         }
         Ok(())
+    }
+
+    /// Whether the shelf is minimized. It can't be through its own styles,
+    /// but a stray minimize must never leave it out of reach.
+    fn minimized(window: &WebviewWindow) -> anyhow::Result<bool> {
+        let minimized = window
+            .is_minimized()
+            .context("could not ask if the shelf is minimized")?;
+        if minimized {
+            log::warn!("float: the shelf is minimized; it counts as closed");
+        }
+        Ok(minimized)
     }
 
     /// The window's frame now, in global physical pixels.
@@ -838,6 +935,11 @@ mod win {
         if !shown || app.state::<Shelf>().lock().items.is_empty() {
             return Ok(());
         }
+        // Minimizing moves the window off screen: snapping it from there
+        // would bring it back somewhere else. The next Float places it.
+        if minimized(&window)? {
+            return Ok(());
+        }
         let frame = frame_of(&window)?;
         let Some(display) = display_under(frame) else {
             return Ok(());
@@ -1037,6 +1139,21 @@ mod tests {
             }
         );
         assert_eq!(Model::default().view(|_| true), FloatView { items: vec![] });
+    }
+
+    #[test]
+    fn a_drag_out_carries_only_the_items_still_there() {
+        let dir = std::env::temp_dir().join(format!("grape-float-drag-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp folder");
+        let here = dir.join("here.txt");
+        std::fs::write(&here, b"x").expect("a temp file");
+        let gone = dir.join("gone.txt");
+        assert_eq!(
+            draggable(vec![gone.clone(), here.clone(), dir.clone()]),
+            [here, dir.clone()]
+        );
+        assert!(draggable(vec![gone]).is_empty());
+        std::fs::remove_dir_all(&dir).expect("the temp folder removed");
     }
 
     #[test]

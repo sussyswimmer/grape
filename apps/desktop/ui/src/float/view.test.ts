@@ -289,6 +289,20 @@ describe("buttons and keys", () => {
     ]);
   });
 
+  it("double-click or Enter on a missing row reveals nothing, until it's back", () => {
+    const h = shown();
+    row(h.root, 3).dispatch("dblclick");
+    const enter = row(h.root, 3).dispatch("keydown", { key: "Enter" });
+    expect(enter.defaultPrevented).toBe(true);
+    expect(commands(h)).toEqual([]);
+
+    h.view.show({ items: shelf.items.map((item) => ({ ...item, missing: false })) });
+    row(h.root, 3).dispatch("dblclick");
+    h.view.show(shelf);
+    row(h.root, 3).dispatch("keydown", { key: "Enter" });
+    expect(commands(h)).toEqual([[FLOAT_REVEAL, { id: 3 }]]);
+  });
+
   it("Delete or Backspace on a row removes it", () => {
     const h = shown();
     row(h.root, 1).dispatch("keydown", { key: "Delete" });

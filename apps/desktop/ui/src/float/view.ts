@@ -13,8 +13,9 @@
  * copy or a shortcut, never a move. Nothing on the page is HTML-draggable
  * and every `dragstart` is cancelled, so WebView2 never starts a drag of
  * its own. Until `float://drag-ended` arrives the page ignores pointer
- * gestures (see `model.ts`). Double-click or Enter reveals an item;
- * Delete or Backspace removes the focused one.
+ * gestures (see `model.ts`). Double-click or Enter reveals an item, unless
+ * the view says it's missing (Rust checks again, as the view can be
+ * stale); Delete or Backspace removes the focused one.
  *
  * Rows are keyed by id and only updated, so keyboard focus survives a
  * redraw. When the focused row leaves, focus moves to the next row, else
@@ -312,12 +313,12 @@ export function mountFloat(root: HTMLElement, options: FloatShelfOptions = {}): 
     row.append(glyphBox, name, missing, remove);
 
     row.addEventListener("pointerdown", (event) => begin({ kind: "item", id }, event, row));
-    row.addEventListener("dblclick", () => callQuietly(callRust, FLOAT_REVEAL, { id }));
+    row.addEventListener("dblclick", () => reveal(id));
     row.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         event.preventDefault();
         if (!event.repeat) {
-          callQuietly(callRust, FLOAT_REVEAL, { id });
+          reveal(id);
         }
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
@@ -333,6 +334,14 @@ export function mountFloat(root: HTMLElement, options: FloatShelfOptions = {}): 
     remove.addEventListener("click", () => callQuietly(callRust, FLOAT_REMOVE, { id }));
 
     return { row, glyph: glyphBox, name, missing, remove, kind: null };
+  }
+
+  /** Asks Rust to show item `id` in Explorer, unless the view says it's gone. */
+  function reveal(id: number): void {
+    if (view.items.some((item) => item.id === id && item.missing)) {
+      return;
+    }
+    callQuietly(callRust, FLOAT_REVEAL, { id });
   }
 
   function updateRow(parts: RowParts, item: FloatItem): void {
