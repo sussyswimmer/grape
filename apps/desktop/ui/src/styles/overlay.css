@@ -148,3 +148,43 @@ body {
     animation: none;
   }
 }
+
+/*
+ * High contrast on Windows: the browser leaves SVG fills and strokes as
+ * they are, so the wheel takes the system's colors here. The highlighted
+ * segment is filled with Highlight, like a selection anywhere else. The
+ * hit fill keeps its alpha (only its color changes), so the overlay stays
+ * see-through.
+ */
+@media (forced-colors: active) {
+  #wheel-root > .wheel {
+    filter: none;
+  }
+
+  .wheel-backdrop,
+  .wheel-segment,
+  .wheel-placeholder {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+
+  .wheel-placeholder {
+    stroke: GrayText;
+    opacity: 1;
+  }
+
+  .wheel-segment.is-highlighted {
+    fill: Highlight;
+    stroke: Highlight;
+  }
+
+  .wheel-label,
+  .wheel-center,
+  .wheel-message {
+    fill: CanvasText;
+  }
+
+  .wheel-label.is-highlighted {
+    fill: HighlightText;
+  }
+}

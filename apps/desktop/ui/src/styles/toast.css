@@ -154,3 +154,37 @@ body {
     transition: none;
   }
 }
+
+/*
+ * High contrast on Windows: the browser paints every background as the
+ * pill's own Canvas, which would hide the dot and the bar, so they take
+ * the system's colors here. The pill is solid, so the plate the browser
+ * draws behind text doesn't show, and the bar sits in an outlined track,
+ * as a Windows progress bar does.
+ */
+@media (forced-colors: active) {
+  .toast {
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .toast-dot {
+    background: GrayText;
+  }
+
+  .toast[data-tone="working"] .toast-dot,
+  .toast-progress-bar {
+    background: Highlight;
+  }
+
+  .toast[data-tone="done"] .toast-dot,
+  .toast[data-tone="error"] .toast-dot {
+    background: CanvasText;
+  }
+
+  .toast-progress {
+    bottom: 6px;
+    background: Canvas;
+    border: 1px solid CanvasText;
+  }
+}

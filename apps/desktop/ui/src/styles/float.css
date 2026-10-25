@@ -275,3 +275,51 @@ body {
     transition: none;
   }
 }
+
+/*
+ * High contrast on Windows: the browser draws the panel, text and borders
+ * in the system's colors but drops the hover fills, so hover gets a thin
+ * outline and focus a thicker Highlight one. A missing item and a
+ * disabled "Drag all" use GrayText instead of fading. The panel is solid,
+ * so the plate the browser draws behind text doesn't show.
+ */
+@media (forced-colors: active) {
+  .float-panel {
+    background: Canvas;
+  }
+
+  .float-panel::after,
+  .float-header,
+  .float-footer {
+    border-color: CanvasText;
+  }
+
+  .float-icon-button {
+    color: ButtonText;
+  }
+
+  .float-row:hover,
+  .float-icon-button:hover,
+  .float-drag-all:hover {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+
+  .float-drag-all.is-disabled:hover {
+    outline: none;
+  }
+
+  /* After the hover rules and as specific, so a hovered row or × still shows its focus. */
+  .float-row:focus-visible,
+  .float-icon-button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .float-row.is-missing .float-glyph,
+  .float-row.is-missing .float-name,
+  .float-drag-all.is-disabled {
+    color: GrayText;
+    opacity: 1;
+  }
+}
