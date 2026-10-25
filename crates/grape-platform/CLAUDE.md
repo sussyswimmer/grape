@@ -23,7 +23,7 @@ src/
     display.rs        display_bounds_at (monitor, work area, DPI scale)
     drop_target.rs    Grape's own IDropTarget for the overlay: always copy, never move (D13); the refusing one for Settings and the shelf
     overlay.rs        one subclass, two roles: tool-window and no-activate styles for the overlay (D11); tool window that a click activates for the shelf, shown topmost without activation (show_shelf) and hidden (hide_shelf)
-    drag_out.rs       drag out of the shelf: SHDoDragDrop of a CF_HDROP-only data object, COPY | LINK never MOVE, button-up guard, Esc watchdog
+    drag_out.rs       drag out of the shelf: SHDoDragDrop of Grape's own data object (CF_HDROP + Preferred DropEffect, never a shell ID list, only what callers stored besides), COPY | LINK never MOVE, button-up guard before and after the path check, Esc watchdog
     share.rs          the share sheet: files looked up as StorageFiles (MTA, 10 s), then the "grape-share" STA thread's invisible anchor window owns the sheet (30 s for DataRequested, Chromium's handler rules)
     actions.rs        CF_HDROP and text clipboard, IFileOpenDialog on an STA thread of its own (Move and pick_folder), IFileOperation move, wt/PowerShell, explorer /select
   mock.rs             scripted DragSignal sequences for app-level tests
