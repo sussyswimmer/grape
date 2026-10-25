@@ -1,5 +1,6 @@
 //! Grape's webview windows: the hidden overlay and toast (declared in
-//! tauri.conf.json) and the settings window (created on first use).
+//! tauri.conf.json) and the settings window (created on first use). The
+//! float shelf is built on first use in `float.rs`.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -106,11 +107,11 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Settings and the toast take no drops. On Windows, wry's and tao's drop
-/// handlers would accept a file there without setting the drop effect,
-/// which Explorer can read as a move (DECISIONS D13), so a refusing target
-/// replaces them. Runs on the main thread, which owns the window; failures
-/// are logged.
+/// Settings and the toast take no drops (nor does the float shelf, see
+/// [`refuse_drops_here`]). On Windows, wry's and tao's drop handlers would
+/// accept a file there without setting the drop effect, which Explorer can
+/// read as a move (DECISIONS D13), so a refusing target replaces them. Runs
+/// on the main thread, which owns the window; failures are logged.
 ///
 /// On macOS nothing is replaced: wry answers every file drag with Copy and
 /// never touches the file (DECISIONS D18), so a file dropped on Settings or
@@ -119,30 +120,36 @@ fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
         let window = window.clone();
-        let queued = app.run_on_main_thread(move || {
-            let hwnd = match window.hwnd() {
-                Ok(hwnd) => hwnd.0 as isize,
-                Err(err) => {
-                    log::error!("{} drop guard: no window handle: {err}", window.label());
-                    return;
-                }
-            };
-            match grape_platform::windows::refuse_drops(hwnd) {
-                Ok(coverage) => log::info!(
-                    "{} refuses drops on {} of {} window(s)",
-                    window.label(),
-                    coverage.registered,
-                    coverage.windows
-                ),
-                Err(err) => log::error!("{} drop guard: {err}", window.label()),
-            }
-        });
+        let queued = app.run_on_main_thread(move || refuse_drops_here(&window));
         if let Err(err) = queued {
             log::error!("drop guard: could not reach the main thread: {err}");
         }
     }
     #[cfg(not(target_os = "windows"))]
     let _ = (app, window);
+}
+
+/// [`refuse_drops`] for a caller already on the main thread (the float
+/// shelf, before every show). Logs how many of the window's windows are
+/// covered.
+#[cfg(target_os = "windows")]
+pub fn refuse_drops_here(window: &tauri::WebviewWindow) {
+    let hwnd = match window.hwnd() {
+        Ok(hwnd) => hwnd.0 as isize,
+        Err(err) => {
+            log::error!("{} drop guard: no window handle: {err}", window.label());
+            return;
+        }
+    };
+    match grape_platform::windows::refuse_drops(hwnd) {
+        Ok(coverage) => log::info!(
+            "{} refuses drops on {} of {} window(s)",
+            window.label(),
+            coverage.registered,
+            coverage.windows
+        ),
+        Err(err) => log::error!("{} drop guard: {err}", window.label()),
+    }
 }
 
 /// Debug builds only: shows the overlay for about two seconds, so focus,

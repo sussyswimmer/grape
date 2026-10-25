@@ -3,19 +3,24 @@
 //!
 //! The work itself is in `grape_platform::file_actions`. This module picks
 //! what each action works on, runs it on a thread of its own (Move waits on
-//! a dialog) and words the toast. Terminal opens the app chosen in
-//! Settings. Share is AirDrop on macOS and arrives later on Windows; Float
-//! arrives in a later build.
+//! a dialog, Share on the sheet) and words the toast. Terminal opens the app
+//! chosen in Settings. Share is the share sheet on Windows and AirDrop on
+//! macOS. Float puts the items on the shelf ([`crate::float`]) on Windows
+//! and arrives later on macOS.
 
 use std::path::{Path, PathBuf};
 use std::thread;
 
 use grape_core::{ActionKey, ItemKind, SelectionItem};
-use grape_platform::file_actions::{self, MoveOutcome, MovedItem, TerminalApp};
+use grape_platform::file_actions::{
+    self, MoveOutcome, MovedItem, ShareOutcome, SkipReason, Skipped, TerminalApp,
+};
 use grape_platform::{DisplayBounds, PlatformError};
 use tauri::{AppHandle, Manager};
 
 use crate::events::{ToastShow, ToastTone};
+#[cfg(any(target_os = "windows", test))]
+use crate::float::{Added, CAPACITY};
 use crate::settings;
 use crate::toast::{self, Toaster};
 
@@ -55,15 +60,30 @@ pub fn run(
     anchor: (i32, i32),
     display: DisplayBounds,
 ) {
-    let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
+    let items = items.to_vec();
     let terminal_dir = items.first().and_then(terminal_dir);
     let app_for_thread = app.clone();
     let spawned = thread::Builder::new()
         .name("grape-action".to_owned())
         .spawn(move || {
-            // Copied out of the settings here, off the wheel's thread.
-            let terminal_app = settings::terminal_app(&app_for_thread);
-            let report = perform(action, &paths, terminal_dir.as_deref(), terminal_app);
+            let report = match action {
+                // The shelf is a window, so Float needs the app; `perform`
+                // doesn't take it.
+                #[cfg(target_os = "windows")]
+                ActionKey::Float => floated(crate::float::add(&app_for_thread, &items, &display)),
+                _ => {
+                    let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
+                    // Copied out of the settings here, off the wheel's thread.
+                    let terminal_app = settings::terminal_app(&app_for_thread);
+                    perform(
+                        action,
+                        &paths,
+                        terminal_dir.as_deref(),
+                        terminal_app,
+                        anchor,
+                    )
+                }
+            };
             if let Some(report) = report {
                 show(&app_for_thread, report, anchor, &display);
             }
@@ -74,13 +94,16 @@ pub fn run(
 }
 
 /// Runs the action and words the result. `None`: nothing to say (the
-/// terminal opened, or the user closed the folder picker). Terminal opens
-/// `terminal_app` in `terminal_dir`.
+/// terminal or the share sheet opened, or the user closed the folder
+/// picker). Terminal opens `terminal_app` in `terminal_dir`; Share opens
+/// near `anchor`, the wheel's center. Float on Windows never comes here:
+/// [`run`] puts the items on the shelf.
 fn perform(
     action: ActionKey,
     paths: &[PathBuf],
     terminal_dir: Option<&Path>,
     terminal_app: TerminalApp,
+    anchor: (i32, i32),
 ) -> Option<Report> {
     let report = match action {
         ActionKey::Copy => word(action, file_actions::copy_files(paths), |result| {
@@ -102,7 +125,9 @@ fn perform(
             )),
         },
         ActionKey::Move => word(action, file_actions::move_to_chosen_folder(paths), moved),
-        ActionKey::Share => word(action, file_actions::share(paths), shared),
+        ActionKey::Share => word(action, file_actions::share(paths, Some(anchor)), |result| {
+            shared(paths, result)
+        }),
         ActionKey::Float => Some(later(action)),
     };
     log::info!(
@@ -117,7 +142,7 @@ fn perform(
 }
 
 /// Words `result` with `words`. An action this OS doesn't have yet (Share
-/// on Windows) gets "coming", not a failure.
+/// off Windows and macOS) gets "coming", not a failure.
 fn word<T>(
     action: ActionKey,
     result: Result<T, PlatformError>,
@@ -206,9 +231,68 @@ fn opened_terminal(result: Result<(), PlatformError>) -> Option<Report> {
         .map(|err| failed("Couldn't open a terminal", &err))
 }
 
-fn shared(result: Result<(), PlatformError>) -> Option<Report> {
-    // The AirDrop sheet is the answer; only a failure needs a toast.
-    result.err().map(|err| failed("Couldn't share", &err))
+/// The share sheet or AirDrop is the answer when everything went; a toast
+/// says what was left out, or that nothing could go.
+fn shared(paths: &[PathBuf], result: Result<ShareOutcome, PlatformError>) -> Option<Report> {
+    let outcome = match result {
+        Ok(outcome) => outcome,
+        Err(err) => return Some(failed("Couldn't share", &err)),
+    };
+    let skipped = &outcome.skipped;
+    if !outcome.opened {
+        let detail = if !skipped.is_empty() && skipped.iter().all(|s| s.why == SkipReason::Folder) {
+            Some("Share sends files, not folders.".to_owned())
+        } else {
+            left_out(skipped)
+        };
+        return Some(Report::new(ToastTone::Info, "Nothing to share", detail));
+    }
+    if skipped.is_empty() {
+        return None;
+    }
+    let of = paths.len();
+    Some(Report::new(
+        ToastTone::Info,
+        format!("Sharing {} of {of}", of.saturating_sub(skipped.len())),
+        left_out(skipped),
+    ))
+}
+
+/// Why Share left `skipped` out: one item by name, several by their
+/// shared reason, or in general when the reasons differ.
+fn left_out(skipped: &[Skipped]) -> Option<String> {
+    let first = skipped.first()?;
+    let same = skipped.iter().all(|s| s.why == first.why);
+    let words = match (skipped, first.why) {
+        (_, SkipReason::Folder) if same => "Folders can't be shared.".to_owned(),
+        ([one], SkipReason::Missing) => format!("{} is gone.", name(&one.path)),
+        ([one], SkipReason::Unshareable) => format!("{} can't be shared.", name(&one.path)),
+        (many, SkipReason::Missing) if same => format!("{} items are gone.", many.len()),
+        (many, SkipReason::Unshareable) if same => {
+            format!("{} items can't be shared.", many.len())
+        }
+        _ => "Some items can't be shared.".to_owned(),
+    };
+    Some(words)
+}
+
+/// Words a Float: the shelf is the answer, unless some items didn't fit
+/// or it couldn't open.
+#[cfg(any(target_os = "windows", test))]
+fn floated(result: anyhow::Result<Added>) -> Option<Report> {
+    match result {
+        Err(err) => Some(Report::new(
+            ToastTone::Error,
+            "Couldn't open the shelf",
+            Some(format!("{err:#}")),
+        )),
+        Ok(added) if added.left_out > 0 => Some(Report::new(
+            ToastTone::Info,
+            "The shelf is full",
+            Some(format!("It holds {CAPACITY} items.")),
+        )),
+        Ok(_) => None,
+    }
 }
 
 fn moved(result: Result<MoveOutcome, PlatformError>) -> Option<Report> {
@@ -277,7 +361,8 @@ fn moved_report(to: &Path, moved: &[MovedItem], unsure: &[PathBuf], of: usize) -
     report.revealing(first.now.clone())
 }
 
-/// Share and Float, until they're built.
+/// An action this OS doesn't have yet: Float off Windows, Share off Windows
+/// and macOS, everything on other hosts.
 fn later(action: ActionKey) -> Report {
     let detail = match action {
         ActionKey::Share => "Sharing is coming.",
@@ -443,36 +528,177 @@ mod tests {
         assert_eq!(failed.tone, ToastTone::Error);
     }
 
+    fn skip(path: &str, why: SkipReason) -> Skipped {
+        Skipped {
+            path: PathBuf::from(path),
+            why,
+        }
+    }
+
+    fn share(opened: bool, skipped: Vec<Skipped>) -> Result<ShareOutcome, PlatformError> {
+        Ok(ShareOutcome { opened, skipped })
+    }
+
+    fn three() -> Vec<PathBuf> {
+        ["/a/photo.png", "/a/Trip", "/a/notes.txt"]
+            .map(PathBuf::from)
+            .to_vec()
+    }
+
     #[test]
-    fn share_is_quiet_unless_it_fails() {
-        assert_eq!(shared(Ok(())), None);
-        let failed = shared(Err(os_error())).unwrap();
+    fn share_is_quiet_when_everything_went() {
+        assert_eq!(shared(&three(), share(true, vec![])), None);
+        let failed = shared(&three(), Err(os_error())).unwrap();
         assert_eq!(failed.tone, ToastTone::Error);
         assert_eq!(failed.title, "Couldn't share");
     }
 
     #[test]
-    fn float_is_coming() {
+    fn share_says_what_it_left_out() {
+        let folder = shared(
+            &three(),
+            share(true, vec![skip("/a/Trip", SkipReason::Folder)]),
+        )
+        .unwrap();
+        assert_eq!(folder.tone, ToastTone::Info);
+        assert_eq!(folder.title, "Sharing 2 of 3");
+        assert_eq!(folder.detail.as_deref(), Some("Folders can't be shared."));
+
+        let gone = shared(
+            &three(),
+            share(true, vec![skip("/a/notes.txt", SkipReason::Missing)]),
+        )
+        .unwrap();
+        assert_eq!(gone.detail.as_deref(), Some("notes.txt is gone."));
+
+        let shortcut = shared(
+            &three(),
+            share(true, vec![skip("/a/notes.txt", SkipReason::Unshareable)]),
+        )
+        .unwrap();
+        assert_eq!(
+            shortcut.detail.as_deref(),
+            Some("notes.txt can't be shared.")
+        );
+
+        let mixed = shared(
+            &three(),
+            share(
+                true,
+                vec![
+                    skip("/a/Trip", SkipReason::Folder),
+                    skip("/a/notes.txt", SkipReason::Missing),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(mixed.title, "Sharing 1 of 3");
+        assert_eq!(mixed.detail.as_deref(), Some("Some items can't be shared."));
+
+        let both_gone = shared(
+            &three(),
+            share(
+                true,
+                vec![
+                    skip("/a/photo.png", SkipReason::Missing),
+                    skip("/a/notes.txt", SkipReason::Missing),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(both_gone.detail.as_deref(), Some("2 items are gone."));
+    }
+
+    #[test]
+    fn share_with_nothing_left_says_why() {
+        let folders = shared(
+            &[PathBuf::from("/a/Trip"), PathBuf::from("/a/Pics")],
+            share(
+                false,
+                vec![
+                    skip("/a/Trip", SkipReason::Folder),
+                    skip("/a/Pics", SkipReason::Folder),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(folders.tone, ToastTone::Info);
+        assert_eq!(folders.title, "Nothing to share");
+        assert_eq!(
+            folders.detail.as_deref(),
+            Some("Share sends files, not folders.")
+        );
+
+        let gone = shared(
+            &[PathBuf::from("/a/notes.txt")],
+            share(false, vec![skip("/a/notes.txt", SkipReason::Missing)]),
+        )
+        .unwrap();
+        assert_eq!(gone.title, "Nothing to share");
+        assert_eq!(gone.detail.as_deref(), Some("notes.txt is gone."));
+
+        let mixed = shared(
+            &three(),
+            share(
+                false,
+                vec![
+                    skip("/a/photo.png", SkipReason::Unshareable),
+                    skip("/a/Trip", SkipReason::Folder),
+                    skip("/a/notes.txt", SkipReason::Unshareable),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(mixed.detail.as_deref(), Some("Some items can't be shared."));
+    }
+
+    #[test]
+    fn the_shelf_is_quiet_unless_it_is_full_or_wont_open() {
+        let added = |added, already, left_out| {
+            Ok(Added {
+                added,
+                already,
+                left_out,
+            })
+        };
+        assert_eq!(floated(added(2, 0, 0)), None);
+        assert_eq!(floated(added(0, 3, 0)), None);
+        let full = floated(added(1, 0, 4)).unwrap();
+        assert_eq!(full.tone, ToastTone::Info);
+        assert_eq!(full.title, "The shelf is full");
+        assert_eq!(full.detail.as_deref(), Some("It holds 50 items."));
+        let failed = floated(Err(anyhow::anyhow!("no window"))).unwrap();
+        assert_eq!(failed.tone, ToastTone::Error);
+        assert_eq!(failed.title, "Couldn't open the shelf");
+    }
+
+    // On Windows Float goes to the shelf in `run`, never `perform`.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn float_is_coming_where_there_is_no_shelf() {
         let float = perform(
             ActionKey::Float,
             &[PathBuf::from("/a")],
             None,
             TerminalApp::WindowsTerminal,
+            (0, 0),
         )
         .unwrap();
         assert_eq!(float.tone, ToastTone::Info);
         assert_eq!(float.detail.as_deref(), Some("The float shelf is coming."));
     }
 
-    // On macOS Share opens AirDrop, so it's never run from a test there.
-    #[cfg(not(target_os = "macos"))]
+    // Share opens the share sheet on Windows and AirDrop on macOS, so it's
+    // never run from a test there.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
-    fn share_is_coming_where_there_is_no_airdrop() {
+    fn share_is_coming_where_there_is_no_sheet() {
         let share = perform(
             ActionKey::Share,
             &[PathBuf::from("/a")],
             None,
             TerminalApp::WindowsTerminal,
+            (0, 0),
         )
         .unwrap();
         assert_eq!(share.tone, ToastTone::Info);
@@ -484,8 +710,14 @@ mod tests {
     fn off_windows_every_action_is_coming_not_failing() {
         let any = TerminalApp::WindowsTerminal;
         for action in [ActionKey::Copy, ActionKey::CopyPath, ActionKey::Move] {
-            let report =
-                perform(action, &[PathBuf::from("/a")], Some(Path::new("/")), any).unwrap();
+            let report = perform(
+                action,
+                &[PathBuf::from("/a")],
+                Some(Path::new("/")),
+                any,
+                (0, 0),
+            )
+            .unwrap();
             assert_eq!(report.tone, ToastTone::Info, "{action:?}");
             assert_eq!(report.title, "Not in this build yet");
         }
@@ -500,6 +732,7 @@ mod tests {
                 &[PathBuf::from("/a")],
                 Some(Path::new("/")),
                 app,
+                (0, 0),
             )
             .unwrap();
             assert_eq!(terminal.detail.as_deref(), Some("Terminal is coming."));

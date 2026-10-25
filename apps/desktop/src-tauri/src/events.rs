@@ -1,5 +1,6 @@
-//! What Rust sends the overlay and toast windows: the event contract in
-//! `docs/design/m1-drag-wheel.md` §C. The UI mirrors these types in
+//! What Rust sends the overlay, toast and shelf windows: the event contract
+//! in `docs/design/m1-drag-wheel.md` §C, plus the float shelf's
+//! `float://view` and `float://drag-ended`. The UI mirrors these types in
 //! `ui/src/shared/events.ts`, and both sides test against the same golden
 //! JSON in `ui/src/shared/fixtures/`.
 
@@ -189,6 +190,64 @@ pub struct ToastHide {
     pub id: u64,
 }
 
+/// `float://view`: what the float shelf lists, in shelf order. Sent after
+/// every change and before the shelf is shown, and returned by
+/// `float_view`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloatView {
+    /// The items, oldest first.
+    pub items: Vec<FloatItem>,
+}
+
+/// One item on the shelf. The page only ever gets its id and name; Rust
+/// keeps the path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FloatItem {
+    /// Names the item in `float_remove`, `float_reveal` and
+    /// `float_drag_out`. Never reused while Grape runs.
+    pub id: u64,
+    /// The display name ("photo.jpg"), never a path.
+    pub name: String,
+    /// File or folder, for the glyph.
+    pub kind: FloatKind,
+    /// The item is gone from where it was: shown dimmed, not draggable.
+    pub missing: bool,
+}
+
+/// What a shelf item is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FloatKind {
+    /// A file.
+    File,
+    /// A folder.
+    Folder,
+}
+
+/// `float://drag-ended`: a drag out of the shelf is over, so the page can
+/// take gestures again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct FloatDragEnded {
+    /// How it went.
+    pub outcome: FloatOutcome,
+}
+
+/// How a drag out of the shelf ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FloatOutcome {
+    /// Dropped somewhere that copied the files.
+    Copied,
+    /// Dropped somewhere that made shortcuts.
+    Linked,
+    /// Dropped nowhere, or Esc.
+    Cancelled,
+    /// Nothing was there to drag, or the button was already up.
+    Nothing,
+    /// The drag couldn't start.
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +399,68 @@ mod tests {
         assert_eq!(
             json(&ToastHide { id: 4 }),
             golden(include_str!("../../ui/src/shared/fixtures/toast-hide.json"))
+        );
+    }
+
+    #[test]
+    fn float_views_match_the_fixtures() {
+        let view = FloatView {
+            items: vec![
+                FloatItem {
+                    id: 1,
+                    name: "photo.jpg".to_owned(),
+                    kind: FloatKind::File,
+                    missing: false,
+                },
+                FloatItem {
+                    id: 2,
+                    name: "Invoices".to_owned(),
+                    kind: FloatKind::Folder,
+                    missing: false,
+                },
+                FloatItem {
+                    id: 3,
+                    name: "notes.txt".to_owned(),
+                    kind: FloatKind::File,
+                    missing: true,
+                },
+            ],
+        };
+        assert_eq!(
+            json(&view),
+            golden(include_str!("../../ui/src/shared/fixtures/float-view.json"))
+        );
+        assert_eq!(
+            json(&FloatView { items: vec![] }),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/float-view-empty.json"
+            ))
+        );
+        assert_eq!(
+            json(&FloatDragEnded {
+                outcome: FloatOutcome::Copied
+            }),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/float-drag-ended.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn every_float_outcome_is_lower_case() {
+        let names: Vec<Value> = [
+            FloatOutcome::Copied,
+            FloatOutcome::Linked,
+            FloatOutcome::Cancelled,
+            FloatOutcome::Nothing,
+            FloatOutcome::Failed,
+        ]
+        .iter()
+        .map(json)
+        .collect();
+        assert_eq!(
+            names,
+            ["copied", "linked", "cancelled", "nothing", "failed"].map(Value::from)
         );
     }
 

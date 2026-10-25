@@ -7,6 +7,11 @@ fn main() {
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(&[
             "wheel_painted",
             "toast_clicked",
+            "float_view",
+            "float_remove",
+            "float_clear",
+            "float_reveal",
+            "float_drag_out",
             "settings_get",
             "settings_set_key",
             "settings_set_output_next_to_source",

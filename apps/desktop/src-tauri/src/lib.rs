@@ -1,6 +1,6 @@
 //! Grape's Tauri app: a tray icon, a hidden overlay window, the wheel
-//! controller and the Settings window's settings. See `CLAUDE.md` in this
-//! crate.
+//! controller, the Settings window's settings and, on Windows, the float
+//! shelf. See `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it's a menu-bar accessory app with no Dock icon
@@ -9,6 +9,7 @@
 mod actions;
 pub mod controller;
 pub mod events;
+mod float;
 mod jobs;
 mod settings;
 mod toast;
@@ -76,9 +77,17 @@ pub fn run() -> anyhow::Result<()> {
         ))
         .manage(GrapeState::default())
         .manage(toast::Toaster::default())
+        // Empty, and only ever filled on Windows; the commands work on it
+        // everywhere.
+        .manage(float::Shelf::default())
         .invoke_handler(tauri::generate_handler![
             wheel::wheel_painted,
             toast::toast_clicked,
+            float::float_view,
+            float::float_remove,
+            float::float_clear,
+            float::float_reveal,
+            float::float_drag_out,
             settings::settings_get,
             settings::settings_set_key,
             settings::settings_set_output_next_to_source,
@@ -89,6 +98,7 @@ pub fn run() -> anyhow::Result<()> {
             settings::settings_dismiss_welcome
         ])
         .on_window_event(wheel::on_overlay_window_event)
+        .on_window_event(float::on_window_event)
         .setup(|app| {
             // A menu-bar app on macOS: no Dock icon, no app menu.
             #[cfg(target_os = "macos")]
