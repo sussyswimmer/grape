@@ -31,6 +31,8 @@ npm install -g pnpm@10
 
 To try Grape without the dev setup above, install the build CI makes on every run. It's a release build, unsigned until M7.
 
+A released version comes from GitHub Releases instead, as `Grape-Setup-x64.exe` (README → "Install", and "Releasing" below). The steps are the same. A CI build is for a commit that isn't released yet.
+
 1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-Windows-x64` and unzip it.
 2. Run `Grape_<version>_x64-setup.exe`. It installs for your user only, so no admin prompt.
 3. SmartScreen says "Windows protected your PC". Click **More info**, then **Run anyway**.
@@ -111,6 +113,56 @@ No haptics on Windows. The tick plays via WebAudio in the overlay or `PlaySoundW
 - Code signing: unsigned builds trigger SmartScreen ("Windows protected your PC"). Free option for open source: **SignPath Foundation** (free signing for OSS projects that meet its criteria). Alternatives: Azure Trusted Signing (paid, identity checks). Log in DECISIONS when chosen.
 - Launch at login: `tauri-plugin-autostart` (HKCU Run key).
 - Builds: GitHub Actions `windows-latest` (x64) and `windows-11-arm` (ARM64) runners. See ROADMAP M7.
+
+## Releasing
+
+A version tag makes a draft release. `.github/workflows/release.yml` builds the installer from the tag and drafts a GitHub Release with it. It never publishes: Maxwell checks the draft and publishes it by hand. So far it builds x64 only.
+
+**Cutting a release**
+
+1. Pick the version: plain `X.Y.Z`, with no `-beta` or other suffix (the workflow refuses those tags). Set it in all four places:
+   - `apps/desktop/src-tauri/tauri.conf.json` → `"version"` (the installer's version)
+   - `Cargo.toml` → `[workspace.package]` → `version` (every crate inherits it)
+   - `apps/desktop/package.json` → `"version"`
+   - `apps/desktop/ui/package.json` → `"version"`
+2. Run `cargo update --workspace`. It moves Grape's own four crates to the new version in `Cargo.lock` and leaves every other crate alone.
+3. Commit the five files (`git commit -am "Release X.Y.Z"`) and push. Wait for CI to pass on that commit.
+4. Tag the commit and push that one tag:
+
+   ```powershell
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
+   ```
+
+   Push it by name, not with `git push --tags`. GitHub starts no workflow when more than three tags arrive in one push.
+
+5. Open Actions → Release → the run for the tag, and wait for both jobs to finish. CI runs on the tag too.
+6. Check the draft (Releases → "Grape X.Y.Z", marked Draft), following `TESTING.md` → "Release, M7":
+   - Download `Grape-Setup-x64.exe` and `SHA256SUMS.txt` from the draft, and check the hash with the PowerShell line in the notes.
+   - Install it on a clean standard user account (no admin rights), go through SmartScreen, and convert a file.
+7. Edit the draft: replace the TODO under "What's new".
+8. Publish it.
+
+If the version check fails, nothing was built or released. Delete the tag (`git tag -d vX.Y.Z`, then `git push --delete origin vX.Y.Z`), fix the versions, commit and tag again. To run a tag again after a runner or network failure, use Actions → Release → Run workflow and type the tag. That button shows only once `release.yml` is on the repo's default branch. Before that, open the failed run and click **Re-run failed jobs**. A fix in the code needs a new version, because a tag stays where it is.
+
+**What the workflow checks**
+- The tag is `v` and then `X.Y.Z`, and `X.Y.Z` is the version in the four files and in `Cargo.lock`'s entries for Grape's own crates. It prints each one and names the ones that differ, before anything builds.
+- The build is the CI job's (`ci.yml` → `build-windows`): the same actions, Node 22, Rust 1.99, `pnpm install --frozen-lockfile` and `pnpm tauri build --bundles nsis --ci`.
+- The NSIS bundler made exactly one `*-setup.exe`. It's copied to `Grape-Setup-x64.exe`, the same name in every release, and hashed into `SHA256SUMS.txt` as `<hash>  Grape-Setup-x64.exe`, in lower-case hex (the `sha256sum` format). Both files are also the run's `Grape-Setup-x64` artifact.
+- The release job checks the downloaded installer against `SHA256SUMS.txt`, fills in `{{VERSION}}` in `.github/release-notes.md`, and makes the draft with `gh release create --draft --verify-tag`.
+- **Running it again.** If the draft exists, the run replaces its two files (`--clobber`) and keeps its notes, so "What's new" survives. If the release is already published, the run fails and changes nothing, so a published file always matches its hash.
+- **Permissions.** The workflow's token is read-only. Only the release job can write (`contents: write`), and it runs no build code.
+- It doesn't sign anything or add an updater, and Grape itself still makes no network calls (golden rule 3).
+
+**Signing.** The installer and Grape are unsigned, so SmartScreen warns: "Windows protected your PC" → **More info** → **Run anyway**. The release notes say so. Signing will come from the SignPath Foundation, which is free for open-source projects (ROADMAP M7). Applying is Maxwell's step. Once it's approved, the workflow gets a signing step after the build and before the hash, so `SHA256SUMS.txt` covers the signed file, and the choice gets a DECISIONS entry.
+
+**WebView2.** Grape's windows need Microsoft's WebView2 runtime. `tauri.conf.json` doesn't set `bundle.windows.webviewInstallMode`, so Tauri 2.12's default applies: `downloadBootstrapper`, silent (`WebviewInstallMode::default` in tauri-utils 2.10.1).
+- The installer looks for WebView2 in the registry first. If it's there, nothing is downloaded.
+- If it's missing, the installer downloads Microsoft's bootstrapper from `go.microsoft.com`, runs it silently, and then installs Grape. If the download fails, the install stops with an error.
+- That download is the installer's, not Grape's. Windows 11 and current Windows 10 already have WebView2, so it rarely happens.
+- A PC that is offline *and* has no WebView2 can't install Grape. The `offlineInstaller` mode would fix that, for about 127 MB more per download.
+
+**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
 
 ## Windows QA must-checks
 - Drag from Explorer, the Desktop, Downloads, search results, OneDrive placeholders (cloud-only files: Grape must hydrate or skip them, not hang), and zip folders opened in Explorer (virtual paths, which v1 should skip).

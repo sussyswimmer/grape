@@ -1,0 +1,180 @@
+name: Release
+
+# A version tag (v1.2.3) builds the Windows installer and makes a DRAFT
+# GitHub Release with it. Nothing is published here: Maxwell checks the draft,
+# writes "What's new" and publishes it by hand. The steps are in
+# docs/PLATFORM_WINDOWS.md → "Releasing".
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Build an existing tag again, for example after a failed run. A draft that
+  # already exists gets its two files replaced; its notes are kept.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to build, like v0.2.0"
+        required: true
+        type: string
+
+# One run per tag at a time. A second run waits instead of racing the first.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The pushed tag, or the one typed in for a re-run.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # The same build as ci.yml's build-windows job, from the tag. It has a
+  # read-only token: the build runs third-party build scripts.
+  build:
+    name: Build (Windows installer)
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      # Fails before anything builds unless the tag, minus the v, is the
+      # version in all four files and in Cargo.lock.
+      - name: Check the tag matches the version
+        id: version
+        run: |
+          if ($env:TAG -notmatch '^v(\d+\.\d+\.\d+)$') {
+            Write-Output "::error::Release tags look like v1.2.3. '$env:TAG' doesn't."
+            exit 1
+          }
+          $want = $Matches[1]
+          $found = [ordered]@{}
+          foreach ($file in 'apps/desktop/src-tauri/tauri.conf.json', 'apps/desktop/package.json', 'apps/desktop/ui/package.json') {
+            $found[$file] = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json).version
+          }
+          $cargo = Get-Content -Raw -LiteralPath Cargo.toml
+          $found['Cargo.toml [workspace.package]'] = $null
+          if ($cargo -match '(?ms)^\[workspace\.package\]\s*$(.*?)(?=^\[|\z)') {
+            if ($Matches[1] -match '(?m)^\s*version\s*=\s*"([^"]*)"') {
+              $found['Cargo.toml [workspace.package]'] = $Matches[1]
+            }
+          }
+          # Grape's own crates are the Cargo.lock entries with no source line.
+          $lock = Get-Content -Raw -LiteralPath Cargo.lock
+          $crates = [regex]::Matches($lock, '(?m)^\[\[package\]\]\r?\nname = "([^"]+)"\r?\nversion = "([^"]+)"\r?\n(?!source = )')
+          if ($crates.Count -eq 0) {
+            Write-Output "::error::Found none of Grape's crates in Cargo.lock."
+            exit 1
+          }
+          foreach ($crate in $crates) {
+            $found["Cargo.lock ($($crate.Groups[1].Value))"] = $crate.Groups[2].Value
+          }
+          $wrong = 0
+          foreach ($entry in $found.GetEnumerator()) {
+            $have = if ($entry.Value) { $entry.Value } else { '(none)' }
+            Write-Output ('{0,-40} {1}' -f $entry.Key, $have)
+            if ($entry.Value -ne $want) {
+              Write-Output "::error::$($entry.Key) says $have, but the tag says $want."
+              $wrong++
+            }
+          }
+          if ($wrong -gt 0) {
+            Write-Output "Set the version in all four files, run cargo update --workspace so Cargo.lock follows, commit, and tag again."
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$want"
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - name: Build Grape and the installer
+        working-directory: apps/desktop
+        run: pnpm tauri build --bundles nsis --ci
+      # Tauri names the installer Grape_<version>_x64-setup.exe. The release
+      # file has one name for every version, so the latest-release link works.
+      - name: Name the installer and hash it
+        run: |
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) {
+            Write-Output "::error::Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count): $($setup.Name -join ', ')"
+            exit 1
+          }
+          $out = Join-Path $env:RUNNER_TEMP 'grape-release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $exe = Join-Path $out 'Grape-Setup-x64.exe'
+          Copy-Item -LiteralPath $setup[0].FullName -Destination $exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          # sha256sum's format, with LF and no BOM, so `sha256sum -c` reads it too.
+          [System.IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), "$hash  Grape-Setup-x64.exe`n")
+          Write-Output "Copied $($setup[0].Name) to Grape-Setup-x64.exe"
+          Write-Output "$hash  Grape-Setup-x64.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Grape-Setup-x64
+          path: |
+            ${{ runner.temp }}/grape-release/Grape-Setup-x64.exe
+            ${{ runner.temp }}/grape-release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # The only job that can write: it makes or updates the draft and runs no
+  # build code.
+  release:
+    name: Draft the GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      # Only for the notes template, as it was at the tag.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: actions/download-artifact@v8
+        with:
+          name: Grape-Setup-x64
+          path: release
+      - name: Check the installer against SHA256SUMS.txt
+        working-directory: release
+        run: sha256sum -c SHA256SUMS.txt
+      - name: Fill in the release notes
+        run: |
+          sed "s/{{VERSION}}/${VERSION}/g" .github/release-notes.md > "$RUNNER_TEMP/release-notes.md"
+          if grep -q '{{' "$RUNNER_TEMP/release-notes.md"; then
+            echo "::error::The release notes still have a {{placeholder}} the workflow doesn't fill."
+            exit 1
+          fi
+      - name: Create the draft, or replace a draft's files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          files=(release/Grape-Setup-x64.exe release/SHA256SUMS.txt)
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::$TAG is already published, so its files stay as they are. Release a new version instead."
+              exit 1
+            fi
+            echo "The draft for $TAG exists: replacing its files and keeping its notes."
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" --draft --verify-tag \
+              --title "Grape $VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              "${files[@]}"
+          fi
