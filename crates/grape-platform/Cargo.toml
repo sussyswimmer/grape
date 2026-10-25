@@ -14,11 +14,18 @@ thiserror.workspace = true
 log = "0.4.34"
 
 # Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
-# so this shares that build. wry and tao already enable every feature below
-# except Win32_Storage_FileSystem, so the rest add no new code to the build
+# so this shares that build. wry and tao already enable the Win32 features
+# below except Win32_Storage_FileSystem and Win32_UI_Shell_Common (drag-out's
+# shell data object). Nothing else in the build enables the WinRT ones
+# (Foundation, ApplicationModel_DataTransfer, Storage, Storage_Streams: the
+# share sheet), so those and the two Win32 ones add new bindings to the build
 # (DECISIONS D9, D13).
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
+    "ApplicationModel_DataTransfer",
+    "Foundation",
+    "Storage",
+    "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
@@ -33,12 +40,17 @@ windows = { version = "0.62.2", features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 # The COM `#[implement]` macro (Grape's IDropTarget) expands to `windows_core`
 # paths, so the crate must be a direct dependency. Same version wry and tao
 # already build.
 windows-core = "0.62.2"
+# `IIterable<IStorageItem>` from a Vec, for the share sheet's file list: the
+# windows crate doesn't re-export it. The version the windows crate already
+# builds, so the package is already in Cargo.lock (MIT OR Apache-2.0).
+windows-collections = "0.3.2"
 
 # Only macOS builds pull in the AppKit bindings (DECISIONS D18). tao and wry
 # already build every one of these crates at these versions, so nothing new

@@ -14,7 +14,7 @@
 //! - Pick a folder (Settings): the same `IFileOpenDialog` as Move's,
 //!   owned by the caller's window.
 //! - Reveal: `explorer.exe /select,"<path>"`.
-//! - Share: not yet (the Windows share sheet comes later).
+//! - Share is the share sheet, in `super::share`.
 //!
 //! A message-only window made for each call owns the clipboard while Grape
 //! writes it: `SetClipboardData` fails when the clipboard has no owner. The
@@ -36,7 +36,9 @@ use std::thread;
 use std::time::Duration;
 
 use ::windows::core::{implement, w, Error, Ref, HRESULT, HSTRING, PCWSTR};
-use ::windows::Win32::Foundation::{GlobalFree, ERROR_CANCELLED, E_UNEXPECTED, HANDLE, HWND};
+use ::windows::Win32::Foundation::{
+    GlobalFree, ERROR_CANCELLED, E_UNEXPECTED, HANDLE, HGLOBAL, HWND,
+};
 use ::windows::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION,
     FILE_FLAG_BACKUP_SEMANTICS,
@@ -82,11 +84,7 @@ const VOLUME_PATH_LEN: usize = 1024;
 
 pub(crate) fn copy_files(paths: &[PathBuf]) -> Result<(), PlatformError> {
     let files = drop_files(paths);
-    // SAFETY: a static, NUL-terminated format name.
-    let preferred = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
-    if preferred == 0 {
-        return Err(os_err("RegisterClipboardFormatW", &Error::from_thread()));
-    }
+    let preferred = preferred_drop_effect()?;
     let effect = DROPEFFECT_COPY.0.to_le_bytes();
     with_clipboard(|| {
         put(u32::from(CF_HDROP.0), &files)?;
@@ -131,10 +129,6 @@ pub(crate) fn open_terminal(dir: &Path, app: TerminalApp) -> Result<(), Platform
     }
 }
 
-pub(crate) fn share(_paths: &[PathBuf]) -> Result<(), PlatformError> {
-    Err(PlatformError::Unsupported)
-}
-
 pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
     // Raw, because `Command::arg` would quote the whole switch when the
     // path has a space and leave a comma bare, and Explorer then ignores
@@ -173,9 +167,21 @@ pub(crate) fn pick_folder(
     })
 }
 
+/// The registered `Preferred DropEffect` format: what pasting or dropping
+/// should do with `CF_HDROP` files, as a little-endian `DROPEFFECT`.
+pub(crate) fn preferred_drop_effect() -> Result<u32, PlatformError> {
+    // SAFETY: a static, NUL-terminated format name.
+    let format = unsafe { RegisterClipboardFormatW(w!("Preferred DropEffect")) };
+    if format == 0 {
+        return Err(os_err("RegisterClipboardFormatW", &Error::from_thread()));
+    }
+    Ok(format)
+}
+
 /// A `CF_HDROP` block: a `DROPFILES` header, then each path in UTF-16 with a
-/// NUL after it, then one more NUL.
-fn drop_files(paths: &[PathBuf]) -> Vec<u8> {
+/// NUL after it, then one more NUL. The drag out of the shelf sends the
+/// same block.
+pub(crate) fn drop_files(paths: &[PathBuf]) -> Vec<u8> {
     let header = size_of::<DROPFILES>();
     let mut bytes = Vec::with_capacity(header);
     // pFiles: the names start right after the header.
@@ -265,6 +271,21 @@ fn open_clipboard(owner: Option<HWND>) -> Result<(), PlatformError> {
 /// Copies `bytes` into movable memory and hands it to the open clipboard as
 /// `format`. Once that works, the clipboard owns the memory.
 fn put(format: u32, bytes: &[u8]) -> Result<(), PlatformError> {
+    let memory = global_copy(bytes)?;
+    // SAFETY: this thread has the clipboard open and emptied it. On success
+    // the system owns `memory`.
+    if let Err(err) = unsafe { SetClipboardData(format, Some(HANDLE(memory.0))) } {
+        // SAFETY: the clipboard refused the block, so it's still ours.
+        let _ = unsafe { GlobalFree(Some(memory)) };
+        return Err(os_err("SetClipboardData", &err));
+    }
+    Ok(())
+}
+
+/// A new movable memory block holding a copy of `bytes`. The caller owns
+/// it until it hands it on (to the clipboard, or a data object), and frees
+/// it with `GlobalFree` if that fails.
+pub(crate) fn global_copy(bytes: &[u8]) -> Result<HGLOBAL, PlatformError> {
     // SAFETY: a plain allocation.
     let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) }
         .map_err(|err| os_err("GlobalAlloc", &err))?;
@@ -283,14 +304,7 @@ fn put(format: u32, bytes: &[u8]) -> Result<(), PlatformError> {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), target.cast::<u8>(), bytes.len());
         let _ = GlobalUnlock(memory);
     }
-    // SAFETY: this thread has the clipboard open and emptied it. On success
-    // the system owns `memory`.
-    if let Err(err) = unsafe { SetClipboardData(format, Some(HANDLE(memory.0))) } {
-        // SAFETY: the clipboard refused the block, so it's still ours.
-        let _ = unsafe { GlobalFree(Some(memory)) };
-        return Err(os_err("SetClipboardData", &err));
-    }
-    Ok(())
+    Ok(memory)
 }
 
 /// Explorer's own form, `/select,"<path>"`. A Windows path can't hold `"`,
@@ -895,7 +909,7 @@ impl IFileOperationProgressSink_Impl for MoveLog_Impl {
     }
 }
 
-fn os_err(context: &'static str, err: &Error) -> PlatformError {
+pub(crate) fn os_err(context: &'static str, err: &Error) -> PlatformError {
     PlatformError::Os {
         context,
         code: err.code().0,

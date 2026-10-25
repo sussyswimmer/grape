@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::file_actions::{MoveOutcome, TerminalApp};
+use crate::file_actions::{MoveOutcome, ShareOutcome, TerminalApp};
 use crate::{DisplayBounds, DragMonitor, PlatformError};
 
 pub(crate) fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
@@ -38,7 +38,10 @@ pub(crate) fn pick_folder(
     Err(PlatformError::Unsupported)
 }
 
-pub(crate) fn share(_paths: &[PathBuf]) -> Result<(), PlatformError> {
+pub(crate) fn share(
+    _paths: &[PathBuf],
+    _near: Option<(i32, i32)>,
+) -> Result<ShareOutcome, PlatformError> {
     Err(PlatformError::Unsupported)
 }
 

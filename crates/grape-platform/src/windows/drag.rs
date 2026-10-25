@@ -202,7 +202,7 @@ fn held_modifiers() -> Modifiers {
 
 /// Either physical button: `GetAsyncKeyState` reads physical buttons, and
 /// with swapped buttons the primary one is the right.
-fn primary_button_down() -> bool {
+pub(crate) fn primary_button_down() -> bool {
     key_down(VK_LBUTTON) || key_down(VK_RBUTTON)
 }
 

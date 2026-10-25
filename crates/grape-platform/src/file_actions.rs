@@ -7,7 +7,7 @@
 //! (golden rule 2). The others read paths and nothing else.
 //!
 //! Every function returns [`PlatformError::Unsupported`] except on Windows
-//! and macOS. Share is macOS only for now (AirDrop).
+//! and macOS. Share is the share sheet on Windows and AirDrop on macOS.
 
 use std::path::{Path, PathBuf};
 
@@ -152,16 +152,64 @@ pub fn pick_folder(
     imp::pick_folder(owner, title, start)
 }
 
-/// Shares the files. On macOS that's AirDrop: its window opens and the
-/// user picks a device there. That runs on the main thread, so the caller
-/// waits for it: never call this from a thread the main thread is waiting
-/// for.
+/// What a Share did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShareOutcome {
+    /// The share sheet (Windows) or AirDrop's window (macOS) opened with
+    /// every item that wasn't skipped. `false` when nothing was left to
+    /// share, so nothing opened.
+    pub opened: bool,
+    /// The items left out, in the order they were given, and why. Always
+    /// empty on macOS.
+    pub skipped: Vec<Skipped>,
+}
+
+/// One item a Share left out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Skipped {
+    /// The item, as it was given.
+    pub path: PathBuf,
+    /// Why it was left out.
+    pub why: SkipReason,
+}
+
+/// Why a Share left an item out (Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// A folder. Share sends files only: the sheet's targets don't
+    /// reliably take folders.
+    Folder,
+    /// Nothing is there any more.
+    Missing,
+    /// Windows can't hand it to the sheet: a shortcut (`.lnk`, `.url`,
+    /// `.wsh`), or a file the system couldn't look up for sharing in time.
+    Unshareable,
+}
+
+/// Shares the files.
+///
+/// On Windows that's the share sheet, near `near` (the drop point in
+/// global physical pixels; `None` is the cursor). Folders, missing items
+/// and files Windows can't share are left out and listed in
+/// [`ShareOutcome::skipped`]; when nothing is left, the sheet doesn't open.
+/// The sheet belongs to a small invisible window on a thread of Grape's
+/// own, and Grape doesn't take the focus to open it. This waits up to 10 s
+/// for Windows to look the files up, then up to 30 s for the sheet to ask
+/// for them.
+///
+/// On macOS it's AirDrop with every item: its window opens and the user
+/// picks a device there. That runs on the main thread, so the caller waits
+/// for it. `near` is ignored.
+///
+/// Blocks: call it from a thread of its own, and never from one the main
+/// thread is waiting for.
 ///
 /// # Errors
-/// [`PlatformError::Unsupported`] except on macOS, or an OS error when
-/// AirDrop is off or can't take these items.
-pub fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
-    imp::share(paths)
+/// [`PlatformError::Unsupported`] except on Windows and macOS, or an OS
+/// error when AirDrop is off or can't take these items, or the share sheet
+/// couldn't open or never asked for the files.
+pub fn share(paths: &[PathBuf], near: Option<(i32, i32)>) -> Result<ShareOutcome, PlatformError> {
+    imp::share(paths, near)
 }
 
 /// Opens the folder holding `path` in Explorer or Finder, with `path`
@@ -200,7 +248,8 @@ mod tests {
             move_to_chosen_folder(&paths),
             Err(PlatformError::Unsupported)
         );
-        assert_eq!(share(&paths), Err(PlatformError::Unsupported));
+        assert_eq!(share(&paths, None), Err(PlatformError::Unsupported));
+        assert_eq!(share(&paths, Some((1, 2))), Err(PlatformError::Unsupported));
         assert_eq!(
             reveal(Path::new("/a/b.png")),
             Err(PlatformError::Unsupported)
@@ -218,17 +267,6 @@ mod tests {
         );
         assert_eq!(
             pick_folder(Some(1), "Choose a folder", None),
-            Err(PlatformError::Unsupported)
-        );
-    }
-
-    #[cfg(target_os = "windows")]
-    #[test]
-    fn share_is_unsupported_on_windows_for_now() {
-        use super::*;
-
-        assert_eq!(
-            share(&[PathBuf::from(r"C:\a\b.png")]),
             Err(PlatformError::Unsupported)
         );
     }

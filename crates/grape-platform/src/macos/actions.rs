@@ -53,7 +53,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSError, NSFileManager, NSString, NSURL};
 
 use super::{io_error, FEATURE_UNSUPPORTED, NO_CODE};
-use crate::file_actions::{MoveOutcome, MovedItem, TerminalApp};
+use crate::file_actions::{MoveOutcome, MovedItem, ShareOutcome, TerminalApp};
 use crate::mac_rules::{
     iterm_args, judge_move, path_lines, picker_message, reveal_args, terminal_args, terminal_plan,
     ItemDevices, MacTerminal, MoveSnapshot, MoveVerdict, OldPlace, ITERM_BUNDLE_ID,
@@ -133,7 +133,12 @@ pub(crate) fn reveal(path: &Path) -> Result<(), PlatformError> {
     open(reveal_args(path), "start open -R")
 }
 
-pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
+/// AirDrop takes every item, so nothing is ever skipped, and `_near` has
+/// no use: AirDrop places its own window.
+pub(crate) fn share(
+    paths: &[PathBuf],
+    _near: Option<(i32, i32)>,
+) -> Result<ShareOutcome, PlatformError> {
     let urls = autoreleasepool(|_| file_urls(paths))?;
     on_main("AirDrop", move |mtm| {
         let unavailable = PlatformError::Os {
@@ -174,6 +179,10 @@ pub(crate) fn share(paths: &[PathBuf]) -> Result<(), PlatformError> {
             open.push((service, done));
         });
         Ok(())
+    })
+    .map(|()| ShareOutcome {
+        opened: true,
+        skipped: Vec::new(),
     })
 }
 

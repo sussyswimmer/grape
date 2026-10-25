@@ -11,9 +11,10 @@
 //! else, in every callback, whatever keys are held. It never reports a move
 //! or a link.
 //!
-//! Grape's other windows (Settings) get the same target in refusing mode
-//! ([`refuse_drops`]): it answers `DROPEFFECT_NONE` to everything, so OLE
-//! never calls `Drop` there and a file dropped on Settings stays put.
+//! Grape's other windows (Settings, the float shelf) get the same target
+//! in refusing mode ([`refuse_drops`]): it answers `DROPEFFECT_NONE` to
+//! everything, so OLE never calls `Drop` there and a file dropped on
+//! Settings, or dragged from the shelf back onto it, stays put.
 //!
 //! The callbacks run on the window's thread (Tauri's main thread). They
 //! read the file list and position, `try_send` a [`DropEvent`] and return.
@@ -289,7 +290,7 @@ impl IDropTarget_Impl for OverlayDropTarget_Impl {
 }
 
 /// The file paths in a drag's data object (`CF_HDROP`), or none.
-fn read_paths(data: Option<&IDataObject>) -> Vec<PathBuf> {
+pub(crate) fn read_paths(data: Option<&IDataObject>) -> Vec<PathBuf> {
     let Some(data) = data else {
         return Vec::new();
     };
