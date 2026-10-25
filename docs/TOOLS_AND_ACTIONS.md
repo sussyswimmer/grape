@@ -51,14 +51,16 @@ Actions work on any selection: folders, mixed types, files with no conversions *
 
 | Key | Title | macOS | Windows | Tier |
 |---|---|---|---|---|
-| share | AIRDROP → **SHARE** on Windows | `NSSharingService(named: .sendViaAirDrop)` with the file URLs | Windows share sheet (`IDataTransferManagerInterop::ShowShareUIForWindow`) → Nearby Share and apps | v1 |
-| float | FLOAT | Floating shelf panel that can be pinned to a screen edge; files can be dragged *out* of it into other apps | Same, as a topmost tool window with OLE drag-out | v1 |
+| share | AIRDROP → **SHARE** on Windows | `NSSharingService(named: .sendViaAirDrop)` with the file URLs | Windows share sheet (`IDataTransferManagerInterop::ShowShareUIForWindow`, owned by an invisible window of Grape's) → Nearby Share and apps. Files only: folders, shortcuts and missing items are left out, and a toast says so (D21) | v1 |
+| float | FLOAT | Floating shelf panel that can be pinned to a screen edge; files can be dragged *out* of it into other apps. Not in this build yet: the drag out needs an `NSDraggingSession` | A topmost tool window at the right edge of the screen that opens without taking focus. It holds up to 50 items and snaps to the left or right edge when left near one. Items drag out with OLE as a copy or a shortcut, never a move (D21) | v1 |
 | copy | COPY | File URLs on `NSPasteboard.general` (paste in Finder copies files) | `CF_HDROP` + `Preferred DropEffect = COPY` on the clipboard | v1 |
 | move | MOVE | `NSOpenPanel` (folders only) → move originals. **The only action allowed to move a source.** | `IFileOpenDialog` with `FOS_PICKFOLDERS` → `MoveFileExW` / `IFileOperation` (undo-able) | v1 |
 | copyPath | COPY PATH | Absolute POSIX paths, one per line | Absolute Windows paths, one per line, unquoted | v1 |
 | terminal | TERMINAL | Open the folder (or a file's parent) in Terminal; iTerm2 if the user picked it in Settings | Windows Terminal `wt -d <dir>` if installed, else PowerShell with `-NoExit -Command Set-Location` | v1 |
 
 Move must use the platform's undo-capable API where one exists, and must refuse to move across volumes without confirming.
+
+**Float never moves.** A drag out of the shelf offers copy or shortcut only, whatever keys are held, so the files stay where they are. Remove (× or Delete) and Close only take items off the shelf; nothing on disk changes.
 
 ## Adding a tool or action
 

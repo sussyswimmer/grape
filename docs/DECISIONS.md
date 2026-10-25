@@ -58,7 +58,8 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 | proptest (dev) | 1.11.0 | MIT OR Apache-2.0 | Hit-test property tests |
 | serde_json (dev) | 1.0.151 | MIT OR Apache-2.0 | Serde shape tests and doc-sync parsing in `grape-core` |
 
-- **`windows` features** grow with the milestones, never as new crates. D13 lists M1's. The M5 file actions add `Win32_System_DataExchange` and `Win32_System_Memory`, which tao already enables on the same version, and `Win32_Storage_FileSystem` (bindings only, for `GetVolumePathNameW`).
+- **`windows` features** grow with the milestones, never as new crates. D13 lists M1's. The M5 file actions add `Win32_System_DataExchange` and `Win32_System_Memory`, which tao already enables on the same version, and `Win32_Storage_FileSystem` (bindings only, for `GetVolumePathNameW`). Share and the float shelf add `Foundation`, `ApplicationModel_DataTransfer`, `Storage`, `Storage_Streams` and `Win32_UI_Shell_Common` (D21).
+  - **The one exception is `windows-collections`** (D21). The share sheet takes an `IIterable<IStorageItem>`, and only that crate can make one from a `Vec`. The `windows` crate builds it but doesn't re-export it, and Windows has no collection class to use instead. It was already in `Cargo.lock`, so no new package came in.
 
 - **npm packages** (dev and build only; only the built UI files ship):
 
@@ -111,7 +112,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Decision:** Grape registers its own `IDropTarget` (`grape_platform::windows::install_drop_target`) on the overlay window and every child window, replacing wry's, at startup and again before each show. It reports `DROPEFFECT_COPY` for a file drag and `DROPEFFECT_NONE` for anything else, in `DragEnter`, `DragOver` and `Drop`, whatever keys are held and whatever the source allows. On Windows the controller gets its drop events (`grape_platform::DropEvent`, global physical pixels) from this target instead of Tauri's `WindowEvent::DragDrop`.
 - **Why:** wry 0.57.0 (`webview2/drag_drop.rs`) sets the effect in `DragEnter`/`DragOver` but never writes it in `Drop`, and leaves it unset for drags without files. What Explorer then acts on is whatever value OLE left there, and golden rule 2 can't rest on that (`PLATFORM_WINDOWS.md` → "The drop must never move the source"). The target's screen coordinates are also what the hit test wants.
 - **Kept:** `dragDropEnabled: true` in `tauri.conf.json`, so wry still turns off WebView2's own external drops (`SetAllowExternalDrop(false)`). A window Grape misses then refuses the drop instead of navigating. If wry's handler ever fires, the app logs it as a coverage gap.
-- **Other windows:** Settings gets the same target in refusing mode (`refuse_drops`), answering `DROPEFFECT_NONE` to everything, because tao's and wry's handlers there have the same unset effect. Every future Grape window (toast, float shelf) needs one or the other.
+- **Other windows:** Settings gets the same target in refusing mode (`refuse_drops`), answering `DROPEFFECT_NONE` to everything, because tao's and wry's handlers there have the same unset effect. The toast refuses drops too, and so does the float shelf, at creation and before every show, so a drag out of it dropped back on it does nothing (D21). Every future Grape window needs one or the other.
 - **Hit-testing:** the overlay page has a fill of 1/255 black (`--overlay-hit-fill`), invisible but enough that no part of the overlay can count as see-through when Windows picks the window under a drop.
 - **Dependencies:** `windows` 0.62.2 gains the features `Win32_Graphics_Gdi`, `Win32_System_Com`, `Win32_System_Com_StructuredStorage`, `Win32_System_LibraryLoader`, `Win32_System_Ole`, `Win32_System_SystemServices`, `Win32_UI_HiDpi` and `Win32_UI_Input_KeyboardAndMouse`, all of which wry already enables on the same version. `windows-core` 0.62.2 (MIT OR Apache-2.0) becomes a direct dependency of `grape-platform` because the COM `#[implement]` macro needs it by name; it was already in the build through wry and tao.
 - **Tested:** CI's Windows runner drives the target with the shell's own data object for a temporary file, with Shift, Ctrl, Alt and Shift+Ctrl held and every effect allowed. It always answers copy, and nothing for a drag without files. Not yet run against a real Explorer drag (`TESTING.md` → "Drag + wheel").
@@ -213,6 +214,49 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - All were published more than 14 days ago (D9). `dirs` 6 reuses the `option-ext` that O6 already covers.
   - `grape-platform` now uses `log` 0.4 too (already in D9), to say why an action did something other than what was asked.
 - **Revisit if:** remapping should allow two keys at once, or Maxwell wants launch at login off by default.
+
+## D21: Share and the Float shelf on Windows (2026-10-25, proposed, confirm)
+- **Decision:** on Windows, SHARE opens the system share sheet with the dropped files, and FLOAT puts the dropped items on a small shelf window. Items drag out of the shelf as copies or shortcuts, never as a move. macOS keeps AirDrop for Share. Float on the Mac comes later.
+- **Share:**
+  - Files only. Folders are left out, and so are missing items and shortcuts (`.lnk`, `.url`, `.wsh`), which `StorageFile` can't represent. The rest are looked up with `StorageFile::GetFileFromPathAsync`, all at once, with 10 s for the lot. A file that fails or is late is left out too. A `\\?\` prefix is stripped before the lookup.
+  - A toast says what was left out, for example "Sharing 2 of 3 / Folders can't be shared." When nothing is left, no sheet opens, and the toast says "Nothing to share".
+  - **The anchor window.** The sheet belongs to a window of Grape's own, on a thread of its own: "grape-share", a single-threaded COM apartment with a message loop, started on first use and kept for the app's life.
+    - The anchor is a 32 × 32 logical px popup centered where the wheel was. It's `WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT` at alpha 1 of 255, so it has no taskbar button or Alt-Tab entry, can't be seen and lets clicks through.
+    - It's neither topmost nor `WS_EX_NOACTIVATE`, and it's shown with `SW_SHOWNOACTIVATE`. Grape never takes the focus to open the sheet.
+    - If the sheet activates the anchor when it closes, the anchor hides and hands the foreground back to the window that had it. It's never destroyed, because a sheet may still be open on it.
+  - The `DataRequested` handler follows Chromium's rules: when it's removed, a title that's never empty, `Copy`, the files read-only, `FailWithDisplayText` on a failure, and always `Ok`. If it hasn't run 30 s after the call (Chromium's limit), Share fails with "Couldn't share" and the handler is removed. Every HRESULT on the way is logged.
+  - One share runs at a time. A second one waits for the first to be served or to give up.
+  - **Why:** Chromium, Firefox and Microsoft's WPF ShareSource sample all share from an unpackaged desktop app through `IDataTransferManagerInterop::ShowShareUIForWindow`. Each one passes a live, visible, activatable window of its own process. The docs set no rules for that window. Grape's toast is `WS_EX_NOACTIVATE`, the case no source covers, and tao holds back every event while a main-thread task runs, so the anchor is a new window on a thread of its own. Files (the open-source file manager) leaves folders out of its shares too, and nobody has checked whether Nearby Share or Mail take them.
+- **Float shelf:**
+  - It holds at most 50 items, in drop order, and never the same path twice. A toast says so when some didn't fit.
+  - It opens at the right edge of the drop's monitor work area, 12 logical px in, centered top to bottom, without taking focus. An open shelf stays where it is and only changes height.
+  - Moved by its header and left within 48 logical px of the work area's left or right edge, it snaps flush to that edge, 300 ms after the last move and once no button is down. It's always kept inside the work area.
+  - Items stay on the shelf after a drag. Remove and Close take items off the shelf and never touch the files. The shelf lives in memory only, so quitting clears it.
+  - It refuses drops (`refuse_drops`, D13), so a drag out of it dropped back on it does nothing. Adding items by dropping them on the shelf is a later idea.
+  - It's a tool window (no taskbar button, not in Alt-Tab) that a click activates. Only the foreground window can capture the mouse, and the drag out needs the capture. Grape still never activates it itself: `show_shelf` shows it with `SWP_NOACTIVATE`. `harden_shelf` uses D11's subclass with `WS_EX_TOOLWINDOW` on and `WS_EX_APPWINDOW` and `WS_EX_NOACTIVATE` off, behind the same `overlay-subclass` feature.
+  - **Drag out:** `SHDoDragDrop` with the shell's own drop source and drag image, offering copy or link, never move (golden rule 2). The data object holds only `CF_HDROP` and `Preferred DropEffect` = copy, with no shell ID list.
+    - `float_drag_out` is an async command that queues the drag on the main thread. A synchronous command would run the drag loop inside WebView2's IPC callback.
+    - No drag starts from the header's move region: Chromium refuses to start a drag during a move loop.
+    - A watchdog sends Esc to the drag once if no button has been down for 3 s. That ends a drag that missed the release, which would otherwise hold up the whole app (drag-rs issue #94).
+  - **Why this data object:** Electron drags file lists as `CF_HDROP` alone, offering copy and link, and Chromium's file drags are `CF_HDROP` too. `CF_HDROP` has no common-parent rule, so files from several folders work, and Grape already builds the block for Copy.
+  - **The Recycle Bin argument:** OLE masks what a target answers with what the source allows. A target that asks for a move then gets nothing, and its `Drop` isn't called (Wine's `ole2.c`). On Windows that layer is closed source. ReactOS's clean-room Recycle Bin target deletes the files of any drop that carries a shell ID list itself, in `Drop`, without looking at the allowed effects, and with Shift the delete is permanent. Leaving the ID list out is the second guard. Neither guard has been checked on Windows, so a drop on the Recycle Bin, plain and with Shift, is the first Float check on the PC, on a scratch file.
+  - **macOS:** Float stays "Not in this build yet", because a drag out there needs an `NSDraggingSession`. The shelf window is never built on macOS or Linux.
+- **New dependencies** (Windows only):
+
+| Crate or feature | Version | License | Why |
+|---|---|---|---|
+| `windows` features `Foundation`, `ApplicationModel_DataTransfer`, `Storage`, `Storage_Streams` | 0.62.2 | MIT OR Apache-2.0 | The share sheet's WinRT types (`DataTransferManager`, `DataPackage`, `StorageFile`, `IStorageItem`). Nothing else in the build enables them, so they add new compiled bindings |
+| `windows` feature `Win32_UI_Shell_Common` | 0.62.2 | MIT OR Apache-2.0 | `SHCreateDataObject` for the drag-out data object. Also new compiled bindings |
+| `windows-collections` | 0.3.2 | MIT OR Apache-2.0 | `IIterable<IStorageItem>` from a `Vec`, which `SetStorageItems` takes. The `windows` crate builds it but doesn't re-export it, and Windows has no collection class to use instead. It was already in `Cargo.lock` as a dependency of `windows`. The one exception to D9's "never as new crates" |
+
+- **Tested:** `cargo test` on Linux, and clippy for the Windows target and both Mac targets. The Windows-only tests are type-checked and first run on CI's `windows-latest` runner. They check that a temp file becomes a storage item, a folder and a missing path are skipped with no lookup, and a `.lnk` can't be shared. They also check the anchor's styles, the drag data object for files in two folders (both paths as `CF_HDROP`, `Preferred DropEffect` = copy, no shell ID list), that the allowed effects have no move bit, the button-up and wrong-thread guards, and the shelf's styles on a real window. No test opens the sheet or starts a drag. Nothing has run on the PC yet.
+- **Needs the PC** (`TESTING.md` → "File actions, M5"):
+  - first, the Recycle Bin drops;
+  - whether the sheet accepts the anchor, where it appears, where the focus goes after it closes, and Nearby Share;
+  - whether a click on the shelf gets the mouse capture for the drag (the press lands in WebView2's child window, which belongs to another process);
+  - Shift and Alt drops out of the shelf, and Esc during one;
+  - the snap, and two monitors at different DPI.
+- **Revisit if:** the sheet won't open from the anchor (try an activatable popup on the main thread, then the toast), share targets turn out to take folders, a drag out of the shelf ever moves or deletes a file, or the Mac gets a drag out.
 
 ---
 

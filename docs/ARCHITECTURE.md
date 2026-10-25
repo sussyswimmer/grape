@@ -47,21 +47,22 @@
 - `display_bounds_at(x, y) -> Result<DisplayBounds, PlatformError>`: the monitor under the point, as `DisplayBounds { monitor: Rect, work_area: Rect, scale: f64 }` in global coordinates. Those are physical pixels on Windows (`rcMonitor`, `rcWork`). On macOS they're points from the top-left of the primary screen, with `scale` 1.0, read from a screen cache that the main thread refreshes, with a CoreGraphics fallback (D18). The overlay is sized to `monitor`, and the anchor is clamped to `work_area`.
 - `windows::install_drop_target(hwnd, sink)`: Grape's own `IDropTarget` on the overlay and its child windows. It sends `DropEvent::{Enter{paths,x,y}, Over{x,y}, Leave, Drop{paths,x,y}}` and never reports a move (`DECISIONS.md` D13).
 - `macos::{harden_window, frame_and_show, describe_window}` (main thread only): the overlay's and the toast's NSWindow level, Spaces behavior, and a show that never makes the window key (D18).
-- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir, app)` (the `terminal_app` setting), `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}` and `reveal(path)`. `share(paths)` is AirDrop on macOS. Each returns `Unsupported` where it isn't built yet (Share on Windows, everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
+- `file_actions`: share, copy, copyPath, move, terminal. Float lives in the app because it's a window. Built on Windows (M5) and macOS (D18): `copy_files(paths)`, `copy_paths(paths)`, `open_terminal(dir, app)` (the `terminal_app` setting), `move_to_chosen_folder(paths) -> MoveOutcome::{Cancelled, AlreadyThere{to}, Moved{to, moved: Vec<MovedItem{from, now}>, unsure, of}}`, `reveal(path)` and `share(paths, near) -> ShareOutcome { opened, skipped: Vec<Skipped { path, why: SkipReason::{Folder, Missing, Unshareable} }> }`. Share is the share sheet on Windows, opened near `near` (global physical pixels; the app passes the wheel's center), with files only (D21). On macOS it's AirDrop with every item, `near` is ignored and nothing is skipped. Each returns `Unsupported` where it isn't built (everything on other OSes). The app's `actions.rs` runs them on a thread of their own and writes the toasts.
+- `windows::{harden_shelf, show_shelf, hide_shelf}` and `windows::drag_out(hwnd, paths) -> DragOut { outcome: DragOutcome::{Copied, Linked, Cancelled, ButtonUp, NothingToDrag}, skipped }`, on the main thread, which owns the shelf: the float shelf's window styles, a show that never activates it, and its drag out, which offers copy or link and never move (D21). `windows::primary_button_down()` tells the app's snap timer whether a button is held.
 - `haptic_tick()`: a light trackpad tick on macOS, a no-op elsewhere.
 - `file_actions::pick_folder(owner, title, start)`: the native folder picker for Settings, sharing Move's code. It runs on a blocking worker thread (D19).
 - See `PLATFORM_MACOS.md` / `PLATFORM_WINDOWS.md`.
 
 ### `apps/desktop/src-tauri` (the app)
-- Owns the windows: **overlay** (wheel), **settings**, **float shelf**, **toast**.
+- Owns the windows: **overlay** (wheel), **settings**, **toast**, and on Windows the **float shelf** (`float.rs`, built on first use, D21). The shelf's model is in memory only: items in drop order, no path twice, at most 50. Its page gets ids and names, never paths.
 - Runs the `WheelController` state machine and bridges platform signals, UI events and engines.
-- Exposes Tauri commands to the UI, e.g. `get_wheel(mode)`, `cancel()`, `settings_get/set`.
+- Exposes Tauri commands to the UI, each granted only to the window that uses it (`capabilities/`): `wheel_painted` (overlay), `toast_clicked` (toast), the `settings_*` commands (Settings), and `float_view`, `float_remove`, `float_clear`, `float_reveal` and `float_drag_out` (the shelf). `float_drag_out` is async and queues the drag on the main thread.
 - Stores settings with `tauri-plugin-store` and handles launch at login with `tauri-plugin-autostart`.
 
 ### `apps/desktop/ui` (TypeScript)
 - `overlay.ts` renders the wheel SVG from `Segment[]`, highlights from controller events, plays the tick sound.
 - `settings.ts` is the settings window.
-- `float.ts` is the shelf.
+- `float.html` and `float.ts` (with `float/model.ts` and `float/view.ts`) are the shelf. It lists what `float://view` sends, and a press on an item that moves 4 px becomes one `float_drag_out` call with ids. Rust runs the OS drag.
 - The UI never decides behavior. It renders what Rust sends and reports pointer/drop info back.
 
 ## The overlay window (the hard part)
@@ -79,7 +80,7 @@ Plan:
   - `Over { … }`: hit test → highlight.
   - `Drop { paths, … }`: hit test → run or cancel.
   - `Leave`: the cursor left the display. Keep the wheel and wait. On macOS, a `Leave` while the button is still down with the cursor still on the wheel's display is how Esc shows up (Grape can't read keys without permission), so the controller closes the wheel if no `Enter` or `Over` follows within 200 ms, and a button-up within 50 ms of the `Leave` counts as a refused drop (D18).
-- The UI events (`wheel://open|highlight|close`, `toast://show|hide`) and their JSON are specified in `docs/design/m1-drag-wheel.md` §C; both sides test against the same golden fixtures. The wheel opens pending and fills in once `Enter` brings the paths.
+- The UI events (`wheel://open|highlight|close`, `toast://show|hide`) and their JSON are specified in `docs/design/m1-drag-wheel.md` §C; both sides test against the same golden fixtures. The shelf has two more, sent only to the `float` window: `float://view` (`{ items: [{ id, name, kind, missing }] }`, after every change and before every show) and `float://drag-ended` (`{ outcome }`: copied, linked, cancelled, nothing or failed), with the fixtures `float-view.json`, `float-view-empty.json` and `float-drag-ended.json` (D21). The wheel opens pending and fills in once `Enter` brings the paths.
 - During an OS drag the webview gets **no pointer events**. All highlighting is driven from `Over` positions sent to the UI. Don't rely on DOM `pointermove`.
 - **Known risk (spike in M1):** `Enter` may not fire until the cursor moves after the overlay appears. Until it does, the wheel shows a neutral ring (M1: the numbered placeholder ring). macOS works the same way: Grape checks only the drag pasteboard's *types* and never reads its contents (see `PLATFORM_MACOS.md`), so the paths arrive with `Enter` there too.
 - macOS full-screen Spaces may need a non-activating `NSPanel`. If a plain Tauri window can't float over full-screen apps, use the `tauri-nspanel` plugin and log it in DECISIONS.
@@ -88,6 +89,8 @@ Plan:
 - The platform monitor runs on its own thread (macOS: a polling thread; Windows: the hook thread *must* pump messages). It sends signals through a bounded channel.
 - The controller runs on the Tauri async runtime. UI updates go out as Tauri events (`wheel://open`, `wheel://highlight`, `wheel://close`).
 - Engines run on a worker pool (`tokio::task::spawn_blocking` or a dedicated `rayon` pool). Max concurrency = number of CPUs, and FFmpeg jobs = 2.
+- Each file action runs on a "grape-action" thread of its own. On Windows, Share looks the files up there, in the multithreaded apartment. Then "grape-share" opens the sheet from its anchor window, and "grape-action" waits up to 30 s for the sheet to ask for the files. "grape-share" is a single-threaded apartment with a message loop, started on first use and kept for the app's life (D21).
+- A drag out of the float shelf runs on the main thread, which owns the shelf window and OLE. It's a modal loop, so Tauri's other main-thread work waits until the drop or the cancel. A "grape-drag-watch" thread watches it and sends Esc after 3 s with no button down. After the user moves the shelf, a "grape-float-snap" thread waits for it to be still and then snaps it on the main thread.
 - **Budget:** under 16 ms from modifier signal to `wheel://open`, and under 100 ms until the wheel is painted.
 
 ## Settings (persisted)

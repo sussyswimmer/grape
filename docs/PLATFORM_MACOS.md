@@ -44,6 +44,7 @@ If the drag pasteboard has no file URL type (text, browser images, promised file
 - Move: `NSOpenPanel` ("Move Here", directories only) on the main thread, then `FileManager.moveItem` on the action's own thread. It never overwrites: an item whose name is taken in the chosen folder stays where it was. A mounted volume's root (a USB stick, a DMG or a network share dragged from the Desktop or the sidebar) is never moved, because moving it would copy its contents and then erase them. There's no system undo for this, so moving to another volume asks "Move to another drive?" first, with Cancel as the default button. Grape activates itself for the panel and the alert, then hands activation back to the app that was in front. Each item's result is recorded right after its own move, and the toast says what moved and reveals it.
 - Terminal: `open -a Terminal <dir>`, or `open -b com.googlecode.iterm2 <dir>` when the user chose iTerm2 in Settings and Launch Services finds it (otherwise Terminal, with a log line).
 - Reveal (toast click): `open -R <path>`.
+- Float: not on the Mac yet. Control-drop on FLOAT shows "Not in this build yet", because a drag out of the shelf needs an `NSDraggingSession` (D21).
 
 ## Conversions that use Apple frameworks
 - **HEIC encode/decode:** ImageIO (`CGImageDestination` with `public.heic`). It's the native, licence-free path, so prefer it over libheif on macOS.

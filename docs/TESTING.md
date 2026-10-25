@@ -6,7 +6,7 @@
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
 | Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
-| Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS (never a dialog or AirDrop) |
+| Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS. Tests never open a dialog, AirDrop or the share sheet, and never start a real drag: on Windows a test only reaches code that returns before `ShowShareUIForWindow` or `SHDoDragDrop` |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
 
@@ -78,7 +78,35 @@ File actions, M5 (win; use scratch copies of files)
 - [ ] win: Move into a folder whose name has a space and a comma (`a b,c`), then click the toast → Explorer opens that folder with the moved file selected.
 - [ ] win: make a junction to another drive in PowerShell (`New-Item -ItemType Junction -Path C:\scratch\other -Target D:\scratch`), then Move a file from C: into `C:\scratch\other` → Grape asks "Move to another drive?" first.
 - [ ] win: Move to a folder on another drive (a USB stick) → Grape first asks "Move to another drive?" with No as the default. No → nothing moves. Yes → the items move.
-- [ ] win: Share and Float → a "Not in this build yet" toast, and nothing else happens.
+- Share (D21; the log lines all start with `share:`, and if the sheet doesn't open, copy them all into your note):
+- [ ] win: Alt-drop one scratch file on SHARE → the Windows share sheet opens with that file (if it shows a title, it's the file's name). Note where it appears (near where the wheel was, the middle of the screen, or an edge) and whether it opens behind any window. The log shows `share: ShowShareUIForWindow: 0x00000000` and `share: DataRequested (fill): 0x00000000`.
+- [ ] win: Grape never becomes the active app to open the sheet: Explorer keeps its active title bar until the sheet appears, no Grape window shows in the taskbar or Alt-Tab, and nothing is drawn where the wheel was.
+- [ ] win: close the sheet with Esc, once by clicking elsewhere, and once after sharing to an app → the window you dragged from is active again each time: arrow keys move Explorer's selection without a click. Note any `share: the sheet closed; …` log line.
+- [ ] win: Alt-drop two files and a folder on SHARE → the sheet opens with the two files, and a toast says "Sharing 2 of 3 / Folders can't be shared." Only folders → no sheet, and the toast says "Nothing to share / Share sends files, not folders."
+- [ ] win: a shortcut (`.lnk`) with a file → the sheet gets the file, and the toast says "Sharing 1 of 2 / {name}.lnk can't be shared." The shortcut alone → "Nothing to share", and no sheet.
+- [ ] win: a missing file: in PowerShell run `Start-Sleep 5; Remove-Item C:\scratch\gone.txt`, then at once drag `gone.txt` and another file and drop them on SHARE after the 5 s → the toast says "Sharing 1 of 2 / gone.txt is gone."
+- [ ] win: 30 files, then 100 → the sheet opens with all of them, and sharing them to Mail or another app sends them all. Note how long the sheet takes to open.
+- [ ] win: with Nearby sharing on (Settings → System → Nearby sharing), share a file to another PC or a phone nearby → it arrives, and the original is unchanged.
+- [ ] win: if the sheet never appears, wait 30 s → an error toast says "Couldn't share / DataRequested failed (OS error 0x800705b4)", the log says `share: the share sheet didn't ask for the files within 30 s`, and the next Share still works.
+- Float (D21; use scratch copies of files, and do the Recycle Bin check first):
+- [ ] win: **first Float check:** put a scratch file on the shelf (below), drag it from the shelf onto the Recycle Bin, then again with Shift held → the file is still in its folder both times, isn't in the Recycle Bin, and is still on the shelf. If it's ever gone, stop and report it: that's golden rule 2.
+- [ ] win: Alt-drop two scratch files on FLOAT → the shelf opens at the right edge of that screen, centered top to bottom, titled "Shelf · 2", without taking focus: keep typing in Notepad and the text still goes there. No taskbar button and no Alt-Tab entry. The log shows `float: shelf shown with 2 item(s)`, a `float ex-style (built)` line with `TOOLWINDOW` and without `NOACTIVATE`, and `float refuses drops on N of M window(s)`.
+- [ ] win: with the shelf open, Alt-drop a third file plus one that's already on it → the third appears at the bottom ("Shelf · 3"), the other isn't listed twice, no toast, and the shelf stays where it is and only gets taller.
+- [ ] win: Alt-drop 60 files on FLOAT → 50 are listed (the list scrolls after six rows), and a toast says "The shelf is full / It holds 50 items."
+- [ ] win: drag one item from the shelf into an Explorer folder → a copy appears there; the original stays in its folder and on the shelf. Drag "Drag all 3" into another folder → all three are copied, also when they came from two different folders. The log shows `float: drag out of 3 item(s): Copied, 0 missing`.
+- [ ] win: hold Shift while dropping a shelf item into a folder on the same drive (where Explorer would move) → still a copy, never a move: the original is still in its folder. No wheel opens either: a drag out of the shelf never does. Do the same into a folder on another drive.
+- [ ] win: hold Alt while dropping a shelf item into a folder → a shortcut to it appears there (the log says `Linked`), and the original is untouched.
+- [ ] win: drag a shelf item into Chrome (an upload area or a new tab), into a new Outlook mail (it's attached) and into VS Code (it opens) → each one takes the file, and the original is unchanged.
+- [ ] win: drag a shelf item and drop it back on the shelf → no drop cursor, nothing happens, and the list doesn't change.
+- [ ] win: press Esc during a drag out of the shelf → the drag ends, nothing is dropped, and the shelf takes the next press and drag at once.
+- [ ] win: if a drag out of the shelf ever looks stuck after you let go, wait 3 s → it ends by itself, and the log says `drag out: no button down for 3 s, so Esc went to the drag to end it`. Note what you did just before.
+- [ ] win: delete a shelf item's file in Explorer, then drag that item → nothing is dragged, and the row turns dimmed "Missing" and can't be dragged. Its × still takes it off.
+- [ ] win: a row's ×, Delete or Backspace on a row you tabbed to, and the header's × ("Close the shelf") → the item leaves the shelf or the shelf closes, and the files are untouched in Explorer. Taking off the last item closes the shelf too. Quit and relaunch → the shelf is empty until the next Float.
+- [ ] win: double-click a row, or tab to it and press Enter → Explorer opens with that file selected.
+- [ ] win: drag the shelf by its header to near the left edge of the screen and let go → it snaps flush to that edge, with a small gap. Near the right edge → the right edge. In the middle → it stays where you left it. While you keep the button held it doesn't snap, and it never ends up off the screen.
+- [ ] win: two monitors at different scale (100 % and 150 %): Alt-drop on FLOAT on each → the shelf opens at that monitor's right edge at the right size. Drag it to the other monitor → the text stays sharp, the size is right, and it snaps to that monitor's edges.
+- [ ] win: switch Windows between light and dark mode → the shelf follows, and its text is readable in both. With animation effects off, nothing on it animates.
+- [ ] win: re-run "Shift-drop never deletes the source" ×10 (the drop target code is shared with the shelf).
 
 Settings, M6 (D19; use scratch copies of files)
 - [ ] Open Settings from the tray (the menu bar on a Mac) → it shows each wheel's key, where files go, the fallback folder, Sounds and Launch at login. The Windows key is never offered. A Mac also has Haptics and offers Shift, Control, Option and Command.
@@ -131,6 +159,7 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: MOVE onto a folder holding a file with the same name → that file stays where it was, nothing is overwritten, and the toast says "Moved 1 of 2 items".
 - [ ] mac: MOVE to a USB stick → "Move to another drive?" with Cancel as the default (Return cancels). Move → the items move.
 - [ ] mac: Control-drop on SHARE → the AirDrop window comes to the front with the files (note if it opens behind Finder). Send or close it → Finder is active again, and no AirDrop window is left behind Finder (note if "Sent" leaves its window open and Grape active).
+- [ ] mac: Control-drop on FLOAT → a "Not in this build yet" toast ("The float shelf is coming."), no shelf opens, and nothing else happens.
 - [ ] mac: after a Move, and after cancelling one, the Finder window you dragged from is active again: arrow keys move its selection without clicking first.
 - [ ] mac: drag a USB stick's or a mounted DMG's icon from the Desktop onto MOVE → it isn't moved and nothing on it is erased; the toast says nothing moved.
 - [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Couldn't move" or "Some of it may not have moved", never "Moved …", and the original folder is still complete in its old place.

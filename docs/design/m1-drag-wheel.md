@@ -438,7 +438,7 @@ export interface ToastHidePayload { id: number }
   - Error: title = `user_message`, detail null.
   - Fallback, with the location first so the ellipsis can't cut it: when every output fell back, title `Saved in Downloads\Grape`, detail `{name}; its folder is read-only` (or `{n} files; their folders are read-only`). When only some did, title `Done`, detail `{n} files; {k} in Downloads\Grape`.
   - Not in this build: info, title `Not in this build yet`, detail `{FROM} to {TO} is coming.` (The detail is one line cut with an ellipsis, about 248 px at 12 px, so a list of the formats that do convert wouldn't be seen.)
-  - Tools: info, `Tools arrive in a later build.` Actions: info, `File actions arrive in a later build.`
+  - Tools: info, `Tools arrive in a later build.` Actions: info, `File actions arrive in a later build.` (M1 only. Since M5 the actions run in `actions.rs`. An action an OS doesn't have yet says `Not in this build yet` / `{action} is coming.`, which today is only Float on macOS, D21.)
   - (The "Making {name}…" / "Done" wording follows ROADMAP M3; its clean-room status falls under open question O7.)
 
 ---
@@ -653,7 +653,7 @@ Modules: `controller.rs`, `coords.rs`, `keys.rs` (KeyMap, edge_mode), `events.rs
 
 ### F.5 Jobs (`jobs.rs`)
 `submit(app, RunRequest)`:
-- `entry` is an `Action` → info toast "File actions arrive in a later build." `Tool` → info toast "Tools arrive in a later build."
+- `entry` is an `Action` → info toast "File actions arrive in a later build." (M1 only: since M5 `wheel.rs` hands actions to `actions::run`.) `Tool` → info toast "Tools arrive in a later build."
 - `Convert{to}`: if any item fails `grape_engines::supports(&op, item.format())` → info toast "Not in this build yet / {FROM} to {TO} is coming…". Use the first unsupported item's format.
 - Otherwise `spawn_blocking`:
   1. Build the `Selection`: for each distinct parent folder, plus the fallback `app.path().download_dir()?.join("Grape")`, build a `DirSnapshot{ names: read_dir file names (lossy), writable: probe }`.
@@ -754,7 +754,7 @@ The pure modules get unit tests (§B.4, coords, golden JSON for events, `edge_mo
 9. **Hold Shift before starting the drag** (Explorer move): no wheel; Explorer moves the file as usual.
 10. Esc with the wheel open: the wheel closes and Explorer cancels the drag (D14). The file stays put.
 11. Drag selected text from a browser (with `GRAPE_ANY_APP=1`) and tap Shift: the wheel closes by itself, and the text drop still works where you release it.
-12. Drag a folder and tap Shift: an empty-state message naming Alt. Tap Alt: six actions. Dropping on an action shows "File actions arrive in a later build."
+12. Drag a folder and tap Shift: an empty-state message naming Alt. Tap Alt: six actions. Dropping on an action shows "File actions arrive in a later build." (M1 only; since M5 the actions run, and their checks are in `TESTING.md` → "File actions, M5".)
 13. Multi-select 3 PNGs, Shift, drop on JPG: three outputs and one toast "Making 3 files…" then "Done".
 14. Second monitor at a different scale (if available): the wheel is correctly placed and hit-tested on both. The log's placed rect equals the monitor rect.
 15. Drag from an elevated Explorer: either no wheel, or a neutral ring that closes within about 0.3 s, and the drop isn't hijacked.

@@ -98,3 +98,14 @@ The demo also supports Enter-to-open, arrow keys, Home/End and Space/Enter-to-ap
 - Huge selections (> 200 files): cap the wheel, show a count, and queue jobs.
 - Read-only source folder: write outputs to the fallback location (Settings), then notify.
 - Grape crashing mid-drag: the overlay must never stay up. A watchdog hides it after 30 s with no events.
+
+## 10. The float shelf (Windows)
+
+- **[Grape]** A drop on FLOAT puts the items on the shelf: a small panel at the right edge of the screen the drop was on, centered top to bottom. It opens without taking the keyboard from the app in front, and lists each item by name.
+- **[Grape]** **Lifetime:** the shelf lives in memory. It stays until it's emptied or Grape quits, and quitting clears it.
+- **[Grape]** **Adding to an open shelf:** another drop on FLOAT adds its items after the ones there, skipping any already on it. The shelf stays where it is and gets taller, up to six rows, then the list scrolls. It holds 50 items; the rest are left out, and a toast says the shelf is full.
+- **[Grape]** **Closing:** a row's × (or Delete on a focused row) takes that item off. The header's × empties the shelf and closes it, and so does taking off the last item. None of this touches the files.
+- **[Grape]** **Pin to an edge:** drag the shelf by its header. Let go within 48 px of the screen's left or right edge and it snaps flush to that edge; anywhere else it stays where you left it. It never goes past the screen's edges.
+- **[Grape]** **Dragging out:** press an item, or "Drag all" from two items, and move. The drag is always a copy, or a shortcut where the target makes one, never a move, whatever keys are held. The files stay where they are, and the items stay on the shelf. An item that's gone shows "Missing" and can't be dragged. Esc during the drag cancels it. Double-click or Enter shows an item in Explorer.
+- **[Grape]** A drag out of the shelf never opens the wheel: Grape only watches drags that start in Explorer or on the Desktop (`DECISIONS.md` D14). Dropping anything onto the shelf does nothing.
+- **[Grape]** On macOS FLOAT says "Not in this build yet" for now (D21).
