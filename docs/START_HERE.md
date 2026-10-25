@@ -4,12 +4,21 @@
 
 Read this first in a fresh Claude Code session; the rest of the file is the original step-by-step guide.
 
-- **Branches.** Lane A (app, platform, UI, CI) works on `claude/beautiful-ritchie-y3qgbr`. Lane B (engines) works on `claude/vigilant-gauss-l5qt5y`. Each session pushes only its own branch, and merges the other's when it moves. New DECISIONS entries: D19 is lane A's (Settings); lane B uses D20 and up.
+- **Branches.** Lane A (app, platform, UI, CI) works on `claude/beautiful-ritchie-y3qgbr`. Lane B (engines) works on `claude/vigilant-gauss-l5qt5y`. Each session pushes only its own branch, and merges the other's when it moves. DECISIONS numbering: D19, D21 and D23 are lane A's; lane B has D20 and D22. From now on lane B takes even numbers and lane A odd.
+- **After merging lane B.** A merge that adds, removes or bumps a dependency can fail CI's Licenses job until the notices are regenerated: run the command at the top of `THIRD_PARTY_NOTICES.md` (it needs the network) and commit the result. A new license (ISC, BSD-2-Clause and so on) goes in both `deny.toml` and `about.toml`.
 - **PRs.** PR #13 (head `claude/vigilant-gauss-l5qt5y`) and PR #14 ("Add files via upload", head `claude/beautiful-ritchie-y3qgbr`) carry the same commits. Lane B fast-forwards #13 to lane A's pushes. #13 has the full description. Maxwell keeps one and closes the other.
 - **Try it without the dev setup.** Every CI run uploads `Grape-Windows-x64` (an unsigned per-user NSIS installer, `PLATFORM_WINDOWS.md` → "Running a CI build") and `Grape-macOS-universal` (an ad-hoc-signed DMG, `PLATFORM_MACOS.md` → "Running a CI build") under the run's Artifacts.
 - **Built, green in CI, not yet run by hand on the PC or a Mac:** M0, M1 and M2; M3's first slice (20 raster image conversions); M5's six file actions: Copy, Copy Path, Terminal, Move, Share (the share sheet) and the float shelf (D21; Float is Windows-only for now; their Windows tests run in CI); the macOS port (D18); M6 Settings (D19: keys with swap, where files go, fallback folder, sounds, haptics, launch at login, terminal app, the first-run welcome card). `TESTING.md` lists every manual check.
-- **Next for lane A** (unchecked in `ROADMAP.md`): M4's tool panels; M7's tagged release workflow, `THIRD_PARTY_NOTICES.md` and `licenses/`, signing and the opt-in updater (needs a DECISIONS entry first: golden rule 3); M3's `scripts/fetch-sidecars.ps1` with lane B.
-- **Checking the Mac target from Linux:** `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings`. The Windows target: `--target x86_64-pc-windows-msvc`.
+- **Built 2026-10-25, passing every local check, not yet run on GitHub or by hand:**
+  - Windows contrast themes (M6): the wheel, the toast and the shelf switch to the system's colors.
+  - M7's notices and license check (D23): cargo-about generates `THIRD_PARTY_NOTICES.md`, CI's new Licenses job checks it and every crate's license with cargo-deny, and both bundles ship it with `LICENSE.txt`.
+  - M7's release workflow (`release.yml`): a `vX.Y.Z` tag checks the versions and drafts a GitHub Release with `Grape-Setup-x64.exe` and `SHA256SUMS.txt` for Maxwell to publish (`PLATFORM_WINDOWS.md` → "Releasing"). The first real tag tests it.
+- **Next for lane A** (unchecked in `ROADMAP.md`):
+  - M7: code signing (SignPath; Maxwell applies first), and ARM64 and a portable zip if wanted. The opt-in updater needs Maxwell's decision and a DECISIONS entry first (golden rule 3).
+  - M3: `scripts/fetch-sidecars.ps1`, with lane B's pins from D22. Each sidecar then gets its `licenses/` folder and notices entry (`licenses/README.md`).
+  - M4: the tool panels, once lane B's tools land.
+  - Float on the Mac (it says "Not in this build yet" there).
+- **Checking the Mac target from Linux:** `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings`. The Windows target: `--target x86_64-pc-windows-msvc`. The license check: `cargo deny --locked check licenses bans sources` (D23 says how to install it).
 
 A step-by-step path from an empty folder to a Windows installer. Each step has a prompt to paste into Claude Code. Run Claude Code **on the Windows PC**, inside the `grape` folder, so it can build and you can test right away.
 
@@ -51,7 +60,7 @@ After each milestone:
 ## 5. M7: Downloadable installer
 > Do M7 for Windows: a GitHub Actions release workflow that builds the NSIS installer Grape-Setup-x64.exe on a version tag and attaches it to a GitHub Release, with sidecars fetched by scripts/fetch-sidecars.ps1, THIRD_PARTY_NOTICES.md and licenses/. Update the README with install steps, including the SmartScreen "More info → Run anyway" note for unsigned builds.
 
-Then tag a release (`git tag v0.1.0`, `git push --tags`), and the installer appears on the repo's Releases page.
+Then tag a release (`git tag v0.1.0`, `git push origin v0.1.0`). The installer appears in a draft on the repo's Releases page; check it and publish it (`PLATFORM_WINDOWS.md` → "Releasing").
 
 To build an installer locally without CI: `pnpm tauri build` in `apps/desktop`. The installer lands in `apps/desktop/src-tauri/target/release/bundle/nsis/`. If your Cargo workspace puts `target/` at the repo root, look in `target/release/bundle/nsis/` instead.
 

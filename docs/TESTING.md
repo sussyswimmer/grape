@@ -32,6 +32,10 @@ App shell
 - [ ] win: the overlay never gets a taskbar button or an Alt-Tab entry (debug build: tray → "Debug: flash overlay").
 - [ ] win: a second launch adds no second tray icon; it opens Settings in the running instance.
 - [ ] win: the debug overlay flash doesn't steal focus (the window you were typing in keeps the keyboard), and the log shows the overlay's ex-style with `TOOLWINDOW|NOACTIVATE|TOPMOST`.
+- [ ] win: after installing from CI's `Grape-Windows-x64` installer, `%LOCALAPPDATA%\Grape` holds `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` next to Grape's .exe, and both open and read correctly in Notepad.
+- [ ] win: the installed `THIRD_PARTY_NOTICES.md` matches the repo's at that build's commit.
+- [ ] win: uninstalling Grape removes both files.
+- [ ] mac: in CI's DMG, Grape.app → Show Package Contents → `Contents/Resources` holds `THIRD_PARTY_NOTICES.md` and `LICENSE.txt`, and both open in TextEdit.
 
 Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: drag a PNG from Explorer, tap Shift → a ring appears at the cursor, then fills in with PNG's targets (JPG, WEBP, HEIC, TIFF, AVIF, BMP, PDF; JPG at the top). The log shows `wheel 1 open: Conversions at (x, y)…`, `1 item(s) entered; 7 segment(s)` and `overlay drop target on N of M window(s)`.
@@ -51,6 +55,9 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 Wheel look and image conversions, M3 first slice (win; use scratch copies of files)
 - [ ] win: switch Windows between light and dark mode → the wheel's glass, segments and labels and the toast follow the theme. No colour looks borrowed from another app.
 - [ ] win: Settings → Accessibility → Visual effects → Animation effects off → the wheel appears with no scale or fade, and the working toast's dot doesn't pulse.
+- [ ] win: Settings → Accessibility → Contrast themes → pick a theme (try Night sky and Desert) and Apply, then drag a file and tap Shift → the wheel uses the theme's colors and stays readable: segments are outlined, labels and the center title are clear, and the hovered segment is filled with the theme's highlight color, with its label still readable. The rest of the monitor isn't painted over, and the pending ring and the empty-wheel message are readable too.
+- [ ] win: with a contrast theme on, run a conversion → the toast has a visible border, its dot shows (the theme's highlight color while working, solid when done or failed), and the progress bar fills an outlined track.
+- [ ] win: turn the contrast theme off → the wheel, toast and shelf go back to Grape's own colors without restarting Grape.
 - [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
 - [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
 - [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
@@ -109,6 +116,7 @@ File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag the shelf by its header to near the left edge of the screen and let go → it snaps flush to that edge, with a small gap. Near the right edge → the right edge. In the middle → it stays where you left it. While you keep the button held it doesn't snap, and it never ends up off the screen.
 - [ ] win: two monitors at different scale (100 % and 150 %), closing the shelf with its × before each Alt-drop (an open shelf stays where it is): Alt-drop on FLOAT on monitor A → it opens at A's right edge at A's size; close it, then Alt-drop on FLOAT on monitor B → it opens at B's right edge at B's size. Drag it by its header across to the other monitor → the text stays sharp, the size is right, and it snaps to that monitor's edges.
 - [ ] win: switch Windows between light and dark mode → the shelf follows, and its text is readable in both. With animation effects off, nothing on it animates.
+- [ ] win: with a contrast theme on, open the shelf → its border and dividers show, and every name is readable. Tab through it → the header ×, each row and each row's × get a thick ring in the theme's highlight color, unlike the thin outline under the mouse. A missing item's name is in the theme's dimmed text color, with "Missing" beside it, and so is "Nothing to drag".
 - [ ] win: re-run "Shift-drop never deletes the source" ×10 (the drop target code is shared with the shelf).
 
 Settings, M6 (D19; use scratch copies of files)
@@ -168,6 +176,14 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Couldn't move" or "Some of it may not have moved", never "Moved …", and the original folder is still complete in its old place.
 - [ ] mac (needs Xcode): quit Grape, then start it from Terminal with Xcode's Main Thread Checker: `DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib` followed by the path of the Grape executable in `Grape.app/Contents/MacOS/`. Drag files for a minute → Terminal shows no "Main Thread Checker: UI API called on a background thread" report.
 - [ ] mac: Quit from the menu bar → no Grape process is left in Activity Monitor.
+
+Release, M7 (win; on the first real draft; `PLATFORM_WINDOWS.md` → "Releasing")
+- [ ] win: pushing the tag starts Actions → Release; both jobs pass, and Releases shows a draft "Grape X.Y.Z" with exactly `Grape-Setup-x64.exe` and `SHA256SUMS.txt`. Nothing is published, and the notes show the version, not `{{VERSION}}`.
+- [ ] win: download both files from the draft. In PowerShell in that folder, `(Get-FileHash .\Grape-Setup-x64.exe).Hash -eq (Get-Content .\SHA256SUMS.txt).Split()[0]` prints `True`.
+- [ ] win: as a standard (non-admin) Windows user that has never run Grape, run the installer → SmartScreen says "Windows protected your PC"; **More info** shows "Unknown publisher", and **Run anyway** starts the installer. No UAC prompt appears at any point, and Grape installs to `%LOCALAPPDATA%\Grape`.
+- [ ] win: within a minute of the installer finishing, Grape's icon is in the notification area, Settings shows the welcome card, and a PNG dragged from Explorer and Shift-dropped on JPG becomes `<name>.jpg` next to it. The PNG's `Get-FileHash` is unchanged.
+- [ ] win: Settings → Apps → Installed apps → Grape → Uninstall, with "Delete the application data" unticked → no Grape process or tray icon is left, `%LOCALAPPDATA%\Grape` is gone, Task Manager → Startup apps no longer lists Grape, and the only Grape folders left are `%APPDATA%\io.github.sussyswimmer.grape` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape` (logs and WebView2 data). Install again and uninstall with the box ticked → those two are gone too.
+- [ ] win: write "What's new" and publish → the release page offers `Grape-Setup-x64.exe`. Optional, once `release.yml` is on the default branch: Actions → Release → Run workflow with the same tag now fails with "already published" and changes nothing.
 
 Drag + wheel
 - [ ] Drag a file from Finder/Explorer → tap the conversions key → the wheel appears at the cursor, clamped on screen.
