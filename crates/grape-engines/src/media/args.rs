@@ -21,8 +21,9 @@
 //!   keep 24 bits when the source has more than 16
 //!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
 //!   Opus and Vorbis (OPUS, OGG and WebM's audio) get a channel layout
-//!   they take ([`vorbis_layout`]), and Vorbis at most 192 kHz above its
-//!   200 kHz limit.
+//!   they take, and libopus its surround mapping for 3 to 8 channels
+//!   ([`vorbis_layout`]); Vorbis gets at most 192 kHz above its 200 kHz
+//!   limit.
 //!
 //! Only the mapped streams are written: subtitles, data streams, further
 //! audio tracks and cover art are dropped, and MP4 and MOV get no timecode
@@ -77,6 +78,9 @@ const VORBIS_LAYOUTS: &str = "aformat=channel_layouts=mono|stereo|3.0|quad|5.0|5
 
 /// The Vorbis layouts by channel count, 1 to 8.
 const VORBIS_ORDER: [&str; 8] = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
+
+/// libopus's surround mapping ([`vorbis_layout`]).
+const SURROUND: &[&str] = &["-mapping_family", "1"];
 
 /// One run of `ffmpeg`.
 #[derive(Debug, Clone, PartialEq)]
@@ -249,8 +253,8 @@ fn build(
     }
     // Opus and Vorbis: OPUS, OGG and WebM's audio.
     let layout = matches!(to, Format::Opus | Format::Ogg | Format::Webm)
-        .then(|| vorbis_layout(probe.audio.as_ref()));
-    let reading = layout.as_ref().map_or(&[][..], |(reading, _)| *reading);
+        .then(|| vorbis_layout(probe.audio.as_ref(), to != Format::Ogg));
+    let reading = layout.as_ref().map_or(&[][..], |layout| layout.reading);
     let mut args = prefix(src, reading);
     match video_encoders(to) {
         Some((video_codec, audio_codec)) => {
@@ -278,8 +282,11 @@ fn build(
                     if let (Format::Wmv, Some(audio)) = (to, audio) {
                         push(&mut args, &wma_limits(audio));
                     }
-                    if let Some((_, filter)) = &layout {
-                        push(&mut args, &["-af", filter]);
+                    if let Some(layout) = &layout {
+                        if layout.surround {
+                            push(&mut args, SURROUND);
+                        }
+                        push(&mut args, &["-af", &layout.filter]);
                     }
                 }
             }
@@ -291,9 +298,8 @@ fn build(
         }
         None => {
             let audio = probe.audio.as_ref().ok_or(Missing::Audio)?;
-            let filter = layout.as_ref().map_or("", |(_, filter)| filter.as_str());
             push(&mut args, &["-map", "0:a:0"]);
-            push(&mut args, &audio_encoder(to, audio, filter));
+            push(&mut args, &audio_encoder(to, audio, layout.as_ref()));
         }
     }
     Ok(vec![Pass {
@@ -407,8 +413,18 @@ fn video_encoders(to: Format) -> Option<(&'static [&'static str], &'static [&'st
     }
 }
 
-/// How Opus and Vorbis get a layout they take: the options for reading the
-/// source and the `-af` filter.
+/// How Opus or Vorbis gets a channel layout it takes ([`vorbis_layout`]).
+#[derive(Debug, Clone, PartialEq)]
+struct Layout {
+    /// Options for reading the source, before its `-i`.
+    reading: &'static [&'static str],
+    /// The `-af` filter.
+    filter: String,
+    /// libopus gets its surround mapping ([`SURROUND`]).
+    surround: bool,
+}
+
+/// How Opus (`opus`) or Vorbis gets a layout it takes.
 ///
 /// - Audio with a channel layout is remixed to the nearest Vorbis one
 ///   ([`VORBIS_LAYOUTS`]).
@@ -419,26 +435,52 @@ fn video_encoders(to: Format) -> Option<(&'static [&'static str], &'static [&'st
 ///   channels are downmixed to 7.1 from the layout FFmpeg guesses, which
 ///   9.0 has for 10, 12, 14, 16 and 24 channels; other counts fail.
 /// - With no audio (a silent WebM) the filter has nothing to do.
-fn vorbis_layout(audio: Option<&Audio>) -> (&'static [&'static str], String) {
+///
+/// libopus's default mapping puts the channels of 5.0 and 6.1 in the wrong
+/// speakers. Its surround mapping places every Vorbis layout right, but
+/// codes the fourth channel of 5.1, 6.1 and 7.1 as the LFE, which keeps
+/// nothing above about 400 Hz. So libopus gets it for 3 to 8 channels with
+/// a layout, and for 3, 4, 5 and 7 without one; 7 go to 7.1 with the LFE
+/// silent instead of 6.1, each in a channel of its own. 6 and 8 without a
+/// layout, and more downmixed to 7.1, keep the default mapping, which puts
+/// them right at full bandwidth. FFmpeg remixes 2.1 to stereo, the only
+/// standard layout of 3 or more channels it brings below 3, and mono and
+/// stereo keep the default mapping.
+fn vorbis_layout(audio: Option<&Audio>, opus: bool) -> Layout {
     match audio {
-        Some(audio) if !audio.has_layout && audio.channels > 8 => {
-            (&[], "aformat=channel_layouts=7.1".to_string())
-        }
+        Some(audio) if !audio.has_layout && audio.channels > 8 => Layout {
+            reading: &[],
+            filter: "aformat=channel_layouts=7.1".to_string(),
+            surround: false,
+        },
         Some(audio) if !audio.has_layout && audio.channels > 0 => {
             let channels = audio.channels as usize;
-            let mut pan = format!("pan={}", VORBIS_ORDER[channels - 1]);
+            let around_lfe = opus && channels == 7;
+            let layout = VORBIS_ORDER[channels - 1 + usize::from(around_lfe)];
+            let mut pan = format!("pan={layout}");
             for channel in 0..channels {
-                pan.push_str(&format!("|c{channel}=c{channel}"));
+                // The LFE is the fourth channel of 5.1, 6.1 and 7.1.
+                let to = channel + usize::from(around_lfe && channel >= 3);
+                pan.push_str(&format!("|c{to}=c{channel}"));
             }
-            (&["-guess_layout_max", "0"], pan)
+            Layout {
+                reading: &["-guess_layout_max", "0"],
+                filter: pan,
+                surround: opus && matches!(channels, 3 | 4 | 5 | 7),
+            }
         }
-        _ => (&[], VORBIS_LAYOUTS.to_string()),
+        _ => Layout {
+            reading: &[],
+            filter: VORBIS_LAYOUTS.to_string(),
+            surround: opus && audio.is_some_and(|a| a.channels >= 3 && a.layout != "2.1"),
+        },
     }
 }
 
-/// The audio encoder of an audio target (`to` is one); `layout` is the
-/// filter of [`vorbis_layout`], for Opus and Vorbis.
-fn audio_encoder<'a>(to: Format, audio: &Audio, layout: &'a str) -> Vec<&'a str> {
+/// The audio encoder of an audio target (`to` is one); `layout` is
+/// [`vorbis_layout`]'s, for Opus and Vorbis.
+fn audio_encoder<'a>(to: Format, audio: &Audio, layout: Option<&'a Layout>) -> Vec<&'a str> {
+    let filter = layout.map_or("", |layout| layout.filter.as_str());
     let deep = audio.depth > 16;
     match to {
         Format::Mp3 => vec!["-c:a", "libmp3lame", "-q:a", "2", "-id3v2_version", "3"],
@@ -462,13 +504,20 @@ fn audio_encoder<'a>(to: Format, audio: &Audio, layout: &'a str) -> Vec<&'a str>
             ]
         }
         Format::Ogg => {
-            let mut args = vec!["-c:a", "libvorbis", "-q:a", "6", "-af", layout];
+            let mut args = vec!["-c:a", "libvorbis", "-q:a", "6", "-af", filter];
             if audio.sample_rate > VORBIS_MAX_RATE {
                 args.extend(["-ar", "192000"]);
             }
             args
         }
-        Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k", "-af", layout],
+        Format::Opus => {
+            let mut args = vec!["-c:a", "libopus", "-b:a", "128k"];
+            if layout.is_some_and(|layout| layout.surround) {
+                args.extend(SURROUND);
+            }
+            args.extend(["-af", filter]);
+            args
+        }
         Format::Wma => {
             let mut args = WMA.to_vec();
             args.extend(wma_limits(audio));
@@ -672,6 +721,7 @@ mod tests {
             sample_rate,
             channels,
             has_layout: true,
+            layout: String::new(),
             depth,
         }
     }
@@ -1077,6 +1127,9 @@ mod tests {
                 .collect();
             let expected: &[&str] = if vorbis_family { &[LAYOUTS] } else { &[] };
             assert_eq!(filters, expected, "{to:?}");
+            // These sources are mono or stereo: libopus keeps its default
+            // mapping.
+            assert!(!args.iter().any(|arg| arg == "-mapping_family"), "{to:?}");
         }
     }
 
@@ -1450,6 +1503,8 @@ mod tests {
                 has(args, ["-c:a", codec]) && has(args, ["-af", LAYOUTS]),
                 "{to:?}"
             );
+            // libopus places 5.1 with its surround mapping.
+            assert_eq!(has(args, ["-mapping_family", "1"]), to == Format::Opus);
         }
         let movie = probe(
             Some(video("h264", "yuv420p", 0)),
@@ -1457,6 +1512,7 @@ mod tests {
         );
         let args = &passes_for(&movie, Format::Webm).unwrap()[0].args;
         assert!(has(args, ["-c:a", "libopus"]) && has(args, ["-af", LAYOUTS]));
+        assert!(has(args, ["-mapping_family", "1"]));
         // The other encoders take any layout, or are held to stereo.
         for to in [
             Format::M4a,
@@ -1472,7 +1528,8 @@ mod tests {
 
     #[test]
     fn audio_without_a_layout_keeps_its_channels_for_opus_and_vorbis() {
-        // Four channels, unmixed, as quad, with no guessed layout.
+        // Four channels, unmixed, as quad, with no guessed layout, placed
+        // by libopus's surround mapping.
         let reading = ["-guess_layout_max", "0", "-i", "<src>"];
         let mut quad = PREFIX[..PREFIX.len() - 2].to_vec();
         quad.extend_from_slice(&reading);
@@ -1483,6 +1540,8 @@ mod tests {
             "libopus",
             "-b:a",
             "128k",
+            "-mapping_family",
+            "1",
             "-af",
             "pan=quad|c0=c0|c1=c1|c2=c2|c3=c3",
             "-progress",
@@ -1496,17 +1555,20 @@ mod tests {
         assert_eq!(passes[0].args, argv(&quad));
 
         // Each count from 1 to 8 gets its Vorbis layout, channel for
-        // channel; more are downmixed to 7.1 from FFmpeg's guess.
+        // channel, but Opus puts 7 in 7.1 around its LFE; more are
+        // downmixed to 7.1 from FFmpeg's guess.
         let layouts = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
         for channels in 1..=12 {
-            let pan = (1..=8).contains(&channels).then(|| {
-                let layout = layouts[channels as usize - 1];
-                let map: String = (0..channels).map(|c| format!("|c{c}=c{c}")).collect();
-                format!("pan={layout}{map}")
-            });
-            let filter = pan
-                .clone()
-                .unwrap_or_else(|| "aformat=channel_layouts=7.1".to_string());
+            let pan = |opus: bool| {
+                (1..=8).contains(&channels).then(|| {
+                    if opus && channels == 7 {
+                        return "pan=7.1|c0=c0|c1=c1|c2=c2|c4=c3|c5=c4|c6=c5|c7=c6".to_string();
+                    }
+                    let layout = layouts[channels as usize - 1];
+                    let map: String = (0..channels).map(|c| format!("|c{c}=c{c}")).collect();
+                    format!("pan={layout}{map}")
+                })
+            };
             let audio_only = probe(None, Some(unlabeled(channels)));
             let movie = probe(Some(video("h264", "yuv420p", 0)), Some(unlabeled(channels)));
             for (source, to) in [
@@ -1514,10 +1576,23 @@ mod tests {
                 (&audio_only, Format::Ogg),
                 (&movie, Format::Webm),
             ] {
+                let opus = to != Format::Ogg;
+                let pan = pan(opus);
+                let filter = pan
+                    .clone()
+                    .unwrap_or_else(|| "aformat=channel_layouts=7.1".to_string());
                 let args = &passes_for(source, to).unwrap()[0].args;
                 assert!(
                     has(args, ["-af", &filter]),
                     "{channels} to {to:?}: {args:?}"
+                );
+                // The surround mapping would code a track as the LFE of
+                // 5.1 and 7.1 (6, 8 and more channels).
+                let surround = opus && matches!(channels, 3 | 4 | 5 | 7);
+                assert_eq!(
+                    has(args, ["-mapping_family", "1"]),
+                    surround,
+                    "{channels} to {to:?}"
                 );
                 let guess_off = has(args, ["-guess_layout_max", "0"]);
                 assert_eq!(guess_off, pan.is_some(), "{channels} to {to:?}");
@@ -1532,6 +1607,76 @@ mod tests {
                 let guess = args.iter().any(|arg| arg == "-guess_layout_max");
                 assert!(!guess && !args.iter().any(|arg| arg == "-af"), "{to:?}");
             }
+        }
+    }
+
+    #[test]
+    fn libopus_gets_its_surround_mapping_for_3_to_8_channels() {
+        // 5.0 and 6.1 need it to keep their speakers; 2.1 is remixed to
+        // stereo, which, like mono, keeps the default mapping.
+        let opus = |channels: u32, layout: &str| {
+            let source = Audio {
+                layout: layout.into(),
+                ..audio("flac", 48_000, channels, 16)
+            };
+            let args = passes_for(&probe(None, Some(source)), Format::Opus).unwrap();
+            args[0].args.clone()
+        };
+        let cases = [
+            (1, "mono", false),
+            (2, "stereo", false),
+            (3, "2.1", false),
+            (3, "3.0", true),
+            (4, "quad", true),
+            (5, "5.0", true),
+            (5, "5.0(side)", true),
+            (6, "5.1(side)", true),
+            (7, "6.1", true),
+            (8, "7.1", true),
+            (8, "7.1(wide)", true),
+            (24, "22.2", true),
+            // A layout ffprobe doesn't name counts as one.
+            (6, "", true),
+        ];
+        for (channels, layout, surround) in cases {
+            let args = opus(channels, layout);
+            assert_eq!(has(&args, ["-mapping_family", "1"]), surround, "{layout}");
+            assert!(has(&args, ["-af", LAYOUTS]), "{layout}");
+        }
+        assert_one_pass(
+            &probe(None, Some(audio("ac3", 48_000, 6, 16))),
+            Format::Opus,
+            &[
+                "-map",
+                "0:a:0",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+                "-mapping_family",
+                "1",
+                "-af",
+                LAYOUTS,
+            ],
+            "opus",
+        );
+        // WebM's Opus too; Vorbis never.
+        let movie = |channels| {
+            probe(
+                Some(video("h264", "yuv420p", 0)),
+                Some(audio("ac3", 48_000, channels, 16)),
+            )
+        };
+        for (channels, surround) in [(2, false), (6, true)] {
+            let args = &passes_for(&movie(channels), Format::Webm).unwrap()[0].args;
+            assert_eq!(has(args, ["-mapping_family", "1"]), surround);
+            let at = |arg: &str| args.iter().position(|a| a == arg);
+            if surround {
+                assert_eq!(at("-mapping_family"), at("128k").map(|i| i + 1));
+            }
+            let source = probe(None, Some(audio("ac3", 48_000, channels, 16)));
+            let args = &passes_for(&source, Format::Ogg).unwrap()[0].args;
+            assert!(!args.iter().any(|arg| arg == "-mapping_family"));
         }
     }
 

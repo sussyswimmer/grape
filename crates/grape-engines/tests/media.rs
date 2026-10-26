@@ -818,37 +818,54 @@ const TONES: [f64; 10] = [
     300.0, 500.0, 700.0, 100.0, 1100.0, 1300.0, 1500.0, 1700.0, 1900.0, 2100.0,
 ];
 
-/// Writes a 1 s, 48 kHz, 16-bit WAV of `channels` channels, each a sine at
-/// its [`TONES`], with a plain `WAVEFORMATEX` header: no channel mask, so
-/// FFmpeg sees a channel count and no layout.
-fn write_unlabeled_wav(path: &Path, channels: usize) {
+/// Writes a 1 s, 48 kHz, 16-bit WAV whose channels are sines at `tones`,
+/// with the channel mask `mask` (a `WAVEFORMATEXTENSIBLE` header) or, for
+/// `None`, a plain `WAVEFORMATEX` header: no mask, so FFmpeg sees a channel
+/// count and no layout.
+fn write_wav(path: &Path, tones: &[f64], mask: Option<u32>) {
     let rate = 48_000u32;
     let mut data = Vec::new();
     for n in 0..rate {
         let t = f64::from(n) / f64::from(rate);
-        for tone in &TONES[..channels] {
+        for tone in tones {
             let sample = (8000.0 * (std::f64::consts::TAU * tone * t).sin()) as i16;
             data.extend_from_slice(&sample.to_le_bytes());
         }
     }
-    let block = u16::try_from(channels * 2).unwrap();
-    let data_len = u32::try_from(data.len()).unwrap();
-    let mut wav = Vec::new();
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
+    let channels = u16::try_from(tones.len()).unwrap();
     // PCM, then channels, rate, bytes per second, block size and bits.
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&(block / 2).to_le_bytes());
-    wav.extend_from_slice(&rate.to_le_bytes());
-    wav.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
-    wav.extend_from_slice(&block.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_len.to_le_bytes());
-    wav.extend_from_slice(&data);
+    let mut format = Vec::new();
+    format.extend_from_slice(&if mask.is_some() { 0xFFFEu16 } else { 1 }.to_le_bytes());
+    format.extend_from_slice(&channels.to_le_bytes());
+    format.extend_from_slice(&rate.to_le_bytes());
+    format.extend_from_slice(&(rate * u32::from(channels) * 2).to_le_bytes());
+    format.extend_from_slice(&(channels * 2).to_le_bytes());
+    format.extend_from_slice(&16u16.to_le_bytes());
+    if let Some(mask) = mask {
+        // 22 more bytes: the valid bits, the mask, and PCM's subformat GUID.
+        format.extend_from_slice(&22u16.to_le_bytes());
+        format.extend_from_slice(&16u16.to_le_bytes());
+        format.extend_from_slice(&mask.to_le_bytes());
+        format.extend_from_slice(&[
+            1, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+        ]);
+    }
+    let mut body = Vec::new();
+    body.extend_from_slice(b"WAVEfmt ");
+    body.extend_from_slice(&u32::try_from(format.len()).unwrap().to_le_bytes());
+    body.extend_from_slice(&format);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+    body.extend_from_slice(&data);
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+    wav.extend_from_slice(&body);
     fs::write(path, wav).unwrap();
+}
+
+/// [`write_wav`] of `channels` channels at their [`TONES`], without a mask.
+fn write_unlabeled_wav(path: &Path, channels: usize) {
+    write_wav(path, &TONES[..channels], None);
 }
 
 /// The samples of each channel of a 16-bit PCM WAV, and its sample rate.
@@ -888,14 +905,80 @@ fn tone_power(samples: &[f64], rate: f64, tone: f64) -> f64 {
     s1 * s1 + s2 * s2 - k * s1 * s2
 }
 
+/// Where the channels of the WAV `src`, a sine at `tones` each, went in
+/// `out`: the test FFmpeg decodes it with its own Opus or Vorbis decoder,
+/// and source channel `i` must be in output channel `homes[i]`, within 6 dB
+/// of its level, with no other tone there above a tenth of it; any other
+/// output channel must be silent. Returns what went wrong, labelled.
+fn misplaced(
+    dir: &TestDir,
+    (src, tones): (&Path, &[f64]),
+    out: &Path,
+    homes: &[usize],
+    label: &str,
+) -> Vec<String> {
+    let decoded = dir.join("decoded.wav");
+    let (out_str, dec_str) = (out.to_str().unwrap(), decoded.to_str().unwrap());
+    ffmpeg(&[
+        "-i",
+        out_str,
+        "-map",
+        "0:a:0",
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        dec_str,
+    ]);
+    let (source, source_rate) = read_wav(src);
+    let (samples, rate) = read_wav(&decoded);
+    fs::remove_file(&decoded).unwrap();
+    let full: Vec<f64> = (0..tones.len())
+        .map(|i| tone_power(&source[i], source_rate, tones[i]))
+        .collect();
+    let mut wrong = Vec::new();
+    if samples.len() <= homes.iter().copied().max().unwrap_or(0) {
+        wrong.push(format!("{label}: {} channels", samples.len()));
+    }
+    for (c, channel) in samples.iter().enumerate() {
+        let powers: Vec<f64> = tones
+            .iter()
+            .map(|&t| tone_power(channel, rate, t))
+            .collect();
+        let levels = || -> Vec<String> {
+            (0..tones.len())
+                .map(|j| format!("{:.1}", 10.0 * (powers[j] / full[j]).log10()))
+                .collect()
+        };
+        match homes.iter().position(|&home| home == c) {
+            Some(i) => {
+                let mixed = (0..tones.len()).any(|j| j != i && powers[j] > powers[i] * 0.1);
+                if powers[i] < full[i] * 0.25 || mixed {
+                    wrong.push(format!(
+                        "{label}: channel {c} (source {i}) holds {:?} dB",
+                        levels()
+                    ));
+                }
+            }
+            None if (0..tones.len()).any(|j| powers[j] > full[j] * 0.001) => {
+                wrong.push(format!("{label}: channel {c} holds {:?} dB", levels()));
+            }
+            None => {}
+        }
+    }
+    wrong
+}
+
 #[test]
 fn audio_without_a_layout_keeps_its_channels() {
     let dir = TestDir::new("media-unlabeled");
     let mut failures = Vec::new();
     // Field recorders' polyphonic WAVs and ambisonics have no channel mask.
-    // Up to 8 channels keep their count, each in its own output channel;
+    // Up to 8 channels keep their count, each in its own output channel,
+    // except that Opus puts 7 in 7.1 around its LFE, which stays silent;
     // more are downmixed to 7.1.
-    for (channels, expected) in [(3, "3.0"), (4, "quad"), (6, "5.1"), (10, "7.1")] {
+    let vorbis = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
+    for channels in [3, 4, 5, 6, 7, 8, 10] {
         let wav = dir.join(&format!("{channels}ch.wav"));
         write_unlabeled_wav(&wav, channels);
         // WebM needs video: the same audio, copied, next to some in MKV.
@@ -915,6 +998,12 @@ fn audio_without_a_layout_keeps_its_channels() {
             (&mkv, Format::Webm),
         ] {
             let label = format!("{channels} channels to {to:?}");
+            let opus = to != Format::Ogg;
+            let (expected, homes): (&str, Vec<usize>) = match channels {
+                7 if opus => ("7.1", vec![0, 1, 2, 4, 5, 6, 7]),
+                1..=8 => (vorbis[channels - 1], (0..channels).collect()),
+                _ => ("7.1", Vec::new()),
+            };
             let out = match convert_file(&dir, src, to) {
                 Ok((outcome, _)) => outcome.outputs[0].clone(),
                 Err(e) => {
@@ -926,40 +1015,82 @@ fn audio_without_a_layout_keeps_its_channels() {
             if layout != expected {
                 failures.push(format!("{label}: {layout}"));
             }
-            if channels <= 8 {
-                // Each source channel's tone is in its own output channel,
-                // and only there.
-                let decoded = dir.join("decoded.wav");
-                let out_str = out.to_str().unwrap();
-                let dec_str = decoded.to_str().unwrap();
-                ffmpeg(&[
-                    "-i",
-                    out_str,
-                    "-map",
-                    "0:a:0",
-                    "-c:a",
-                    "pcm_s16le",
-                    "-f",
-                    "wav",
-                    dec_str,
-                ]);
-                let (samples, rate) = read_wav(&decoded);
-                for (c, channel) in samples.iter().enumerate() {
-                    let powers: Vec<f64> = TONES[..channels]
-                        .iter()
-                        .map(|&tone| tone_power(channel, rate, tone))
-                        .collect();
-                    let own = powers.get(c).copied().unwrap_or(0.0);
-                    let mixed = powers
-                        .iter()
-                        .enumerate()
-                        .any(|(i, &p)| i != c && p > own * 0.05);
-                    if own == 0.0 || mixed {
-                        failures.push(format!("{label}: channel {c} holds {powers:?}"));
-                    }
-                }
-                fs::remove_file(&decoded).unwrap();
+            if !homes.is_empty() {
+                let source = (wav.as_path(), &TONES[..channels]);
+                failures.extend(misplaced(&dir, source, &out, &homes, &label));
             }
+            fs::remove_file(&out).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The tones of [`surround_opus_keeps_each_channel_in_its_speaker`]'s
+/// files, but for the LFE's.
+const SURROUND_TONES: [f64; 8] = [500.0, 700.0, 1100.0, 1300.0, 1700.0, 2300.0, 2900.0, 3700.0];
+
+/// The LFE's tone, in its band.
+const LFE_TONE: f64 = 60.0;
+
+#[test]
+fn surround_opus_keeps_each_channel_in_its_speaker() {
+    let dir = TestDir::new("media-opus-surround");
+    // libopus's default mapping put the centre and back channels of 5.0
+    // and 6.1 in other speakers. WAV and MOV keep these layouts, so OPUS
+    // and WebM get them as they are, each channel in its place. The LFE's
+    // tone is low: libopus keeps nothing above about 400 Hz there.
+    let mut failures = Vec::new();
+    let layouts: [(&str, u32); 6] = [
+        ("3.0", 0x7),
+        ("quad", 0x33),
+        ("5.0", 0x37),
+        ("5.1", 0x3f),
+        ("6.1", 0x70f),
+        ("7.1", 0x63f),
+    ];
+    for (layout, mask) in layouts {
+        let channels = mask.count_ones() as usize;
+        let lfe = (mask & 0x8 != 0).then(|| (mask & 0x7).count_ones() as usize);
+        let tones: Vec<f64> = (0..channels)
+            .map(|c| {
+                if Some(c) == lfe {
+                    LFE_TONE
+                } else {
+                    SURROUND_TONES[c]
+                }
+            })
+            .collect();
+        let name: String = layout.chars().filter(char::is_ascii_alphanumeric).collect();
+        let wav = dir.join(&format!("{name}.wav"));
+        write_wav(&wav, &tones, Some(mask));
+        let mov = dir.join(&format!("{name}.mov"));
+        let mut args: Vec<&str> = TESTSRC.to_vec();
+        args.extend(["-i", wav.to_str().unwrap(), "-map", "0:v", "-map", "1:a"]);
+        args.extend([
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy", "-f", "mov",
+        ]);
+        args.push(mov.to_str().unwrap());
+        ffmpeg(&args);
+        for (src, to) in [(&wav, Format::Opus), (&mov, Format::Webm)] {
+            let label = format!("{layout} to {to:?}");
+            assert_eq!(
+                field(&probe(src), "audio", "channel_layout").as_deref(),
+                Some(layout)
+            );
+            let out = match convert_file(&dir, src, to) {
+                Ok((outcome, _)) => outcome.outputs[0].clone(),
+                Err(e) => {
+                    failures.push(format!("{label}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let got = field(&probe(&out), "audio", "channel_layout").unwrap_or_default();
+            if got != layout {
+                failures.push(format!("{label}: {got}"));
+            }
+            let homes: Vec<usize> = (0..channels).collect();
+            let source = (wav.as_path(), tones.as_slice());
+            failures.extend(misplaced(&dir, source, &out, &homes, &label));
             fs::remove_file(&out).unwrap();
         }
     }

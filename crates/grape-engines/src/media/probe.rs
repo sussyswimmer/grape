@@ -93,6 +93,9 @@ pub(crate) struct Audio {
     /// (`ffprobe` says `"unknown"`): a WAV without a channel mask, such as
     /// a field recorder's polyphonic WAV or 4-channel ambisonics.
     pub(crate) has_layout: bool,
+    /// The channel layout as `ffprobe` names it, such as `"5.1(side)"` or
+    /// `"2.1"` (`"unknown"` without one); empty when it prints none.
+    pub(crate) layout: String,
     /// Bits per sample of a lossless source (PCM, FLAC, ALAC, WavPack, TTA,
     /// APE); 16 for everything else, whose decoded depth says nothing about
     /// the original.
@@ -154,6 +157,7 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
             channels: s.channels,
             // ffprobe 6.1 and 9.0 print "unknown" for a stream without one.
             has_layout: s.channel_layout.as_deref() != Some("unknown"),
+            layout: s.channel_layout.clone().unwrap_or_default(),
             depth: depth(s),
         });
     let b_frames = streams
@@ -457,6 +461,7 @@ format.duration="N/A"
                     sample_rate: 44100,
                     channels: 1,
                     has_layout: true,
+                    layout: "mono".into(),
                     depth: 16,
                 }),
                 b_frames: true,
@@ -524,11 +529,16 @@ format.duration="N/A"
     fn a_stream_without_a_channel_layout_is_told_apart() {
         let audio = parse(WAV_WITHOUT_LAYOUT).unwrap().audio.unwrap();
         assert_eq!((audio.channels, audio.has_layout), (4, false));
-        assert!(parse(FLAC_24).unwrap().audio.unwrap().has_layout);
+        assert_eq!(audio.layout, "unknown");
+        let flac = parse(FLAC_24).unwrap().audio.unwrap();
+        assert!(flac.has_layout);
+        assert_eq!(flac.layout, "mono");
         // A layout ffprobe doesn't print isn't taken for a missing one.
         let unprinted =
             WAV_WITHOUT_LAYOUT.replace("streams.stream.0.channel_layout=\"unknown\"\n", "");
-        assert!(parse(&unprinted).unwrap().audio.unwrap().has_layout);
+        let audio = parse(&unprinted).unwrap().audio.unwrap();
+        assert!(audio.has_layout);
+        assert_eq!(audio.layout, "");
     }
 
     #[test]
