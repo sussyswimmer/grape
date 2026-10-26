@@ -402,10 +402,10 @@ fn open(
     Ok(())
 }
 
-/// Makes Grape the active app, so its panel, alert or AirDrop window comes
-/// to the front. Grape has no Dock icon, and an inactive app's windows may
-/// open behind the frontmost one.
-fn activate(mtm: MainThreadMarker) {
+/// Makes Grape the active app, so its panel, alert, AirDrop window or tool
+/// panel comes to the front. Grape has no Dock icon, and an inactive app's
+/// windows may open behind the frontmost one.
+pub(super) fn activate(mtm: MainThreadMarker) {
     let app = NSApplication::sharedApplication(mtm);
     if objc2::available!(macos = 14.0) {
         app.activate();
@@ -417,18 +417,21 @@ fn activate(mtm: MainThreadMarker) {
 
 /// The app in front, unless that's Grape itself. Read on the main thread,
 /// where AppKit keeps it current.
-fn frontmost_other_app(_mtm: MainThreadMarker) -> Option<Retained<NSRunningApplication>> {
+pub(super) fn frontmost_other_app(
+    _mtm: MainThreadMarker,
+) -> Option<Retained<NSRunningApplication>> {
     let front = NSWorkspace::sharedWorkspace().frontmostApplication()?;
     let grape = NSRunningApplication::currentApplication();
     (front.processIdentifier() != grape.processIdentifier()).then_some(front)
 }
 
 /// Gives activation back to `app` after Grape took it for the Move's panel
-/// and alert, or for AirDrop. Only while Grape is still active: if the user went to
-/// another app meanwhile, that one keeps it. From macOS 14 activation is
-/// cooperative, so Grape yields to `app` first and then asks on its behalf.
+/// and alert, for AirDrop, or for a tool panel. Only while Grape is still
+/// active: if the user went to another app meanwhile, that one keeps it.
+/// From macOS 14 activation is cooperative, so Grape yields to `app` first
+/// and then asks on its behalf.
 /// Never `NSApp.hide`: that would hide the overlay and the toast too.
-fn hand_back(mtm: MainThreadMarker, app: &NSRunningApplication) {
+pub(super) fn hand_back(mtm: MainThreadMarker, app: &NSRunningApplication) {
     let grape = NSApplication::sharedApplication(mtm);
     if !grape.isActive() {
         return;

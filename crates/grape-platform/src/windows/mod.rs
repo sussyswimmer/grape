@@ -9,9 +9,12 @@
 //!   reports a move ([`install_drop_target`]), and a refusing one for
 //!   windows that take no drops, the shelf included ([`refuse_drops`]).
 //! - `overlay`: keeps the overlay out of the taskbar and Alt-Tab
-//!   ([`harden_overlay`]), and the float shelf too, though a click
-//!   activates the shelf ([`harden_shelf`]); shows the shelf without
-//!   activating it and hides it ([`show_shelf`], [`hide_shelf`]).
+//!   ([`harden_overlay`]), and the float shelf and the tool panel too,
+//!   though a click activates them ([`harden_shelf`], [`harden_panel`]);
+//!   shows them without activating them and hides them ([`show_shelf`],
+//!   [`hide_shelf`], [`show_panel`], [`hide_panel`], which hands the
+//!   foreground back to [`other_app_foreground`]'s window); lifts the
+//!   overlay over both on every show ([`raise_topmost`]).
 //! - `drag_out`: dragging files out of the shelf ([`drag_out`]): an OLE
 //!   drag of a `CF_HDROP`-only data object that offers copy or link, never
 //!   move.
@@ -37,7 +40,8 @@ mod share;
 pub use drag_out::{drag_out, DragOut, DragOutcome};
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{
-    describe_ex_style, ex_style, harden_overlay, harden_shelf, hide_shelf, show_shelf,
+    describe_ex_style, ex_style, harden_overlay, harden_panel, harden_shelf, hide_panel,
+    hide_shelf, other_app_foreground, raise_topmost, show_panel, show_shelf, HandBack,
 };
 
 pub(crate) use actions::{
@@ -61,4 +65,20 @@ pub(crate) fn display_bounds_at(x: i32, y: i32) -> Result<DisplayBounds, Platfor
 /// acting on an "up".
 pub fn primary_button_down() -> bool {
     drag::primary_button_down()
+}
+
+/// `true` while Esc is down (`GetAsyncKeyState(VK_ESCAPE)`). Any thread
+/// may ask. Reading it never consumes the key: the app in front gets it
+/// too.
+pub fn escape_down() -> bool {
+    drag::key_down(::windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn escape_is_up_when_nobody_presses_it() {
+        // CI presses no keys.
+        assert!(!super::escape_down());
+    }
 }

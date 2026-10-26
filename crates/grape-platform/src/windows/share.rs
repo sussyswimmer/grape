@@ -66,18 +66,18 @@ use ::windows::Win32::System::Com::{
     COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED,
 };
 use ::windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use ::windows::Win32::System::Threading::GetCurrentProcessId;
 use ::windows::Win32::UI::Shell::IDataTransferManagerInterop;
 use ::windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetWindowThreadProcessId, IsWindow, PostMessageW,
-    RegisterClassExW, SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-    TranslateMessage, LWA_ALPHA, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WA_INACTIVE,
-    WM_ACTIVATE, WM_APP, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
+    GetForegroundWindow, GetMessageW, IsWindow, PostMessageW, RegisterClassExW,
+    SetForegroundWindow, SetLayeredWindowAttributes, SetWindowPos, ShowWindow, TranslateMessage,
+    LWA_ALPHA, MSG, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WA_INACTIVE, WM_ACTIVATE, WM_APP,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows_collections::IIterable;
 
 use super::actions::os_err;
+use super::overlay::is_window_of_another_app;
 use crate::file_actions::{ShareOutcome, SkipReason, Skipped};
 use crate::win_rules::{anchor_frame, plain_path, share_skip, share_title};
 use crate::{PlatformError, Rect};
@@ -810,19 +810,6 @@ fn give_back(anchor: HWND) {
     // SAFETY: hides this thread's own live window. Once `front` is in the
     // foreground, hiding the anchor activates nothing else.
     let _ = unsafe { ShowWindow(anchor, SW_HIDE) };
-}
-
-/// `true` if `hwnd` is a live window of another process.
-fn is_window_of_another_app(hwnd: HWND) -> bool {
-    // SAFETY: IsWindow accepts any handle value and only reads state.
-    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-        return false;
-    }
-    let mut process = 0_u32;
-    // SAFETY: a plain query with a writable u32 for the process id.
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process)) };
-    // SAFETY: a plain query.
-    process != 0 && process != unsafe { GetCurrentProcessId() }
 }
 
 /// Logs a share step's HRESULT (never a path or a name) and passes the

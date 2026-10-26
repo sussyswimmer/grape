@@ -184,7 +184,7 @@ fn root_class_at(x: i32, y: i32) -> Option<String> {
     Some(String::from_utf16_lossy(name.get(..len)?))
 }
 
-fn key_down(key: VIRTUAL_KEY) -> bool {
+pub(crate) fn key_down(key: VIRTUAL_KEY) -> bool {
     // SAFETY: a plain query of the async key state; no pointers.
     let state = unsafe { GetAsyncKeyState(i32::from(key.0)) };
     // The high bit says "down right now".

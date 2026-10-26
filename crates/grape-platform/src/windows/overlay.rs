@@ -23,14 +23,24 @@
 //! never call those on the overlay. Whether Windows honors this has to be
 //! checked by hand (`docs/TESTING.md` → "App shell").
 //!
-//! The float shelf ([`harden_shelf`]) gets the same subclass with other
+//! Grape's activatable tool windows, the float shelf ([`harden_shelf`]) and
+//! the tool panel ([`harden_panel`]), get the same subclass with other
 //! bits: `WS_EX_TOOLWINDOW` on, `WS_EX_APPWINDOW` and `WS_EX_NOACTIVATE`
-//! off, and nothing added to position changes. A click must activate the
-//! shelf: only the foreground window can capture the mouse, and a drag out
-//! of the shelf needs the capture. Grape still never activates it itself:
-//! [`show_shelf`] shows it with `SWP_NOACTIVATE` (restoring a minimized
-//! shelf with `SW_SHOWNOACTIVATE` first), and [`hide_shelf`] hides it;
-//! never use Tauri's `show`, `hide` or `set_focus` on it.
+//! off, and nothing added to position changes. A click must activate
+//! them: only the foreground window can capture the mouse, and a drag out
+//! of the shelf needs the capture; the panel needs the keyboard for Enter
+//! and Esc. Grape still never activates them itself: [`show_shelf`] and
+//! [`show_panel`] show them with `SWP_NOACTIVATE` (restoring a minimized
+//! window with `SW_SHOWNOACTIVATE` first), and [`hide_shelf`] and
+//! [`hide_panel`] hide them; never use Tauri's `show`, `hide` or
+//! `set_focus` on them.
+//!
+//! Hiding an active panel hands the foreground back first
+//! ([`hide_panel`]), to the window that was in front when it showed
+//! ([`other_app_foreground`]): Grape may still set the foreground while
+//! its own window is the active one. [`raise_topmost`] lifts the overlay
+//! to the top of the topmost band on every show, so an open panel or
+//! shelf (topmost too) never covers a wheel.
 
 use core::ffi::c_void;
 
@@ -39,18 +49,19 @@ use ::windows::Win32::Foundation::{
     GetLastError, SetLastError, ERROR_INVALID_WINDOW_HANDLE, ERROR_SUCCESS, E_FAIL, HWND, LPARAM,
     LRESULT, WIN32_ERROR, WPARAM,
 };
-use ::windows::Win32::System::Threading::GetCurrentThreadId;
+use ::windows::Win32::System::Threading::{GetCurrentProcessId, GetCurrentThreadId};
 use ::windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, SetWindowLongW,
-    SetWindowPos, ShowWindow, GWL_EXSTYLE, HWND_TOPMOST, SET_WINDOW_POS_FLAGS, STYLESTRUCT,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE,
-    SW_SHOWNOACTIVATE, WINDOWPOS, WINDOW_EX_STYLE, WM_NCDESTROY, WM_STYLECHANGING,
-    WM_WINDOWPOSCHANGING, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_EX_WINDOWEDGE,
+    GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindow, SetForegroundWindow, SetWindowLongW, SetWindowPos, ShowWindow, GWL_EXSTYLE,
+    HWND_TOPMOST, SET_WINDOW_POS_FLAGS, STYLESTRUCT, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, WINDOWPOS, WINDOW_EX_STYLE,
+    WM_NCDESTROY, WM_STYLECHANGING, WM_WINDOWPOSCHANGING, WS_EX_ACCEPTFILES, WS_EX_APPWINDOW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
 };
 
+use crate::win_rules::{hand_back_plan, HandBackPlan};
 use crate::{PlatformError, Rect};
 
 /// Identifies Grape's subclass on the window ("GRAP").
@@ -78,7 +89,8 @@ const SHELF_OFF: u32 = WS_EX_APPWINDOW.0 | WS_EX_NOACTIVATE.0;
 enum Role {
     /// The overlay (and the toast): never activated.
     Overlay,
-    /// The float shelf: activated by a click, never by Grape.
+    /// Grape's activatable tool windows, the float shelf and the tool
+    /// panel: activated by a click, never by Grape.
     Shelf,
 }
 
@@ -198,20 +210,7 @@ pub fn harden_shelf(hwnd: isize) -> Result<(), PlatformError> {
 /// - [`PlatformError::Os`] if `hwnd` isn't a window or `SetWindowPos`
 ///   fails.
 pub fn show_shelf(hwnd: isize, frame: Rect) -> Result<(), PlatformError> {
-    let hwnd = owned_window(hwnd)?;
-    // SAFETY: `hwnd` is a live window owned by this thread (checked above).
-    // IsIconic only reads its state; ShowWindow's return value is only
-    // whether it was visible before.
-    unsafe {
-        if IsIconic(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        }
-    }
-    place(hwnd, frame)?;
-    if window_rect(hwnd).is_some_and(|now| now != frame) {
-        place(hwnd, frame)?;
-    }
-    Ok(())
+    show_topmost(hwnd, frame)
 }
 
 /// Hides the shelf (`ShowWindow(SW_HIDE)`). Hiding a hidden shelf does
@@ -229,6 +228,169 @@ pub fn hide_shelf(hwnd: isize) -> Result<(), PlatformError> {
     // SAFETY: `hwnd` is a live window owned by this thread. The return
     // value is only whether it was visible before.
     let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+    Ok(())
+}
+
+/// Makes `hwnd` behave as Grape's tool panel: the shelf's bits (see
+/// [`harden_shelf`]), so it has no taskbar button or Alt-Tab entry, but a
+/// click activates it and the page then gets Enter and Esc. Grape itself
+/// never activates it: show and move it with [`show_panel`], hide it with
+/// [`hide_panel`], and never call Tauri's `show`, `set_focus` or `hide` on
+/// it.
+///
+/// `hwnd` is the raw handle value. Call this on the thread that created the
+/// window (Tauri's main thread), before the window is first shown. Calling
+/// it again is harmless.
+///
+/// # Errors
+/// As [`harden_overlay`].
+pub fn harden_panel(hwnd: isize) -> Result<(), PlatformError> {
+    harden(hwnd, Role::Shelf)
+}
+
+/// Shows the panel at `frame` (global physical pixels) on top of every
+/// window that isn't topmost, without activating it, exactly as
+/// [`show_shelf`] does: a minimized panel is restored with
+/// `SW_SHOWNOACTIVATE` first, then `SetWindowPos(HWND_TOPMOST, …,
+/// SWP_NOACTIVATE | SWP_SHOWWINDOW)`, twice when a DPI change resized it on
+/// the way. An open panel only moves or resizes, and keeps its activation.
+///
+/// `hwnd` is the raw handle value. Call this on the window's thread.
+///
+/// # Errors
+/// As [`show_shelf`].
+pub fn show_panel(hwnd: isize, frame: Rect) -> Result<(), PlatformError> {
+    show_topmost(hwnd, frame)
+}
+
+/// What [`hide_panel`] did with the foreground. For the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandBack {
+    /// The panel wasn't the foreground window: nothing to hand back.
+    NotActive,
+    /// The window that was in front before the panel showed has the
+    /// foreground again.
+    HandedBack,
+    /// Windows refused `SetForegroundWindow`.
+    Refused,
+    /// The panel was in front, but there's no window of another app to
+    /// hand the foreground to (none was recorded, or it's gone).
+    NoWindow,
+}
+
+/// Hides the panel (`ShowWindow(SW_HIDE)`). When the panel is the
+/// foreground window, it first hands the foreground to `back_to`, while
+/// Grape may still set it (its own window is the active one), if that's a
+/// live window of another app. Hiding a hidden panel does nothing.
+///
+/// `hwnd` is the raw handle value; `back_to` is one from
+/// [`other_app_foreground`]. Call this on the window's thread.
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] if the calling thread doesn't own the
+///   window.
+/// - [`PlatformError::Os`] if `hwnd` isn't a window.
+pub fn hide_panel(hwnd: isize, back_to: Option<isize>) -> Result<HandBack, PlatformError> {
+    let hwnd = owned_window(hwnd)?;
+    // SAFETY: a plain query.
+    let front = unsafe { GetForegroundWindow() };
+    let target = back_to.map(to_hwnd);
+    // `is_window_of_another_app` is false for every window of Grape's, so
+    // the panel itself is never handed the foreground.
+    let plan = hand_back_plan(front == hwnd, target.map(is_window_of_another_app));
+    let handed = match (plan, target) {
+        (HandBackPlan::HandTo, Some(target)) => {
+            // SAFETY: takes the handle by value. The panel, Grape's own
+            // window, is the foreground window, so Grape may set the
+            // foreground; Windows may still refuse, which is reported.
+            if unsafe { SetForegroundWindow(target) }.as_bool() {
+                HandBack::HandedBack
+            } else {
+                HandBack::Refused
+            }
+        }
+        (HandBackPlan::NotActive, _) => HandBack::NotActive,
+        (HandBackPlan::HandTo | HandBackPlan::NoWindow, _) => HandBack::NoWindow,
+    };
+    // SAFETY: `hwnd` is a live window owned by this thread. The return
+    // value is only whether it was visible before.
+    let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+    Ok(handed)
+}
+
+/// The foreground window, unless there's none or it's one of Grape's own:
+/// where the keyboard goes back to when the panel closes. Any thread may
+/// ask.
+pub fn other_app_foreground() -> Option<isize> {
+    // SAFETY: a plain query.
+    let front = unsafe { GetForegroundWindow() };
+    (!front.is_invalid() && is_window_of_another_app(front)).then_some(front.0 as isize)
+}
+
+/// Puts `hwnd` at the top of the topmost band without moving, sizing or
+/// activating it: `SetWindowPos(HWND_TOPMOST, …, SWP_NOMOVE | SWP_NOSIZE |
+/// SWP_NOACTIVATE)`. The overlay calls it on every show, so an open panel
+/// or shelf, topmost too, never covers a wheel.
+///
+/// `hwnd` is the raw handle value. Call this on the window's thread.
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] if the calling thread doesn't own the
+///   window.
+/// - [`PlatformError::Os`] if `hwnd` isn't a window or `SetWindowPos`
+///   fails.
+pub fn raise_topmost(hwnd: isize) -> Result<(), PlatformError> {
+    let hwnd = owned_window(hwnd)?;
+    // SAFETY: `hwnd` is a live window owned by this thread. NOMOVE | NOSIZE
+    // keep its geometry, NOACTIVATE leaves the focus where it is, and
+    // HWND_TOPMOST is a documented sentinel value, not a real window.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    }
+    .map_err(|err| PlatformError::Os {
+        context: "SetWindowPos",
+        code: err.code().0,
+    })
+}
+
+/// `true` if `hwnd` is a live window of another process.
+pub(crate) fn is_window_of_another_app(hwnd: HWND) -> bool {
+    // SAFETY: IsWindow accepts any handle value and only reads state.
+    if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
+        return false;
+    }
+    let mut process = 0_u32;
+    // SAFETY: a plain query with a writable u32 for the process id.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&raw mut process)) };
+    // SAFETY: a plain query.
+    process != 0 && process != unsafe { GetCurrentProcessId() }
+}
+
+/// [`show_shelf`] and [`show_panel`]: shows `raw` topmost at `frame`
+/// without activating it, restoring a minimized window first and setting
+/// the frame again when a DPI change resized it on the way.
+fn show_topmost(raw: isize, frame: Rect) -> Result<(), PlatformError> {
+    let hwnd = owned_window(raw)?;
+    // SAFETY: `hwnd` is a live window owned by this thread (checked above).
+    // IsIconic only reads its state; ShowWindow's return value is only
+    // whether it was visible before.
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+    }
+    place(hwnd, frame)?;
+    if window_rect(hwnd).is_some_and(|now| now != frame) {
+        place(hwnd, frame)?;
+    }
     Ok(())
 }
 
@@ -812,6 +974,139 @@ mod tests {
         assert!(!iconic);
         assert!(visible);
         assert_eq!(window_rect(window.0), Some(frame));
+    }
+
+    #[test]
+    fn harden_panel_applies_the_activatable_tool_window_bits() {
+        let window = TestWindow::new(WS_EX_APPWINDOW | WS_EX_NOACTIVATE);
+        harden_panel(window.raw()).unwrap();
+        let ex = ex_style(window.raw()).unwrap();
+        assert_eq!(
+            ex & WS_EX_TOOLWINDOW.0,
+            WS_EX_TOOLWINDOW.0,
+            "{}",
+            describe_ex_style(ex)
+        );
+        assert_eq!(
+            ex & (WS_EX_NOACTIVATE.0 | WS_EX_APPWINDOW.0),
+            0,
+            "{}",
+            describe_ex_style(ex)
+        );
+        assert_eq!(
+            ex & WS_EX_TOPMOST.0,
+            WS_EX_TOPMOST.0,
+            "{}",
+            describe_ex_style(ex)
+        );
+    }
+
+    #[test]
+    fn show_panel_places_and_shows_and_hide_panel_hides_without_handing_back() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        harden_panel(window.raw()).unwrap();
+        let frame = Rect {
+            x: 50,
+            y: 70,
+            width: 352,
+            height: 224,
+        };
+        show_panel(window.raw(), frame).unwrap();
+        // SAFETY: a plain query of this thread's own live window.
+        assert!(unsafe { IsWindowVisible(window.0) }.as_bool());
+        assert_eq!(window_rect(window.0), Some(frame));
+        // Shown without activation, so it isn't in front: nothing to hand
+        // back, whatever `back_to` says.
+        assert_eq!(
+            hide_panel(window.raw(), Some(window.raw())),
+            Ok(HandBack::NotActive)
+        );
+        // SAFETY: as above.
+        assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());
+        assert_eq!(hide_panel(window.raw(), None), Ok(HandBack::NotActive));
+    }
+
+    #[test]
+    fn hide_panel_with_nothing_recorded_hides_a_panel_that_isnt_in_front() {
+        // Tests never activate a window, and `show_panel` doesn't either, so
+        // this one is never in front: the hand-back's branches are
+        // `win_rules::hand_back_plan`'s, tested on every OS.
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        harden_panel(window.raw()).unwrap();
+        show_panel(
+            window.raw(),
+            Rect {
+                x: 10,
+                y: 10,
+                width: 64,
+                height: 64,
+            },
+        )
+        .unwrap();
+        assert_eq!(hide_panel(window.raw(), None), Ok(HandBack::NotActive));
+        // SAFETY: a plain query of this thread's own live window.
+        assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());
+    }
+
+    #[test]
+    fn raise_topmost_makes_a_window_topmost_without_moving_it() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        let before = window_rect(window.0);
+        let ex = ex_style(window.raw()).unwrap();
+        assert_eq!(ex & WS_EX_TOPMOST.0, 0, "{}", describe_ex_style(ex));
+        raise_topmost(window.raw()).unwrap();
+        let ex = ex_style(window.raw()).unwrap();
+        assert_eq!(
+            ex & WS_EX_TOPMOST.0,
+            WS_EX_TOPMOST.0,
+            "{}",
+            describe_ex_style(ex)
+        );
+        assert_eq!(window_rect(window.0), before);
+    }
+
+    #[test]
+    fn the_foreground_to_hand_back_to_is_never_grapes_own() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        assert!(!is_window_of_another_app(window.0));
+        assert!(!is_window_of_another_app(to_hwnd(0)));
+        if let Some(front) = other_app_foreground() {
+            assert!(is_window_of_another_app(to_hwnd(front)));
+            assert_ne!(front, window.raw());
+        }
+    }
+
+    #[test]
+    fn the_panel_calls_reject_a_window_from_another_thread_or_none() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        let raw = window.raw();
+        let (harden, show, hide, raise) = std::thread::spawn(move || {
+            (
+                harden_panel(raw),
+                show_panel(raw, Rect::default()),
+                hide_panel(raw, None),
+                raise_topmost(raw),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(harden, Err(PlatformError::WrongThread));
+        assert_eq!(show, Err(PlatformError::WrongThread));
+        assert_eq!(hide, Err(PlatformError::WrongThread));
+        assert_eq!(raise, Err(PlatformError::WrongThread));
+        let not_a_window = |result: Result<(), PlatformError>| {
+            matches!(
+                result,
+                Err(PlatformError::Os {
+                    context: "IsWindow",
+                    ..
+                })
+            )
+        };
+        assert!(not_a_window(harden_panel(0)));
+        assert!(not_a_window(show_panel(0, Rect::default())));
+        assert!(not_a_window(hide_panel(0, None).map(|_| ())));
+        assert!(not_a_window(raise_topmost(0)));
     }
 
     #[test]

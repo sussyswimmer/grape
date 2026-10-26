@@ -9,10 +9,14 @@
 //! - `display`: [`crate::display_bounds_at`] from a cache of the screens that
 //!   the main thread fills ([`refresh_screens`]), with CoreGraphics as the
 //!   fallback when the cache is empty.
-//! - `window`: overlay and toast windows from Tauri's raw `NSWindow`
-//!   pointer: [`harden_window`] (level 101 for [`WindowRole::Overlay`], 100
-//!   for [`WindowRole::Toast`], so an open wheel covers the toast),
-//!   [`frame_and_show`], [`describe_window`].
+//! - `window`: overlay, toast and tool panel windows from Tauri's raw
+//!   `NSWindow` pointer: [`harden_window`] (level 101 for
+//!   [`WindowRole::Overlay`], 100 for [`WindowRole::Toast`], 99 for
+//!   [`WindowRole::Panel`], so an open wheel covers the toast and both
+//!   cover the panel), [`frame_and_show`], [`describe_window`], and the
+//!   panel's [`show_panel`] (the one hardened window that becomes key, and
+//!   Grape asks to be activated) and [`hide_panel`] (activation handed
+//!   back).
 //! - `actions`: the file actions behind [`crate::file_actions`]: the general
 //!   pasteboard, Terminal or iTerm2, Finder, AirDrop and the Move panel (a
 //!   volume's root never moves, and each item is judged right after its own
@@ -37,7 +41,9 @@ mod drag;
 mod window;
 
 pub use display::refresh_screens;
-pub use window::{describe_window, frame_and_show, harden_window, WindowRole};
+pub use window::{
+    describe_window, frame_and_show, harden_window, hide_panel, show_panel, PanelShown, WindowRole,
+};
 
 pub(crate) use actions::{
     copy_files, copy_paths, haptic_tick, move_to_chosen_folder, open_terminal, pick_folder, reveal,
@@ -62,10 +68,26 @@ pub(crate) fn display_bounds_at(x: i32, y: i32) -> Result<DisplayBounds, Platfor
     display::display_bounds_at(x, y)
 }
 
+/// `true` while any mouse button is down (`NSEvent.pressedMouseButtons`,
+/// the hardware state, not the event stream). Any thread may ask. The tool
+/// panel refuses its page's Esc then: it belongs to a drag (D31).
+pub fn mouse_button_down() -> bool {
+    objc2_app_kit::NSEvent::pressedMouseButtons() != 0
+}
+
 /// A [`PlatformError::Os`] for a failed `std::io` call, with its errno.
 fn io_error(context: &'static str, err: &std::io::Error) -> PlatformError {
     PlatformError::Os {
         context,
         code: err.raw_os_error().unwrap_or(NO_CODE),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn no_mouse_button_is_down_when_nobody_holds_one() {
+        // Nobody holds the mouse on CI's Mac.
+        assert!(!super::mouse_button_down());
     }
 }

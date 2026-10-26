@@ -1,6 +1,7 @@
-//! The pure rules under the Windows layer: which app Terminal starts, and
-//! what Share leaves out, how it spells paths for the sheet, what the
-//! sheet's title says and where its anchor goes.
+//! The pure rules under the Windows layer: which app Terminal starts, what
+//! Share leaves out, how it spells paths for the sheet, what the sheet's
+//! title says and where its anchor goes, and what hiding the tool panel
+//! does with the foreground.
 //!
 //! No Win32 here, so these build and are tested on every OS, not only on
 //! Windows. The `windows` module is the only caller outside the tests.
@@ -169,9 +170,58 @@ pub(crate) fn anchor_frame(x: i32, y: i32, scale: f64) -> Rect {
     }
 }
 
+/// What hiding the tool panel does with the foreground, before it hides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandBackPlan {
+    /// The panel isn't the foreground window: only hide it.
+    NotActive,
+    /// The panel is in front and the recorded window is a live one of
+    /// another app: hand it the foreground, then hide the panel. Never the
+    /// panel itself, nor another of Grape's windows (D31).
+    HandTo,
+    /// The panel is in front, but nothing was recorded, or that window is
+    /// gone or Grape's own: only hide it.
+    NoWindow,
+}
+
+/// [`HandBackPlan`] for a panel that is (`panel_in_front`) or isn't the
+/// foreground window, and the window recorded when it showed: `None` when
+/// none was, `Some(true)` when it's a live window of another app,
+/// `Some(false)` otherwise.
+pub(crate) fn hand_back_plan(
+    panel_in_front: bool,
+    back_to_other_app: Option<bool>,
+) -> HandBackPlan {
+    match (panel_in_front, back_to_other_app) {
+        (false, _) => HandBackPlan::NotActive,
+        (true, Some(true)) => HandBackPlan::HandTo,
+        (true, Some(false) | None) => HandBackPlan::NoWindow,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panel_that_isnt_in_front_only_hides() {
+        for back_to in [None, Some(false), Some(true)] {
+            assert_eq!(
+                hand_back_plan(false, back_to),
+                HandBackPlan::NotActive,
+                "{back_to:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_panel_in_front_hands_the_foreground_only_to_another_apps_live_window() {
+        assert_eq!(hand_back_plan(true, Some(true)), HandBackPlan::HandTo);
+        // Nothing recorded, or it's gone or one of Grape's own windows (the
+        // panel included): nothing to hand to.
+        assert_eq!(hand_back_plan(true, None), HandBackPlan::NoWindow);
+        assert_eq!(hand_back_plan(true, Some(false)), HandBackPlan::NoWindow);
+    }
 
     #[test]
     fn windows_terminal_is_tried_first_by_default() {
