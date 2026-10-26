@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use common::{assert_no_leftovers, plan_one, planned_file, SourceState, TestDir};
@@ -1116,6 +1117,61 @@ fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
         assert_eq!(field(&info, "video", "codec_name").as_deref(), Some("gif"));
         assert_eq!(field(&info, "video", "width").as_deref(), Some("320"));
     }
+}
+
+/// How many frames `path`'s video stream has, counted by decoding it.
+fn frame_count(path: &Path) -> usize {
+    let out = Command::new(tool("GRAPE_TEST_FFPROBE"))
+        .args(["-v", "error", "-count_frames", "-select_streams", "v:0"])
+        .args(["-show_entries", "stream=nb_read_frames", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffprobe {}", path.display());
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim().trim_end_matches(',').parse().unwrap()
+}
+
+/// Clears its flag when dropped, a panic included.
+struct Lower<'a>(&'a AtomicBool);
+
+impl Drop for Lower<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+#[test]
+fn a_short_wmv_keeps_every_gif_frame() {
+    let dir = TestDir::new("media-wmv-gif");
+    // 1 s at 10 fps: the frames start at 0.046 s, after the audio, and
+    // the last ends at 1.046 s, so at 12 fps the GIF has 12 frames and
+    // lasts 1 s. ASF packets read while FFmpeg probes have no duration,
+    // and 9.0 then lost the last two frames now and then, more often on a
+    // busy machine: ten conversions, with a busy thread per core.
+    let src = make_source(&dir.path, "clip.wmv", Format::Wmv);
+    let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+    let busy = AtomicBool::new(true);
+    let mut seen = Vec::new();
+    std::thread::scope(|scope| {
+        for _ in 0..cores {
+            scope.spawn(|| {
+                while busy.load(Ordering::Relaxed) {
+                    std::hint::spin_loop();
+                }
+            });
+        }
+        let _lower = Lower(&busy);
+        for _ in 0..10 {
+            let (outcome, _) = convert_file(&dir, &src, Format::Gif)
+                .unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+            let gif = &outcome.outputs[0];
+            let duration: f64 = probe(gif)["format.duration"].parse().unwrap();
+            seen.push((frame_count(gif), (duration * 100.0).round() / 100.0));
+            fs::remove_file(gif).unwrap();
+        }
+    });
+    assert!(seen.iter().all(|&run| run == (12, 1.0)), "{seen:?}");
 }
 
 #[test]

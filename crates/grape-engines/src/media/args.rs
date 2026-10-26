@@ -14,7 +14,8 @@
 //!   which yuv420p needs, and for AVI to at most 8190 px a side. FFmpeg
 //!   turns a rotated source upright as it decodes.
 //! - **GIF** takes two passes: a palette from the whole clip, then the GIF
-//!   drawn with it, both at 12 fps and at most 720 px wide.
+//!   drawn with it, both at 12 fps and at most 720 px wide. Both read an
+//!   ASF (WMV) source from its start again after probing ([`gif_passes`]).
 //! - **Audio targets** (and video to MP3) keep `0:a:0`. Lossless targets
 //!   keep 24 bits when the source has more than 16
 //!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
@@ -243,7 +244,7 @@ fn build(
     };
     if to == Format::Gif {
         probe.video.as_ref().ok_or(Missing::Video)?;
-        return Ok(gif_passes(src, out, palette));
+        return Ok(gif_passes(src, probe, out, palette));
     }
     // Opus and Vorbis: OPUS, OGG and WebM's audio.
     let layout = matches!(to, Format::Opus | Format::Ogg | Format::Webm)
@@ -305,8 +306,24 @@ fn build(
 /// and fails if it wrote none (`-abort_on empty_output`), which the second
 /// would report as an unreadable source; the second reads it back as a
 /// second input and draws the GIF with it.
-fn gif_passes(src: &Path, out: &Path, palette: &Path) -> Vec<Pass> {
-    let mut first = prefix(src, &[]);
+///
+/// Both read an ASF (WMV) source from its start again once it's probed
+/// (`-ss 0`). The ASF demuxer gives the packets FFmpeg reads while probing
+/// no duration, so in a clip of a few seconds every frame has none. When
+/// such a source ends before the palette's frame has reached the second
+/// pass's filter graph (now and then; more often on a busy machine),
+/// FFmpeg 9.0 drops the end time the decoder worked out and ends the stream at the
+/// last frame's start plus its duration (`configure_filtergraph` closes
+/// the source with `av_buffersrc_add_frame(NULL)`): `fps` then loses the
+/// GIF frames the last source frame should cover. Read again after
+/// probing, every packet has its duration. Other containers give them one.
+fn gif_passes(src: &Path, probe: &Probe, out: &Path, palette: &Path) -> Vec<Pass> {
+    let reading: &[&str] = if probe.format_name == "asf" {
+        &["-ss", "0"]
+    } else {
+        &[]
+    };
+    let mut first = prefix(src, reading);
     push(
         &mut first,
         &[
@@ -323,7 +340,7 @@ fn gif_passes(src: &Path, out: &Path, palette: &Path) -> Vec<Pass> {
         ],
     );
 
-    let mut second = prefix(src, &[]);
+    let mut second = prefix(src, reading);
     push(
         &mut second,
         &["-f", "png_pipe", "-protocol_whitelist", "file", "-i"],
@@ -870,6 +887,38 @@ mod tests {
     }
 
     #[test]
+    fn a_gif_reads_an_asf_source_from_its_start_again() {
+        let wmv = Probe {
+            format_name: "asf".into(),
+            ..typical(Format::Wmv)
+        };
+        let passes = passes_for(&wmv, Format::Gif).unwrap();
+        assert_eq!(passes.len(), 2);
+        let opening = &PREFIX[..PREFIX.len() - 2];
+        for pass in &passes {
+            let mut start = opening.to_vec();
+            start.extend_from_slice(&["-ss", "0", "-i", "<src>"]);
+            assert!(pass.args.starts_with(&argv(&start)), "{:?}", pass.args);
+            assert_eq!(pass.args.iter().filter(|arg| *arg == "-ss").count(), 1);
+        }
+        // Other containers, and other targets from ASF, read it once.
+        for format_name in ["mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi"] {
+            let source = Probe {
+                format_name: format_name.into(),
+                ..typical(Format::Mp4)
+            };
+            let passes = passes_for(&source, Format::Gif).unwrap();
+            assert!(passes
+                .iter()
+                .all(|pass| !pass.args.iter().any(|a| a == "-ss")));
+        }
+        for to in [Format::Mp4, Format::Webm, Format::Mp3, Format::Avi] {
+            let args = &passes_for(&wmv, to).unwrap()[0].args;
+            assert!(!args.iter().any(|arg| arg == "-ss"), "{to:?}");
+        }
+    }
+
+    #[test]
     fn audio_targets_exact_argv() {
         let cases: [(Format, Format, &[&str], &str); 8] = [
             (
@@ -946,10 +995,11 @@ mod tests {
             let last = i + 1 == passes.len();
             assert!(args.starts_with(&opening), "{to:?}: {args:?}");
             let source = args.windows(2).position(|w| w == input).unwrap();
+            let reading = &args[opening.len()..source];
             assert!(
-                args[opening.len()..source]
+                reading
                     .iter()
-                    .all(|arg| arg == "-guess_layout_max" || arg == "0"),
+                    .all(|arg| arg == "-guess_layout_max" || arg == "-ss" || arg == "0"),
                 "{to:?}: {args:?}"
             );
             let (muxer, output) = if last {
