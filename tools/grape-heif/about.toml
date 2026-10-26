@@ -1,0 +1,55 @@
+# cargo-about config for licenses/grape-heif/rust-crates.md: the Rust crates
+# compiled into grape-heif.exe (DECISIONS D23, D33). tools/grape-heif is its
+# own workspace, so the root about.toml never sees it. Regenerate from the
+# repo root after any change to tools/grape-heif/Cargo.lock:
+#
+#   cargo about generate --locked --fail --manifest-path tools/grape-heif/Cargo.toml -c tools/grape-heif/about.toml -o licenses/grape-heif/rust-crates.md tools/grape-heif/about.hbs
+#
+# CI's Licenses job runs the same command and fails if the file changed.
+
+# grape-heif.exe is Windows only.
+targets = ["x86_64-pc-windows-msvc"]
+
+# Build tools (libheif-sys's build script: system-deps, cfg-expr,
+# target-lexicon, vcpkg, ...) and test-only crates never ship.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# grape-heif and grape-heif-proto are Grape's own, under LICENSE (MIT).
+private = { ignore = true }
+
+# Exactly the licenses the shipped crates use, in the order Grape picks them
+# when a crate offers a choice. Keep it the same as deny.toml's allow list.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+
+# windows-rs names its files `license-mit` and `license-apache-2.0`, which
+# cargo-about doesn't scan. Grape takes MIT. (The same blocks as the root
+# about.toml.)
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+[[windows-sys.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+[[windows-link.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+# libheif-sys (MIT) also carries libheif 1.23.1's source in vendor/libheif,
+# whose COPYING holds LGPL, GPL and MIT texts. grape-heif doesn't build that
+# copy (no `embedded-libheif`): it links vcpkg's libheif, whose texts are in
+# licenses/grape-heif. The crate's own text is LICENSE.
+[libheif-sys.clarify]
+license = "MIT"
+[[libheif-sys.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "7884c212eb49acf7c224e594e4c872d448a8703f6f3d3e640336ad5754dc2556"

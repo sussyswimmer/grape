@@ -6,6 +6,7 @@ Grape is free and open source, under the MIT License in `LICENSE`. It's built wi
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **libarchive**, whose `bsdtar` program Grape will read RAR archives with. It will ship as a separate program, with its license texts in the `licenses/libarchive` folder. Today's installer and DMG don't carry it yet.
+- **grape-heif**, the program Grape converts HEIC images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
 - **Not here yet:** the other helper programs Grape will ship as separate files, like FFmpeg. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -30,7 +31,7 @@ The Rust crates use these, most used first:
 - ISC License (`ISC`)
 - zlib License (`Zlib`)
 
-The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so does libarchive.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive and grape-heif.
 
 ## The MPL-2.0 crates
 
@@ -154,6 +155,24 @@ Grape will read RAR archives with `bsdtar` from [libarchive](https://www.libarch
 | PPMd (Igor Pavlov, Dmitry Shkarin) and the date parser | Public domain | none needed |
 
 This section is written by hand: check it again when `scripts/bsdtar/sources.json` changes libarchive's version.
+
+## grape-heif (HEIC on Windows)
+
+Grape converts HEIC images on Windows with `grape-heif.exe`, a small program of Grape's own (`tools/grape-heif`) that Grape's CI builds. It's a separate program next to `Grape.exe`, which Grape starts for each HEIC image; none of it is inside Grape itself. It links the libraries below statically, and because x265 is under the GPL, the program as a whole is under the **GNU General Public License, version 3 or later**. Its license texts ship with it in the `licenses/grape-heif` folder, where `SOURCE.md` says exactly how it was built. On macOS Grape uses the system's ImageIO instead, so the Mac build has no grape-heif.
+
+| Component | License | Text in `licenses/grape-heif` |
+|---|---|---|
+| grape-heif.exe as a whole | GPL-3.0-or-later | `LICENSE.txt` |
+| libheif 1.23.7 | LGPL-3.0-or-later | `libheif.txt` |
+| libde265 1.1.3 | LGPL-3.0-or-later, and the DOC (ACE/TAO) terms for its Windows condition-variable code | `libde265.txt`, `libde265-win32cond.txt` |
+| x265 4.3 | GPL-2.0-or-later | `x265.txt` |
+| The Rust crates in it (libheif-rs, libheif-sys, serde and others) | MIT, Apache-2.0 and Unicode-3.0 | `rust-crates.md` |
+| Grape's own code in it | MIT | Grape's `LICENSE` |
+| The Visual C++ runtime, linked statically | Visual Studio's redistribution terms, which need no notice | none needed |
+
+**The source.** Every build of the installer comes with grape-heif's complete source, `grape-heif-1.23.7-grape.1-source.tar.gz`, on the GitHub Release that ships the installer and in the CI run that built it. It holds Grape's code for the program, every Rust crate it uses, the three libraries' source archives, vcpkg's build recipes and how to build it again.
+
+This section is written by hand: check it again when `tools/grape-heif/vcpkg.lock.json` changes a version.
 
 ## Rust crates
 
