@@ -431,9 +431,13 @@ struct Layout {
 /// - Audio without one keeps its 1 to 8 channels, unmixed, labelled with
 ///   the Vorbis layout of that count by `pan`: FFmpeg mustn't guess a
 ///   layout for it (`-guess_layout_max 0`), since its guesses for 3 and 4
-///   channels (2.1, 4.0) aren't Vorbis layouts and would be remixed. More
-///   channels are downmixed to 7.1 from the layout FFmpeg guesses, which
-///   9.0 has for 10, 12, 14, 16 and 24 channels; other counts fail.
+///   channels (2.1, 4.0) aren't Vorbis layouts and would be remixed. Where
+///   the encoder would cut the fourth channel as the LFE, they go to the
+///   next layout instead, around its LFE, which stays silent: 6 for Vorbis
+///   (libvorbis keeps only up to about 250 Hz of 5.1's LFE) and 7 for Opus
+///   (below). More channels are downmixed to 7.1 from the layout FFmpeg
+///   guesses, which 9.0 has for 10, 12, 14, 16 and 24 channels (6.1 not
+///   for 14); other counts fail.
 /// - With no audio (a silent WebM) the filter has nothing to do.
 ///
 /// libopus's default mapping puts the channels of 5.0 and 6.1 in the wrong
@@ -455,7 +459,7 @@ fn vorbis_layout(audio: Option<&Audio>, opus: bool) -> Layout {
         },
         Some(audio) if !audio.has_layout && audio.channels > 0 => {
             let channels = audio.channels as usize;
-            let around_lfe = opus && channels == 7;
+            let around_lfe = channels == if opus { 7 } else { 6 };
             let layout = VORBIS_ORDER[channels - 1 + usize::from(around_lfe)];
             let mut pan = format!("pan={layout}");
             for channel in 0..channels {
@@ -1554,15 +1558,39 @@ mod tests {
         let passes = passes_for(&four, Format::Opus).unwrap();
         assert_eq!(passes[0].args, argv(&quad));
 
+        // Six to OGG, around 6.1's LFE: libvorbis would cut 5.1's.
+        let mut ogg = PREFIX[..PREFIX.len() - 2].to_vec();
+        ogg.extend_from_slice(&reading);
+        ogg.extend_from_slice(&[
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "libvorbis",
+            "-q:a",
+            "6",
+            "-af",
+            "pan=6.1|c0=c0|c1=c1|c2=c2|c4=c3|c5=c4|c6=c5",
+            "-progress",
+            "pipe:1",
+            "-f",
+            "ogg",
+            "<out>",
+        ]);
+        let six = probe(None, Some(unlabeled(6)));
+        assert_eq!(passes_for(&six, Format::Ogg).unwrap()[0].args, argv(&ogg));
+
         // Each count from 1 to 8 gets its Vorbis layout, channel for
-        // channel, but Opus puts 7 in 7.1 around its LFE; more are
-        // downmixed to 7.1 from FFmpeg's guess.
+        // channel, but Opus puts 7 in 7.1 and Vorbis 6 in 6.1, around the
+        // LFE; more are downmixed to 7.1 from FFmpeg's guess.
         let layouts = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
         for channels in 1..=12 {
             let pan = |opus: bool| {
                 (1..=8).contains(&channels).then(|| {
                     if opus && channels == 7 {
                         return "pan=7.1|c0=c0|c1=c1|c2=c2|c4=c3|c5=c4|c6=c5|c7=c6".to_string();
+                    }
+                    if !opus && channels == 6 {
+                        return "pan=6.1|c0=c0|c1=c1|c2=c2|c4=c3|c5=c4|c6=c5".to_string();
                     }
                     let layout = layouts[channels as usize - 1];
                     let map: String = (0..channels).map(|c| format!("|c{c}=c{c}")).collect();

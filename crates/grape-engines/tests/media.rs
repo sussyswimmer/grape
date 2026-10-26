@@ -814,8 +814,10 @@ fn surround_becomes_a_layout_opus_and_vorbis_take() {
 }
 
 /// The tone of each channel of [`write_unlabeled_wav`]'s files, in Hz.
+/// The fourth, 900 Hz, is one an LFE's low-pass removes (libvorbis's 5.1
+/// keeps up to about 250 Hz, libopus's surround mapping about 400 Hz).
 const TONES: [f64; 10] = [
-    300.0, 500.0, 700.0, 100.0, 1100.0, 1300.0, 1500.0, 1700.0, 1900.0, 2100.0,
+    300.0, 500.0, 700.0, 900.0, 1100.0, 1300.0, 1500.0, 1700.0, 1900.0, 2100.0,
 ];
 
 /// Writes a 1 s, 48 kHz, 16-bit WAV whose channels are sines at `tones`,
@@ -974,9 +976,9 @@ fn audio_without_a_layout_keeps_its_channels() {
     let dir = TestDir::new("media-unlabeled");
     let mut failures = Vec::new();
     // Field recorders' polyphonic WAVs and ambisonics have no channel mask.
-    // Up to 8 channels keep their count, each in its own output channel,
-    // except that Opus puts 7 in 7.1 around its LFE, which stays silent;
-    // more are downmixed to 7.1.
+    // Up to 8 channels keep their count, each in its own output channel at
+    // full bandwidth, except that Opus puts 7 in 7.1 and Vorbis 6 in 6.1,
+    // around the LFE, which stays silent; more are downmixed to 7.1.
     let vorbis = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
     for channels in [3, 4, 5, 6, 7, 8, 10] {
         let wav = dir.join(&format!("{channels}ch.wav"));
@@ -1001,6 +1003,7 @@ fn audio_without_a_layout_keeps_its_channels() {
             let opus = to != Format::Ogg;
             let (expected, homes): (&str, Vec<usize>) = match channels {
                 7 if opus => ("7.1", vec![0, 1, 2, 4, 5, 6, 7]),
+                6 if !opus => ("6.1", vec![0, 1, 2, 4, 5, 6]),
                 1..=8 => (vorbis[channels - 1], (0..channels).collect()),
                 _ => ("7.1", Vec::new()),
             };
