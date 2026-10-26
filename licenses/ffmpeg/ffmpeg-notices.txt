@@ -3477,7 +3477,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[98] libvorbis 1.3.7, permissive: Jutta Degener and Carsten Bormann
+[98] libvorbis 1.3.7, TU-Berlin-1.0: Jutta Degener and Carsten Bormann
 Files:
   libvorbis-1.3.7/lib/lpc.c  linux-x86_64, windows-x86_64
 Text:

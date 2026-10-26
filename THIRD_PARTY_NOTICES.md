@@ -125,11 +125,11 @@ These are built into them. Each has its own text in `licenses/ffmpeg`.
 | libvpx | 1.17.0 | BSD-3-Clause | `libvpx.txt`, `libvpx-PATENTS.txt`, `libvpx-x86inc.txt` |
 | dav1d | 1.5.4 | BSD-2-Clause | `dav1d.txt`, `dav1d-PATENTS.txt` |
 | zlib | 1.3.2 | Zlib | `zlib.txt` |
-| Code from other projects inside FFmpeg and the libraries above | | BSD-2-Clause, BSD-3-Clause, MIT, ISC, Zlib, IJG, BSL-1.0 | `ffmpeg-notices.txt` |
+| Code from other projects inside FFmpeg and the libraries above | | BSD-2-Clause, BSD-3-Clause, MIT, ISC, Zlib, IJG, BSL-1.0, TU-Berlin-1.0 | `ffmpeg-notices.txt`, `dsd2pcm.txt`, `sha2-gifford.txt`, `glumpy.txt`, `libwebp.txt` |
 | mingw-w64 runtime (Windows) | 11.0.1 | ZPL-2.1, with the notices in its text | `mingw-w64-runtime.txt` |
 | GCC runtime, libgcc (Windows) | 13.2.0 | GPL-3.0-or-later WITH GCC-exception-3.1 | `gcc-runtime-exception.txt`, `LICENSE-GPLv3.txt` |
 
-Some of their source files hold code from other projects, like MIPS's fixed-point code, WebRTC's iLBC decoder, musl's `sscanf` and x86inc.asm. `ffmpeg-notices.txt` has each of those notices verbatim, with the files it's in; Grape's build checks that it has every one in what it compiles. libvpx and dav1d come with patent grants, the `-PATENTS.txt` files. The GCC Runtime Library Exception lets libgcc's code be distributed under any terms, so it doesn't change the programs' license. `grape-ffmpeg-sources.tar` also holds the mingw-w64 runtime's source.
+Some of their source files hold code from other projects, like MIPS's fixed-point code, WebRTC's iLBC decoder, musl's `sscanf` and x86inc.asm. `ffmpeg-notices.txt` has each of those notices verbatim, with the files it's in; Grape's build checks that it has every one in what it compiles. Where a file only names the license of code it took from another project, that project's license text is there too: dsd2pcm's (FFmpeg's DSD decoder), Aaron D. Gifford's (its SHA-2 code), Glumpy's (its scaler's filters) and libwebp's (libvpx's threads). libvorbis's LPC code carries Jutta Degener and Carsten Bormann's terms (TU-Berlin-1.0). libvpx and dav1d come with patent grants, the `-PATENTS.txt` files. The GCC Runtime Library Exception lets libgcc's code be distributed under any terms, so it doesn't change the programs' license. `grape-ffmpeg-sources.tar` also holds the mingw-w64 runtime's source.
 
 ## Rust crates
 

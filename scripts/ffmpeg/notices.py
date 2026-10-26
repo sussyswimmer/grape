@@ -337,6 +337,9 @@ def kind_of(plain):
     t = plain.lower()
     if "independent jpeg group" in t:
         return "IJG"
+    if "jutta degener and carsten bormann" in t and \
+            "any use of this software is permitted provided that this notice is not removed" in t:
+        return "TU-Berlin-1.0"  # their GSM 06.10 terms, as of 1994
     if "redistribution and use in source and binary forms" in t:
         if "advertising materials" in t:
             return "BSD-4-Clause"
