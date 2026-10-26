@@ -103,23 +103,8 @@ pub(crate) fn convert(
     // folder.
     let src_abs = absolute(src).map_err(|e| names.read_failed(e))?;
     source_is_a_file(&src_abs, src, &names)?;
-    // The temp files are this folder plus an ASCII name, so they pass when
-    // it does.
     let dir_abs = absolute(dir).map_err(|e| names.write_failed(e))?;
-    if !ffmpeg_gets_unchanged(&src_abs) {
-        return Err(unnamable(
-            names.read_failed(String::new()),
-            &src_abs,
-            &names,
-        ));
-    }
-    if !ffmpeg_gets_unchanged(&dir_abs) {
-        return Err(unnamable(
-            names.write_failed(String::new()),
-            &dir_abs,
-            &names,
-        ));
-    }
+    ffmpeg_can_name(&src_abs, &dir_abs, &names)?;
     let info = probe_source(ffprobe, &src_abs, src, &names, ctx).map_err(or_cancelled)?;
     // Refuse a source without the stream the target needs before anything
     // is created.
@@ -245,23 +230,34 @@ fn ffmpeg_gets_unchanged(path: &Path) -> bool {
     cfg!(not(windows)) || path.to_str().is_some()
 }
 
-/// `error` (a read or write failure) for `path`, a name FFmpeg can't get
-/// unchanged ([`ffmpeg_gets_unchanged`]), with a message that says so.
-fn unnamable(mut error: GrapeError, path: &Path, names: &Names) -> GrapeError {
-    error.user_message = match error.kind {
-        ErrorKind::ReadFailed => format!(
-            "{} or its folder has a name Grape's media converter can't open. \
-             Rename it and try again.",
-            names.source
-        ),
-        _ => format!(
-            "{} or a folder above it has a name Grape's media converter can't \
-             write to. Rename it and try again.",
-            names.folder
-        ),
-    };
-    error.detail = format!("not valid Unicode: {}", path.display());
-    error
+/// Refuses a source, or an output folder, that FFmpeg wouldn't get
+/// unchanged ([`ffmpeg_gets_unchanged`]). The temp files are that folder
+/// plus an ASCII name, so they pass when it does.
+fn ffmpeg_can_name(src_abs: &Path, dir_abs: &Path, names: &Names) -> Result<(), GrapeError> {
+    let detail = |path: &Path| format!("not valid Unicode: {}", path.display());
+    if !ffmpeg_gets_unchanged(src_abs) {
+        return Err(GrapeError::new(
+            ErrorKind::ReadFailed,
+            format!(
+                "{} or its folder has a name Grape's media converter can't open. \
+                 Rename it and try again.",
+                names.source
+            ),
+            detail(src_abs),
+        ));
+    }
+    if !ffmpeg_gets_unchanged(dir_abs) {
+        return Err(GrapeError::new(
+            ErrorKind::WriteFailed,
+            format!(
+                "{} or a folder above it has a name Grape's media converter can't \
+                 write to. Rename it and try again.",
+                names.folder
+            ),
+            detail(dir_abs),
+        ));
+    }
+    Ok(())
 }
 
 /// Checks that the source is still a file: a folder or a pipe named like
