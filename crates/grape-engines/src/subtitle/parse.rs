@@ -863,6 +863,17 @@ mod tests {
     }
 
     #[test]
+    fn style_and_region_blocks_after_a_cue_are_skipped() {
+        // After a cue, a block without a timing line would be its text.
+        let vtt = "WEBVTT\n\n00:01.000 --> 00:02.000\nHi\n\nSTYLE\n::cue { color: red }\n\n\
+                   REGION id:x width:40%\n\n00:03.000 --> 00:04.000\nBye";
+        assert_eq!(
+            plain(&parsed(vtt)),
+            [cue(1000, 2000, &["Hi"]), cue(3000, 4000, &["Bye"])]
+        );
+    }
+
+    #[test]
     fn a_timing_line_ends_a_note_style_or_region_block() {
         // The arrow on the line after NOTE: the NOTE line is the cue's
         // identifier. Further down: the block ends before the arrow.
