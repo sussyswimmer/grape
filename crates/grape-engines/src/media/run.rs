@@ -630,6 +630,8 @@ pub(super) mod tests {
     /// - `fail`: "boom" on stderr, then exits 3;
     /// - `probe`: [`PROBE_OUTPUT`] on stdout, then exits 0;
     /// - `big`: 5 MiB on stdout, then exits 0;
+    /// - `big-hold`: 5 MiB on stdout, then runs until killed, or for 30 s,
+    ///   without closing it;
     /// - `write`: writes [`FAKE_TEXT`] to [`FAKE_OUT`], then as `progress`;
     /// - `error`: as `progress`, but then [`FAKE_TEXT`] on stderr and
     ///   exits 1;
@@ -662,6 +664,11 @@ pub(super) mod tests {
             "big" => {
                 // Fails with a broken pipe once the reader gives up.
                 let _ = io::stdout().lock().write_all(&vec![b'x'; 5 << 20]);
+                0
+            }
+            "big-hold" => {
+                let _ = io::stdout().lock().write_all(&vec![b'x'; 5 << 20]);
+                thread::sleep(Duration::from_secs(30));
                 0
             }
             "write" => {
@@ -983,6 +990,20 @@ pub(super) mod tests {
             matches!(&result, Err(RunError::Io(e)) if e.kind() == io::ErrorKind::Other),
             "{result:?}"
         );
+    }
+
+    #[test]
+    fn probe_stops_reading_at_4_mib_without_waiting_for_the_end() {
+        let token = CancelToken::new();
+        let started = Instant::now();
+        // The child never closes its stdout: only the limit ends the read.
+        let result = probe_command(fake("big-hold"), &token, Duration::from_secs(10));
+        assert!(
+            matches!(&result, Err(RunError::Io(e)) if e.kind() == io::ErrorKind::Other),
+            "{result:?}"
+        );
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 
     #[test]
