@@ -141,9 +141,7 @@ pub(crate) fn convert(
     }
     let mut is_cancelled = || cancel.is_cancelled();
     let bytes = read(src, &names, cancel).map_err(or_cancelled)?;
-    let Some((text, encoding)) = decode::decode(&bytes, &mut is_cancelled) else {
-        return Err(crate::cancelled(src));
-    };
+    let (text, encoding) = decoded(&bytes, src, &mut is_cancelled)?;
     drop(bytes);
     let doc = parse::parse(&text, &mut is_cancelled)
         .map_err(|e| parse_failed(e, src, &names, encoding, cancel))?;
@@ -164,6 +162,17 @@ pub(crate) fn convert(
     drop(temp);
     progress(1.0);
     Ok(outcome)
+}
+
+/// The source's bytes as text, and the encoding they were read in.
+/// [`decode::decode`] gives nothing only once the job is cancelled, so
+/// that is a cancel.
+fn decoded(
+    bytes: &[u8],
+    src: &Path,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<(String, Encoding), GrapeError> {
+    decode::decode(bytes, is_cancelled).ok_or_else(|| crate::cancelled(src))
 }
 
 /// The error for a text that `parse` refused. Once the job is cancelled
@@ -341,6 +350,18 @@ mod tests {
             drop(temp);
             assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0, "{to:?}");
         }
+    }
+
+    #[test]
+    fn a_job_cancelled_while_decoding_is_cancelled() {
+        let src = Path::new("shows/subs.srt");
+        let srt = b"1\n00:00:01,000 --> 00:00:02,000\nCaf\xE9\n";
+        let (text, encoding) = decoded(srt, src, &mut || false).unwrap();
+        assert!(text.ends_with("Café\n"));
+        assert_eq!(encoding, Encoding::Windows1252);
+        let err = decoded(srt, src, &mut || true).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Cancelled);
+        assert_eq!(err.user_message, crate::cancelled(src).user_message);
     }
 
     #[test]
