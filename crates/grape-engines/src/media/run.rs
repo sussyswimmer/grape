@@ -129,6 +129,10 @@ pub(crate) fn transcode(
     cancel: &CancelToken,
     on_time: &mut dyn FnMut(Duration),
 ) -> Result<Finished, RunError> {
+    #[cfg(test)]
+    if let Some(fake) = tests::next_fake(args) {
+        return transcode_command(fake.command(), cancel, on_time);
+    }
     transcode_command(command(program, args)?, cancel, on_time)
 }
 
@@ -153,6 +157,10 @@ pub(crate) fn probe(
     cancel: &CancelToken,
     timeout: Duration,
 ) -> Result<String, RunError> {
+    #[cfg(test)]
+    if let Some(fake) = tests::next_fake(args) {
+        return fake.probe(cancel, timeout);
+    }
     probe_command(command(program, args)?, cancel, timeout)
 }
 
@@ -476,15 +484,96 @@ impl Drop for SlotGuard<'_> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::cell::RefCell;
     use std::io::{Cursor, Write};
 
     use super::*;
 
     /// The environment variable that turns [`fake_child`] into a child.
     const FAKE_MODE: &str = "GRAPE_FAKE_CHILD";
+
+    /// The text a scripted [`Fake::Child`] writes.
+    const FAKE_TEXT: &str = "GRAPE_FAKE_TEXT";
+
+    /// A scripted [`Fake::Child`]'s output path.
+    const FAKE_OUT: &str = "GRAPE_FAKE_OUT";
+
+    /// A sidecar run that a test scripts with [`script`], in place of
+    /// `ffmpeg` or `ffprobe`.
+    #[derive(Debug)]
+    pub(crate) enum Fake {
+        /// `ffprobe` printing this. No child runs: the test harness prints
+        /// its own lines around a fake child's output, which `probe::parse`
+        /// would refuse.
+        Prints(String),
+        /// [`fake_child`] in this mode, with [`FAKE_TEXT`] set to the text
+        /// and [`FAKE_OUT`] to the run's output path (its last argument,
+        /// without `file:`).
+        Child(&'static str, String),
+    }
+
+    /// A scripted run, ready to start.
+    pub(super) struct Next {
+        fake: Fake,
+        out: OsString,
+    }
+
+    impl Next {
+        /// The child of a scripted `ffmpeg` run.
+        pub(super) fn command(self) -> Command {
+            match self.fake {
+                Fake::Child(mode, text) => {
+                    let mut command = fake(mode);
+                    command.env(FAKE_TEXT, text).env(FAKE_OUT, self.out);
+                    command
+                }
+                Fake::Prints(_) => panic!("ffmpeg was scripted to print a probe"),
+            }
+        }
+
+        /// The outcome of a scripted `ffprobe` run.
+        pub(super) fn probe(
+            self,
+            cancel: &CancelToken,
+            timeout: Duration,
+        ) -> Result<String, RunError> {
+            match self.fake {
+                Fake::Prints(text) => Ok(text),
+                Fake::Child(..) => probe_command(self.command(), cancel, timeout),
+            }
+        }
+    }
+
+    thread_local! {
+        /// The runs [`script`] queued on this thread.
+        static SCRIPT: RefCell<VecDeque<Fake>> = const { RefCell::new(VecDeque::new()) };
+        /// The argv of each scripted run on this thread.
+        static RAN: RefCell<Vec<Vec<OsString>>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Makes the next sidecar runs on this thread `fakes`, in order. A run
+    /// past the last one starts the real program.
+    pub(crate) fn script(fakes: impl IntoIterator<Item = Fake>) {
+        SCRIPT.with(|script| *script.borrow_mut() = fakes.into_iter().collect());
+        RAN.with(|ran| ran.borrow_mut().clear());
+    }
+
+    /// The argv of each scripted run on this thread since [`script`].
+    pub(crate) fn ran() -> Vec<Vec<OsString>> {
+        RAN.with(|ran| ran.borrow().clone())
+    }
+
+    /// The next scripted run on this thread, if any, noting its argv.
+    pub(super) fn next_fake(args: &[OsString]) -> Option<Next> {
+        let fake = SCRIPT.with(|script| script.borrow_mut().pop_front())?;
+        RAN.with(|ran| ran.borrow_mut().push(args.to_vec()));
+        let last = args.last().and_then(|arg| arg.to_str()).unwrap_or_default();
+        let out = OsString::from(last.strip_prefix("file:").unwrap_or(last));
+        Some(Next { fake, out })
+    }
 
     /// Runs only [`fake_child`] in this test binary, printing straight to
     /// the pipes.
@@ -506,7 +595,9 @@ mod tests {
     /// - `sleep`: runs until killed;
     /// - `fail`: "boom" on stderr, then exits 3;
     /// - `probe`: [`PROBE_OUTPUT`] on stdout, then exits 0;
-    /// - `big`: 5 MiB on stdout, then exits 0.
+    /// - `big`: 5 MiB on stdout, then exits 0;
+    /// - `write`: writes [`FAKE_TEXT`] to [`FAKE_OUT`], then as `progress`;
+    /// - `error`: [`FAKE_TEXT`] on stderr, then exits 1.
     #[test]
     fn fake_child() {
         let Ok(mode) = std::env::var(FAKE_MODE) else {
@@ -534,6 +625,16 @@ mod tests {
                 // Fails with a broken pipe once the reader gives up.
                 let _ = io::stdout().lock().write_all(&vec![b'x'; 5 << 20]);
                 0
+            }
+            "write" => {
+                let text = std::env::var(FAKE_TEXT).unwrap();
+                std::fs::write(std::env::var_os(FAKE_OUT).unwrap(), text).unwrap();
+                fake_progress()
+            }
+            "error" => {
+                let text = std::env::var(FAKE_TEXT).unwrap();
+                io::stderr().lock().write_all(text.as_bytes()).unwrap();
+                1
             }
             other => panic!("unknown {FAKE_MODE} mode {other:?}"),
         };

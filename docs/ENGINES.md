@@ -73,7 +73,7 @@ Every re-encoded video stream except GIF's is scaled to even dimensions, at leas
 
 Video from an AVI or WMV (ASF) source is never copied: those containers keep only decode times, so copied B-frames would play out of order, and FFmpeg writes that without an error. Their audio follows the rules above.
 
-A copied conversion that FFmpeg rejects (a stream can fit by its codec and still not mux) is retried once, re-encoding everything.
+A copied conversion that FFmpeg rejects (a stream can fit by its codec and still not mux) is retried once, re-encoding everything. Only FFmpeg's own refusal is retried, a failure judged "not readable" or "couldn't write the format" (Errors above): a write failure (disk full, no permission, a read-only drive, the folder gone) is reported at once as "couldn't save", a source FFmpeg can no longer open as "couldn't read", and a cancelled job is never retried. Either would otherwise cost a whole encode, or quietly publish a re-encode where a copy was due.
 
 **Known limits** (later slices): only the first audio track is kept; HDR or 10-bit video comes out washed out in yuv420p without tone mapping; GIFs over 30 s aren't warned about; hardware encoders (Media Foundation, NVENC, AMF, QSV, VideoToolbox) aren't used yet.
 

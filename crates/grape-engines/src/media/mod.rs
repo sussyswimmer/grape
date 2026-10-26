@@ -143,15 +143,19 @@ pub(crate) fn convert(
     let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, progress) {
         Ok(warnings) => warnings,
         Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
-        // A copied stream can fit by its codec and still not mux: one retry
-        // re-encoding everything.
-        Err(_) if args::copy_plan(to, &info).any() => {
+        Err(e) => {
+            let refused = matches!(e, RunError::Exit { .. });
+            let failure = or_cancelled(ffmpeg_failed(&names, e, src));
+            if !(refused && args::copy_plan(to, &info).any() && worth_a_retry(&failure)) {
+                return Err(failure);
+            }
+            // A copied stream can fit by its codec and still not mux: one
+            // retry re-encoding everything.
             let again = args::reencode_passes(&src_abs, to, &info, &out, &palette_path)
                 .map_err(|missing| no_stream(&names, missing, src))?;
             run_passes(ffmpeg, &again, info.duration, ctx, progress)
                 .map_err(|e| or_cancelled(ffmpeg_failed(&names, e, src)))?
         }
-        Err(e) => return Err(or_cancelled(ffmpeg_failed(&names, e, src))),
     };
     drop(palette);
 
@@ -178,6 +182,19 @@ pub(crate) fn convert(
     drop(temp);
     progress(1.0);
     Ok(outcome)
+}
+
+/// Whether a copy that FFmpeg refused with `failure` is worth one retry
+/// re-encoding everything: only for what a re-encode can change, a muxer
+/// that refused a stream (any encode or decode failure). An output that
+/// can't be written (a full disk, a folder gone) or a source that can't be
+/// read would fail the same way after a whole encode, or quietly come out
+/// re-encoded where it should have been copied; a cancel is final.
+fn worth_a_retry(failure: &GrapeError) -> bool {
+    matches!(
+        failure.kind,
+        ErrorKind::EncodeFailed | ErrorKind::DecodeFailed
+    )
 }
 
 /// `path` made absolute against the current folder, without touching the
@@ -404,33 +421,188 @@ fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::ffi::OsString;
+    use std::fs;
+
+    use grape_core::{JobOutput, Operation};
+
     use super::*;
     use crate::output::unique_suffix;
+    use run::tests::{ran, script, Fake};
 
     /// A fresh folder under the system temp folder, removed on drop.
-    #[cfg(unix)]
     struct TestDir(PathBuf);
 
-    #[cfg(unix)]
     impl TestDir {
         fn new() -> TestDir {
             let path = std::env::temp_dir().join(format!("grape-media-unit-{}", unique_suffix()));
-            std::fs::create_dir_all(&path).unwrap();
+            fs::create_dir_all(&path).unwrap();
             TestDir(path)
         }
     }
 
-    #[cfg(unix)]
     impl Drop for TestDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            let _ = fs::remove_dir_all(&self.0);
         }
     }
 
     /// An absolute path to a program that isn't there.
-    #[cfg(unix)]
     fn no_program() -> PathBuf {
         std::env::temp_dir().join(format!("grape-no-sidecar-{}", unique_suffix()))
+    }
+
+    /// Sidecar paths for scripted runs: a run past the script fails to
+    /// start, as a missing sidecar.
+    fn ctx() -> EngineCtx {
+        EngineCtx {
+            sidecars: SidecarPaths {
+                ffmpeg: Some(no_program()),
+                ffprobe: Some(no_program()),
+                heif_enc: None,
+            },
+            ..EngineCtx::default()
+        }
+    }
+
+    /// `ffprobe -of flat` for a file of `format_name` with an H.264 video
+    /// and an audio stream of `audio` (none if empty), 2 s long.
+    fn flat(format_name: &str, video: bool, audio: &str) -> String {
+        let mut text = String::new();
+        let mut index = 0;
+        if video {
+            text.push_str(
+                "streams.stream.0.index=0\n\
+                 streams.stream.0.codec_name=\"h264\"\n\
+                 streams.stream.0.codec_type=\"video\"\n\
+                 streams.stream.0.width=160\n\
+                 streams.stream.0.height=120\n\
+                 streams.stream.0.pix_fmt=\"yuv420p\"\n\
+                 streams.stream.0.disposition.attached_pic=0\n",
+            );
+            index = 1;
+        }
+        if !audio.is_empty() {
+            text.push_str(&format!(
+                "streams.stream.{index}.index={index}\n\
+                 streams.stream.{index}.codec_name=\"{audio}\"\n\
+                 streams.stream.{index}.codec_type=\"audio\"\n\
+                 streams.stream.{index}.sample_rate=\"48000\"\n\
+                 streams.stream.{index}.channels=2\n\
+                 streams.stream.{index}.disposition.attached_pic=0\n"
+            ));
+        }
+        text.push_str(&format!(
+            "format.format_name=\"{format_name}\"\nformat.duration=\"2.000000\"\n"
+        ));
+        text
+    }
+
+    /// An H.264 and AAC Matroska file, which MP4 copies.
+    fn mkv_h264_aac() -> Fake {
+        Fake::Prints(flat("matroska,webm", true, "aac"))
+    }
+
+    /// An H.264 and AAC MP4 file.
+    fn mp4_h264_aac() -> Fake {
+        Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac"))
+    }
+
+    /// True when `pair` appears as two adjacent arguments.
+    fn has(args: &[OsString], pair: [&str; 2]) -> bool {
+        args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+    }
+
+    /// A job converting `name` (the bytes `source`) to `to`, next to it, in
+    /// a fresh folder.
+    struct Case {
+        dir: TestDir,
+        job: Job,
+    }
+
+    impl Case {
+        fn new(name: &str, to: Format) -> Case {
+            let dir = TestDir::new();
+            let src = dir.0.join(name);
+            fs::write(&src, b"source").unwrap();
+            let dest = dir.0.join(format!("converted.{}", to.output_ext()));
+            let job = Job {
+                inputs: vec![src],
+                output: JobOutput::File(dest),
+                op: Operation::convert(to),
+                used_fallback: false,
+            };
+            Case { dir, job }
+        }
+
+        fn run(&self) -> Result<JobOutcome, GrapeError> {
+            crate::run_job(&self.job, &ctx(), &mut |_| {})
+        }
+
+        /// Panics if a temp file was left behind or the source changed.
+        fn assert_clean(&self) {
+            for entry in fs::read_dir(&self.dir.0).unwrap() {
+                let name = entry.unwrap().file_name();
+                assert!(
+                    !name.to_string_lossy().starts_with(".grape-"),
+                    "{name:?} left"
+                );
+            }
+            assert_eq!(fs::read(&self.job.inputs[0]).unwrap(), b"source");
+        }
+    }
+
+    #[test]
+    fn a_copy_that_cant_be_written_fails_without_a_retry() {
+        for stderr in [
+            "[out#0/mp4 @ 0x1] Error writing trailer: No space left on device",
+            "[out#0/mp4 @ 0x1] Error submitting a packet to the muxer: Permission denied",
+            "[out#0/mp4 @ 0x1] Error opening output file:/gone/x.mp4: No such file or directory",
+        ] {
+            let case = Case::new("clip.mkv", Format::Mp4);
+            script([mkv_h264_aac(), Fake::Child("error", stderr.to_string())]);
+            let err = case.run().unwrap_err();
+            assert_eq!(err.kind, ErrorKind::WriteFailed, "{stderr}: {}", err.detail);
+            // The probe and the copy: no re-encode after it.
+            let ran = ran();
+            assert_eq!(ran.len(), 2, "{stderr}");
+            assert!(has(&ran[1], ["-c", "copy"]));
+            assert!(!case.dir.0.join("converted.mp4").exists());
+            case.assert_clean();
+        }
+    }
+
+    #[test]
+    fn a_copy_whose_source_is_gone_fails_without_a_retry() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        let stderr = "[in#0 @ 0x1] Error opening input: No such file or directory";
+        script([mkv_h264_aac(), Fake::Child("error", stderr.to_string())]);
+        let err = case.run().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ReadFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "Grape couldn't read clip.mkv.");
+        assert_eq!(ran().len(), 2);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn a_copy_the_muxer_refuses_is_retried_re_encoding_everything() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        let refused = "[mp4 @ 0x1] track 1: muxing mp3 at 8000hz is not standard\n\
+                       [out#0/mp4 @ 0x1] Could not write header (incorrect codec parameters ?): \
+                       Invalid argument";
+        script([
+            mkv_h264_aac(),
+            Fake::Child("error", refused.to_string()),
+            Fake::Child("write", "re-encoded".to_string()),
+            mp4_h264_aac(),
+        ]);
+        let outcome = case.run().unwrap();
+        assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), b"re-encoded");
+        let ran = ran();
+        assert_eq!(ran.len(), 4);
+        assert!(has(&ran[1], ["-c", "copy"]));
+        assert!(has(&ran[2], ["-c:v", "libx264"]) && has(&ran[2], ["-c:a", "aac"]));
+        case.assert_clean();
     }
 
     /// The kind of error a failed `ffmpeg` run that wrote `stderr` maps to.
@@ -543,7 +715,7 @@ mod tests {
         let out = dir.0.join(".grape-tmp-1.aiff");
         let names = Names::new(&src, &dir.0.join("long.aiff"), Format::Flac, Format::Aiff);
         let ctx = EngineCtx::default();
-        let file = std::fs::File::create(&out).unwrap();
+        let file = fs::File::create(&out).unwrap();
         // Sparse: nothing is written.
         file.set_len(args::AIFF_MAX_LEN + 1).unwrap();
         let err = check_output(&no_program(), &out, Format::Aiff, &names, &ctx, &src).unwrap_err();
