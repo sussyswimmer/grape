@@ -614,7 +614,8 @@ pub(super) mod tests {
     /// - `probe`: [`PROBE_OUTPUT`] on stdout, then exits 0;
     /// - `big`: 5 MiB on stdout, then exits 0;
     /// - `write`: writes [`FAKE_TEXT`] to [`FAKE_OUT`], then as `progress`;
-    /// - `error`: [`FAKE_TEXT`] on stderr, then exits 1;
+    /// - `error`: as `progress`, but then [`FAKE_TEXT`] on stderr and
+    ///   exits 1;
     /// - `hold`: writes its pid to [`FAKE_OUT`] and holds it open (on
     ///   Windows, so nobody else can open or delete it), reports one output
     ///   time, then runs until killed, or for 30 s.
@@ -652,6 +653,7 @@ pub(super) mod tests {
                 fake_progress()
             }
             "error" => {
+                fake_progress();
                 let text = std::env::var(FAKE_TEXT).unwrap();
                 io::stderr().lock().write_all(text.as_bytes()).unwrap();
                 1

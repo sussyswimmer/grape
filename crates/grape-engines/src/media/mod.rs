@@ -51,9 +51,13 @@ use run::RunError;
 /// How long `ffprobe` may take to read a source's headers.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The share of the progress bar the passes fill; the rest is the check and
-/// the publish.
-const PASSES_SHARE: f32 = 0.99;
+/// Where the progress bar is once FFmpeg's passes are done: they fill it
+/// up to here ([`Bar`]).
+const PASSES_SHARE: f32 = 0.98;
+
+/// Where the progress bar is once the output is checked and synced; it
+/// reaches 1.0 only once the output is published.
+const CHECKED: f32 = 0.99;
 
 /// True for every audio and video pair in the matrix: each audio format to
 /// the other seven, each video format to the other video formats, GIF and
@@ -83,6 +87,7 @@ pub(crate) fn convert(
     let names = Names::new(src, dest, from, to);
     let dir = publish::dest_dir(dest, &names)?;
     let cancel = &ctx.cancel;
+    let mut bar = Bar::new(progress);
     let or_cancelled = |e| publish::or_cancelled(cancel, src, e);
     let (Some(ffmpeg), Some(ffprobe)) = (
         ctx.sidecars.ffmpeg.as_deref(),
@@ -156,7 +161,7 @@ pub(crate) fn convert(
     source_is_a_file(&src_abs, src, &names)?;
     let first = args::passes(&src_abs, to, &info, &out, &palette_path)
         .map_err(|missing| no_stream(&names, missing, src))?;
-    let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, progress) {
+    let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, &mut bar) {
         Ok(warnings) => warnings,
         Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
         Err(e) => {
@@ -166,10 +171,10 @@ pub(crate) fn convert(
                 return Err(failure);
             }
             // A copied stream can fit by its codec and still not mux: one
-            // retry re-encoding everything.
+            // retry re-encoding everything, filling what's left of the bar.
             let again = args::reencode_passes(&src_abs, to, &info, &out, &palette_path)
                 .map_err(|missing| no_stream(&names, missing, src))?;
-            run_passes(ffmpeg, &again, info.duration, ctx, progress)
+            run_passes(ffmpeg, &again, info.duration, ctx, &mut bar)
                 .map_err(|e| or_cancelled(ffmpeg_failed(&names, e, src)))?
         }
     };
@@ -190,14 +195,45 @@ pub(crate) fn convert(
         .open(&out)
         .and_then(|file| file.sync_all())
         .map_err(|e| names.write_failed(format!("sync {}: {e}", out.display())))?;
+    bar.to(CHECKED);
 
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
     let outcome = publish::finalize(&temp, job, src, dest, dir, &names)?;
     drop(temp);
-    progress(1.0);
+    bar.published();
     Ok(outcome)
+}
+
+/// The job's progress bar, over `run_job`'s callback: it only ever moves
+/// forward, and stays below 1.0 until the output is published.
+struct Bar<'a> {
+    report: &'a mut dyn FnMut(f32),
+    /// The furthest it has been.
+    shown: f32,
+}
+
+impl<'a> Bar<'a> {
+    fn new(report: &'a mut dyn FnMut(f32)) -> Bar<'a> {
+        Bar { report, shown: 0.0 }
+    }
+
+    /// Moves the bar to `fraction`, at most [`CHECKED`], unless it is
+    /// already there or further.
+    fn to(&mut self, fraction: f32) {
+        let fraction = fraction.min(CHECKED);
+        if fraction > self.shown {
+            self.shown = fraction;
+            (self.report)(fraction);
+        }
+    }
+
+    /// Fills the bar: the output is published.
+    fn published(&mut self) {
+        self.shown = 1.0;
+        (self.report)(1.0);
+    }
 }
 
 /// Whether FFmpeg gets `path` as it is. On Windows FFmpeg rebuilds its argv
@@ -290,18 +326,22 @@ fn probe_source(
     probe::parse(&flat).map_err(|e| names.decode_failed(format!("probe {}: {e}", src.display())))
 }
 
-/// Runs `passes` in order, reporting the job's progress from each pass's
-/// output time against the source's duration (none when it's unknown).
-/// Returns what the last pass wrote to stderr: FFmpeg's warnings, for the
-/// detail of a failed check.
+/// Runs `passes` in order, moving the bar from where it is to
+/// [`PASSES_SHARE`] by each pass's output time against the source's
+/// duration (only at the end of each pass when the duration is unknown),
+/// so a retry fills what's left. The GIF palette pass reports no output
+/// time until it ends. Returns what the last pass wrote to stderr:
+/// FFmpeg's warnings, for the detail of a failed check.
 fn run_passes(
     ffmpeg: &Path,
     passes: &[Pass],
     duration: Option<Duration>,
     ctx: &EngineCtx,
-    progress: &mut dyn FnMut(f32),
+    bar: &mut Bar,
 ) -> Result<String, RunError> {
     let total = duration.filter(|d| !d.is_zero());
+    let start = bar.shown.min(PASSES_SHARE);
+    let span = PASSES_SHARE - start;
     let mut done = 0.0f32;
     let mut warnings = String::new();
     for pass in passes {
@@ -309,12 +349,12 @@ fn run_passes(
         let mut on_time = |time: Duration| {
             if let Some(total) = total {
                 let fraction = (time.as_secs_f32() / total.as_secs_f32()).clamp(0.0, 1.0);
-                progress((done + weight * fraction) * PASSES_SHARE);
+                bar.to(start + span * (done + weight * fraction));
             }
         };
         warnings = run::transcode(ffmpeg, &pass.args, &ctx.cancel, &mut on_time)?.stderr_tail;
-        done += weight;
-        progress(done.min(1.0) * PASSES_SHARE);
+        done = (done + weight).min(1.0);
+        bar.to(start + span * done);
     }
     Ok(warnings)
 }
@@ -592,6 +632,13 @@ mod tests {
             crate::run_job(&self.job, &ctx(), &mut |_| {})
         }
 
+        /// [`Case::run`], also returning every progress value reported.
+        fn run_seeing_progress(&self) -> (Result<JobOutcome, GrapeError>, Vec<f32>) {
+            let mut seen = Vec::new();
+            let result = crate::run_job(&self.job, &ctx(), &mut |f| seen.push(f));
+            (result, seen)
+        }
+
         /// Panics if a temp file was left behind or the source changed.
         fn assert_clean(&self) {
             for entry in fs::read_dir(&self.dir.0).unwrap() {
@@ -731,6 +778,64 @@ mod tests {
         assert_eq!(err.user_message, "Grape couldn't read clip.mkv.");
         assert_eq!(ran().len(), 2);
         case.assert_clean();
+    }
+
+    #[test]
+    fn the_bar_only_moves_forward_and_fills_once_published() {
+        let mut seen = Vec::new();
+        let mut report = |f| seen.push(f);
+        let mut bar = Bar::new(&mut report);
+        bar.to(0.5);
+        bar.to(0.2);
+        bar.to(0.5);
+        bar.to(0.7);
+        bar.to(1.0);
+        bar.to(2.0);
+        bar.published();
+        assert_eq!(seen, [0.5, 0.7, CHECKED, 1.0]);
+    }
+
+    /// Asserts that `seen` only grows, stays at most [`CHECKED`] until its
+    /// last value, and ends at 1.0.
+    fn assert_forward_to_done(seen: &[f32]) {
+        let (last, before) = seen.split_last().unwrap();
+        assert_eq!(*last, 1.0, "{seen:?}");
+        assert!(before.iter().all(|&f| f <= CHECKED), "{seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+    }
+
+    #[test]
+    fn a_retry_moves_the_bar_on_from_where_the_copy_left_it() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        // The copy gets to the end (2 s of 2 s), then the muxer refuses.
+        let refused = "[out#0/mp4 @ 0x1] Error writing trailer: Invalid argument";
+        script([
+            mkv_h264_aac(),
+            Fake::Child("error", refused.to_string()),
+            Fake::Child("write", "re-encoded".to_string()),
+            mp4_h264_aac(),
+        ]);
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        assert_eq!(ran().len(), 4);
+        assert_forward_to_done(&seen);
+        // The copy filled the passes' share; the retry adds nothing below.
+        assert!(seen.contains(&PASSES_SHARE), "{seen:?}");
+    }
+
+    #[test]
+    fn progress_reaches_1_only_once_the_output_is_published() {
+        let case = Case::new("song.wav", Format::Flac);
+        script([
+            Fake::Prints(flat("wav", false, "pcm_s16le")),
+            Fake::Child("write", "flac".to_string()),
+            Fake::Prints(flat("flac", false, "flac")),
+        ]);
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        assert_forward_to_done(&seen);
+        assert_eq!(seen[seen.len() - 2..], [CHECKED, 1.0]);
+        assert!(seen.len() > 3, "{seen:?}");
     }
 
     #[test]

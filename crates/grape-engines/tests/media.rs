@@ -229,7 +229,11 @@ fn every_audio_and_video_pair_converts() {
             count += 1;
             let outcome = match convert_file(&dir, &src, to) {
                 Ok((outcome, seen)) => {
-                    if seen.last() != Some(&1.0) || !seen.windows(2).all(|w| w[0] <= w[1]) {
+                    // Forward only, and 1.0 only once the file is there.
+                    let done = seen.split_last().is_some_and(|(&last, before)| {
+                        last == 1.0 && before.iter().all(|&f| f <= 0.99)
+                    });
+                    if !done || !seen.windows(2).all(|w| w[0] < w[1]) {
                         failures.push(format!("{from:?} to {to:?}: progress {seen:?}"));
                     }
                     outcome
