@@ -389,7 +389,25 @@ pub fn on_overlay_window_event(window: &tauri::Window, event: &tauri::WindowEven
         return;
     }
     if let tauri::WindowEvent::DragDrop(drag) = event {
-        log::warn!("overlay: wry's drop handler saw {drag:?}; Grape's drop target missed a window");
+        log::warn!(
+            "overlay: wry's drop handler saw a drag ({}); Grape's drop target missed a window",
+            drag_kind(drag)
+        );
+    }
+}
+
+/// A wry drop event for the log: its kind and how many paths it carries,
+/// never the paths themselves.
+#[cfg(any(not(target_os = "macos"), test))]
+fn drag_kind(drag: &tauri::DragDropEvent) -> String {
+    use tauri::DragDropEvent;
+
+    match drag {
+        DragDropEvent::Enter { paths, .. } => format!("enter, {} item(s)", paths.len()),
+        DragDropEvent::Over { .. } => "over".to_owned(),
+        DragDropEvent::Drop { paths, .. } => format!("drop, {} item(s)", paths.len()),
+        DragDropEvent::Leave => "leave".to_owned(),
+        _ => "another kind".to_owned(),
     }
 }
 
@@ -461,6 +479,44 @@ fn to_global(frame: Rect, x: f64, y: f64) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missed_drop_is_logged_by_kind_and_count_never_by_path() {
+        use std::path::PathBuf;
+
+        use tauri::DragDropEvent;
+
+        let paths = vec![
+            PathBuf::from(r"C:\Users\someone\Secret Plans\budget.xlsx"),
+            PathBuf::from("/Users/someone/photo.jpg"),
+        ];
+        let position = tauri::PhysicalPosition::new(10.0, 20.0);
+        let cases = [
+            (
+                DragDropEvent::Enter {
+                    paths: paths.clone(),
+                    position,
+                },
+                "enter, 2 item(s)",
+            ),
+            (DragDropEvent::Over { position }, "over"),
+            (
+                DragDropEvent::Drop {
+                    paths: paths.clone(),
+                    position,
+                },
+                "drop, 2 item(s)",
+            ),
+            (DragDropEvent::Leave, "leave"),
+        ];
+        for (drag, kind) in cases {
+            let text = drag_kind(&drag);
+            assert_eq!(text, kind);
+            for leak in ["someone", "Secret", "budget", "photo", "Users", "xlsx"] {
+                assert!(!text.contains(leak), "{text}");
+            }
+        }
+    }
 
     #[test]
     fn drop_positions_are_offset_by_the_overlay_frame() {
