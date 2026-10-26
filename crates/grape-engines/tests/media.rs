@@ -435,6 +435,28 @@ fn audio_depth_channels_and_rate_follow_the_target() {
         Some("48000")
     );
 
+    // libvorbis has no setup above 200 kHz: a 384 kHz source is resampled.
+    let fast = dir.join("fast.wav");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=0.5:sample_rate=384000",
+        "-c:a",
+        "pcm_s24le",
+        fast.to_str().unwrap(),
+    ]);
+    let (outcome, _) = convert_file(&dir, &fast, Format::Ogg).unwrap();
+    let info = probe(&outcome.outputs[0]);
+    assert_eq!(
+        field(&info, "audio", "codec_name").as_deref(),
+        Some("vorbis")
+    );
+    assert_eq!(
+        field(&info, "audio", "sample_rate").as_deref(),
+        Some("192000")
+    );
+
     // A lossy source never becomes a 24-bit file.
     let mp3 = make_source(&dir.path, "song.mp3", Format::Mp3);
     let (outcome, _) = convert_file(&dir, &mp3, Format::Aiff).unwrap();

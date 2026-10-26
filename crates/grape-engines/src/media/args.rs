@@ -19,7 +19,8 @@
 //!   keep 24 bits when the source has more than 16
 //!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
 //!   Opus and Vorbis (OPUS, OGG and WebM's audio) get a channel layout
-//!   they take ([`VORBIS_LAYOUTS`]).
+//!   they take ([`VORBIS_LAYOUTS`]), and Vorbis at most 192 kHz above its
+//!   200 kHz limit.
 //!
 //! Only the mapped streams are written: subtitles, data streams, further
 //! audio tracks and cover art are dropped.
@@ -392,7 +393,13 @@ fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
                 samples,
             ]
         }
-        Format::Ogg => vec!["-c:a", "libvorbis", "-q:a", "6", "-af", VORBIS_LAYOUTS],
+        Format::Ogg => {
+            let mut args = vec!["-c:a", "libvorbis", "-q:a", "6", "-af", VORBIS_LAYOUTS];
+            if audio.sample_rate > VORBIS_MAX_RATE {
+                args.extend(["-ar", "192000"]);
+            }
+            args
+        }
         Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k", "-af", VORBIS_LAYOUTS],
         Format::Wma => {
             let mut args = WMA.to_vec();
@@ -402,6 +409,11 @@ fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
         _ => Vec::new(),
     }
 }
+
+/// The highest sample rate libvorbis encodes: its setups end at 200 kHz
+/// (`lib/modes/setup_X.h`, 1.3.7), and FFmpeg doesn't resample for it, so
+/// a faster source (DXD's 352.8 kHz, 384 kHz) goes to 192 kHz.
+const VORBIS_MAX_RATE: u32 = 200_000;
 
 /// `wmav2` takes at most 2 channels and 48 kHz, and FFmpeg doesn't convert
 /// for it on its own: it fails instead.
@@ -1296,6 +1308,26 @@ mod tests {
         ] {
             let args = &passes_for(&surround, to).unwrap()[0].args;
             assert!(!args.iter().any(|arg| arg == "-af"), "{to:?}");
+        }
+    }
+
+    #[test]
+    fn vorbis_is_held_to_its_sample_rates() {
+        for (rate, capped) in [
+            (44_100, false),
+            (192_000, false),
+            (200_000, false),
+            (200_001, true),
+            (352_800, true),
+            (384_000, true),
+        ] {
+            let source = probe(None, Some(audio("pcm_s24le", rate, 2, 24)));
+            let args = &passes_for(&source, Format::Ogg).unwrap()[0].args;
+            assert_eq!(has(args, ["-ar", "192000"]), capped, "{rate}");
+            assert_eq!(args.iter().any(|arg| arg == "-ar"), capped, "{rate}");
+            // Opus resamples on its own (to 48 kHz).
+            let args = &passes_for(&source, Format::Opus).unwrap()[0].args;
+            assert!(!args.iter().any(|arg| arg == "-ar"), "{rate}");
         }
     }
 

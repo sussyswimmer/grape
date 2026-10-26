@@ -66,7 +66,7 @@ Every video target except GIF scales to even dimensions, at least 2×2: `scale='
 | m4a | — | `aac -b:a 256k` | `-f ipod -movflags +faststart` |
 | wav | — | `pcm_s16le`, or `pcm_s24le` from a lossless source over 16 bits | `-rf64 auto` for files over 4 GiB |
 | flac | — | `flac -compression_level 8`, `-sample_fmt s16` or `s32` (24-bit) by the source's depth | a lossy source counts as 16-bit |
-| ogg | — | `libvorbis -q:a 6`, the layout filter as for opus | libvorbis would write other layouts with the wrong speaker positions |
+| ogg | — | `libvorbis -q:a 6`, the layout filter as for opus, `-ar 192000` above 200 kHz | libvorbis would write other layouts with the wrong speaker positions, and has no setup above 200 kHz (DXD's 352.8 kHz, 384 kHz) |
 | opus | — | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | libopus takes only these Vorbis-order layouts and doesn't convert on its own, so FFmpeg remixes to the nearest: 5.1(side) (AC-3, E-AC-3, DTS, 6-channel FLAC) → 5.1, 2.1 → stereo, 4.0 → 5.0, 5.0(side) → 5.0, more than 8 channels → at most 7.1 |
 | aiff | — | `pcm_s16be` or `pcm_s24be`, as wav | |
 | wma | — | `wmav2 -b:a 192k`, with wmv's limits | |
