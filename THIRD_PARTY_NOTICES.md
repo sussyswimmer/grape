@@ -5,9 +5,9 @@ Grape is free and open source, under the MIT License in `LICENSE`. It's built wi
 - **313 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
-- **libarchive**, whose `bsdtar` program Grape will read RAR archives with. It will ship as a separate program, with its license texts in the `licenses/libarchive` folder. Today's installer and DMG don't carry it yet.
+- **libarchive**, whose `bsdtar` program Grape reads RAR archives with. It ships as a separate program, with its license texts in the `licenses/libarchive` folder.
 - **grape-heif**, the program Grape converts HEIC images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
-- **FFmpeg and ffprobe**, the helper programs that builds of Grape with audio and video conversion ship next to it as separate files, and the libraries built into them. Those builds carry their full license texts in a `licenses` folder.
+- **FFmpeg and ffprobe**, the programs Grape converts audio and video with, and the libraries built into them. They ship as separate programs under the GPL, with their license texts and where their source is in the `licenses/ffmpeg` folder.
 - **Not here yet:** the other helper programs Grape will ship as separate files. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -141,7 +141,7 @@ This software is based in part on the work of the Independent JPEG Group.
 
 ## libarchive
 
-Grape will read RAR archives with `bsdtar` from [libarchive](https://www.libarchive.org/) 3.8.10, built by Grape's CI from the release tarball with six small patches (three upstream fixes and three of Grape's own). It will ship as a separate program: `bsdtar.exe` next to `Grape.exe` on Windows, and `Grape.app/Contents/MacOS/bsdtar` on macOS. Its license texts will ship with it in the `licenses/libarchive` folder, where `SOURCE.md` says exactly how it was built. Today's installer and DMG don't carry it yet.
+Grape reads RAR archives with `bsdtar` from [libarchive](https://www.libarchive.org/) 3.8.10, built by Grape's CI from the release tarball with six small patches (three upstream fixes and three of Grape's own). It ships as a separate program: `bsdtar.exe` next to `Grape.exe` on Windows, and `Grape.app/Contents/MacOS/bsdtar` on macOS. Its license texts ship with it in the `licenses/libarchive` folder, where `SOURCE.md` says exactly how it was built.
 
 | Component | License | Text in `licenses/libarchive` |
 |---|---|---|
@@ -159,9 +159,9 @@ This section is written by hand: check it again when `scripts/bsdtar/sources.jso
 
 ## FFmpeg and ffprobe
 
-Builds of Grape that include audio and video conversion ship FFmpeg, which converts the audio and video, and ffprobe, which reads media details. They aren't compiled into Grape: they're separate programs next to it, and Grape starts them when it needs them. Grape builds them itself from FFmpeg 9.0.2 with only the parts it uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
+Grape ships FFmpeg, which converts the audio and video, and ffprobe, which reads media details. They aren't compiled into Grape: they're separate programs next to it (`ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` on Windows, `ffmpeg` and `ffprobe` in `Grape.app/Contents/MacOS` on macOS), and Grape starts them when it needs them. Grape's CI builds them from FFmpeg 9.0.2 with only the parts Grape uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
 
-Those builds carry their license texts in a `licenses/ffmpeg` folder next to Grape: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the same GitHub Release as those builds.
+Their license texts ship with them in the `licenses/ffmpeg` folder: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the GitHub Release that ships the installer and in the CI run that built them.
 
 MP3 encoding uses LAME: https://lame.sourceforge.io/
 
