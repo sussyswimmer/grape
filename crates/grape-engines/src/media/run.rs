@@ -979,6 +979,16 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn the_sidecar_never_inherits_ffreport() {
+        // A user's FFREPORT would make FFmpeg write a report file, with the
+        // command line and the source's path, wherever it points.
+        let command = command(&std::env::current_exe().unwrap(), &[]).unwrap();
+        assert!(command
+            .get_envs()
+            .any(|(key, value)| key == "FFREPORT" && value.is_none()));
+    }
+
+    #[test]
     fn relative_programs_are_refused_before_spawning() {
         let relative: &[&str] = if cfg!(windows) {
             &["ffmpeg", r"bin\ffmpeg.exe", r"\ffmpeg.exe", "C:ffmpeg.exe"]
