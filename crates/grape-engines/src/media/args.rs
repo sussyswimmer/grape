@@ -413,6 +413,25 @@ fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
     }
 }
 
+/// The longest AIFF file: 8 bytes of `FORM` header, then a size that is
+/// 32 bits. FFmpeg writes a longer one without an error, with every size
+/// in it wrapped, so players see a short or broken file.
+pub(crate) const AIFF_MAX_LEN: u64 = u32::MAX as u64 + 8;
+
+/// How many bytes of samples an AIFF of `probe`'s audio would hold, from
+/// its duration, rate, channels and depth ([`audio_encoder`] writes 16 or
+/// 24 bits). `None` when the duration or the audio is unknown.
+pub(crate) fn aiff_bytes(probe: &Probe) -> Option<u64> {
+    let audio = probe.audio.as_ref()?;
+    let bytes_per_sample = if audio.depth > 16 { 3.0 } else { 2.0 };
+    let bytes = probe.duration?.as_secs_f64()
+        * f64::from(audio.sample_rate)
+        * f64::from(audio.channels)
+        * bytes_per_sample;
+    // `as` saturates.
+    Some(bytes as u64)
+}
+
 /// The highest sample rate libvorbis encodes: its setups end at 200 kHz
 /// (`lib/modes/setup_X.h`, 1.3.7), and FFmpeg doesn't resample for it, so
 /// a faster source (DXD's 352.8 kHz, 384 kHz) goes to 192 kHz.
@@ -1339,6 +1358,34 @@ mod tests {
             let args = &passes_for(&source, Format::Opus).unwrap()[0].args;
             assert!(!args.iter().any(|arg| arg == "-ar"), "{rate}");
         }
+    }
+
+    #[test]
+    fn aiff_bytes_count_every_sample() {
+        let long = |secs: u64, rate: u32, depth: u32| Probe {
+            duration: Some(Duration::from_secs(secs)),
+            ..probe(None, Some(audio("flac", rate, 2, depth)))
+        };
+        // 24-bit stereo 48 kHz fills 4 GiB in 4 h 8 min 33 s; 16-bit CD
+        // audio in 6 h 45 min 49 s.
+        let max = AIFF_MAX_LEN;
+        assert!(aiff_bytes(&long(4 * 3600 + 8 * 60, 48_000, 24)).unwrap() < max);
+        assert!(aiff_bytes(&long(4 * 3600 + 9 * 60, 48_000, 24)).unwrap() > max);
+        assert!(aiff_bytes(&long(6 * 3600 + 45 * 60, 44_100, 16)).unwrap() < max);
+        assert!(aiff_bytes(&long(6 * 3600 + 46 * 60, 44_100, 16)).unwrap() > max);
+        assert_eq!(aiff_bytes(&long(1, 48_000, 24)), Some(288_000));
+        // A lossy source is written as 16 bits.
+        assert_eq!(aiff_bytes(&long(1, 44_100, 16)), Some(176_400));
+        let unknown = Probe {
+            duration: None,
+            ..long(1, 48_000, 24)
+        };
+        assert_eq!(aiff_bytes(&unknown), None);
+        assert_eq!(
+            aiff_bytes(&probe(Some(video("h264", "yuv420p", 0)), None)),
+            None
+        );
+        assert_eq!(AIFF_MAX_LEN, 4 * 1024 * 1024 * 1024 + 7);
     }
 
     #[test]

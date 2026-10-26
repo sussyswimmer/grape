@@ -665,6 +665,42 @@ fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
 }
 
 #[test]
+fn a_source_too_long_for_aiff_is_refused_before_writing() {
+    let dir = TestDir::new("media-aiff-limit");
+    // A one-second FLAC whose STREAMINFO says it holds 2^36 - 1 samples
+    // (16 days at 48 kHz): ffprobe takes the duration from there.
+    let src = dir.join("long.flac");
+    ffmpeg(&[
+        SINE[0],
+        SINE[1],
+        "-i",
+        "sine=duration=1:sample_rate=48000",
+        "-ac",
+        "2",
+        "-c:a",
+        "flac",
+        src.to_str().unwrap(),
+    ]);
+    let mut bytes = fs::read(&src).unwrap();
+    // "fLaC", then STREAMINFO's block header (type 0).
+    assert_eq!(&bytes[..4], b"fLaC");
+    assert_eq!(bytes[4] & 0x7f, 0);
+    // STREAMINFO's bytes 10..18 end with the 36-bit total sample count.
+    let field = &mut bytes[18..26];
+    let packed = u64::from_be_bytes(field.try_into().unwrap()) | ((1 << 36) - 1);
+    field.copy_from_slice(&packed.to_be_bytes());
+    fs::write(&src, &bytes).unwrap();
+    let duration: f64 = probe(&src)["format.duration"].parse().unwrap();
+    assert!(duration > 1_000_000.0, "{duration}");
+
+    let names_before = dir.names();
+    let err = convert_file(&dir, &src, Format::Aiff).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "long.flac is too long to save as AIFF.");
+    assert_eq!(dir.names(), names_before);
+}
+
+#[test]
 fn a_source_without_the_needed_stream_is_refused_before_writing() {
     let dir = TestDir::new("media-missing-stream");
     let silent = dir.join("silent.mp4");

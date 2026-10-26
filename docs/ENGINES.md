@@ -68,7 +68,7 @@ Every re-encoded video stream except GIF's is scaled to even dimensions, at leas
 | flac | — | `flac -compression_level 8`, `-sample_fmt s16` or `s32` (24-bit) by the source's depth | a lossy source counts as 16-bit |
 | ogg | — | `libvorbis -q:a 6`, the layout filter as for opus, `-ar 192000` above 200 kHz | libvorbis would write other layouts with the wrong speaker positions, and has no setup above 200 kHz (DXD's 352.8 kHz, 384 kHz) |
 | opus | — | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | libopus takes only these Vorbis-order layouts and doesn't convert on its own, so FFmpeg remixes to the nearest: 5.1(side) (AC-3, E-AC-3, DTS, 6-channel FLAC) → 5.1, 2.1 → stereo, 4.0 → 5.0, 5.0(side) → 5.0, more than 8 channels → at most 7.1 |
-| aiff | — | `pcm_s16be` or `pcm_s24be`, as wav | |
+| aiff | — | `pcm_s16be` or `pcm_s24be`, as wav | AIFF's sizes are 32-bit and FFmpeg wraps them past 4 GiB, so a source whose duration says the samples won't fit (24-bit stereo 48 kHz past about 4 h 8 min) is refused before anything is written ("… is too long to save as AIFF."), and an output past the limit fails its check |
 | wma | — | `wmav2 -b:a 192k`, with wmv's limits | |
 
 Video from an AVI or WMV (ASF) source is never copied: those containers keep only decode times, so copied B-frames would play out of order, and FFmpeg writes that without an error. Their audio follows the rules above.

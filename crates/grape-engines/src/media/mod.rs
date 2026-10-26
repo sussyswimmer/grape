@@ -108,6 +108,12 @@ pub(crate) fn convert(
     if let Some(missing) = missing_stream(to, &info) {
         return Err(no_stream(&names, missing, src));
     }
+    if to == Format::Aiff {
+        if let Some(bytes) = args::aiff_bytes(&info).filter(|&b| b > args::AIFF_MAX_LEN) {
+            let detail = format!("{bytes} bytes of samples from {}", src.display());
+            return Err(too_long_for_aiff(&names, detail));
+        }
+    }
 
     publish::ensure_dir(job, ctx, dir, &names)?;
     // From here on, the temp files remove themselves on every return path.
@@ -260,6 +266,11 @@ fn check_output(
     if len == 0 {
         return Err(wrote("FFmpeg wrote nothing".to_string()));
     }
+    // The duration checked before converting can be wrong.
+    if to == Format::Aiff && len > args::AIFF_MAX_LEN {
+        let detail = format!("check {}: {len} bytes", out.display());
+        return Err(too_long_for_aiff(names, detail));
+    }
     let flat =
         run::probe(ffprobe, &probe::probe_args(out), &ctx.cancel, PROBE_TIMEOUT).map_err(|e| {
             match e {
@@ -302,6 +313,15 @@ fn no_stream(names: &Names, missing: Missing, src: &Path) -> GrapeError {
         ErrorKind::DecodeFailed,
         message,
         format!("no {what} stream in {}", src.display()),
+    )
+}
+
+/// The error for a source too long for AIFF's 32-bit sizes.
+fn too_long_for_aiff(names: &Names, detail: String) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::EncodeFailed,
+        format!("{} is too long to save as {}.", names.source, names.to),
+        detail,
     )
 }
 
@@ -353,5 +373,62 @@ fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
         RunError::TimedOut | RunError::Io(_) => {
             names.encode_failed(format!("convert {}: {e}", src.display()))
         }
+    }
+}
+
+// Sparse files, which the size test needs, are cheap on Unix only.
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::fs;
+
+    use super::*;
+    use crate::output::unique_suffix;
+
+    /// A fresh folder under the system temp folder, removed on drop.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> TestDir {
+            let path = std::env::temp_dir().join(format!("grape-media-unit-{}", unique_suffix()));
+            fs::create_dir_all(&path).unwrap();
+            TestDir(path)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// An absolute path to a program that isn't there.
+    fn no_program() -> PathBuf {
+        std::env::temp_dir().join(format!("grape-no-sidecar-{}", unique_suffix()))
+    }
+
+    #[test]
+    fn an_aiff_past_4_gib_fails_its_check() {
+        let dir = TestDir::new();
+        let src = dir.0.join("long.flac");
+        let out = dir.0.join(".grape-tmp-1.aiff");
+        let names = Names::new(&src, &dir.0.join("long.aiff"), Format::Flac, Format::Aiff);
+        let ctx = EngineCtx::default();
+        let file = fs::File::create(&out).unwrap();
+        // Sparse: nothing is written.
+        file.set_len(args::AIFF_MAX_LEN + 1).unwrap();
+        let err = check_output(&no_program(), &out, Format::Aiff, &names, &ctx, &src).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed);
+        assert_eq!(err.user_message, "long.flac is too long to save as AIFF.");
+        // At the limit the check goes on to ffprobe, missing here.
+        file.set_len(args::AIFF_MAX_LEN).unwrap();
+        let err = check_output(&no_program(), &out, Format::Aiff, &names, &ctx, &src).unwrap_err();
+        assert_eq!(err.user_message, "Grape couldn't write a AIFF file.");
+        // Other formats have no such limit.
+        let names = Names::new(&src, &dir.0.join("long.wav"), Format::Flac, Format::Wav);
+        file.set_len(args::AIFF_MAX_LEN + 1).unwrap();
+        let err = check_output(&no_program(), &out, Format::Wav, &names, &ctx, &src).unwrap_err();
+        assert_eq!(err.user_message, "Grape couldn't write a WAV file.");
     }
 }
