@@ -686,7 +686,8 @@ STATEMENTS = (
     ("ffmpeg", "originally derives (via libplacebo/mpv) from glumpy",
      ("glumpy.txt",), "Glumpy's license (BSD-3-Clause), the \"(new) BSD License\" this names."),
     ("ffmpeg", "the math underlying each filter function was written from scratch",
-     (), "FFmpeg says it wrote this code itself; only the math comes from these sources."),
+     (), "FFmpeg says it wrote this math from scratch, taking only some algorithms from these "
+         "sources; the code from Glumpy is the entry before this one."),
     ("x264", "unlike the rest of x264, this file is available under an isc license",
      (), "it explains the ISC notice at the top of the same file, which is in Part 1."),
     ("lame", "fft and fht routines",
@@ -748,14 +749,15 @@ Part 1 has the notices. Part 2 has the other things those files' comments
 say about licenses: code from the public domain or from another project, or
 a license named without its text. Each of them has one of two lines:
 
-  "Upstream license:" when the file says its code came from another project
-  under a license whose text it doesn't carry (dsd2pcm, Aaron D. Gifford's
-  SHA-2 code, Glumpy, libwebp and dav1d). It names that project's license
-  text, in this folder; SOURCE.md says where each one came from.
+  "Upstream license:" when the code, its copyright lines or the license
+  file it points to come from another project, under a license whose text
+  the file doesn't carry (dsd2pcm, Aaron D. Gifford's SHA-2 code, Glumpy,
+  libwebp and dav1d). It names that project's license text, in this
+  folder; SOURCE.md says where each one came from.
 
   "Needs nothing more:" and why: public domain code, GPL or LGPL code that
-  the programs' own license (LICENSE.txt) covers, or a note about a notice
-  that's in Part 1.
+  the programs' own license (LICENSE.txt) covers, code FFmpeg says it wrote
+  itself, or a note about a notice that's in Part 1.
 
 notices.py doesn't pass a statement without one of those lines, so each has
 been read and decided.
