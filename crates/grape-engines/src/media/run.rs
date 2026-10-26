@@ -7,8 +7,9 @@
 //!   stdout and stderr while the calling thread watches the child. Only the
 //!   last [`TAIL_BYTES`] of stderr are kept, for the log.
 //! - **Cancel and timeouts** are checked at least every [`POLL`]. The child
-//!   is killed and then waited for: on Windows its temp output can't be
-//!   deleted while the process still holds it open.
+//!   is killed and then waited for, on every way out of a run, a panic in
+//!   the caller's callback included ([`Reaper`]): on Windows its temp
+//!   output can't be deleted while the process still holds it open.
 //! - **Two at a time:** [`acquire`] holds an FFmpeg job back until one of
 //!   the [`MAX_FFMPEG_JOBS`] slots is free (`docs/ARCHITECTURE.md`).
 
@@ -187,9 +188,9 @@ fn probe_command(
 
 /// Starts `command` and sees it through: `read_stdout` runs on its own
 /// thread and sends messages that `on_message` handles on this one; stderr
-/// is drained into a [`Tail`]. An error from `on_message`, a cancel or the
-/// deadline kills the child. Returns once the child is gone and both
-/// readers have finished.
+/// is drained into a [`Tail`]. An error or a panic from `on_message`, a
+/// cancel or the deadline kills the child ([`Reaper`]). Returns once the
+/// child is gone and both readers have finished.
 fn supervise<M: Send>(
     mut command: Command,
     cancel: &CancelToken,
@@ -200,15 +201,22 @@ fn supervise<M: Send>(
     if cancel.is_cancelled() {
         return Err(RunError::Cancelled);
     }
-    let mut child = command.spawn().map_err(RunError::Spawn)?;
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        stop(&mut child);
+    let mut child = Reaper {
+        child: command.spawn().map_err(RunError::Spawn)?,
+        exited: false,
+    };
+    let (Some(stdout), Some(stderr)) = (child.child.stdout.take(), child.child.stderr.take())
+    else {
         return Err(RunError::Io(io::Error::other(
             "the sidecar's output isn't piped",
         )));
     };
     let (sender, messages) = mpsc::channel();
     thread::scope(|scope| {
+        // Owned by this closure, so even a panic drops it, stopping the
+        // child, before the scope waits for the readers, which only end
+        // once the child's pipes close.
+        let mut child = child;
         let readers = thread::Builder::new()
             .name("grape-sidecar-stdout".to_string())
             .spawn_scoped(scope, move || read_stdout(stdout, sender))
@@ -218,20 +226,9 @@ fn supervise<M: Send>(
                     .spawn_scoped(scope, move || drain_tail(stderr))
                     .map(|err| (out, err))
             });
-        let (out, err) = match readers {
-            Ok(readers) => readers,
-            Err(e) => {
-                stop(&mut child);
-                return Err(RunError::Io(e));
-            }
-        };
-        let status = match watch(&mut child, cancel, deadline, &messages, on_message) {
-            Ok(status) => status,
-            Err(e) => {
-                stop(&mut child);
-                return Err(e);
-            }
-        };
+        let (out, err) = readers.map_err(RunError::Io)?;
+        let status = watch(&mut child.child, cancel, deadline, &messages, on_message)?;
+        child.exited = true;
         // The child has exited, so its pipes are closed and both readers end.
         let _ = out.join();
         let stderr_tail = err.join().map(Tail::render).unwrap_or_default();
@@ -282,6 +279,23 @@ fn watch<M>(
         if stdout_closed {
             // `recv_timeout` returns at once from now on.
             thread::sleep(EXIT_POLL);
+        }
+    }
+}
+
+/// A running child, killed and waited for ([`stop`]) when dropped unless
+/// it has exited: on every way out of [`supervise`], a panic included, so
+/// it never outlives the run.
+struct Reaper {
+    child: Child,
+    /// Set once `try_wait` saw the child exit, which also reaped it.
+    exited: bool,
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        if !self.exited {
+            stop(&mut self.child);
         }
     }
 }
@@ -600,7 +614,10 @@ pub(super) mod tests {
     /// - `probe`: [`PROBE_OUTPUT`] on stdout, then exits 0;
     /// - `big`: 5 MiB on stdout, then exits 0;
     /// - `write`: writes [`FAKE_TEXT`] to [`FAKE_OUT`], then as `progress`;
-    /// - `error`: [`FAKE_TEXT`] on stderr, then exits 1.
+    /// - `error`: [`FAKE_TEXT`] on stderr, then exits 1;
+    /// - `hold`: writes its pid to [`FAKE_OUT`] and holds it open (on
+    ///   Windows, so nobody else can open or delete it), reports one output
+    ///   time, then runs until killed, or for 30 s.
     #[test]
     fn fake_child() {
         let Ok(mode) = std::env::var(FAKE_MODE) else {
@@ -638,6 +655,21 @@ pub(super) mod tests {
                 let text = std::env::var(FAKE_TEXT).unwrap();
                 io::stderr().lock().write_all(text.as_bytes()).unwrap();
                 1
+            }
+            "hold" => {
+                let mut options = std::fs::OpenOptions::new();
+                options.write(true).create(true).truncate(true);
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::OpenOptionsExt;
+                    options.share_mode(0);
+                }
+                let mut held = options.open(std::env::var_os(FAKE_OUT).unwrap()).unwrap();
+                write!(held, "{}", std::process::id()).unwrap();
+                print_flushed(b"\nout_time_us=1\n");
+                // Ends by itself, so a test that fails can't leave it for good.
+                thread::sleep(Duration::from_secs(30));
+                0
             }
             other => panic!("unknown {FAKE_MODE} mode {other:?}"),
         };
@@ -681,6 +713,62 @@ pub(super) mod tests {
         let mut fake = command(&exe, &args).unwrap();
         fake.env(FAKE_MODE, mode);
         fake
+    }
+
+    /// A [`fake`] child in `hold` mode that holds `file`.
+    fn holding(file: &Path) -> Command {
+        let mut child = fake("hold");
+        child.env(FAKE_OUT, file);
+        child
+    }
+
+    /// A file for a `hold` child, in a fresh folder that drops with it.
+    struct Held {
+        dir: PathBuf,
+        file: PathBuf,
+    }
+
+    impl Held {
+        fn new() -> Held {
+            let dir =
+                std::env::temp_dir().join(format!("grape-held-{}", crate::output::unique_suffix()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let file = dir.join("held");
+            Held { dir, file }
+        }
+
+        /// Asserts that the child that held the file is gone: the file can
+        /// be read and deleted (Windows refuses both while the child's
+        /// handle is open) and, on Unix, its pid isn't even a zombie.
+        fn assert_gone(&self) {
+            let pid = std::fs::read_to_string(&self.file).unwrap();
+            std::fs::remove_file(&self.file).unwrap();
+            #[cfg(target_os = "linux")]
+            assert!(
+                !Path::new(&format!("/proc/{pid}")).exists(),
+                "child {pid} is still in the process table"
+            );
+            #[cfg(all(unix, not(target_os = "linux")))]
+            {
+                let status = Command::new("/bin/ps")
+                    .args(["-p", pid.trim()])
+                    .stdout(Stdio::null())
+                    .status()
+                    .unwrap();
+                assert!(
+                    !status.success(),
+                    "child {pid} is still in the process table"
+                );
+            }
+            #[cfg(windows)]
+            let _ = pid;
+        }
+    }
+
+    impl Drop for Held {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     /// Cancels `token` if the test still runs after 10 s, so a hang fails
@@ -736,6 +824,26 @@ pub(super) mod tests {
         // both readers saw their pipe close: the child is gone.
         let cancelled = canceller.join().unwrap();
         assert!(returned.duration_since(cancelled) < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_panic_while_handling_progress_still_stops_the_child() {
+        let held = Held::new();
+        let child = holding(&held.file);
+        let (returned, unwound) = mpsc::channel();
+        let run = thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                transcode_command(child, &CancelToken::new(), &mut |_| {
+                    panic!("the progress callback failed")
+                })
+            }));
+            returned.send(result.is_err()).unwrap();
+        });
+        // Without the kill, the run waits on the child's pipes for 30 s.
+        let panicked = unwound.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(panicked, "the panic was swallowed");
+        run.join().unwrap();
+        held.assert_gone();
     }
 
     #[test]
