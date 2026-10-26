@@ -603,13 +603,13 @@ pub(crate) fn prefix_at(src: &Path, reading: &[&str], level: &str) -> Vec<OsStri
 
 /// The end of every argv: progress as `key=value` lines on stdout, the
 /// muxer, and the output as the last argument.
-fn finish(mut args: Vec<OsString>, muxer: &str, out: &Path) -> Vec<OsString> {
+pub(crate) fn finish(mut args: Vec<OsString>, muxer: &str, out: &Path) -> Vec<OsString> {
     push(&mut args, &["-progress", "pipe:1", "-f", muxer]);
     args.push(file_url(out));
     args
 }
 
-fn push(args: &mut Vec<OsString>, list: &[&str]) {
+pub(crate) fn push(args: &mut Vec<OsString>, list: &[&str]) {
     args.extend(list.iter().map(OsString::from));
 }
 

@@ -260,8 +260,9 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); audio and video
 /// among each other (104) with `ffmpeg` and `ffprobe`. Tools: Extract
 /// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
-/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`. Pure: it
-/// doesn't check that the sidecar files are there; [`run_job`] fails
+/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`; with
+/// `ffmpeg` and `ffprobe` (D26), Remove Audio on MP4, MOV and MKV. Pure:
+/// it doesn't check that the sidecar files are there; [`run_job`] fails
 /// cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
@@ -314,7 +315,10 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
     if tool == ToolKey::ExtractArchive && archive::extracts(from, sidecars.bsdtar.is_some()) {
         Some(Engine::Archive)
     } else if pdf::runs_tool(tool, from) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
+        // PDF Remove Metadata stays the PDF engine's.
         Some(Engine::Pdf)
+    } else if media::tools::runs_tool(tool, from) && media::has_sidecars(sidecars) {
+        Some(Engine::Media)
     } else {
         None
     }
@@ -378,6 +382,19 @@ pub fn run_job(
             let rar = archive::rar::RarPaths::from_sidecars(sidecars);
             archive::extract(job, src, dest, from, ctx, progress, rar.as_ref())
                 .map(archive::ArchiveOutcome::into_outcome)
+        }
+        // The tools on one file into one file (D26). A PDF never gets here:
+        // `tool_engine` picks the PDF engine for it first.
+        (Some(from), [src], JobOutput::File(dest), Operation::Tool { tool, params })
+            if tool_engine(tool, from, sidecars) == Some(Engine::Media) =>
+        {
+            // The planned name says what the output is: the source's
+            // format, or FLAC for Compress on a WAV.
+            let to = format_of(dest).unwrap_or(from);
+            if to != from {
+                return Err(not_yet_supported(job, Some(from)));
+            }
+            media::tools::run(job, src, dest, from, to, tool, &params, ctx, progress)
         }
         // Split PDF and Remove Metadata (one input), Merge PDFs (all of
         // them): every input must be a PDF. The engine checks the shape.

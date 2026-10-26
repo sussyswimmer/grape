@@ -12,6 +12,8 @@
 //! - [`tags`] is the tools' second `ffprobe` (D26): which tags a source
 //!   has, by key, for what Remove Metadata reports and what the other
 //!   tools set again.
+//! - [`tools`] runs the tools (D26) on one file each, with the same
+//!   steps as [`convert`].
 //!
 //! **Offline and contained.** Both tools run with `-protocol_whitelist
 //! file` and `-format_whitelist` [`args::DEMUXERS`], and every path goes in
@@ -23,7 +25,8 @@
 //! **Only what the user sees.** A conversion keeps the first video stream
 //! that isn't cover art and the first audio stream. Subtitles, data
 //! streams, further audio tracks and cover art are dropped, and MP4 and
-//! MOV get no timecode track.
+//! MOV get no timecode track. The tools keep every track but what they
+//! remove ([`tools`]).
 //!
 //! The source is only ever an input; the output is always the temp path the
 //! caller passes, never the planned final name.
@@ -36,8 +39,8 @@
 pub(crate) mod args;
 pub(crate) mod probe;
 pub(crate) mod run;
-#[allow(dead_code)] // The tools (D26) run it from their first commit on.
 pub(crate) mod tags;
+pub(crate) mod tools;
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
@@ -390,7 +393,13 @@ fn probe_source(
         &ctx.cancel,
         PROBE_TIMEOUT,
     )
-    .map_err(|e| match e {
+    .map_err(|e| probe_failed(names, e, src))?;
+    probe::parse(&flat).map_err(|e| names.decode_failed(format!("probe {}: {e}", src.display())))
+}
+
+/// Maps a failed `ffprobe` run on the source to the job's error.
+fn probe_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
+    match e {
         RunError::Cancelled => crate::cancelled(src),
         RunError::NotAbsolute(_) | RunError::Spawn(_) => {
             missing_sidecar(format!("probe {}: {e}", src.display()))
@@ -406,8 +415,7 @@ fn probe_source(
         RunError::TimedOut | RunError::Io(_) | RunError::TooMuch { .. } => {
             names.decode_failed(format!("probe {}: {e}", src.display()))
         }
-    })?;
-    probe::parse(&flat).map_err(|e| names.decode_failed(format!("probe {}: {e}", src.display())))
+    }
 }
 
 /// Runs `passes` in order, moving the bar from where it is to `end`
@@ -611,10 +619,10 @@ mod tests {
     use run::tests::{one_at_a_time, ran, script, slots_held, Fake};
 
     /// A fresh folder under the system temp folder, removed on drop.
-    struct TestDir(PathBuf);
+    pub(super) struct TestDir(pub(super) PathBuf);
 
     impl TestDir {
-        fn new() -> TestDir {
+        pub(super) fn new() -> TestDir {
             let path = std::env::temp_dir().join(format!("grape-media-unit-{}", unique_suffix()));
             fs::create_dir_all(&path).unwrap();
             TestDir(path)
@@ -634,7 +642,7 @@ mod tests {
 
     /// Sidecar paths for scripted runs: a run past the script fails to
     /// start, as a missing sidecar.
-    fn ctx() -> EngineCtx {
+    pub(super) fn ctx() -> EngineCtx {
         EngineCtx {
             sidecars: SidecarPaths {
                 ffmpeg: Some(no_program()),
@@ -647,7 +655,7 @@ mod tests {
 
     /// `ffprobe -of flat` for a file of `format_name` with an H.264 video
     /// and an audio stream of `audio` (none if empty), 2 s long.
-    fn flat(format_name: &str, video: bool, audio: &str) -> String {
+    pub(super) fn flat(format_name: &str, video: bool, audio: &str) -> String {
         let mut text = String::new();
         let mut index = 0;
         if video {
@@ -698,7 +706,7 @@ mod tests {
     }
 
     /// True when `pair` appears as two adjacent arguments.
-    fn has(args: &[OsString], pair: [&str; 2]) -> bool {
+    pub(super) fn has(args: &[OsString], pair: [&str; 2]) -> bool {
         args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
     }
 
@@ -1057,7 +1065,7 @@ mod tests {
 
     /// Asserts that `seen` only grows, stays at most [`CHECKED`] until its
     /// last value, and ends at 1.0.
-    fn assert_forward_to_done(seen: &[f32]) {
+    pub(super) fn assert_forward_to_done(seen: &[f32]) {
         let (last, before) = seen.split_last().unwrap();
         assert_eq!(*last, 1.0, "{seen:?}");
         assert!(before.iter().all(|&f| f <= CHECKED), "{seen:?}");
@@ -1065,7 +1073,7 @@ mod tests {
     }
 
     /// Asserts that `seen` is `want`, to f32 rounding.
-    fn assert_progress(seen: &[f32], want: &[f32]) {
+    pub(super) fn assert_progress(seen: &[f32], want: &[f32]) {
         let same =
             seen.len() == want.len() && seen.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5);
         assert!(same, "seen {seen:?}, want {want:?}");

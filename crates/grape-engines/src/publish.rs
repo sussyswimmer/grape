@@ -194,6 +194,13 @@ impl Names {
         let message = format!("Grape couldn't save into {}.", self.folder);
         GrapeError::new(ErrorKind::WriteFailed, message, detail)
     }
+
+    /// A tool that would change nothing worth a new file (D26), saying
+    /// why: "`source` `why`", such as "clip.mp4 has no sound to remove.".
+    pub(crate) fn no_change(&self, why: &str, detail: String) -> GrapeError {
+        let message = format!("{} {why}", self.source);
+        GrapeError::new(ErrorKind::NoChange, message, detail)
+    }
 }
 
 /// "image" for images and GIF, "video" for the other video formats, "file"

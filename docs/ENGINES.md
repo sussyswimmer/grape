@@ -90,7 +90,7 @@ A copied conversion that FFmpeg rejects (a stream can fit by its codec and still
 
 ## Tools (D26)
 
-Lane B's five v1 tools (DECISIONS D26). They land one tool and format at a time: until a pair's commit is in, `run_job` refuses it and the app says "… is coming" (D35). They run FFmpeg as "How Grape runs FFmpeg" says (the whitelists, `file:` URLs, a temp file, the output check, the no-clobber publish, at most two jobs at once), with these differences:
+Lane B's five v1 tools (DECISIONS D26). They land one tool and format at a time: until a pair's commit is in, `run_job` refuses it and the app says "… is coming" (D35). In so far: Remove Audio on MP4, MOV and MKV. They run FFmpeg as "How Grape runs FFmpeg" says (the whitelists, `file:` URLs, a temp file, the output check, the no-clobber publish, at most two jobs at once), with these differences:
 
 - **Every track stays** except what the tool removes. Streams are mapped by their index (`-map 0:<i>`, never `0:V` or `0:a`), so subtitles, further audio tracks, chapters, cover art and MKV attachments come along. Conversions keep only what the user sees (above).
 - **Only Remove Metadata removes metadata.** The other tools keep tags, `creation_time` (FFmpeg's CLI drops it from every remux, `ffmpeg_mux_init.c:3034`, so it's set again from the source), iPhone `com.apple.quicktime.*` keys (`-movflags +use_metadata_tags` with the brands blanked, on MP4 and MOV only, never M4A), cover art, chapters, ICC and EXIF/XMP/IPTC. Normalize and Channels remove only ReplayGain, R128 and `iTunNORM`, which their change makes wrong.

@@ -8,6 +8,9 @@
 #![allow(clippy::unwrap_used)]
 
 mod common;
+// The tools (D26), in their own file.
+#[path = "media/tools.rs"]
+mod tools;
 
 use std::collections::HashMap;
 use std::fs;

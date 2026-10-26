@@ -139,10 +139,10 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
     for pair in &runnable {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
-    // Over every tool and format, exactly these seven run, each offered on
-    // the wheel for one item or for several.
+    // Over every tool and format, exactly these run, each offered on the
+    // wheel for one item or for several.
     let tools = runnable_tools(&all);
-    assert_eq!(tools.len(), 7, "{tools:?}");
+    assert_eq!(tools.len(), 7 + MEDIA_TOOLS.len(), "{tools:?}");
     for pair in [
         (ToolKey::ExtractArchive, Format::Zip),
         (ToolKey::ExtractArchive, Format::Tar),
@@ -151,7 +151,10 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         (ToolKey::SplitPdf, Format::Pdf),
         (ToolKey::MergePdf, Format::Pdf),
         (ToolKey::RemoveMetadata, Format::Pdf),
-    ] {
+    ]
+    .into_iter()
+    .chain(MEDIA_TOOLS)
+    {
         assert!(tools.contains(&pair), "{pair:?}");
     }
     for &(tool, format) in &tools {
@@ -195,6 +198,45 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         .iter()
         .all(|&(from, _)| from != Format::Rar));
     assert!(!runnable_tools(&no_bsdtar).contains(&(ToolKey::ExtractArchive, Format::Rar)));
+}
+
+/// The tools that run with `ffmpeg` and `ffprobe` (D26), so far.
+const MEDIA_TOOLS: [(ToolKey, Format); 3] = [
+    (ToolKey::MuteVideo, Format::Mp4),
+    (ToolKey::MuteVideo, Format::Mov),
+    (ToolKey::MuteVideo, Format::Mkv),
+];
+
+#[test]
+fn media_tools_run_only_with_both_ffmpeg_sidecars() {
+    let all = all_sidecars();
+    for (without, name) in [
+        (
+            SidecarPaths {
+                ffmpeg: None,
+                ..all.clone()
+            },
+            "ffmpeg",
+        ),
+        (
+            SidecarPaths {
+                ffprobe: None,
+                ..all.clone()
+            },
+            "ffprobe",
+        ),
+    ] {
+        let tools = runnable_tools(&without);
+        assert_eq!(tools.len(), 7, "without {name}: {tools:?}");
+        for pair in MEDIA_TOOLS {
+            assert!(!tools.contains(&pair), "{pair:?} without {name}");
+        }
+    }
+    // Nothing but the archive tools runs with no sidecar at all.
+    assert_eq!(runnable_tools(&SidecarPaths::default()).len(), 3);
+    for (tool, format) in MEDIA_TOOLS {
+        assert!(!supports(&Operation::tool(tool), Some(format)));
+    }
 }
 
 /// Sidecar paths that are set but point at nothing.
