@@ -25,6 +25,10 @@
 //!   binary at login.
 //! - Until the welcome card is dismissed, setup opens Settings at launch
 //!   to show it ([`SettingsState::welcome_at_launch`]).
+//! - The tool panels start from the last Compress preset and Normalize
+//!   target that ran (`tools.compress`, `tools.normalize_lufs`), saved when
+//!   a panel's Run is accepted ([`remember`]). The Settings window doesn't
+//!   show them.
 //!
 //! The model (loading, the key swap rule, the view, what to store) is pure
 //! and tested here without Tauri.
@@ -35,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use grape_core::{OutputLocation, Platform, Settings};
+use grape_core::{CompressPreset, OutputLocation, Platform, Settings};
 use grape_platform::file_actions;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -44,6 +48,7 @@ use tauri_plugin_autostart::AutoLaunchManager;
 use tauri_plugin_store::{Store, StoreExt};
 
 use crate::controller::{ControllerConfig, Input, Key, KeyMap, THIS_OS};
+use crate::panel::model::{lufs_ok, ToolChoice, ToolMemory};
 use crate::wheel::WheelInputs;
 
 /// The store's file, in the app data folder (the store plugin's default).
@@ -67,6 +72,8 @@ const HAPTICS: &str = "haptics";
 const LAUNCH_AT_LOGIN: &str = "launch_at_login";
 const TERMINAL_APP: &str = "terminal_app";
 const ONBOARDING_DONE: &str = "onboarding.done";
+const TOOLS_COMPRESS: &str = "tools.compress";
+const TOOLS_NORMALIZE_LUFS: &str = "tools.normalize_lufs";
 /// `output.location` for "next to the original".
 const NEXT_TO_SOURCE: &str = "next_to_source";
 
@@ -99,6 +106,9 @@ pub struct AppSettings {
     pub terminal_app: TerminalId,
     /// `true` once the user dismissed the welcome card with "Got it".
     pub onboarding_done: bool,
+    /// What the tool panels start from: the last Compress preset and
+    /// Normalize target that ran.
+    pub tool_memory: ToolMemory,
 }
 
 impl AppSettings {
@@ -113,6 +123,7 @@ impl AppSettings {
             launch_at_login: None,
             terminal_app: default_terminal(platform),
             onboarding_done: false,
+            tool_memory: ToolMemory::DEFAULT,
         }
     }
 }
@@ -375,6 +386,8 @@ pub fn load(
         parse_terminal(value, platform)
     });
     let onboarding_done = read(&stored, &mut report, ONBOARDING_DONE, parse_bool);
+    let compress = read(&stored, &mut report, TOOLS_COMPRESS, parse_compress);
+    let normalize_lufs = read(&stored, &mut report, TOOLS_NORMALIZE_LUFS, parse_lufs);
     let settings = AppSettings {
         keys,
         output: output.unwrap_or(defaults.output),
@@ -384,6 +397,10 @@ pub fn load(
         launch_at_login,
         terminal_app: terminal_app.unwrap_or(defaults.terminal_app),
         onboarding_done: onboarding_done.unwrap_or(defaults.onboarding_done),
+        tool_memory: ToolMemory {
+            compress: compress.unwrap_or(defaults.tool_memory.compress),
+            normalize_lufs: normalize_lufs.unwrap_or(defaults.tool_memory.normalize_lufs),
+        },
     };
     (settings, report)
 }
@@ -433,6 +450,34 @@ fn parse_terminal(value: &Value, platform: Platform) -> Result<TerminalId, &'sta
         .and_then(TerminalId::from_store_id)
         .ok_or("isn't a terminal app Grape knows")?;
     set_terminal(terminal, platform).map_err(|_| "names an app this OS doesn't offer")
+}
+
+/// `tools.compress`'s value for `preset`: `CompressPreset`'s serde name.
+const fn compress_id(preset: CompressPreset) -> &'static str {
+    match preset {
+        CompressPreset::Small => "small",
+        CompressPreset::Balanced => "balanced",
+        CompressPreset::High => "high",
+    }
+}
+
+fn parse_compress(value: &Value) -> Result<CompressPreset, &'static str> {
+    [
+        CompressPreset::Small,
+        CompressPreset::Balanced,
+        CompressPreset::High,
+    ]
+    .into_iter()
+    .find(|&preset| value.as_str() == Some(compress_id(preset)))
+    .ok_or("isn't small, balanced or high")
+}
+
+fn parse_lufs(value: &Value) -> Result<i8, &'static str> {
+    value
+        .as_i64()
+        .filter(|&lufs| lufs_ok(lufs))
+        .and_then(|lufs| i8::try_from(lufs).ok())
+        .ok_or("isn't a whole number from -24 to -10")
 }
 
 fn parse_output(value: &Value) -> Result<OutputLocation, &'static str> {
@@ -504,7 +549,25 @@ pub fn store_changes(old: &AppSettings, new: &AppSettings) -> Vec<(&'static str,
     if old.onboarding_done != new.onboarding_done {
         changes.push((ONBOARDING_DONE, Some(Value::Bool(new.onboarding_done))));
     }
+    let (was, now) = (old.tool_memory, new.tool_memory);
+    if was.compress != now.compress {
+        changes.push((TOOLS_COMPRESS, Some(Value::from(compress_id(now.compress)))));
+    }
+    if was.normalize_lufs != now.normalize_lufs {
+        changes.push((TOOLS_NORMALIZE_LUFS, Some(Value::from(now.normalize_lufs))));
+    }
     changes
+}
+
+/// `memory` with `choice` applied.
+const fn remembered(memory: ToolMemory, choice: ToolChoice) -> ToolMemory {
+    match choice {
+        ToolChoice::Compress(compress) => ToolMemory { compress, ..memory },
+        ToolChoice::NormalizeLufs(normalize_lufs) => ToolMemory {
+            normalize_lufs,
+            ..memory
+        },
+    }
 }
 
 /// What planning follows: the output location and the fallback folder
@@ -1453,6 +1516,37 @@ pub fn planning_settings(app: &AppHandle) -> Settings {
     }
 }
 
+/// What the tool panels start from, or the defaults if the settings aren't
+/// loaded (they always are once setup ran).
+pub fn tool_memory(app: &AppHandle) -> ToolMemory {
+    match app.try_state::<SettingsState>() {
+        Some(state) => state.lock().tool_memory,
+        None => {
+            log::warn!("settings: not loaded; the tool panels start from the defaults");
+            ToolMemory::DEFAULT
+        }
+    }
+}
+
+/// Remembers a panel's choice after its Run was accepted: it applies at
+/// once (the next panel starts from it) and is saved at once. A failed save
+/// is logged by the save and never reaches the page.
+pub fn remember(app: &AppHandle, choice: ToolChoice) {
+    let Some(state) = app.try_state::<SettingsState>() else {
+        log::warn!("settings: not loaded; a tool panel's choice isn't remembered");
+        return;
+    };
+    let mut settings = state.lock();
+    let new = AppSettings {
+        tool_memory: remembered(settings.tool_memory, choice),
+        ..settings.clone()
+    };
+    let changes = store_changes(&settings, &new);
+    *settings = new;
+    // Logged there; the panel already closed and its job runs anyway.
+    let _ = state.save(&changes);
+}
+
 /// The app the Terminal action opens: the user's choice, copied out of
 /// the settings, or this OS's default if they aren't loaded (they always
 /// are once setup ran).
@@ -1513,7 +1607,14 @@ mod tests {
     #[test]
     fn the_windows_view_matches_the_fixture() {
         // The defaults: Windows Terminal, and the welcome card not dismissed.
-        let settings = AppSettings::defaults(Platform::Windows);
+        // The tool panels' memory isn't in the view.
+        let settings = AppSettings {
+            tool_memory: ToolMemory {
+                compress: CompressPreset::Small,
+                normalize_lufs: -23,
+            },
+            ..AppSettings::defaults(Platform::Windows)
+        };
         let default_fallback = Path::new(r"C:\Users\max\Downloads\Grape");
         let view = view(
             &settings,
@@ -1550,6 +1651,10 @@ mod tests {
             launch_at_login: Some(false),
             terminal_app: TerminalId::ITerm2,
             onboarding_done: true,
+            tool_memory: ToolMemory {
+                compress: CompressPreset::High,
+                normalize_lufs: -14,
+            },
         };
         let default_fallback = Path::new("/Users/max/Downloads/Grape");
         let view = view(&settings, Platform::MacOs, default_fallback, None, note);
@@ -1612,7 +1717,9 @@ mod tests {
                     HAPTICS,
                     LAUNCH_AT_LOGIN,
                     TERMINAL_APP,
-                    ONBOARDING_DONE
+                    ONBOARDING_DONE,
+                    TOOLS_COMPRESS,
+                    TOOLS_NORMALIZE_LUFS
                 ]
             );
         }
@@ -1631,6 +1738,8 @@ mod tests {
             (LAUNCH_AT_LOGIN, json!(false)),
             (TERMINAL_APP, json!("iterm2")),
             (ONBOARDING_DONE, json!(true)),
+            (TOOLS_COMPRESS, json!("small")),
+            (TOOLS_NORMALIZE_LUFS, json!(-23)),
             // Not this slice's: ignored, and never rewritten.
             ("features.v2", json!(true)),
         ]);
@@ -1646,6 +1755,10 @@ mod tests {
                 launch_at_login: Some(false),
                 terminal_app: TerminalId::ITerm2,
                 onboarding_done: true,
+                tool_memory: ToolMemory {
+                    compress: CompressPreset::Small,
+                    normalize_lufs: -23,
+                },
             }
         );
         assert_eq!(report, LoadReport::default());
@@ -2249,6 +2362,10 @@ mod tests {
                 launch_at_login: Some(true),
                 terminal_app: offered_terminals(platform)[1],
                 onboarding_done: true,
+                tool_memory: ToolMemory {
+                    compress: CompressPreset::High,
+                    normalize_lufs: -24,
+                },
             };
             let mut store: HashMap<&'static str, Value> = HashMap::new();
             for (key, value) in store_changes(&old, &new) {
@@ -2589,5 +2706,127 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         assert!(!usable_folder(&file));
         std::fs::remove_file(&file).unwrap();
+    }
+
+    #[test]
+    fn the_tool_memory_loads_both_keys() {
+        for (preset, id) in [
+            (CompressPreset::Small, "small"),
+            (CompressPreset::Balanced, "balanced"),
+            (CompressPreset::High, "high"),
+        ] {
+            // The stored ids are grape-core's serde names.
+            assert_eq!(serde_json::to_value(preset).unwrap(), json!(id));
+            assert_eq!(compress_id(preset), id);
+            for lufs in [-24, -16, -14, -10] {
+                let map = HashMap::from([
+                    (TOOLS_COMPRESS, json!(id)),
+                    (TOOLS_NORMALIZE_LUFS, json!(lufs)),
+                ]);
+                let (settings, report) = from_map(map, Platform::Windows);
+                assert_eq!(
+                    settings.tool_memory,
+                    ToolMemory {
+                        compress: preset,
+                        normalize_lufs: lufs,
+                    }
+                );
+                assert!(report.warnings.is_empty(), "{report:?}");
+            }
+        }
+        assert_eq!(
+            AppSettings::defaults(Platform::MacOs).tool_memory,
+            ToolMemory::DEFAULT
+        );
+    }
+
+    #[test]
+    fn a_bad_tool_memory_value_falls_back_without_repeating_it() {
+        for value in [json!("medium"), json!("Small"), json!(2), json!(null)] {
+            let warning = falls_back(TOOLS_COMPRESS, value, Platform::Windows);
+            assert_eq!(
+                warning,
+                "tools.compress isn't small, balanced or high; using the default"
+            );
+        }
+        for value in [
+            json!(-9),
+            json!(-25),
+            json!(-16.5),
+            json!(-16.0),
+            json!("-16"),
+            json!(true),
+            json!(200),
+        ] {
+            let warning = falls_back(TOOLS_NORMALIZE_LUFS, value, Platform::MacOs);
+            assert_eq!(
+                warning,
+                "tools.normalize_lufs isn't a whole number from -24 to -10; using the default"
+            );
+        }
+    }
+
+    #[test]
+    fn each_tool_choice_stores_exactly_its_key() {
+        let old = AppSettings::defaults(Platform::Windows);
+        let compress = AppSettings {
+            tool_memory: remembered(old.tool_memory, ToolChoice::Compress(CompressPreset::Small)),
+            ..old.clone()
+        };
+        assert_eq!(
+            store_changes(&old, &compress),
+            [(TOOLS_COMPRESS, Some(json!("small")))]
+        );
+        assert_eq!(compress.tool_memory.normalize_lufs, -16);
+        let normalize = AppSettings {
+            tool_memory: remembered(old.tool_memory, ToolChoice::NormalizeLufs(-14)),
+            ..old.clone()
+        };
+        assert_eq!(
+            store_changes(&old, &normalize),
+            [(TOOLS_NORMALIZE_LUFS, Some(json!(-14)))]
+        );
+        assert_eq!(normalize.tool_memory.compress, CompressPreset::Balanced);
+        // The same choice again: nothing to store.
+        let again = AppSettings {
+            tool_memory: remembered(
+                compress.tool_memory,
+                ToolChoice::Compress(CompressPreset::Small),
+            ),
+            ..compress.clone()
+        };
+        assert!(store_changes(&compress, &again).is_empty());
+        // What's stored loads back.
+        let stored: HashMap<&'static str, Value> = store_changes(&old, &normalize)
+            .into_iter()
+            .filter_map(|(key, value)| Some((key, value?)))
+            .collect();
+        assert_eq!(
+            from_map(stored, Platform::Windows).0.tool_memory,
+            normalize.tool_memory
+        );
+    }
+
+    #[test]
+    fn the_view_has_no_tools_key() {
+        let settings = AppSettings {
+            tool_memory: ToolMemory {
+                compress: CompressPreset::High,
+                normalize_lufs: -10,
+            },
+            ..AppSettings::defaults(Platform::Windows)
+        };
+        let view = json_of(&view(
+            &settings,
+            Platform::Windows,
+            Path::new(r"C:\Users\max\Downloads\Grape"),
+            None,
+            None,
+        ));
+        let keys: Vec<&String> = view.as_object().unwrap().keys().collect();
+        assert!(
+            keys.iter().all(|key| !key.to_lowercase().contains("tool")),
+            "{keys:?}"
+        );
     }
 }

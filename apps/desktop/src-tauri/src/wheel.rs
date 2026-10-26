@@ -11,7 +11,8 @@
 //!   applies the [`Effect`]s: overlay frame and visibility, the
 //!   `wheel://open`, `wheel://highlight` and `wheel://close` events
 //!   ([`crate::events`]), and run requests: file actions in
-//!   [`crate::actions`], conversions and tools in [`crate::jobs`].
+//!   [`crate::actions`], a v1 panel tool's panel in [`crate::panel`], and
+//!   conversions and the other tools in [`crate::jobs`].
 //! - The overlay calls `wheel_painted` once a wheel is on screen, for the
 //!   latency log.
 //! - Settings reach the controller as [`Input::Configure`] (keys, sounds)
@@ -35,6 +36,7 @@ use tauri::{PhysicalPosition, PhysicalSize};
 use crate::actions;
 use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
 use crate::jobs;
+use crate::panel::{self, model::Route};
 use crate::ui_windows::OVERLAY;
 
 /// Inputs buffered for the controller thread.
@@ -240,8 +242,9 @@ fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) {
     }
 }
 
-/// Runs a drop: file actions in [`actions`], conversions and tools in
-/// [`jobs`].
+/// Runs a drop: file actions in [`actions`], a v1 panel tool this build
+/// can run opens its panel ([`panel`]), and conversions and the other
+/// tools go to [`jobs`]. The wheel is done either way.
 fn run(app: &AppHandle, request: &RunRequest) {
     log::info!(
         "wheel {}: run {:?} on {} item(s)",
@@ -253,7 +256,12 @@ fn run(app: &AppHandle, request: &RunRequest) {
         WheelEntry::Action(action) => {
             actions::run(app, action, &request.items, request.anchor, request.display)
         }
-        entry => jobs::submit(app, entry, &request.items, request.anchor, request.display),
+        entry => match panel::route_for(app, entry, &request.items) {
+            Route::Panel(tool) => panel::open(app, tool, request),
+            Route::Direct => {
+                jobs::submit(app, entry, &request.items, request.anchor, request.display)
+            }
+        },
     }
 }
 
@@ -290,10 +298,34 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
         log::error!("could not show the overlay: {err}");
         return;
     }
+    #[cfg(target_os = "windows")]
+    raise_overlay(app, overlay);
     log::info!(
         "overlay shown in {:.1} ms",
         began.elapsed().as_secs_f64() * 1000.0
     );
+}
+
+/// Lifts the overlay to the top of the topmost band, on the main thread
+/// after the show (FIFO), so an open tool panel or the float shelf, both
+/// topmost too, never covers the wheel. Every show: one `SetWindowPos`.
+#[cfg(target_os = "windows")]
+fn raise_overlay(app: &AppHandle, overlay: WebviewWindow) {
+    let queued = app.run_on_main_thread(move || {
+        let raised = overlay
+            .hwnd()
+            .map_err(|err| err.to_string())
+            .and_then(|hwnd| {
+                grape_platform::windows::raise_topmost(hwnd.0 as isize)
+                    .map_err(|err| err.to_string())
+            });
+        if let Err(err) = raised {
+            log::error!("could not raise the overlay over the topmost windows: {err}");
+        }
+    });
+    if let Err(err) = queued {
+        log::error!("could not raise the overlay: no main thread: {err}");
+    }
 }
 
 /// Frames the overlay on the monitor (in points) and orders it to the

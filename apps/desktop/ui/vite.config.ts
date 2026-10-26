@@ -19,6 +19,7 @@ export default defineConfig({
         settings: resolve(import.meta.dirname, "settings.html"),
         toast: resolve(import.meta.dirname, "toast.html"),
         float: resolve(import.meta.dirname, "float.html"),
+        panel: resolve(import.meta.dirname, "panel.html"),
       },
     },
   },

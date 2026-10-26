@@ -3,9 +3,12 @@
  * renderers, the settings page and the float shelf, so their tests run in
  * Node without a new dependency. It models elements, attributes, classes,
  * inline style, children, text, listeners (with bubbling, `target`,
- * `preventDefault` and `stopPropagation`), focus, pointer capture, and a
+ * `preventDefault` and `stopPropagation`), focus, pointer capture, a
  * form control's `value` and `checked` (plain fields: a test sets them,
- * then dispatches `change`); nothing else. Test code only.
+ * then dispatches `change`), and plain `disabled`, `tabIndex`, `scrollTop`
+ * and `hidden` fields (no reflection to attributes, no clamping); and the
+ * document's `body`, for "nothing is focused" checks. Nothing else. Test
+ * code only.
  */
 
 export class FakeClassList {
@@ -74,6 +77,10 @@ export class FakeElement {
   parent: FakeElement | null = null;
   value = "";
   checked = false;
+  disabled = false;
+  tabIndex = -1;
+  scrollTop = 0;
+  hidden = false;
   /** Pointer ids captured with `setPointerCapture` and not yet released. */
   readonly captures = new Set<number>();
   private text = "";
@@ -204,6 +211,7 @@ export class FakeElement {
 export class FakeDocument {
   readonly defaultView = null;
   activeElement: FakeElement | null = null;
+  readonly body: FakeElement = new FakeElement(this, "http://www.w3.org/1999/xhtml", "body");
 
   createElementNS(namespaceURI: string, name: string): FakeElement {
     return new FakeElement(this, namespaceURI, name);

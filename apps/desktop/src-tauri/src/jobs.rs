@@ -2,14 +2,17 @@
 //! (`docs/design/m1-drag-wheel.md` §F.5) and tells the user how it went in
 //! the toast.
 //!
-//! - A conversion this build can't run gets an info toast at once, and
-//!   nothing is read or written.
+//! - A drop this build can't run gets an info toast at once, and nothing
+//!   is read or written. [`check_runnable`] is the one check, for this
+//!   path and for the tool panels' route (`crate::panel`), so wiring an
+//!   engine changes only it.
 //! - Otherwise, on a thread of its own: build the selection
 //!   (`grape_engines::build_selection`, which reads the disk), plan it
 //!   (`grape_core::plan`), show "Making …", run each job with
 //!   `grape_engines::run_job`, and finish with done, partial or error.
 //!   Clicking the finished toast reveals the first output.
-//! - Tools arrive in a later build.
+//! - Tools arrive in a later build. A tool's panel hands its choices over
+//!   through [`submit_op`], with the items in the panel's order.
 //! - Where outputs go and the fallback folder come from Settings
 //!   ([`crate::settings`]), read when the drop is planned. The sidecars
 //!   come from [`crate::sidecars`], found once at startup.
@@ -198,9 +201,18 @@ impl Report {
     }
 }
 
+/// Why this build can't run a drop, as the info toast says it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotRunnable {
+    /// The toast's main line.
+    pub title: String,
+    /// Its second line, if any.
+    pub detail: Option<String>,
+}
+
 /// Runs a drop on `entry` (a conversion or a tool) for `items`, with the
-/// toast near the wheel at `anchor` on `display`. Returns at once; the
-/// jobs run on their own thread.
+/// toast near the wheel at `anchor` on `display`. Tools get their default
+/// params. Returns at once; the jobs run on their own thread.
 pub fn submit(
     app: &AppHandle,
     entry: WheelEntry,
@@ -212,8 +224,23 @@ pub fn submit(
         log::warn!("jobs: {entry:?} isn't a job; file actions run elsewhere");
         return;
     };
-    if let Some(report) = not_runnable(&op, items) {
-        log::info!("jobs: {op:?} not in this build: {}", report.title);
+    submit_op(app, op, items, anchor, display);
+}
+
+/// Runs `op` (a tool with its panel's params, or a conversion) on `items`
+/// in this order: the panel path, and the rest of [`submit`]. A drop this
+/// build can't run gets the info toast at once. Returns at once; the jobs
+/// run on their own thread.
+pub fn submit_op(
+    app: &AppHandle,
+    op: Operation,
+    items: &[SelectionItem],
+    anchor: (i32, i32),
+    display: DisplayBounds,
+) {
+    if let Err(why) = check_runnable(&op, items) {
+        log::info!("jobs: {op:?} not in this build: {}", why.title);
+        let report = Report::new(ToastTone::Info, why.title, why.detail);
         show(
             app,
             app.state::<Toaster>().next_id(),
@@ -242,24 +269,27 @@ pub fn submit(
     }
 }
 
-/// The info toast for a drop this build can't run, or `None` when it can.
-/// Every item must be supported, so a mixed drop never half-runs.
-fn not_runnable(op: &Operation, items: &[SelectionItem]) -> Option<Report> {
+/// The one runnability check, for the direct path ([`submit`],
+/// [`submit_op`]) and the panel route (`panel::route_for`): `Ok` when this
+/// build can run `op` on every item, or what the info toast says. Every
+/// item must be supported, so a mixed drop never half-runs. Wiring an
+/// engine (archives, PDF, lane B's media) changes only this function.
+pub fn check_runnable(op: &Operation, items: &[SelectionItem]) -> Result<(), NotRunnable> {
     match op {
-        Operation::Tool { .. } => Some(Report::new(
-            ToastTone::Info,
-            "Tools arrive in a later build.",
-            None,
-        )),
+        Operation::Tool { .. } => Err(NotRunnable {
+            title: "Tools arrive in a later build.".to_owned(),
+            detail: None,
+        }),
         Operation::Convert { to } => {
-            let item = items.iter().find(|item| !supports(op, item.format()))?;
+            let Some(item) = items.iter().find(|item| !supports(op, item.format())) else {
+                return Ok(());
+            };
             let from = item.format().map_or("This file", Format::display_name);
-            Some(Report::new(
-                ToastTone::Info,
-                "Not in this build yet",
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
                 // One line: the detail row is cut with an ellipsis.
-                Some(format!("{from} to {} is coming.", to.display_name())),
-            ))
+                detail: Some(format!("{from} to {} is coming.", to.display_name())),
+            })
         }
     }
 }
@@ -510,14 +540,16 @@ mod tests {
     fn raster_pairs_run_and_the_rest_say_they_are_coming() {
         let to_jpg = Operation::Convert { to: Format::Jpg };
         let png = [SelectionItem::file("/a/photo.png")];
-        assert_eq!(not_runnable(&to_jpg, &png), None);
+        assert_eq!(check_runnable(&to_jpg, &png), Ok(()));
 
         let to_heic = Operation::Convert { to: Format::Heic };
-        let report = not_runnable(&to_heic, &png).unwrap();
-        assert_eq!(report.tone, ToastTone::Info);
-        assert_eq!(report.title, "Not in this build yet");
-        assert_eq!(report.detail.as_deref(), Some("PNG to HEIC is coming."));
-        assert_eq!(report.reveal, None);
+        assert_eq!(
+            check_runnable(&to_heic, &png),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("PNG to HEIC is coming.".to_owned()),
+            })
+        );
     }
 
     #[test]
@@ -526,19 +558,28 @@ mod tests {
         let mixed = [
             SelectionItem::file("/a/one.jpg"),
             SelectionItem::file("/a/two.heic"),
+            SelectionItem::file("/a/three.avif"),
         ];
-        let report = not_runnable(&to_png, &mixed).unwrap();
-        assert_eq!(report.detail.as_deref(), Some("HEIC to PNG is coming."));
+        let why = check_runnable(&to_png, &mixed).unwrap_err();
+        // The first unsupported item names the toast.
+        assert_eq!(why.detail.as_deref(), Some("HEIC to PNG is coming."));
     }
 
     #[test]
     fn tools_wait_for_a_later_build() {
-        let tool = Operation::Tool {
-            tool: ToolKey::Compress,
-            params: ToolParams::default(),
-        };
-        let report = not_runnable(&tool, &[SelectionItem::file("/a/photo.png")]).unwrap();
-        assert_eq!(report.title, "Tools arrive in a later build.");
+        for tool in [
+            ToolKey::Compress,
+            ToolKey::MergePdf,
+            ToolKey::RemoveMetadata,
+        ] {
+            let op = Operation::Tool {
+                tool,
+                params: ToolParams::default(),
+            };
+            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.png")]).unwrap_err();
+            assert_eq!(why.title, "Tools arrive in a later build.");
+            assert_eq!(why.detail, None);
+        }
     }
 
     #[test]

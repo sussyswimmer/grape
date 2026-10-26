@@ -6,8 +6,10 @@
 import {
   type FloatView,
   isFloatView,
+  isPanelOpen,
   isToastShowPayload,
   isWheelOpenPayload,
+  type PanelOpen,
   type ToastShowPayload,
   type WheelOpenPayload,
 } from "../shared/events";
@@ -51,6 +53,15 @@ export function floatFixture(name: string): FloatView {
   const value = fixtureJson(name);
   if (!isFloatView(value)) {
     throw new Error(`${name} is not a float://view payload`);
+  }
+  return value;
+}
+
+/** A `panel://open` fixture, guarded. */
+export function panelOpenFixture(name: string): PanelOpen {
+  const value = fixtureJson(name);
+  if (!isPanelOpen(value)) {
+    throw new Error(`${name} is not a panel://open payload`);
   }
   return value;
 }

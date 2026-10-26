@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "panel",
+  "description": "A tool's panel listens for panel://open and panel://close, asks once on load for the open request (panel_current), and answers by seq and item ids, never paths: panel_run with the chosen order and options, or panel_cancel. Rust keeps the paths, checks every run and starts the job.",
+  "windows": ["panel"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-panel-current", "allow-panel-run", "allow-panel-cancel"]
+}

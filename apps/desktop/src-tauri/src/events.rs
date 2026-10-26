@@ -1,12 +1,14 @@
-//! What Rust sends the overlay, toast and shelf windows: the event contract
-//! in `docs/design/m1-drag-wheel.md` §C, plus the float shelf's
-//! `float://view` and `float://drag-ended`. The UI mirrors these types in
+//! What Rust sends the overlay, toast, shelf and panel windows: the event
+//! contract in `docs/design/m1-drag-wheel.md` §C, the float shelf's
+//! `float://view` and `float://drag-ended`, and the tool panel's
+//! `panel://open` and `panel://close`, plus what the panel sends back in
+//! `panel_run` ([`PanelRun`]). The UI mirrors these types in
 //! `ui/src/shared/events.ts`, and both sides test against the same golden
 //! JSON in `ui/src/shared/fixtures/`.
 
 use grape_core::{wheel_layout, EmptyState, Geometry, Platform, Point, Segment, WheelContent};
-use grape_core::{WheelEntry, WheelMode, GEOMETRY};
-use serde::Serialize;
+use grape_core::{Channels, CompressPreset, WheelEntry, WheelMode, GEOMETRY};
+use serde::{Deserialize, Serialize};
 
 use crate::controller::KeyMap;
 
@@ -246,6 +248,114 @@ pub enum FloatOutcome {
     Nothing,
     /// The drag couldn't start.
     Failed,
+}
+
+/// `panel://open`: show this panel request, replacing whatever the panel
+/// showed. Also `panel_current`'s answer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PanelOpen {
+    /// The panel's own request counter: from 1, never reused while Grape
+    /// runs. Not the wheel's seq.
+    pub seq: u64,
+    /// The tool's name ("Merge PDFs").
+    pub title: String,
+    /// The dropped items, ids 1..=n in drop order.
+    pub items: Vec<PanelItem>,
+    /// What the panel offers, and where it starts.
+    pub panel: PanelSpec,
+}
+
+/// One item, by id and display name. Rust keeps the path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PanelItem {
+    /// 1..=n, in drop order, per request.
+    pub id: u64,
+    /// The display name ("photo.jpg"), never a path.
+    pub name: String,
+}
+
+/// A panel's controls and their starting values. `tool` is grape-core's
+/// `ToolKey` serde key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "tool", rename_all_fields = "camelCase")]
+pub enum PanelSpec {
+    /// Compress: the preset to start from (the last one that ran).
+    #[serde(rename = "compress")]
+    Compress {
+        /// Small, Balanced or High.
+        preset: CompressPreset,
+    },
+    /// Audio Channels: always starts at Mono.
+    #[serde(rename = "audioChannels")]
+    AudioChannels {
+        /// Mono or Stereo.
+        channels: Channels,
+    },
+    /// Normalize Volume: a loudness target on a whole-LUFS grid.
+    #[serde(rename = "normalizeAudio")]
+    NormalizeAudio {
+        /// Where the slider starts (the last target that ran).
+        target_lufs: i8,
+        /// The quietest target.
+        min_lufs: i8,
+        /// The loudest target.
+        max_lufs: i8,
+        /// The slider's step.
+        step_lufs: u8,
+    },
+    /// Merge PDFs: the order list.
+    #[serde(rename = "mergePDF")]
+    MergePdf {
+        /// `merged_names[i]` is the merged file's name if `items[i]` goes
+        /// first. As long as `items`.
+        merged_names: Vec<String>,
+    },
+}
+
+/// `panel://close`: panel `seq` closed (run, cancelled, paused).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PanelClose {
+    /// The panel request that closed.
+    pub seq: u64,
+}
+
+/// What the page chose, in `panel_run`. Rust checks it against the open
+/// request before anything runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "tool", rename_all_fields = "camelCase")]
+pub enum PanelChoice {
+    /// Compress with this preset.
+    #[serde(rename = "compress")]
+    Compress {
+        /// Small, Balanced or High.
+        preset: CompressPreset,
+    },
+    /// Audio Channels with this layout.
+    #[serde(rename = "audioChannels")]
+    AudioChannels {
+        /// Mono or Stereo.
+        channels: Channels,
+    },
+    /// Normalize Volume to this target.
+    #[serde(rename = "normalizeAudio")]
+    NormalizeAudio {
+        /// In LUFS; Rust checks the range and the step.
+        target_lufs: i8,
+    },
+    /// Merge PDFs, in the run's order.
+    #[serde(rename = "mergePDF")]
+    MergePdf,
+}
+
+/// `panel_run`'s args as one value, for the model and the fixture tests.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PanelRun {
+    /// The panel request this answers.
+    pub seq: u64,
+    /// Every item id once, in the order to run them.
+    pub order: Vec<u64>,
+    /// The options.
+    pub choice: PanelChoice,
 }
 
 #[cfg(test)]
@@ -528,5 +638,234 @@ mod tests {
             panic!("expected entries");
         };
         assert!(dense);
+    }
+
+    fn panel_open(seq: u64, title: &str, names: &[&str], panel: PanelSpec) -> PanelOpen {
+        PanelOpen {
+            seq,
+            title: title.to_owned(),
+            items: names
+                .iter()
+                .zip(1..)
+                .map(|(name, id)| PanelItem {
+                    id,
+                    name: (*name).to_owned(),
+                })
+                .collect(),
+            panel,
+        }
+    }
+
+    #[test]
+    fn panel_opens_and_the_close_match_the_fixtures() {
+        let compress = panel_open(
+            1,
+            "Compress",
+            &["photo.jpg", "beach.png"],
+            PanelSpec::Compress {
+                preset: CompressPreset::Balanced,
+            },
+        );
+        assert_eq!(
+            json(&compress),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/panel-open-compress.json"
+            ))
+        );
+        let channels = panel_open(
+            2,
+            "Audio Channels",
+            &["interview.wav"],
+            PanelSpec::AudioChannels {
+                channels: Channels::Mono,
+            },
+        );
+        assert_eq!(
+            json(&channels),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/panel-open-channels.json"
+            ))
+        );
+        let normalize = panel_open(
+            3,
+            "Normalize Volume",
+            &["episode 12.mp3", "intro.m4a"],
+            PanelSpec::NormalizeAudio {
+                target_lufs: -16,
+                min_lufs: -24,
+                max_lufs: -10,
+                step_lufs: 1,
+            },
+        );
+        assert_eq!(
+            json(&normalize),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/panel-open-normalize.json"
+            ))
+        );
+        let merge = panel_open(
+            4,
+            "Merge PDFs",
+            &["report.pdf", "cover.pdf", "appendix.pdf"],
+            PanelSpec::MergePdf {
+                merged_names: [
+                    "report Merged.pdf",
+                    "cover Merged.pdf",
+                    "appendix Merged.pdf",
+                ]
+                .map(str::to_owned)
+                .to_vec(),
+            },
+        );
+        assert_eq!(
+            json(&merge),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/panel-open-merge.json"
+            ))
+        );
+        assert_eq!(
+            json(&PanelClose { seq: 4 }),
+            golden(include_str!(
+                "../../ui/src/shared/fixtures/panel-close.json"
+            ))
+        );
+    }
+
+    fn run_fixture(text: &str) -> PanelRun {
+        serde_json::from_str(text).unwrap()
+    }
+
+    #[test]
+    fn panel_runs_read_from_the_fixtures() {
+        assert_eq!(
+            run_fixture(include_str!(
+                "../../ui/src/shared/fixtures/panel-run-compress.json"
+            )),
+            PanelRun {
+                seq: 1,
+                order: vec![1, 2],
+                choice: PanelChoice::Compress {
+                    preset: CompressPreset::Small
+                },
+            }
+        );
+        assert_eq!(
+            run_fixture(include_str!(
+                "../../ui/src/shared/fixtures/panel-run-channels.json"
+            )),
+            PanelRun {
+                seq: 2,
+                order: vec![1],
+                choice: PanelChoice::AudioChannels {
+                    channels: Channels::Stereo
+                },
+            }
+        );
+        assert_eq!(
+            run_fixture(include_str!(
+                "../../ui/src/shared/fixtures/panel-run-normalize.json"
+            )),
+            PanelRun {
+                seq: 3,
+                order: vec![1, 2],
+                choice: PanelChoice::NormalizeAudio { target_lufs: -14 },
+            }
+        );
+        assert_eq!(
+            run_fixture(include_str!(
+                "../../ui/src/shared/fixtures/panel-run-merge.json"
+            )),
+            PanelRun {
+                seq: 4,
+                order: vec![2, 1, 3],
+                choice: PanelChoice::MergePdf,
+            }
+        );
+    }
+
+    #[test]
+    fn panel_cancel_carries_only_the_seq() {
+        /// `panel_cancel`'s args.
+        #[derive(Debug, PartialEq, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Cancel {
+            seq: u64,
+        }
+        let cancel: Cancel = serde_json::from_str(include_str!(
+            "../../ui/src/shared/fixtures/panel-cancel.json"
+        ))
+        .unwrap();
+        assert_eq!(cancel, Cancel { seq: 4 });
+    }
+
+    #[test]
+    fn every_panel_tag_is_the_tools_serde_key() {
+        let specs = [
+            (
+                PanelSpec::Compress {
+                    preset: CompressPreset::High,
+                },
+                ToolKey::Compress,
+            ),
+            (
+                PanelSpec::AudioChannels {
+                    channels: Channels::Stereo,
+                },
+                ToolKey::AudioChannels,
+            ),
+            (
+                PanelSpec::NormalizeAudio {
+                    target_lufs: -16,
+                    min_lufs: -24,
+                    max_lufs: -10,
+                    step_lufs: 1,
+                },
+                ToolKey::NormalizeAudio,
+            ),
+            (
+                PanelSpec::MergePdf {
+                    merged_names: vec![],
+                },
+                ToolKey::MergePdf,
+            ),
+        ];
+        for (spec, tool) in specs {
+            assert_eq!(json(&spec)["tool"], json(&tool), "{tool:?}");
+            let choice: PanelChoice = serde_json::from_value(serde_json::json!({
+                "tool": json(&tool),
+                "preset": "small",
+                "channels": "mono",
+                "targetLufs": -16,
+            }))
+            .unwrap();
+            let chosen = match choice {
+                PanelChoice::Compress { .. } => ToolKey::Compress,
+                PanelChoice::AudioChannels { .. } => ToolKey::AudioChannels,
+                PanelChoice::NormalizeAudio { .. } => ToolKey::NormalizeAudio,
+                PanelChoice::MergePdf => ToolKey::MergePdf,
+            };
+            assert_eq!(chosen, tool);
+        }
+    }
+
+    #[test]
+    fn an_unknown_tool_preset_or_target_is_refused() {
+        for bad in [
+            r#"{"tool":"removeMetadata"}"#,
+            r#"{"tool":"compress","preset":"medium"}"#,
+            r#"{"tool":"compress"}"#,
+            r#"{"tool":"audioChannels","channels":"surround"}"#,
+            r#"{"tool":"normalizeAudio","targetLufs":-16.5}"#,
+            r#"{"tool":"normalizeAudio","targetLufs":-200}"#,
+            r#"{"tool":"normalizeAudio","targetLufs":"-16"}"#,
+            r#"{"preset":"small"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<PanelChoice>(bad).is_err(),
+                "{bad} was accepted"
+            );
+        }
+        let bad_run = r#"{"seq":1,"order":[1],"choice":{"tool":"compress","preset":"medium"}}"#;
+        assert!(serde_json::from_str::<PanelRun>(bad_run).is_err());
     }
 }

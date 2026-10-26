@@ -56,6 +56,29 @@
         "backgroundThrottling": "disabled",
         "acceptFirstMouse": true,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
+      },
+      {
+        "label": "panel",
+        "url": "panel.html",
+        "title": "Grape",
+        "width": 352,
+        "height": 224,
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": true,
+        "shadow": false,
+        "visibleOnAllWorkspaces": true,
+        "resizable": false,
+        "minimizable": false,
+        "maximizable": false,
+        "dragDropEnabled": true,
+        "backgroundThrottling": "disabled",
+        "acceptFirstMouse": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=no-user-gesture-required"
       }
     ]
   },

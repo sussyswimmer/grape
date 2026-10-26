@@ -176,7 +176,7 @@ impl Model {
 /// The name the shelf shows: the item's file name; for a drive or share
 /// root, which has none, its last part other than the root itself ("D:");
 /// the whole path only when there's nothing else ("/").
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     if let Some(name) = path.file_name() {
         return name.to_string_lossy().into_owned();
     }

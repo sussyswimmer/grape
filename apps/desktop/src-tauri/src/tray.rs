@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::controller::Input;
 use crate::wheel::WheelInputs;
-use crate::{jobs, ui_windows, GrapeState};
+use crate::{jobs, panel, ui_windows, GrapeState};
 
 type PauseItem = CheckMenuItem<Wry>;
 
@@ -73,6 +73,10 @@ fn toggle_pause(app: &AppHandle, pause: &PauseItem) {
     log::info!("{}", if paused { "paused" } else { "resumed" });
     if let Some(inputs) = app.try_state::<WheelInputs>() {
         inputs.send(Input::SetPaused(paused));
+    }
+    // An open tool panel closes, and nothing runs.
+    if paused {
+        panel::cancel_open(app, "paused");
     }
 
     if let Err(err) = pause.set_checked(paused) {

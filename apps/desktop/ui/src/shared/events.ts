@@ -4,8 +4,12 @@
  * `toast://…` events to the `toast` window; the UI answers with two app
  * commands. The float shelf (M5) adds the `float://…` events, emitted to
  * the `float` window, and five `float_*` commands that name items by id.
- * The types mirror `apps/desktop/src-tauri/src/events.rs`, and both sides
- * test against the same golden JSON in `./fixtures/`.
+ * The tool panel (M4, D31) adds `panel://open` and `panel://close`,
+ * emitted to the `panel` window, and three `panel_*` commands that answer
+ * by the panel's seq and item ids, never paths. The types mirror
+ * `apps/desktop/src-tauri/src/events.rs`, and both sides test against the
+ * same golden JSON in `./fixtures/` (the `panel-run-*` and `panel-cancel`
+ * files are command args, UI → Rust, not events).
  *
  * Payloads arrive as `unknown`. Every one goes through its guard before the
  * UI touches it, so a contract drift fails loudly in one place instead of
@@ -47,6 +51,39 @@ export interface FloatView { items: FloatItem[] }
 export type FloatOutcome = "copied" | "linked" | "cancelled" | "nothing" | "failed";
 export interface FloatDragEnded { outcome: FloatOutcome }
 
+// The tool panel (M4, D31). Rust keeps the paths; the page gets a seq, item
+// ids (1..=n in drop order) and display names, and answers with ids only.
+/** grape-core's `ToolKey` serde keys for the four v1 panel tools. */
+export type PanelTool = "compress" | "audioChannels" | "normalizeAudio" | "mergePDF";
+/** grape-core's `CompressPreset` serde names. */
+export type CompressPreset = "small" | "balanced" | "high";
+/** grape-core's `Channels` serde names. */
+export type Channels = "mono" | "stereo";
+/** One dropped item: `id` is 1..=n in drop order; `name` is a display name, never a path. */
+export interface PanelItem { id: number; name: string }
+/**
+ * What the panel offers, per tool. Normalize's numbers are whole LUFS on the
+ * `stepLufs` grid. `mergedNames[i]` is the merged PDF's name if `items[i]`
+ * goes first.
+ */
+export type PanelSpec =
+  | { tool: "compress"; preset: CompressPreset }
+  | { tool: "audioChannels"; channels: Channels }
+  | { tool: "normalizeAudio"; targetLufs: number; minLufs: number; maxLufs: number; stepLufs: number }
+  | { tool: "mergePDF"; mergedNames: string[] };
+/** `panel://open`, and `panel_current`'s answer: show this request, replacing whatever was shown. */
+export interface PanelOpen { seq: number; title: string; items: PanelItem[]; panel: PanelSpec }
+/** `panel://close`: panel `seq` closed (run, cancelled or paused). */
+export interface PanelClose { seq: number }
+/** What the page chose, in `panel_run`. */
+export type PanelChoice =
+  | { tool: "compress"; preset: CompressPreset }
+  | { tool: "audioChannels"; channels: Channels }
+  | { tool: "normalizeAudio"; targetLufs: number }
+  | { tool: "mergePDF" };
+/** `panel_run`'s args. A type alias, not an interface, so it passes as `invoke`'s args record. */
+export type PanelRunArgs = { seq: number; order: number[]; choice: PanelChoice };
+
 // ---------------------------------------------------------------------------
 // Names
 // ---------------------------------------------------------------------------
@@ -87,10 +124,27 @@ export const FLOAT_REVEAL = "float_reveal";
  */
 export const FLOAT_DRAG_OUT = "float_drag_out";
 
+/** Rust → panel: show this request (new, or replacing the open one). Sent before the window shows. */
+export const PANEL_OPEN = "panel://open";
+/** Rust → panel: panel `seq` closed, after the window hid. The page ignores another seq. */
+export const PANEL_CLOSE = "panel://close";
+
+/** UI → Rust command, no args: answers with the open `PanelOpen`, or `null`. The page asks once, on load. */
+export const PANEL_CURRENT = "panel_current";
+/**
+ * UI → Rust command, args `PanelRunArgs`: run panel `seq` with this order
+ * and choice. Resolves `null` (a stale seq or a second run is ignored), or
+ * rejects with a sentence and the panel stays open.
+ */
+export const PANEL_RUN = "panel_run";
+/** UI → Rust command, args `{ seq }`: close panel `seq`, and nothing runs. */
+export const PANEL_CANCEL = "panel_cancel";
+
 /** The Tauri window labels these events are emitted to. */
 export const OVERLAY_WINDOW = "overlay";
 export const TOAST_WINDOW = "toast";
 export const FLOAT_WINDOW = "float";
+export const PANEL_WINDOW = "panel";
 
 // ---------------------------------------------------------------------------
 // Enum values, kept next to the types so a new variant is a compile error
@@ -112,6 +166,8 @@ const CLOSE_REASONS: readonly CloseReason[] = [
 const TOAST_TONES: readonly ToastTone[] = ["working", "done", "error", "info"];
 const FLOAT_KINDS: readonly FloatKind[] = ["file", "folder"];
 const FLOAT_OUTCOMES: readonly FloatOutcome[] = ["copied", "linked", "cancelled", "nothing", "failed"];
+export const COMPRESS_PRESETS: readonly CompressPreset[] = ["small", "balanced", "high"];
+export const CHANNELS: readonly Channels[] = ["mono", "stereo"];
 
 // ---------------------------------------------------------------------------
 // Guard helpers
@@ -320,7 +376,7 @@ export function isToastHidePayload(value: unknown): value is ToastHidePayload {
   return hasExactKeys(value, ["id"]) && isCount(value["id"]);
 }
 
-/** A shelf item id: Rust hands them out from 1 and never reuses one. */
+/** A shelf item id or a panel seq or item id: Rust counts them from 1. */
 function isItemId(value: unknown): value is number {
   return isCount(value) && value >= 1;
 }
@@ -354,4 +410,100 @@ export function isFloatView(value: unknown): value is FloatView {
 /** Guards a `float://drag-ended` payload. */
 export function isFloatDragEnded(value: unknown): value is FloatDragEnded {
   return hasExactKeys(value, ["outcome"]) && isOneOf(value["outcome"], FLOAT_OUTCOMES);
+}
+
+/** A whole number that survived JSON exactly (Rust's `i8`/`u8` fit). */
+function isWhole(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value);
+}
+
+function isPanelItem(value: unknown): value is PanelItem {
+  return (
+    hasExactKeys(value, ["id", "name"]) &&
+    isItemId(value["id"]) &&
+    typeof value["name"] === "string"
+  );
+}
+
+/**
+ * A panel spec with exactly its tool's keys. Normalize's target must sit
+ * on the step grid inside min..max, so the slider can show it as is; Merge
+ * needs two items or more and one merged name per item.
+ */
+function isPanelSpec(value: unknown, count: number): value is PanelSpec {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const tool: unknown = (value as Fields)["tool"];
+  switch (tool) {
+    case "compress":
+      return hasExactKeys(value, ["tool", "preset"]) && isOneOf(value["preset"], COMPRESS_PRESETS);
+    case "audioChannels":
+      return hasExactKeys(value, ["tool", "channels"]) && isOneOf(value["channels"], CHANNELS);
+    case "normalizeAudio": {
+      if (!hasExactKeys(value, ["tool", "targetLufs", "minLufs", "maxLufs", "stepLufs"])) {
+        return false;
+      }
+      const target = value["targetLufs"];
+      const min = value["minLufs"];
+      const max = value["maxLufs"];
+      const step = value["stepLufs"];
+      return (
+        isWhole(target) &&
+        isWhole(min) &&
+        isWhole(max) &&
+        isWhole(step) &&
+        step >= 1 &&
+        min < max &&
+        min <= target &&
+        target <= max &&
+        (target - min) % step === 0 &&
+        (max - min) % step === 0
+      );
+    }
+    case "mergePDF": {
+      if (!hasExactKeys(value, ["tool", "mergedNames"])) {
+        return false;
+      }
+      const names = value["mergedNames"];
+      return (
+        count >= 2 &&
+        Array.isArray(names) &&
+        names.length === count &&
+        names.every((name: unknown) => typeof name === "string")
+      );
+    }
+    default:
+      return false;
+  }
+}
+
+/**
+ * Guards a `panel://open` payload (and the `panel_current` answer). Item
+ * ids are unique, because the page answers with them; the title is never
+ * empty.
+ */
+export function isPanelOpen(value: unknown): value is PanelOpen {
+  if (!hasExactKeys(value, ["seq", "title", "items", "panel"])) {
+    return false;
+  }
+  const title = value["title"];
+  const items = value["items"];
+  if (
+    !isItemId(value["seq"]) ||
+    typeof title !== "string" ||
+    title.length === 0 ||
+    !Array.isArray(items) ||
+    items.length === 0 ||
+    !items.every((item: unknown) => isPanelItem(item))
+  ) {
+    return false;
+  }
+  const ids = new Set(items.map((item: PanelItem) => item.id));
+  return ids.size === items.length && isPanelSpec(value["panel"], items.length);
+}
+
+/** Guards a `panel://close` payload. */
+export function isPanelClose(value: unknown): value is PanelClose {
+  return hasExactKeys(value, ["seq"]) && isItemId(value["seq"]);
 }

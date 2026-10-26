@@ -1,6 +1,7 @@
-//! Grape's webview windows: the hidden overlay and toast (declared in
-//! tauri.conf.json) and the settings window (created on first use). The
-//! float shelf is built on first use in `float.rs`.
+//! Grape's webview windows: the hidden overlay, toast and tool panel
+//! (declared in tauri.conf.json) and the settings window (created on first
+//! use). The float shelf is built on first use in `float.rs`; the panel is
+//! shown and hidden in `panel.rs`.
 
 use std::sync::{Mutex, PoisonError};
 
@@ -71,6 +72,26 @@ pub fn prepare_toast(app: &AppHandle) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Gets the tool panel ready at startup, on the main thread. On Windows:
+/// the shelf's style subclass (tool window, no taskbar button or Alt-Tab
+/// entry, but a click activates it), its extended style in the log, and a
+/// drop target that refuses everything. On macOS: level 99 (under the
+/// toast and an open wheel) and the overlay's collection behavior.
+///
+/// # Errors
+/// Fails if the panel window from tauri.conf.json doesn't exist.
+pub fn prepare_panel(app: &AppHandle) -> anyhow::Result<()> {
+    let panel = app
+        .get_webview_window(crate::panel::PANEL)
+        .context("the panel window from tauri.conf.json is missing")?;
+    #[cfg(target_os = "windows")]
+    windows_overlay::harden_panel(&panel);
+    #[cfg(target_os = "macos")]
+    mac_overlay::harden(&panel, grape_platform::macos::WindowRole::Panel);
+    refuse_drops(app, &panel);
+    Ok(())
+}
+
 /// Opens Settings, or brings it to the front if it's already open.
 ///
 /// The window is built off the calling thread: creating a WebView2 window
@@ -107,11 +128,12 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Settings and the toast take no drops (nor does the float shelf, see
-/// [`refuse_drops_here`]). On Windows, wry's and tao's drop handlers would
-/// accept a file there without setting the drop effect, which Explorer can
-/// read as a move (DECISIONS D13), so a refusing target replaces them. Runs
-/// on the main thread, which owns the window; failures are logged.
+/// Settings, the toast and the tool panel take no drops (nor does the
+/// float shelf, see [`refuse_drops_here`]). On Windows, wry's and tao's
+/// drop handlers would accept a file there without setting the drop
+/// effect, which Explorer can read as a move (DECISIONS D13), so a refusing
+/// target replaces them. Runs on the main thread, which owns the window;
+/// failures are logged.
 ///
 /// On macOS nothing is replaced: wry answers every file drag with Copy and
 /// never touches the file (DECISIONS D18), so a file dropped on Settings or
@@ -130,8 +152,8 @@ fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
 }
 
 /// [`refuse_drops`] for a caller already on the main thread (the float
-/// shelf, before every show). Logs how many of the window's windows are
-/// covered.
+/// shelf and the tool panel, before every show). Logs how many of the
+/// window's windows are covered.
 #[cfg(target_os = "windows")]
 pub fn refuse_drops_here(window: &tauri::WebviewWindow) {
     let hwnd = match window.hwnd() {
@@ -217,6 +239,33 @@ mod windows_overlay {
         log_hwnd_ex_style(hwnd, "at startup");
     }
 
+    /// The tool panel: the shelf's subclass (feature `overlay-subclass`):
+    /// a tool window that a click activates. Logs its extended style.
+    /// Failures are logged, not fatal: the panel may then show in Alt-Tab.
+    pub fn harden_panel(panel: &WebviewWindow) {
+        let hwnd = match panel.hwnd() {
+            Ok(hwnd) => hwnd.0 as isize,
+            Err(err) => {
+                log::error!("panel: no window handle: {err}");
+                return;
+            }
+        };
+        #[cfg(feature = "overlay-subclass")]
+        match grape_platform::windows::harden_panel(hwnd) {
+            Ok(()) => log::info!("panel: style subclass installed"),
+            Err(err) => log::error!("panel: could not install the style subclass: {err}"),
+        }
+        #[cfg(not(feature = "overlay-subclass"))]
+        log::warn!("panel: the overlay-subclass feature is off; tao's styles only");
+        match grape_platform::windows::ex_style(hwnd) {
+            Ok(style) => log::info!(
+                "panel ex-style (at startup): {}",
+                grape_platform::windows::describe_ex_style(style)
+            ),
+            Err(err) => log::warn!("panel ex-style (at startup): unreadable: {err}"),
+        }
+    }
+
     /// Logs the overlay's current extended style, e.g.
     /// `overlay ex-style (shown): 0x08080088 TOOLWINDOW|NOACTIVATE|TOPMOST|LAYERED`.
     #[cfg(debug_assertions)]
@@ -237,12 +286,14 @@ mod windows_overlay {
     }
 }
 
-/// The macOS side of [`prepare_overlay`] and [`prepare_toast`].
+/// The macOS side of [`prepare_overlay`], [`prepare_toast`] and
+/// [`prepare_panel`].
 #[cfg(target_os = "macos")]
 mod mac_overlay {
     /// Lifts `window` over the menu bar, the Dock and full-screen apps, on
     /// every Space, and logs how it ended up. The toast sits one level
-    /// below the overlay. Main thread only.
+    /// below the overlay, the tool panel one below the toast. Main thread
+    /// only.
     pub(super) fn harden(window: &tauri::WebviewWindow, role: grape_platform::macos::WindowRole) {
         let ns_window = match window.ns_window() {
             Ok(ns_window) => ns_window,
@@ -312,5 +363,41 @@ mod tests {
         ] {
             assert_eq!(toast[key].as_bool(), Some(value), "{key}");
         }
+    }
+
+    #[test]
+    fn the_panel_is_hidden_topmost_activatable_and_never_focused_when_shown() {
+        let windows = config_windows();
+        let labels: Vec<&str> = windows.iter().filter_map(|w| w["label"].as_str()).collect();
+        assert_eq!(labels, [OVERLAY, crate::toast::TOAST, crate::panel::PANEL]);
+        let panel = windows
+            .iter()
+            .find(|w| w["label"] == crate::panel::PANEL)
+            .unwrap();
+        assert_eq!(panel["url"], "panel.html");
+        assert_eq!(panel["title"], "Grape");
+        assert_eq!(
+            (panel["width"].as_f64(), panel["height"].as_f64()),
+            (Some(352.0), Some(224.0))
+        );
+        for (key, value) in [
+            ("visible", false),
+            ("transparent", true),
+            ("decorations", false),
+            ("alwaysOnTop", true),
+            ("skipTaskbar", true),
+            ("focus", false),
+            ("focusable", true),
+            ("shadow", false),
+            ("visibleOnAllWorkspaces", true),
+            ("resizable", false),
+            ("minimizable", false),
+            ("maximizable", false),
+            ("dragDropEnabled", true),
+            ("acceptFirstMouse", true),
+        ] {
+            assert_eq!(panel[key].as_bool(), Some(value), "{key}");
+        }
+        assert_eq!(panel["backgroundThrottling"], "disabled");
     }
 }

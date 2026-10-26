@@ -1,6 +1,6 @@
 //! Grape's Tauri app: a tray icon, a hidden overlay window, the wheel
-//! controller, the Settings window's settings and, on Windows, the float
-//! shelf. See `CLAUDE.md` in this crate.
+//! controller, the tool panels, the Settings window's settings and, on
+//! Windows, the float shelf. See `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it's a menu-bar accessory app with no Dock icon
@@ -11,6 +11,7 @@ pub mod controller;
 pub mod events;
 mod float;
 mod jobs;
+mod panel;
 mod settings;
 mod sidecars;
 mod toast;
@@ -83,6 +84,8 @@ pub fn run() -> anyhow::Result<()> {
         // Empty, and only ever filled on Windows; the commands work on it
         // everywhere.
         .manage(float::Shelf::default())
+        // At most one tool panel, and what it waits on.
+        .manage(panel::PanelState::default())
         .invoke_handler(tauri::generate_handler![
             wheel::wheel_painted,
             toast::toast_clicked,
@@ -91,6 +94,9 @@ pub fn run() -> anyhow::Result<()> {
             float::float_clear,
             float::float_reveal,
             float::float_drag_out,
+            panel::panel_current,
+            panel::panel_run,
+            panel::panel_cancel,
             settings::settings_get,
             settings::settings_set_key,
             settings::settings_set_output_next_to_source,
@@ -102,6 +108,7 @@ pub fn run() -> anyhow::Result<()> {
         ])
         .on_window_event(wheel::on_overlay_window_event)
         .on_window_event(float::on_window_event)
+        .on_window_event(panel::on_window_event)
         .setup(|app| {
             // A menu-bar app on macOS: no Dock icon, no app menu.
             #[cfg(target_os = "macos")]
@@ -118,6 +125,11 @@ pub fn run() -> anyhow::Result<()> {
             if let Err(err) = ui_windows::prepare_toast(app.handle()) {
                 log::error!("could not prepare the toast window: {err:#}");
             }
+            // Not fatal: tools then run without their panels' choices.
+            if let Err(err) = ui_windows::prepare_panel(app.handle()) {
+                log::error!("could not prepare the panel window: {err:#}");
+            }
+            panel::set_preview(app.handle(), panel::preview_from_env());
             // Once, next to Grape's executable; every drop gets a copy.
             app.manage(sidecars::Sidecars::find());
             // Before the wheel, which starts with the user's keys, sounds
@@ -151,13 +163,18 @@ pub fn run() -> anyhow::Result<()> {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
-        // Grape is going (tray → Quit, or a restart): stop every job now.
-        RunEvent::ExitRequested { code: Some(_), .. } => jobs::cancel_all(app),
+        // Grape is going (tray → Quit, or a restart): stop every job now,
+        // and forget the open panel so a late Run is ignored.
+        RunEvent::ExitRequested { code: Some(_), .. } => {
+            panel::shut(app);
+            jobs::cancel_all(app);
+        }
         // Unhook the mouse before the process goes, and give the cancelled
         // jobs a moment to kill their children and delete their temp
         // files, so none outlives Grape. Cancelling again covers an exit
         // that skipped the request.
         RunEvent::Exit => {
+            panel::shut(app);
             jobs::cancel_all(app);
             wheel::stop(app);
             jobs::wait_for_all(app);
