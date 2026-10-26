@@ -106,7 +106,7 @@ pub(crate) fn draw(page: &PdfPage, size: PageSize) -> Result<Vec<u8>, DrawError>
 #[derive(Debug)]
 pub(crate) enum DrawError {
     /// PDFium failed (often: the bitmap couldn't be allocated).
-    Pdfium(PdfiumError),
+    Pdfium(#[allow(dead_code)] PdfiumError), // read through `Debug`, for the detail
     /// The bitmap PDFium returned doesn't have the size asked for.
     Size,
 }

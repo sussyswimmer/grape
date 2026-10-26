@@ -1943,3 +1943,30 @@ fn mark_of_the_web_follows_converted_and_extracted_files() {
         assert_no_leftovers(&dir.0);
     }
 }
+
+// ---- What run_job returns (#22) --------------------------------------------
+
+#[test]
+fn into_outcome_notes_only_what_was_left_out() {
+    let wrote = JobOutcome {
+        outputs: vec![PathBuf::from("x Extracted")],
+        ..JobOutcome::default()
+    };
+    let nothing = ArchiveOutcome {
+        outcome: wrote.clone(),
+        left_out: LeftOut::default(),
+    };
+    assert_eq!(nothing.into_outcome(), wrote);
+    // macOS metadata counts as a fact too; the app decides not to word it.
+    let mac = LeftOut {
+        mac_metadata: 2,
+        ..LeftOut::default()
+    };
+    let outcome = ArchiveOutcome {
+        outcome: wrote.clone(),
+        left_out: mac,
+    }
+    .into_outcome();
+    assert_eq!(outcome.outputs, wrote.outputs);
+    assert_eq!(outcome.notes, vec![crate::Note::LeftOut(mac)]);
+}

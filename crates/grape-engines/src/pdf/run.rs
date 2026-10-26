@@ -70,6 +70,17 @@ pub(crate) struct PdfPaths {
     pub(crate) pdfium: PathBuf,
 }
 
+impl PdfPaths {
+    /// The worker and the library from the app's sidecars, if it found
+    /// both.
+    pub(crate) fn from_sidecars(sidecars: &crate::SidecarPaths) -> Option<PdfPaths> {
+        Some(PdfPaths {
+            worker: sidecars.pdf_worker.clone()?,
+            pdfium: sidecars.pdfium.clone()?,
+        })
+    }
+}
+
 /// The bounds of a PDF job.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Limits {
@@ -122,6 +133,32 @@ pub(crate) struct PdfOutcome {
     pub(crate) used_pdfium: bool,
 }
 
+impl PdfOutcome {
+    /// The outcome `run_job` returns for `op`: pages drawn below 300 DPI,
+    /// and for Remove Metadata what it removed (even nothing), as notes.
+    pub(crate) fn into_outcome(self, op: &Operation) -> JobOutcome {
+        let mut outcome = self.outcome;
+        if !self.scaled_pages.is_empty() {
+            let count = u32::try_from(self.scaled_pages.len()).unwrap_or(u32::MAX);
+            outcome.notes.push(crate::Note::PagesScaled(count));
+        }
+        if matches!(
+            op,
+            Operation::Tool {
+                tool: ToolKey::RemoveMetadata,
+                ..
+            }
+        ) {
+            let mut fields: Vec<crate::MetaField> =
+                self.removed.iter().map(|key| key.field()).collect();
+            fields.sort();
+            fields.dedup();
+            outcome.notes.push(crate::Note::MetadataRemoved(fields));
+        }
+        outcome
+    }
+}
+
 /// True for the four v1 conversions: PDF → JPG, PNG, TXT, MD.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
     from == Format::Pdf && matches!(to, Format::Jpg | Format::Png | Format::Txt | Format::Md)
@@ -148,54 +185,6 @@ pub(crate) fn run(
         ctx,
         progress,
         &Launch::worker(paths),
-        &paths.pdfium,
-        &Limits::default(),
-    )
-}
-
-/// Converts the PDF `src` to `to` into the planned `dest`: pages
-/// (`JobOutput::PagesFileOrFolder`) for JPG and PNG, a file for TXT and MD.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn convert(
-    job: &Job,
-    src: &Path,
-    dest: &JobOutput,
-    from: Format,
-    to: Format,
-    ctx: &EngineCtx,
-    progress: &mut dyn FnMut(f32),
-    paths: &PdfPaths,
-) -> Result<PdfOutcome, GrapeError> {
-    let launch = Launch::worker(paths);
-    convert_with(
-        job,
-        src,
-        dest,
-        from,
-        to,
-        ctx,
-        progress,
-        &launch,
-        &paths.pdfium,
-        &Limits::default(),
-    )
-}
-
-/// Runs the PDF tool `tool` on the job's inputs.
-pub(crate) fn tool(
-    job: &Job,
-    tool: ToolKey,
-    ctx: &EngineCtx,
-    progress: &mut dyn FnMut(f32),
-    paths: &PdfPaths,
-) -> Result<PdfOutcome, GrapeError> {
-    let launch = Launch::worker(paths);
-    tool_with(
-        job,
-        tool,
-        ctx,
-        progress,
-        &launch,
         &paths.pdfium,
         &Limits::default(),
     )
@@ -1508,5 +1497,55 @@ mod tests {
         );
         assert_eq!(message(FailKind::Read), "Grape couldn't read a.pdf.");
         assert_eq!(message(FailKind::Write), "Grape couldn't save into out.");
+    }
+
+    #[test]
+    fn into_outcome_notes_scaled_pages_and_what_was_removed() {
+        let done = |scaled_pages: Vec<u32>, removed: Vec<MetaKey>| PdfOutcome {
+            outcome: JobOutcome {
+                outputs: vec![PathBuf::from("doc")],
+                ..JobOutcome::default()
+            },
+            pages: 6,
+            scaled_pages,
+            removed,
+            used_pdfium: true,
+        };
+        let png = Operation::convert(Format::Png);
+        assert_eq!(
+            done(vec![2, 5], Vec::new()).into_outcome(&png).notes,
+            [crate::Note::PagesScaled(2)]
+        );
+        assert_eq!(done(Vec::new(), Vec::new()).into_outcome(&png).notes, []);
+        let remove = Operation::tool(ToolKey::RemoveMetadata);
+        assert_eq!(
+            done(
+                Vec::new(),
+                vec![MetaKey::Title, MetaKey::Xmp, MetaKey::Author]
+            )
+            .into_outcome(&remove)
+            .notes,
+            [crate::Note::MetadataRemoved(vec![
+                crate::MetaField::Author,
+                crate::MetaField::Title,
+                crate::MetaField::Xmp,
+            ])]
+        );
+        // Repeats collapse, and one note per job.
+        assert_eq!(
+            done(Vec::new(), vec![MetaKey::Title, MetaKey::Title])
+                .into_outcome(&remove)
+                .notes,
+            [crate::Note::MetadataRemoved(vec![crate::MetaField::Title])]
+        );
+        // Nothing removed still says so: "No metadata found".
+        assert_eq!(
+            done(Vec::new(), Vec::new()).into_outcome(&remove).notes,
+            [crate::Note::MetadataRemoved(Vec::new())]
+        );
+        let split = Operation::tool(ToolKey::SplitPdf);
+        let outcome = done(Vec::new(), Vec::new()).into_outcome(&split);
+        assert_eq!(outcome.notes, []);
+        assert_eq!(outcome.outputs, [PathBuf::from("doc")]);
     }
 }

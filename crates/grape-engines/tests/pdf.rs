@@ -18,7 +18,10 @@ use std::time::{Duration, Instant};
 use common::{assert_no_leftovers, names_in, plan_one, SourceState, TestDir};
 use grape_core::{plan, Format, Job, JobOutput, Operation, Settings, ToolKey};
 use grape_engines::pdf::it::{self, Options, Outcome};
-use grape_engines::{build_selection, EngineCtx, ErrorKind, GrapeError};
+use grape_engines::{
+    build_selection, run_job, supports, supports_with, EngineCtx, ErrorKind, GrapeError, MetaField,
+    Note, SidecarPaths,
+};
 use lopdf::content::{Content, Operation as Op};
 use lopdf::{dictionary, Document, Object, Stream};
 
@@ -825,4 +828,115 @@ fn the_folder_output_never_replaces_an_existing_folder() {
     assert_eq!(names_in(&dir.join("doc 2")), ["doc 1.jpg", "doc 2.jpg"]);
     source.assert_unchanged();
     assert_no_leftovers(&dir.path);
+}
+
+// ---- Through run_job, as the app runs them (#22) ----------------------------
+
+/// The sidecars the app finds: PDFium and the worker.
+fn with_pdf() -> EngineCtx {
+    EngineCtx {
+        sidecars: SidecarPaths {
+            pdfium: Some(pdfium()),
+            pdf_worker: Some(PathBuf::from(WORKER)),
+            ..SidecarPaths::default()
+        },
+        ..EngineCtx::default()
+    }
+}
+
+#[test]
+fn run_job_runs_every_pdf_job_with_the_sidecars() {
+    let ctx = with_pdf();
+    let doc = numbered(2);
+    let cases = [
+        (Operation::convert(Format::Png), "doc"),
+        (Operation::convert(Format::Jpg), "doc"),
+        (Operation::convert(Format::Txt), "doc.txt"),
+        (Operation::convert(Format::Md), "doc.md"),
+        (Operation::tool(ToolKey::SplitPdf), "doc Pages"),
+        (
+            Operation::tool(ToolKey::RemoveMetadata),
+            "doc No Metadata.pdf",
+        ),
+    ];
+    for (op, output) in cases {
+        // A folder per case, so each output gets its own planned name.
+        let dir = TestDir::new("pdf-dispatch");
+        let (src, job) = plan_one(&dir, "doc.pdf", &doc, op);
+        let source = SourceState::of(&src);
+        assert!(
+            supports_with(&op, &[Some(Format::Pdf)], &ctx.sidecars),
+            "{op:?}"
+        );
+        assert!(!supports(&op, Some(Format::Pdf)), "{op:?}");
+        let outcome = run_job(&job, &ctx, &mut |_| {}).unwrap();
+        assert_eq!(outcome.outputs, vec![dir.join(output)], "{op:?}");
+        let notes = match op {
+            // numbered() has a Title and an Author.
+            Operation::Tool {
+                tool: ToolKey::RemoveMetadata,
+                ..
+            } => {
+                vec![Note::MetadataRemoved(vec![
+                    MetaField::Author,
+                    MetaField::Title,
+                ])]
+            }
+            _ => Vec::new(),
+        };
+        assert_eq!(outcome.notes, notes, "{op:?}");
+        source.assert_unchanged();
+        assert_no_leftovers(&dir.path);
+    }
+
+    // Merge: one job for both inputs, in their order.
+    let dir = TestDir::new("pdf-dispatch-merge");
+    let settings = Settings::new(dir.join("fallback"));
+    let (a, b) = (dir.join("a.pdf"), dir.join("b.pdf"));
+    fs::write(&a, numbered(1)).unwrap();
+    fs::write(&b, numbered(3)).unwrap();
+    let merge = Operation::tool(ToolKey::MergePdf);
+    let selection = build_selection(&[a.clone(), b.clone()], &settings);
+    let jobs = plan(&selection, &merge, &settings).unwrap().jobs;
+    assert_eq!(jobs.len(), 1);
+    let outcome = run_job(&jobs[0], &ctx, &mut |_| {}).unwrap();
+    assert_eq!(outcome.outputs, vec![dir.join("a Merged.pdf")]);
+    assert_eq!(outcome.notes, Vec::new());
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
+fn without_pdfium_or_the_worker_no_pdf_job_runs() {
+    let dir = TestDir::new("pdf-dispatch-missing");
+    let (src, job) = plan_one(
+        &dir,
+        "doc.pdf",
+        &numbered(1),
+        Operation::convert(Format::Png),
+    );
+    let source = SourceState::of(&src);
+    let names = names_in(&dir.path);
+    let full = with_pdf().sidecars;
+    for sidecars in [
+        SidecarPaths::default(),
+        SidecarPaths {
+            pdfium: None,
+            ..full.clone()
+        },
+        SidecarPaths {
+            pdf_worker: None,
+            ..full.clone()
+        },
+    ] {
+        assert!(!supports_with(&job.op, &[Some(Format::Pdf)], &sidecars));
+        let ctx = EngineCtx {
+            sidecars,
+            ..EngineCtx::default()
+        };
+        let error = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotYetSupported);
+        assert_eq!(error.user_message, "PDF to PNG isn't in this build yet.");
+    }
+    assert_eq!(names_in(&dir.path), names);
+    source.assert_unchanged();
 }

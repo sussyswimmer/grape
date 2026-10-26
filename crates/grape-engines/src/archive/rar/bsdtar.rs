@@ -147,6 +147,7 @@ pub(crate) struct Stderr {
 
 /// What [`Running::end`] saw besides its verdict.
 #[derive(Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))] // Read by the tests only.
 pub(crate) struct Seen {
     /// What bsdtar wrote on stderr.
     pub(crate) stderr: Stderr,

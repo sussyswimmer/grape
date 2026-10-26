@@ -1289,6 +1289,8 @@ struct Ran {
     progress: Vec<f32>,
     work: Option<PathBuf>,
     took: Duration,
+    /// The child's pid; only Linux checks it (in `/proc`).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pid: Option<u32>,
     /// What the child's folder held while it ran ([`fs::canonicalize`]d).
     work_real: Option<PathBuf>,

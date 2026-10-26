@@ -214,6 +214,24 @@ pub(crate) enum MetaKey {
     Xmp,
 }
 
+impl MetaKey {
+    /// The kind the app's toast names.
+    pub(crate) fn field(self) -> crate::MetaField {
+        match self {
+            MetaKey::Title => crate::MetaField::Title,
+            MetaKey::Author => crate::MetaField::Author,
+            MetaKey::Subject => crate::MetaField::Subject,
+            MetaKey::Keywords => crate::MetaField::Keywords,
+            MetaKey::Creator => crate::MetaField::Creator,
+            MetaKey::Producer => crate::MetaField::Producer,
+            MetaKey::CreationDate => crate::MetaField::CreationDate,
+            MetaKey::ModDate => crate::MetaField::ModDate,
+            MetaKey::Other => crate::MetaField::Other,
+            MetaKey::Xmp => crate::MetaField::Xmp,
+        }
+    }
+}
+
 /// Why the worker failed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

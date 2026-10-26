@@ -34,9 +34,8 @@ pub mod it;
 
 pub use worker::worker_main;
 
-// What `run_job`'s dispatch will call once it is wired (D29).
-#[allow(unused_imports)]
-pub(crate) use run::{convert, run, runs_tool, supports, tool, Limits, PdfOutcome, PdfPaths};
+// What `run_job`'s dispatch calls (D29).
+pub(crate) use run::{run, runs_tool, supports, PdfPaths};
 
 /// The first argument that turns Grape's executable into the PDF worker:
 /// `Grape --grape-pdf-worker`. The app checks for it before anything else

@@ -137,6 +137,18 @@ pub(crate) struct ArchiveOutcome {
     pub(crate) left_out: LeftOut,
 }
 
+impl ArchiveOutcome {
+    /// The outcome `run_job` returns: what was left out, if anything, as a
+    /// note.
+    pub(crate) fn into_outcome(self) -> JobOutcome {
+        let mut outcome = self.outcome;
+        if self.left_out != LeftOut::default() {
+            outcome.notes.push(crate::Note::LeftOut(self.left_out));
+        }
+        outcome
+    }
+}
+
 /// Why an archive job failed, before it becomes a [`GrapeError`]. Neither
 /// the details nor `Display` ever hold a path or an entry name: they go to
 /// the log. The names a toast shows travel in the variants' fields.

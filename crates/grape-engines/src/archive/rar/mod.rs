@@ -55,6 +55,13 @@ pub(crate) struct RarPaths {
     pub(crate) bsdtar: PathBuf,
 }
 
+impl RarPaths {
+    /// bsdtar from the app's sidecars, if it found one.
+    pub(crate) fn from_sidecars(sidecars: &crate::SidecarPaths) -> Option<RarPaths> {
+        sidecars.bsdtar.clone().map(|bsdtar| RarPaths { bsdtar })
+    }
+}
+
 /// Why a RAR job failed, beyond the failures every archive shares.
 /// `Display` (the log) never holds a name, a path or bsdtar's stderr.
 #[derive(Debug, thiserror::Error)]

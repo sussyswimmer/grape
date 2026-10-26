@@ -795,3 +795,47 @@ fn bsdtars_own_refusal_is_mapped_from_its_message() {
         detail(&result)
     );
 }
+
+// ---- Through run_job, as the app runs them (#22) ----------------------------
+
+#[test]
+fn run_job_reaches_bsdtar_through_the_sidecars() {
+    let ctx = EngineCtx {
+        sidecars: crate::SidecarPaths {
+            bsdtar: Some(bsdtar_path()),
+            ..crate::SidecarPaths::default()
+        },
+        ..EngineCtx::default()
+    };
+    let bytes = writer::case("r5_filecopy");
+    let copies = vec![crate::Note::LeftOut(LeftOut {
+        copies: 1,
+        ..LeftOut::default()
+    })];
+    for to in [Format::Zip, Format::Tar, Format::Gz] {
+        let case = new_case("x.rar", &bytes, Operation::convert(to));
+        assert!(crate::supports_with(
+            &case.job.op,
+            &[Some(Format::Rar)],
+            &ctx.sidecars
+        ));
+        let outcome = crate::run_job(&case.job, &ctx, &mut |_| {}).unwrap();
+        assert_eq!(outcome.notes, copies, "{to:?}");
+        case.source.assert_unchanged();
+    }
+    let case = new_case("x.rar", &bytes, Operation::tool(ToolKey::ExtractArchive));
+    let JobOutput::Folder(dest) = case.job.output.clone() else {
+        panic!("not a folder output");
+    };
+    let outcome = crate::run_job(&case.job, &ctx, &mut |_| {}).unwrap();
+    assert_eq!(outcome.outputs, vec![dest.clone()]);
+    assert_eq!(fs::read(dest.join("orig.txt")).unwrap(), A);
+    assert!(!dest.join("copy.txt").exists());
+    assert_eq!(outcome.notes, copies);
+    // The same job without bsdtar: refused before anything is read.
+    fs::remove_dir_all(&dest).unwrap();
+    let error = crate::run_job(&case.job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::NotYetSupported);
+    assert!(!dest.exists());
+    case.source.assert_unchanged();
+}

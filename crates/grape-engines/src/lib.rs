@@ -4,8 +4,9 @@
 //! The public contract is the one in `docs/design/m1-drag-wheel.md` §E.1:
 //! the app builds a [`grape_core::Selection`] with [`build_selection`]
 //! (which reads the disk so `grape-core` doesn't have to), plans it with
-//! [`grape_core::plan`], asks [`supports`] whether this build can execute
-//! it, and calls [`run_job`] once per job with an [`EngineCtx`]. The rules
+//! [`grape_core::plan`], asks [`supports_with`] whether this build can
+//! execute it with the sidecars it found, and calls [`run_job`] once per
+//! job with an [`EngineCtx`]. The rules
 //! every engine follows (never touch the source,
 //! no network, sidecars via [`SidecarPaths`], cancellation and progress)
 //! are in `CLAUDE.md` in this crate.
@@ -13,13 +14,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-#[allow(dead_code)] // Wired into `run_job` after lane B's media push (D27).
 mod archive;
 mod cancel;
 mod headers;
 mod image;
 mod output;
-#[allow(dead_code)] // Wired into `run_job` with the PDF sidecar paths (D29).
 #[doc(hidden)] // Public only for the worker entry, `pdf::worker_main` (D29).
 pub mod pdf;
 mod publish;
@@ -35,7 +34,7 @@ use std::sync::{
     Arc,
 };
 
-use grape_core::{Format, Job, JobOutput, Operation};
+use grape_core::{Format, Job, JobOutput, Operation, ToolKey};
 
 /// Sidecar locations injected by the app, which finds them next to its own
 /// executable at startup (`apps/desktop/src-tauri/src/sidecars.rs`). One
@@ -208,17 +207,32 @@ impl GrapeError {
     }
 }
 
-/// Can this build execute `op` for an input of format `from`?
-///
-/// In this build: conversions between two different raster formats among
-/// JPG, PNG, WebP, TIFF and BMP (20 pairs), and SRT to VTT or TXT and VTT
-/// to SRT or TXT (4 pairs). Everything else (HEIC, AVIF, SVG, PDF, audio,
-/// video, documents, archives, every tool) is `false`.
+/// Can this build execute `op` for an input of format `from`, with no
+/// sidecars? The app asks [`supports_with`], with the sidecars it found.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
-    match (op, from) {
-        (Operation::Convert { to }, Some(from)) => engine_for(from, *to).is_some(),
-        _ => false,
-    }
+    supports_with(op, std::slice::from_ref(&from), &SidecarPaths::default())
+}
+
+/// Can this build execute `op` on inputs of these `formats` (one per
+/// selected item, `None` for one with no known format) with these
+/// `sidecars`? True when `formats` isn't empty and every input has an
+/// engine for `op`.
+///
+/// In this build: raster images among JPG, PNG, WebP, TIFF and BMP (20
+/// pairs); SRT to VTT or TXT and VTT to SRT or TXT (4); ZIP, TAR and GZIP
+/// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
+/// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4). Tools: Extract
+/// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
+/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`.
+pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
+    !formats.is_empty()
+        && formats.iter().all(|from| match (op, *from) {
+            (Operation::Convert { to }, Some(from)) => engine_for(from, *to, sidecars).is_some(),
+            (Operation::Tool { tool, .. }, Some(from)) => {
+                tool_engine(*tool, from, sidecars).is_some()
+            }
+            (_, None) => false,
+        })
 }
 
 /// The engines in this build.
@@ -228,52 +242,123 @@ enum Engine {
     Image,
     /// SRT and WebVTT subtitles ([`subtitle`]).
     Subtitle,
+    /// ZIP, TAR, GZIP and RAR ([`archive`]).
+    Archive,
+    /// PDF, in a worker process ([`pdf`]).
+    Pdf,
 }
 
-/// The engine that converts `from` to `to`, if this build has one. The one
-/// place that decides, so [`supports`] and [`run_job`] always agree.
-fn engine_for(from: Format, to: Format) -> Option<Engine> {
+/// The engine that converts `from` to `to` with these sidecars, if this
+/// build has one. The one place that decides, so [`supports_with`] and
+/// [`run_job`] always agree.
+fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engine> {
     if image::supports(from, to) {
         Some(Engine::Image)
     } else if subtitle::supports(from, to) {
         Some(Engine::Subtitle)
+    } else if archive::supports(from, to, sidecars.bsdtar.is_some()) {
+        Some(Engine::Archive)
+    } else if pdf::supports(from, to) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
+        Some(Engine::Pdf)
     } else {
         None
     }
+}
+
+/// The engine that runs `tool` on an input of format `from` with these
+/// sidecars, if this build has one: [`engine_for`]'s twin for tools.
+fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<Engine> {
+    if tool == ToolKey::ExtractArchive && archive::extracts(from, sidecars.bsdtar.is_some()) {
+        Some(Engine::Archive)
+    } else if pdf::runs_tool(tool, from) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
+        Some(Engine::Pdf)
+    } else {
+        None
+    }
+}
+
+/// The input's format, from its file name, as on the wheel.
+fn format_of(path: &Path) -> Option<Format> {
+    path.file_name()
+        .and_then(|name| Format::from_file_name(&name.to_string_lossy()))
 }
 
 /// Runs one planned job. `progress` gets fractions in 0.0..=1.0 (may never be called).
 /// Never opens a source for writing; never replaces an existing file; leaves no temp
 /// file behind on error or cancel.
 ///
-/// The input's format comes from its file name, as on the wheel; the
-/// decoder then trusts the content. A job this build can't run (see
-/// [`supports`]), one without exactly one input, or one whose output isn't
-/// a single file fails with [`ErrorKind::NotYetSupported`] before anything
-/// is read or written. The output usually lands at the planned path; if
-/// that name was taken after planning, the next free `" N"` name is used
-/// and [`JobOutcome::renamed`] is set.
+/// The inputs' formats come from their file names, as on the wheel; the
+/// decoders then trust the content. A job this build can't run with
+/// `ctx.sidecars` (see [`supports_with`]), or whose inputs and output don't
+/// have the shape its operation plans (one input and a file for most
+/// conversions; pages for PDF → JPG or PNG; a folder for Extract Archive
+/// and Split PDF; every input for Merge PDFs), fails with
+/// [`ErrorKind::NotYetSupported`] before anything is read or written. The
+/// output usually lands at the planned path; if that name was taken after
+/// planning, the next free `" N"` name is used and [`JobOutcome::renamed`]
+/// is set. What the job left out or removed is in [`JobOutcome::notes`].
 pub fn run_job(
     job: &Job,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
-    let from = job
-        .inputs
-        .first()
-        .and_then(|path| path.file_name())
-        .and_then(|name| Format::from_file_name(&name.to_string_lossy()));
+    let from = job.inputs.first().and_then(|path| format_of(path));
+    let sidecars = &ctx.sidecars;
     match (from, job.inputs.as_slice(), &job.output, job.op) {
         (Some(from), [src], JobOutput::File(dest), Operation::Convert { to }) => {
-            match engine_for(from, to) {
+            match engine_for(from, to, &ctx.sidecars) {
                 Some(Engine::Image) => image::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Subtitle) => {
                     subtitle::convert(job, src, dest, from, to, ctx, progress)
                 }
+                Some(Engine::Archive) => {
+                    let rar = archive::rar::RarPaths::from_sidecars(sidecars);
+                    archive::convert(job, src, dest, from, to, ctx, progress, rar.as_ref())
+                        .map(archive::ArchiveOutcome::into_outcome)
+                }
+                // PDF → TXT or MD.
+                Some(Engine::Pdf) => run_pdf(job, ctx, progress),
                 None => Err(not_yet_supported(job, Some(from))),
             }
         }
+        // PDF → JPG or PNG: one page writes the file, more the folder.
+        (Some(from), [_], JobOutput::PagesFileOrFolder { .. }, Operation::Convert { to }) => {
+            match engine_for(from, to, sidecars) {
+                Some(Engine::Pdf) => run_pdf(job, ctx, progress),
+                _ => Err(not_yet_supported(job, Some(from))),
+            }
+        }
+        (Some(from), [src], JobOutput::Folder(dest), Operation::Tool { tool, .. })
+            if tool_engine(tool, from, sidecars) == Some(Engine::Archive) =>
+        {
+            let rar = archive::rar::RarPaths::from_sidecars(sidecars);
+            archive::extract(job, src, dest, from, ctx, progress, rar.as_ref())
+                .map(archive::ArchiveOutcome::into_outcome)
+        }
+        // Split PDF and Remove Metadata (one input), Merge PDFs (all of
+        // them): every input must be a PDF. The engine checks the shape.
+        (Some(_), inputs, _, Operation::Tool { tool, .. })
+            if inputs.iter().all(|path| {
+                format_of(path).and_then(|f| tool_engine(tool, f, sidecars)) == Some(Engine::Pdf)
+            }) =>
+        {
+            run_pdf(job, ctx, progress)
+        }
         _ => Err(not_yet_supported(job, from)),
+    }
+}
+
+/// A PDF job ([`pdf::run`] checks the shape), with the worker and the
+/// library from the sidecars.
+fn run_pdf(
+    job: &Job,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+) -> Result<JobOutcome, GrapeError> {
+    let from = job.inputs.first().and_then(|path| format_of(path));
+    match pdf::PdfPaths::from_sidecars(&ctx.sidecars) {
+        Some(paths) => pdf::run(job, ctx, progress, &paths).map(|done| done.into_outcome(&job.op)),
+        None => Err(not_yet_supported(job, from)),
     }
 }
 
