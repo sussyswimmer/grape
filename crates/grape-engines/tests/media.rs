@@ -382,15 +382,18 @@ fn video_too_large_for_avi_is_scaled_to_fit() {
     let dir = TestDir::new("media-avi-size");
     // MPEG-4 Part 2 refuses 8192 px or more on either side. A panorama and
     // a tall strip, one frame each; odd sizes, to check the even rounding.
+    // PNG in MOV takes any size.
     for (size, expected) in [("9001x101", ("8190", "90")), ("101x9001", ("90", "8190"))] {
-        let src = dir.join(&format!("{size}.mkv"));
+        let src = dir.join(&format!("{size}.mov"));
         ffmpeg(&[
             "-f",
             "lavfi",
             "-i",
             &format!("testsrc=size={size}:rate=1:duration=1"),
             "-c:v",
-            "ffv1",
+            "png",
+            "-f",
+            "mov",
             src.to_str().unwrap(),
         ]);
         let (outcome, _) = convert_file(&dir, &src, Format::Avi)
@@ -426,10 +429,11 @@ fn a_camera_timecode_doesnt_become_a_track() {
         assert_eq!(kinds(&outcome.outputs[0]), ["video", "audio"], "{to:?}");
         fs::remove_file(&outcome.outputs[0]).unwrap();
     }
-    // Re-encoded: from an MKV that carries the timecode as a tag.
+    // Re-encoded: from an MKV that carries the timecode as a tag, with
+    // MPEG-4 Part 2 video, which MP4 and MOV don't copy.
     let mkv = dir.join("camera.mkv");
     let mut args: Vec<&str> = vec!["-i", src.to_str().unwrap(), "-map", "0:v", "-map", "0:a"];
-    args.extend(["-c:v", "ffv1", "-c:a", "copy", "-timecode", "01:00:00:00"]);
+    args.extend(["-c:v", "mpeg4", "-c:a", "copy", "-timecode", "01:00:00:00"]);
     args.push(mkv.to_str().unwrap());
     ffmpeg(&args);
     for to in [Format::Mp4, Format::Mov] {
@@ -591,6 +595,21 @@ fn frame_times(path: &Path) -> Vec<i64> {
         .collect()
 }
 
+/// How many of `path`'s video frames are B-frames.
+fn b_frames(path: &Path) -> usize {
+    let out = Command::new(tool("GRAPE_TEST_FFPROBE"))
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "frame=pict_type", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffprobe {}", path.display());
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|line| line.trim_end_matches(',') == "B")
+        .count()
+}
+
 #[test]
 fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
     let dir = TestDir::new("media-b-frames");
@@ -602,7 +621,7 @@ fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
             "-f",
             "lavfi",
             "-i",
-            "testsrc2=size=320x240:rate=30:duration=1",
+            "testsrc=size=320x240:rate=30:duration=1",
             SINE[0],
             SINE[1],
             SINE[2],
@@ -620,6 +639,7 @@ fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
             muxer,
             src.to_str().unwrap(),
         ]);
+        assert!(b_frames(&src) > 0, "{name} has no B-frames");
         let from = Format::from_file_name(name).unwrap();
         for to in [Format::Mp4, Format::Mov, Format::Mkv] {
             if !targets(from).contains(&to) {
@@ -686,9 +706,9 @@ fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
     let dir = TestDir::new("media-short-gif");
     // One frame (1/30 s), and two frames at 50 fps: both shorter than a
     // GIF frame at 12 fps.
-    for (name, source) in [
-        ("one.mp4", "testsrc2=size=320x240:rate=30,trim=end_frame=1"),
-        ("two.mp4", "testsrc2=size=320x240:rate=50:duration=0.04"),
+    for (name, source, frames) in [
+        ("one.mp4", "testsrc=size=320x240:rate=30", "1"),
+        ("two.mp4", "testsrc=size=320x240:rate=50", "2"),
     ] {
         let src = dir.join(name);
         ffmpeg(&[
@@ -696,6 +716,8 @@ fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
             "lavfi",
             "-i",
             source,
+            "-frames:v",
+            frames,
             "-c:v",
             "libx264",
             "-pix_fmt",
