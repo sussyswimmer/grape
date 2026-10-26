@@ -243,13 +243,9 @@ jobs:
             dist/windows-x86_64
             dist/grape-ffmpeg-sources.tar
           key: ${{ steps.dist.outputs.cache-primary-key }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ffmpeg-x86_64-pc-windows-msvc
-          path: ${{ runner.temp }}/ffmpeg-artifact
-          if-no-files-found: error
       # Uploaded once, from here: the sources job checks that the Mac runs
       # wrote the same one. It's tarballs already, so it isn't compressed again.
+      # Before the exes, so they never sit in a run without their source.
       - uses: actions/upload-artifact@v7
         with:
           name: ffmpeg-source
@@ -258,6 +254,11 @@ jobs:
             ${{ runner.temp }}/ffmpeg-source/grape-ffmpeg-sources.tar.sha256
           if-no-files-found: error
           compression-level: 0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg-artifact
+          if-no-files-found: error
 
   # build.sh runs the programs only on Linux and macOS, so the Windows exes
   # first run here: the gate's checks (the -grape marker, licenses/ffmpeg,
@@ -349,9 +350,11 @@ jobs:
           exit 0
 
   # Natively on Apple silicon: build.sh doesn't cross-compile between Mac
-  # architectures.
+  # architectures. After windows-x86_64, which uploads the one source bundle:
+  # the halves are GPL programs too, so no run holds them without it.
   macos-arm64:
     name: FFmpeg (macos-arm64)
+    needs: windows-x86_64
     runs-on: macos-latest
     timeout-minutes: 90
     defaults:
@@ -496,9 +499,10 @@ jobs:
 
   # Natively on Intel: uname -m must say x86_64, so Rosetta on Apple silicon
   # isn't enough. macos-15-intel is GitHub's Intel image; when it's retired,
-  # take the next one (D24, "Revisit if").
+  # take the next one (D24, "Revisit if"). After windows-x86_64, as above.
   macos-x86_64:
     name: FFmpeg (macos-x86_64)
+    needs: windows-x86_64
     runs-on: macos-15-intel
     timeout-minutes: 90
     defaults:
@@ -640,10 +644,12 @@ jobs:
   # is signed ad hoc (lipo breaks the halves' signatures, D25). The per-arch
   # files go along under their own names: tauri-build wants them while a
   # universal build compiles each arch. Then each half runs where this
-  # runner can run it (the Intel one under Rosetta, when there is one).
+  # runner can run it (the Intel one under Rosetta, when there is one). Only
+  # once the sources job has checked the uploaded source bundle against both
+  # halves' own: ffmpeg-apple-darwin never appears without its source.
   merge:
     name: FFmpeg (macOS universal)
-    needs: [macos-arm64, macos-x86_64]
+    needs: [macos-arm64, macos-x86_64, sources]
     runs-on: macos-latest
     timeout-minutes: 20
     defaults:
