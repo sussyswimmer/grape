@@ -1835,6 +1835,21 @@ mod tests {
     }
 
     #[test]
+    fn parsing_checks_every_16k_lines() {
+        // A fixed size, so a change to how often parsing checks shows:
+        // 100,000 blank lines are checked at lines 0, 16,384, 32,768,
+        // 49,152, 65,536, 81,920 and 98,304, then once before the sort.
+        let blank = "\n".repeat(100_000);
+        let mut calls = 0;
+        let result = parse(&blank, &mut || {
+            calls += 1;
+            false
+        });
+        assert_eq!(result, Err(ParseError::NoCues));
+        assert_eq!(calls, 8);
+    }
+
+    #[test]
     fn a_cancel_is_noticed_inside_a_long_block() {
         let text = vec!["x"; CHECK_EVERY];
         // A valid timing line keeps the text after it; a bad one drops it.
