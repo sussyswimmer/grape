@@ -1686,11 +1686,13 @@ name = "grape-platform"
 version = "0.1.0"
 dependencies = [
  "dispatch2",
+ "grape-heif-proto",
  "log",
  "objc2",
  "objc2-app-kit",
  "objc2-core-graphics",
  "objc2-foundation",
+ "serde_json",
  "thiserror 2.0.21",
  "windows",
  "windows-collections",

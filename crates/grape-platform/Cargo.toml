@@ -19,7 +19,9 @@ log = "0.4.34"
 # shell data object). Nothing else in the build enables the WinRT ones
 # (Foundation, ApplicationModel_DataTransfer, Storage, Storage_Streams: the
 # share sheet), so those and the two Win32 ones add new bindings to the build
-# (DECISIONS D9, D13).
+# (DECISIONS D9, D13). Win32_Security (CreateJobObjectW's attributes) and
+# Win32_System_JobObjects are the HEIC helper's Job Object (`windows::job`,
+# D33): bindings only, no new package.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "ApplicationModel_DataTransfer",
@@ -28,10 +30,12 @@ windows = { version = "0.62.2", features = [
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
@@ -107,6 +111,17 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
     "std",
     "objc2",
 ] }
+
+[features]
+# The HEIC tests that need a real codec (D33): on Windows,
+# `tests/job_object.rs`'s grape-heif.exe case (GRAPE_TEST_HEIF). CI's heif-it
+# jobs turn it on.
+heif-it = []
+
+[dev-dependencies]
+# tests/job_object.rs writes protocol requests to grape-heif.exe.
+grape-heif-proto.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

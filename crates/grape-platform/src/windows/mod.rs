@@ -24,6 +24,9 @@
 //!   its own).
 //! - `share`: Share behind [`crate::file_actions::share`]: the share sheet,
 //!   owned by an invisible anchor window on a thread of its own.
+//! - `job`: the Job Object a helper process runs in ([`job::JobGuard`],
+//!   D33): it ends the helper with Grape, caps its memory and keeps it to
+//!   one process.
 //!
 //! Inside this crate, write the Win32 bindings as `::windows::…`: a bare
 //! `windows::…` can be confused with this module.
@@ -34,6 +37,7 @@ mod drag;
 mod drag_out;
 mod drop_target;
 mod hook;
+pub mod job;
 mod overlay;
 mod share;
 
