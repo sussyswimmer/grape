@@ -1632,6 +1632,7 @@ dependencies = [
  "anyhow",
  "grape-core",
  "grape-engines",
+ "grape-heif-proto",
  "grape-platform",
  "log",
  "serde",

@@ -340,8 +340,10 @@ struct Helper {
 
 /// The helpers lane A's engines need. PDFium ships wherever a build has
 /// one (D29). bsdtar ships once the bundles carry it (#27, D27): then
-/// `ships` becomes `cfg!(any(windows, target_os = "macos"))` too.
-const HELPERS: [Helper; 2] = [
+/// `ships` becomes `cfg!(any(windows, target_os = "macos"))` too. The HEIC
+/// helper ships on Windows (`grape-heif.exe`, D33); on macOS it's Grape
+/// itself, so it's never missing there.
+const HELPERS: [Helper; 3] = [
     Helper {
         title: "Grape's PDF library is missing",
         detail: "Reinstalling Grape brings it back.",
@@ -353,6 +355,12 @@ const HELPERS: [Helper; 2] = [
         detail: "Reinstalling Grape brings it back.",
         ships: false,
         with: with_bsdtar,
+    },
+    Helper {
+        title: "Grape's HEIC helper is missing",
+        detail: "Reinstall Grape to convert HEIC files.",
+        ships: cfg!(windows),
+        with: with_heif,
     },
 ];
 
@@ -367,6 +375,13 @@ fn with_pdf(sidecars: &SidecarPaths) -> SidecarPaths {
 fn with_bsdtar(sidecars: &SidecarPaths) -> SidecarPaths {
     SidecarPaths {
         bsdtar: Some(PathBuf::from("bsdtar")),
+        ..sidecars.clone()
+    }
+}
+
+fn with_heif(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        heif: Some(PathBuf::from("grape-heif")),
         ..sidecars.clone()
     }
 }
@@ -833,6 +848,114 @@ mod tests {
         let why = check_runnable(&to_png, &mixed, &installed()).unwrap_err();
         // The first unsupported item names the toast.
         assert_eq!(why.detail.as_deref(), Some("AVIF to PNG is coming."));
+    }
+
+    /// [`installed`] plus the HEIC helper: `grape-heif.exe` on Windows,
+    /// Grape itself on macOS.
+    fn with_heic_helper() -> SidecarPaths {
+        SidecarPaths {
+            heif: Some(PathBuf::from("grape-heif.exe")),
+            ..installed()
+        }
+    }
+
+    #[test]
+    fn heic_runs_with_its_helper_both_ways() {
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let png = [SelectionItem::file("/a/photo.png")];
+        for to in [
+            Format::Jpg,
+            Format::Png,
+            Format::Webp,
+            Format::Tiff,
+            Format::Bmp,
+        ] {
+            let op = Operation::Convert { to };
+            assert_eq!(
+                check_runnable(&op, &heic, &with_heic_helper()),
+                Ok(()),
+                "{to:?}"
+            );
+        }
+        for from in ["/a/photo.png", "/a/photo.jpg", "/a/scan.tiff"] {
+            let op = Operation::Convert { to: Format::Heic };
+            let items = [SelectionItem::file(from)];
+            assert_eq!(
+                check_runnable(&op, &items, &with_heic_helper()),
+                Ok(()),
+                "{from}"
+            );
+        }
+        // HEIC ⇄ AVIF and HEIC → PDF wait for their engines (D33).
+        let to_avif = Operation::Convert { to: Format::Avif };
+        assert_eq!(
+            check_runnable(&to_avif, &heic, &with_heic_helper())
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("HEIC to AVIF is coming.")
+        );
+        let to_heic = Operation::Convert { to: Format::Heic };
+        assert_eq!(check_runnable(&to_heic, &png, &with_heic_helper()), Ok(()));
+    }
+
+    #[test]
+    fn heic_without_its_helper_says_so_on_windows_and_is_coming_elsewhere() {
+        let to_png = Operation::Convert { to: Format::Png };
+        let to_heic = Operation::Convert { to: Format::Heic };
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let png = [SelectionItem::file("/a/photo.png")];
+        for (op, items, coming) in [
+            (&to_png, &heic, "HEIC to PNG is coming."),
+            (&to_heic, &png, "PNG to HEIC is coming."),
+        ] {
+            let why = check_runnable(op, items, &installed()).unwrap_err();
+            if cfg!(windows) {
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Grape's HEIC helper is missing".to_owned(),
+                        detail: Some("Reinstall Grape to convert HEIC files.".to_owned()),
+                    }
+                );
+            } else {
+                // macOS always has its helper (Grape itself); Linux none.
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Not in this build yet".to_owned(),
+                        detail: Some(coming.to_owned()),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_heic_and_an_avif_never_blame_the_heic_helper() {
+        let to_png = Operation::Convert { to: Format::Png };
+        let mixed = [
+            SelectionItem::file("/a/one.heic"),
+            SelectionItem::file("/a/two.avif"),
+        ];
+        // Without the helper: where it ships, even with it the AVIF can't
+        // run, so the AVIF names the toast; elsewhere the HEIC does.
+        let why = check_runnable(&to_png, &mixed, &installed()).unwrap_err();
+        assert_eq!(why.title, "Not in this build yet");
+        let named = if cfg!(windows) {
+            "AVIF to PNG is coming."
+        } else {
+            "HEIC to PNG is coming."
+        };
+        assert_eq!(why.detail.as_deref(), Some(named));
+        // With it, only the AVIF can't run.
+        assert_eq!(
+            check_runnable(&to_png, &mixed, &with_heic_helper()),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("AVIF to PNG is coming.".to_owned()),
+            })
+        );
     }
 
     #[test]

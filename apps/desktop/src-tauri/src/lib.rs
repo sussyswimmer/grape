@@ -7,6 +7,7 @@
 //! (DECISIONS D18).
 
 mod actions;
+mod contain;
 pub mod controller;
 pub mod events;
 mod float;
@@ -130,6 +131,9 @@ pub fn run() -> anyhow::Result<()> {
                 log::error!("could not prepare the panel window: {err:#}");
             }
             panel::set_preview(app.handle(), panel::preview_from_env());
+            // Before any drop runs: the engines put each helper process
+            // they start into a Job Object on Windows (D33).
+            contain::install();
             // Once, next to Grape's executable; every drop gets a copy.
             app.manage(sidecars::Sidecars::find());
             // Before the wheel, which starts with the user's keys, sounds

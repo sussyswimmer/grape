@@ -32,6 +32,8 @@ serde.workspace = true
 serde_json.workspace = true
 grape-core.workspace = true
 grape-engines.workspace = true
+# `main.rs` checks the HEIC worker's flag on every OS (D33).
+grape-heif-proto.workspace = true
 grape-platform.workspace = true
 
 [features]
