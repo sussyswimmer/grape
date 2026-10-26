@@ -548,9 +548,10 @@ fn sort_by_start(cues: &mut [Cue], ticker: &mut Ticker) -> Result<(), Cancelled>
 /// - In WebVTT only, character references: by name from [`entities`]
 ///   (case-sensitive, so `&Eacute;` is É and `&EACUTE;` stays text), or by
 ///   number (`&#233;`, `&#xE9;`). As in HTML, a name of HTML 3.2 (see
-///   [`entities::legacy`]) needs no `;` when what follows it isn't a letter
-///   or digit: `&copy 2024` is "© 2024", `&copy2024` stays text. `&#128;`
-///   to `&#159;` are read as Windows-1252, as HTML does (see [`numeric`]).
+///   [`entities::legacy`]) needs no `;` when what follows it isn't an ASCII
+///   letter or digit: `&copy 2024` is "© 2024" and `&copyé` "©é", while
+///   `&copy2024` stays text. `&#128;` to `&#159;` are read as
+///   Windows-1252, as HTML does (see [`numeric`]).
 ///   `&#10;` and `&#13;` break the line, as a line of cue text can't hold
 ///   one; `&#0;` stays text.
 fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
@@ -767,8 +768,8 @@ fn reference(rest: &str) -> Option<(usize, Reference)> {
     if semicolon {
         Some((len + 2, Reference::Char(entities::named(name)?)))
     } else {
-        // What follows the name isn't a letter or digit, or it would be
-        // part of the name.
+        // What follows the name isn't an ASCII letter or digit, or it
+        // would be part of the name.
         Some((len + 1, Reference::Char(entities::legacy(name)?)))
     }
 }
@@ -1512,6 +1513,8 @@ mod tests {
         );
         // At the end of the line, and before `#` or another reference.
         assert_eq!(spans("&amp#38; &reg&copy;&amp", true), [text("&#38; ®©&")]);
+        // Only ASCII letters and digits are part of a name.
+        assert_eq!(spans("&copyé &eacuteà", true), [text("©é éà")]);
         // HTML 4 names that HTML 3.2 didn't have need their `;`.
         assert_eq!(
             spans("&euro &hellip &apos &mdash; &COPY;&REG;", true),
