@@ -12,9 +12,8 @@
 //!   escapes `&`, `<` and `>`, and SRT writes a `-->` in text as `->`, so
 //!   a text line can never become a timing line.
 //! - **Cancellation:** `is_cancelled` is asked before anything is written
-//!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) lines; once it
-//!   says so, the writer
-//!   fails with an error.
+//!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) units of work, a
+//!   cue or a line each; once it says so, the writer fails with an error.
 //!
 //! A line without visible text, and a cue without such lines, is left out,
 //! so even a document that wasn't normalized can't produce a blank line in
@@ -43,6 +42,7 @@ pub(crate) fn write_vtt(
     ticker.tick()?;
     write!(out, "WEBVTT{nl}")?;
     for (i, cue) in visible_cues(doc).enumerate() {
+        ticker.tick()?;
         let (start, end) = (timestamp(cue.start_ms, '.'), timestamp(cue.end_ms, '.'));
         write!(out, "{nl}{}{nl}{start} --> {end}{nl}", i + 1)?;
         tagged_lines(cue, escape_vtt, &mut ticker, |line| {
@@ -67,6 +67,7 @@ pub(crate) fn write_srt(
         out.write_all(b"\xEF\xBB\xBF")?;
     }
     for (i, cue) in visible_cues(doc).enumerate() {
+        ticker.tick()?;
         if i > 0 {
             out.write_all(nl.as_bytes())?;
         }
@@ -93,6 +94,7 @@ pub(crate) fn write_txt(
     let mut previous = String::new();
     let mut text = String::new();
     for cue in &doc.cues {
+        ticker.tick()?;
         for line in &cue.lines {
             ticker.tick()?;
             text.clear();
@@ -589,7 +591,12 @@ mod tests {
             |doc, out, is_cancelled| write_srt(doc, out, false, is_cancelled),
             |doc, out, is_cancelled| write_txt(doc, out, is_cancelled),
         ];
-        for doc in [&one_cue, &many_cues] {
+        // The first check counts as one unit, and so does each cue and
+        // each line: the check at unit CHECK_EVERY stops the writer.
+        for (doc, written_lines) in [
+            (&one_cue, CHECK_EVERY - 2),
+            (&many_cues, CHECK_EVERY / 2 - 1),
+        ] {
             for (w, writer) in writers.iter().enumerate() {
                 // Not cancelled at the first check, before anything is
                 // written; cancelled from the second on.
@@ -602,9 +609,8 @@ mod tests {
                 let err = writer(doc, &mut out, &mut is_cancelled).unwrap_err();
                 assert_eq!(err.to_string(), "cancelled");
                 let written = String::from_utf8(out).unwrap();
-                // The first check counted as one unit, each line as one.
                 let lines = written.lines().filter(|l| l.starts_with("line ")).count();
-                assert_eq!(lines, CHECK_EVERY - 1, "writer {w}");
+                assert_eq!(lines, written_lines, "writer {w}");
             }
         }
     }
