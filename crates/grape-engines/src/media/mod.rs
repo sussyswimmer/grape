@@ -90,41 +90,32 @@ pub(crate) fn convert(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
-    let names = Names::new(src, dest, from, to);
-    let dir = publish::dest_dir(dest, &names)?;
     let cancel = &ctx.cancel;
     let mut bar = Bar::new(progress);
     let or_cancelled = |e| publish::or_cancelled(cancel, src, e);
-    let (Some(ffmpeg), Some(ffprobe)) = (
-        ctx.sidecars.ffmpeg.as_deref(),
-        ctx.sidecars.ffprobe.as_deref(),
-    ) else {
-        return Err(missing_sidecar("no ffmpeg or ffprobe path".to_string()));
-    };
-
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-    // FFmpeg gets absolute `file:` URLs, so nothing depends on its working
-    // folder.
-    let src_abs = absolute(src).map_err(|e| names.read_failed(e))?;
-    source_is_a_file(&src_abs, src, &names)?;
-    let dir_abs = absolute(dir).map_err(|e| names.write_failed(e))?;
-    ffmpeg_can_name(&src_abs, &dir_abs, &names)?;
-    let info = probe_source(ffprobe, &src_abs, src, &names, ctx).map_err(or_cancelled)?;
+    let begun = begin(job, src, dest, from, to, ctx)?;
+    let Begun {
+        ffmpeg,
+        ffprobe,
+        dir,
+        ref src_abs,
+        ref names,
+        ref info,
+        ..
+    } = begun;
     // Refuse a source without the stream the target needs before anything
     // is created.
-    if let Some(missing) = missing_stream(to, &info) {
-        return Err(no_stream(&names, missing, src));
+    if let Some(missing) = missing_stream(to, info) {
+        return Err(no_stream(names, missing, src));
     }
     if to == Format::Aiff {
-        if let Some(bytes) = args::aiff_bytes(&info).filter(|&b| b > args::AIFF_MAX_LEN) {
+        if let Some(bytes) = args::aiff_bytes(info).filter(|&b| b > args::AIFF_MAX_LEN) {
             let detail = format!("{bytes} bytes of samples from {}", src.display());
-            return Err(too_long_for_aiff(&names, detail));
+            return Err(too_long_for_aiff(names, detail));
         }
     }
 
-    publish::ensure_dir(job, ctx, dir, &names)?;
+    publish::ensure_dir(job, ctx, dir, names)?;
     // From here on, the temp files remove themselves on every return path.
     let create = |ext| {
         TempFile::create(dir, ext)
@@ -149,31 +140,31 @@ pub(crate) fn convert(
     };
     // The wait can be as long as two other encodes: a source moved or
     // deleted meanwhile can't be read.
-    source_is_a_file(&src_abs, src, &names)?;
-    let first = args::passes(&src_abs, to, &info, &out, &palette_path)
-        .map_err(|missing| no_stream(&names, missing, src))?;
-    let copies = args::copy_plan(to, &info).any();
+    source_is_a_file(src_abs, src, names)?;
+    let first = args::passes(src_abs, to, info, &out, &palette_path)
+        .map_err(|missing| no_stream(names, missing, src))?;
+    let copies = args::copy_plan(to, info).any();
     let share = if copies { COPY_SHARE } else { PASSES_SHARE };
     let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, &mut bar, share) {
         Ok(warnings) => warnings,
         Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
         Err(e) => {
             let refused = matches!(e, RunError::Exit { .. });
-            let failure = or_cancelled(ffmpeg_failed(&names, e, src));
+            let failure = or_cancelled(ffmpeg_failed(names, e, src));
             if !(refused && copies && worth_a_retry(&failure)) {
                 return Err(failure);
             }
             // A copied stream can fit by its codec and still not mux: one
             // retry re-encoding everything, filling what's left of the bar.
-            let again = args::reencode_passes(&src_abs, to, &info, &out, &palette_path)
-                .map_err(|missing| no_stream(&names, missing, src))?;
+            let again = args::reencode_passes(src_abs, to, info, &out, &palette_path)
+                .map_err(|missing| no_stream(names, missing, src))?;
             run_passes(ffmpeg, &again, info.duration, ctx, &mut bar, PASSES_SHARE)
-                .map_err(|e| or_cancelled(ffmpeg_failed(&names, e, src)))?
+                .map_err(|e| or_cancelled(ffmpeg_failed(names, e, src)))?
         }
     };
     drop(palette);
 
-    check_output(ffprobe, &out, to, &names, ctx, src)
+    check_output(ffprobe, &out, to, names, ctx, src)
         .map_err(|mut e| {
             if !warnings.trim().is_empty() {
                 e.detail = format!("{}; FFmpeg said: {}", e.detail, warnings.trim());
@@ -181,23 +172,105 @@ pub(crate) fn convert(
             e
         })
         .map_err(or_cancelled)?;
-    // FFmpeg doesn't sync its output. Windows only flushes a file opened for
-    // writing; this never truncates or creates it. No test can tell whether
-    // the sync ran: only a crash or power cut right after would show it.
-    OpenOptions::new()
-        .write(true)
-        .open(&out)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| names.write_failed(format!("sync {}: {e}", out.display())))?;
-    bar.to(CHECKED);
+    begun.publish_checked(temp, &out, ctx, &mut bar)
+}
+
+/// What every media job has made sure of, and learned, before it creates
+/// anything ([`begin`]).
+struct Begun<'a> {
+    job: &'a Job,
+    src: &'a Path,
+    dest: &'a Path,
+    /// The folder `dest` is in.
+    dir: &'a Path,
+    ffmpeg: &'a Path,
+    ffprobe: &'a Path,
+    /// `src` made absolute, for FFmpeg's `file:` URLs.
+    src_abs: PathBuf,
+    names: Names,
+    /// What `ffprobe` said about the source.
+    info: Probe,
+}
+
+/// The start every media job shares: the sidecars, a cancel check, the
+/// source still a file, names FFmpeg gets unchanged, and the source's
+/// probe. Nothing is created yet.
+fn begin<'a>(
+    job: &'a Job,
+    src: &'a Path,
+    dest: &'a Path,
+    from: Format,
+    to: Format,
+    ctx: &'a EngineCtx,
+) -> Result<Begun<'a>, GrapeError> {
+    let names = Names::new(src, dest, from, to);
+    let dir = publish::dest_dir(dest, &names)?;
+    let cancel = &ctx.cancel;
+    let (Some(ffmpeg), Some(ffprobe)) = (
+        ctx.sidecars.ffmpeg.as_deref(),
+        ctx.sidecars.ffprobe.as_deref(),
+    ) else {
+        return Err(missing_sidecar("no ffmpeg or ffprobe path".to_string()));
+    };
 
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let outcome = publish::finalize(&temp, job, src, dest, dir, &names)?;
-    drop(temp);
-    bar.published();
-    Ok(outcome)
+    // FFmpeg gets absolute `file:` URLs, so nothing depends on its working
+    // folder.
+    let src_abs = absolute(src).map_err(|e| names.read_failed(e))?;
+    source_is_a_file(&src_abs, src, &names)?;
+    let dir_abs = absolute(dir).map_err(|e| names.write_failed(e))?;
+    ffmpeg_can_name(&src_abs, &dir_abs, &names)?;
+    let info = probe_source(ffprobe, &src_abs, src, &names, ctx)
+        .map_err(|e| publish::or_cancelled(cancel, src, e))?;
+    Ok(Begun {
+        job,
+        src,
+        dest,
+        dir,
+        ffmpeg,
+        ffprobe,
+        src_abs,
+        names,
+        info,
+    })
+}
+
+impl Begun<'_> {
+    /// Publishes the checked output `out` (the absolute path of `temp`):
+    /// syncs it, moves the bar to [`CHECKED`], checks for a cancel once
+    /// more, and gives it its final name without replacing anything.
+    fn publish_checked(
+        &self,
+        temp: TempFile,
+        out: &Path,
+        ctx: &EngineCtx,
+        bar: &mut Bar,
+    ) -> Result<JobOutcome, GrapeError> {
+        // FFmpeg doesn't sync its output. Windows only flushes a file opened
+        // for writing; this never truncates or creates it. No test can tell
+        // whether the sync ran: only a crash or power cut right after would
+        // show it.
+        OpenOptions::new()
+            .write(true)
+            .open(out)
+            .and_then(|file| file.sync_all())
+            .map_err(|e| {
+                self.names
+                    .write_failed(format!("sync {}: {e}", out.display()))
+            })?;
+        bar.to(CHECKED);
+
+        if ctx.cancel.is_cancelled() {
+            return Err(crate::cancelled(self.src));
+        }
+        let outcome =
+            publish::finalize(&temp, self.job, self.src, self.dest, self.dir, &self.names)?;
+        drop(temp);
+        bar.published();
+        Ok(outcome)
+    }
 }
 
 /// The job's progress bar, over `run_job`'s callback: it only ever moves
@@ -367,7 +440,8 @@ fn run_passes(
 }
 
 /// Checks that FFmpeg wrote a file of the target's kind: not empty, and
-/// with the stream the target is for.
+/// with the stream the target is for. Returns what `ffprobe` said about
+/// it, for the tools' own checks.
 fn check_output(
     ffprobe: &Path,
     out: &Path,
@@ -375,7 +449,7 @@ fn check_output(
     names: &Names,
     ctx: &EngineCtx,
     src: &Path,
-) -> Result<(), GrapeError> {
+) -> Result<Probe, GrapeError> {
     let wrote = |detail: String| names.encode_failed(format!("check {}: {detail}", out.display()));
     let len = match std::fs::metadata(out) {
         Ok(meta) => meta.len(),
@@ -402,7 +476,7 @@ fn check_output(
         })?;
     let output = probe::parse(&flat).map_err(wrote)?;
     match missing_stream(to, &output) {
-        None => Ok(()),
+        None => Ok(output),
         Some(Missing::Audio) => Err(wrote("no audio stream in the output".to_string())),
         Some(Missing::Video) => Err(wrote("no video stream in the output".to_string())),
     }

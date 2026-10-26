@@ -568,10 +568,17 @@ fn wma_limits(audio: &Audio) -> Vec<&'static str> {
     args
 }
 
-/// The start of every argv: no stdin, no banner or stats, errors only,
-/// overwrite the (temp) output, and the source as input 0, read only from a
-/// local file by one of the [`DEMUXERS`], with the options in `reading`.
+/// The start of every conversion's argv: [`prefix_at`] with errors only.
 fn prefix(src: &Path, reading: &[&str]) -> Vec<OsString> {
+    prefix_at(src, reading, "error")
+}
+
+/// The start of every argv: no stdin, no banner or stats, FFmpeg's log at
+/// `level` (`"error"`; `"info"` for a pass whose stderr is read, such as a
+/// loudness measurement), overwrite the (temp) output, and the source as
+/// input 0, read only from a local file by one of the [`DEMUXERS`], with
+/// the options in `reading`.
+pub(crate) fn prefix_at(src: &Path, reading: &[&str], level: &str) -> Vec<OsString> {
     let mut args = Vec::new();
     push(
         &mut args,
@@ -580,7 +587,7 @@ fn prefix(src: &Path, reading: &[&str]) -> Vec<OsString> {
             "-hide_banner",
             "-nostats",
             "-v",
-            "error",
+            level,
             "-y",
             "-protocol_whitelist",
             "file",
