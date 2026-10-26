@@ -7,8 +7,9 @@
 //! beside `Grape.exe` on Windows, the bundler puts them in
 //! `Grape.app/Contents/MacOS` on macOS (the executable's own folder), and
 //! in dev tauri-build copies `bundle.externalBin` into `target/debug` the
-//! same way when `tauri dev` gets the `tauri.sidecars.conf.json` overlay
-//! (D25). Nothing else is searched: never `PATH`, so an FFmpeg the user
+//! same way when `tauri dev` gets its OS's sidecars overlay
+//! (`tauri.sidecars.windows.conf.json` or `tauri.sidecars.macos.conf.json`,
+//! D25). Nothing else is searched: never `PATH`, so an FFmpeg the user
 //! installed is never run, and never through the shell plugin.
 //!
 //! PDFium (D29) is a library, loaded only by the PDF worker, which is
@@ -29,7 +30,7 @@
 //! `<helper> --grape-heif-worker` on both systems. On Windows it's
 //! `grape-heif.exe` next to `Grape.exe`, Grape's own sidecar (libheif, a
 //! GPL program of its own, built by CI from `tools/grape-heif`; the
-//! `tauri.heif.windows.conf.json` overlay bundles it), by the same rule as
+//! `tauri.sidecars.windows.conf.json` overlay bundles it), by the same rule as
 //! FFmpeg. On macOS it's Grape's own executable (ImageIO, `main.rs`), like
 //! the PDF worker, so it's always there and isn't logged as a sidecar.
 //! Other systems have none.

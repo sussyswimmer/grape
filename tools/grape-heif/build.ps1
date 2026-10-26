@@ -31,7 +31,7 @@ workflow and a PC run the same steps (heic-spec J13):
      versions) and SHA256SUMS in tools\grape-heif\target\out;
   8. with -Install, also copies it to
      apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe,
-     where `tauri build` with tauri.heif.windows.conf.json takes it.
+     where `tauri build` with tauri.sidecars.windows.conf.json takes it.
 
 CI checks the result further (the banner, no plugin loader, the DLLs it
 imports, the license texts): .github/workflows/grape-heif.yml.

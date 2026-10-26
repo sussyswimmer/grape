@@ -322,12 +322,13 @@ jobs:
         run: cargo test -p grape-engines --features engines-it --locked --test media --no-fail-fast
 
   # A Windows build anyone can download from the run's Artifacts: the
-  # per-user NSIS installer (no admin needed), with PDFium (D29) and
-  # grape-heif.exe (D33) next to Grape.exe. It's unsigned until M7, so
+  # per-user NSIS installer (no admin needed), with PDFium (D29) and the
+  # sidecars next to Grape.exe, each built in this run: Grape's own FFmpeg
+  # (D24), bsdtar (D27) and grape-heif.exe (D33). It's unsigned until M7, so
   # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
   build-windows:
     name: Build (Windows installer)
-    needs: grape-heif
+    needs: [ffmpeg, bsdtar, grape-heif]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -343,7 +344,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # Restore and save apart: the cache is saved right after the fetch, so
       # the pdfium-Windows key, which rust-windows shares, never holds the
-      # grape-heif.exe copied in below.
+      # sidecars copied in below.
       - id: pdfium-cache
         uses: actions/cache/restore@v6
         with:
@@ -357,43 +358,129 @@ jobs:
         with:
           path: apps/desktop/src-tauri/binaries
           key: ${{ steps.pdfium-cache.outputs.cache-primary-key }}
-      # grape-heif.exe from this run's grape-heif job, under the name Tauri's
-      # externalBin wants.
+      # The sidecars from this run's ffmpeg, bsdtar and grape-heif workflows.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg
+      - uses: actions/download-artifact@v8
+        with:
+          name: bsdtar-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/bsdtar
       - uses: actions/download-artifact@v8
         with:
           name: grape-heif-x86_64-pc-windows-msvc
           path: ${{ runner.temp }}/grape-heif
-      - name: Put grape-heif.exe in binaries
+      # Each checked against its SHA256SUMS and the hash its job reported,
+      # then copied under the name Tauri's externalBin wants.
+      - name: Put the sidecars in binaries
         shell: pwsh
         env:
+          FFMPEG_SUMS: ${{ needs.ffmpeg.outputs.windows-sums }}
           GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
         run: |
-          $exe = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
-          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
-          if ($sha -ne $env:GRAPE_HEIF_SHA256) {
-            Write-Output "::error::grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built."
-            exit 1
-          }
-          Copy-Item -LiteralPath $exe -Destination apps/desktop/src-tauri/binaries/grape-heif-x86_64-pc-windows-msvc.exe
-      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
-      # bundle.resources; the HEIC overlay adds grape-heif to externalBin and
-      # licenses/grape-heif/, and runs the sidecar gate first. Never a second
-      # overlay that also sets externalBin (it would replace the list).
-      - name: Build Grape and the installer
-        working-directory: apps/desktop
-        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.heif.windows.conf.json
-      # tauri-build copies the resources and the sidecars next to grape.exe,
-      # which is what the installer installs.
-      - name: Check PDFium and grape-heif are in the build
-        shell: pwsh
-        run: |
-          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md',
-                         'target/release/grape-heif.exe', 'target/release/licenses/grape-heif/LICENSE.txt', 'target/release/licenses/grape-heif/SOURCE.md') {
-            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
-              Write-Output "::error::$f is missing from the build."
-              exit 1
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          function Test-Sums([string]$dir) {
+            $lines = @(Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS') | Where-Object { $_ -ne '' })
+            if ($lines.Count -eq 0) { Fail "$dir\SHA256SUMS lists nothing." }
+            foreach ($line in $lines) {
+              if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { Fail "$dir\SHA256SUMS has a line it shouldn't: $line" }
+              $want = $Matches[1]
+              $file = $Matches[2]
+              $got = Hash (Join-Path $dir $file)
+              if ($got -ne $want) { Fail "$file has SHA-256 $got, not the $want its SHA256SUMS says." }
+              Write-Output "$got  $file"
             }
           }
+          $ffmpeg = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          $sums = Hash (Join-Path $ffmpeg 'SHA256SUMS')
+          if ($sums -ne $env:FFMPEG_SUMS) { Fail "The FFmpeg artifact's SHA256SUMS has SHA-256 $sums, not the $env:FFMPEG_SUMS the ffmpeg workflow wrote." }
+          Test-Sums $ffmpeg
+          $bsdtar = Join-Path $env:RUNNER_TEMP 'bsdtar'
+          Test-Sums $bsdtar
+          $heif = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
+          $sha = Hash $heif
+          if ($sha -ne $env:GRAPE_HEIF_SHA256) { Fail "grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built." }
+          $bins = 'apps/desktop/src-tauri/binaries'
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffmpeg-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffprobe-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $bsdtar 'bsdtar-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath $heif -Destination (Join-Path $bins 'grape-heif-x86_64-pc-windows-msvc.exe')
+          Get-ChildItem -File -LiteralPath $bins | Format-Table -AutoSize Name, Length
+      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
+      # bundle.resources. The Windows sidecars overlay is the one overlay
+      # that sets externalBin (ffmpeg, ffprobe, bsdtar, grape-heif), adds
+      # their license folders, and runs the sidecar gate (D25) first. Never a
+      # second overlay that also sets externalBin: it would replace the list.
+      - name: Build Grape and the installer
+        working-directory: apps/desktop
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.sidecars.windows.conf.json
+      # tauri-build copies the resources and the sidecars next to grape.exe,
+      # and the installer carries the same files. Every sidecar and license
+      # folder this build ships is checked there and, when 7-Zip can read it,
+      # in the installer itself. The overlay must list exactly these, so a
+      # sidecar can't be added or dropped without this list changing too.
+      - name: Check every sidecar and license folder is in the build
+        shell: pwsh
+        run: |
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          $sidecars = @('ffmpeg', 'ffprobe', 'bsdtar', 'grape-heif')
+          $folders = @('pdfium', 'ffmpeg', 'libarchive', 'grape-heif')
+          $overlay = (Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.sidecars.windows.conf.json | ConvertFrom-Json).bundle
+          $listed = @($overlay.externalBin | ForEach-Object { ($_ -split '/')[-1] })
+          if (($listed -join ' ') -cne ($sidecars -join ' ')) { Bad "tauri.sidecars.windows.conf.json lists $($listed -join ', '), but this check expects $($sidecars -join ', ')." }
+          $shipped = @($overlay.resources.PSObject.Properties | ForEach-Object { $_.Value })
+          $want = @($folders | Where-Object { $_ -ne 'pdfium' } | ForEach-Object { "licenses/$_/" })
+          if (($shipped -join ' ') -cne ($want -join ' ')) { Bad "tauri.sidecars.windows.conf.json ships $($shipped -join ', '), but this check expects $($want -join ', ')." }
+
+          $expected = [System.Collections.Generic.List[string]]::new()
+          foreach ($f in 'pdfium.dll', 'THIRD_PARTY_NOTICES.md', 'LICENSE.txt') {
+            $expected.Add($f)
+            if (-not (Test-Path -LiteralPath "target/release/$f" -PathType Leaf)) { Bad "target/release/$f is missing from the build." }
+          }
+          foreach ($name in $sidecars) {
+            $expected.Add("$name.exe")
+            $built = "target/release/$name.exe"
+            if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+            elseif ((Hash $built) -ne (Hash "apps/desktop/src-tauri/binaries/$name-x86_64-pc-windows-msvc.exe")) { Bad "$built isn't the $name this run built." }
+          }
+          foreach ($folder in $folders) {
+            foreach ($file in @(Get-ChildItem -File -LiteralPath "licenses/$folder")) {
+              $rel = "licenses/$folder/$($file.Name)"
+              $expected.Add($rel)
+              $built = "target/release/$rel"
+              if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+              elseif ((Hash $built) -ne (Hash $file.FullName)) { Bad "$built differs from $rel." }
+            }
+          }
+
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { Bad "Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count)." } else {
+            $paths = @()
+            $listed = $false
+            if (Get-Command 7z -ErrorAction SilentlyContinue) {
+              $listing = @(& 7z l -tNsis -slt -ba $setup[0].FullName 2> $null)
+              $listed = $LASTEXITCODE -eq 0
+              $paths = @($listing | Where-Object { $_ -like 'Path = *' } | ForEach-Object { $_.Substring(7).Replace('/', '\') })
+            }
+            if (-not $listed -or $paths.Count -eq 0) {
+              Write-Output "::warning::7-Zip couldn't list $($setup[0].Name), so only target/release was checked."
+            } else {
+              $missing = @($expected | Where-Object { $p = $_.Replace('/', '\'); -not ($paths | Where-Object { $_ -eq $p -or $_.EndsWith("\$p") }) })
+              if ($missing.Count -eq $expected.Count) {
+                Write-Output "::warning::None of the files was found in 7-Zip's listing of $($setup[0].Name), which may name them another way; only target/release was checked."
+                $paths | ForEach-Object { Write-Output "  $_" }
+              } else {
+                foreach ($m in $missing) { Bad "$($setup[0].Name) doesn't carry $m." }
+                if ($missing.Count -eq 0) { Write-Output "$($setup[0].Name) carries all $($expected.Count) files checked." }
+              }
+            }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          exit 0
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-Windows-x64
@@ -402,10 +489,13 @@ jobs:
 
   # A Mac build anyone can download from the run's Artifacts: a universal
   # (Apple silicon + Intel) Grape.app in a DMG, with PDFium in
-  # Contents/Frameworks (D29). It's ad-hoc signed, not notarized, so the first
-  # open needs the steps in docs/PLATFORM_MACOS.md → "Running a CI build".
+  # Contents/Frameworks (D29) and the sidecars in Contents/MacOS, each built
+  # in this run: Grape's own FFmpeg (D24) and bsdtar (D27). It's ad-hoc
+  # signed, not notarized, so the first open needs the steps in
+  # docs/PLATFORM_MACOS.md → "Running a CI build".
   build-macos:
     name: Build (macOS DMG)
+    needs: [ffmpeg, bsdtar]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -420,34 +510,123 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
-      - uses: actions/cache@v6
+      # Restore and save apart, as on Windows: the pdfium-macOS key, which
+      # rust-macos shares, never holds the sidecars copied in below.
+      - id: pdfium-cache
+        uses: actions/cache/restore@v6
         with:
           path: apps/desktop/src-tauri/binaries
           key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
       - name: Fetch PDFium
         run: /bin/bash ./scripts/fetch-sidecars.sh --only pdfium
-      # The overlay adds binaries/macos/libpdfium.dylib to
-      # bundle.macOS.frameworks and licenses/pdfium/ to bundle.resources.
+      - if: steps.pdfium-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: ${{ steps.pdfium-cache.outputs.cache-primary-key }}
+      # The sidecars from this run's ffmpeg and bsdtar workflows.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-apple-darwin
+          path: ${{ runner.temp }}/ffmpeg
+      - uses: actions/download-artifact@v8
+        with:
+          name: bsdtar-apple-darwin
+          path: ${{ runner.temp }}/bsdtar
+      # Each checked against its SHA256SUMS (FFmpeg's also against the hash
+      # its workflow reported), then copied under Tauri's externalBin names:
+      # the universal file for the bundle and both per-arch files, which
+      # tauri-build wants while it compiles each arch (D25). Artifacts lose
+      # the executable bit.
+      - name: Put the sidecars in binaries
+        shell: bash
+        env:
+          FFMPEG_SUMS: ${{ needs.ffmpeg.outputs.macos-sums }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          sums=$(shasum -a 256 < "$RUNNER_TEMP/ffmpeg/SHA256SUMS" | cut -d ' ' -f 1)
+          [ "$sums" = "$FFMPEG_SUMS" ] || fail "The FFmpeg artifact's SHA256SUMS has SHA-256 $sums, not the $FFMPEG_SUMS the ffmpeg workflow wrote."
+          (cd "$RUNNER_TEMP/ffmpeg" && shasum -a 256 -c SHA256SUMS) || fail "The FFmpeg artifact doesn't match its SHA256SUMS."
+          (cd "$RUNNER_TEMP/bsdtar" && shasum -a 256 -c SHA256SUMS) || fail "The bsdtar artifact doesn't match its SHA256SUMS."
+          bins=apps/desktop/src-tauri/binaries
+          for triple in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+            cp "$RUNNER_TEMP/ffmpeg/ffmpeg-$triple" "$RUNNER_TEMP/ffmpeg/ffprobe-$triple" "$RUNNER_TEMP/bsdtar/bsdtar-$triple" "$bins/"
+            chmod 755 "$bins/ffmpeg-$triple" "$bins/ffprobe-$triple" "$bins/bsdtar-$triple"
+          done
+          ls -l "$bins"
+      # The PDFium overlay adds binaries/macos/libpdfium.dylib to
+      # bundle.macOS.frameworks and licenses/pdfium/ to bundle.resources. The
+      # macOS sidecars overlay is the one overlay that sets externalBin
+      # (ffmpeg, ffprobe, bsdtar), adds their license folders, and runs the
+      # sidecar gate (D25) first. Never a second overlay that also sets
+      # externalBin: it would replace the list.
       - name: Build Grape.app and the DMG
         working-directory: apps/desktop
-        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci --config src-tauri/tauri.pdfium.macos.conf.json
-      # The ad-hoc app must not have the hardened runtime: its library
-      # validation would refuse the ad-hoc dylib (tauri.conf.json, D29).
-      - name: Check PDFium is in Grape.app
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci --config src-tauri/tauri.pdfium.macos.conf.json --config src-tauri/tauri.sidecars.macos.conf.json
+      # Every sidecar, library and license folder this build ships, in
+      # Grape.app, which is what the DMG holds. The overlay must list exactly
+      # these sidecars and folders, so one can't be added or dropped without
+      # this list changing too. The ad-hoc app must not have the hardened
+      # runtime: its library validation would refuse the ad-hoc dylib
+      # (tauri.conf.json, D29).
+      - name: Check every sidecar, PDFium and every license folder is in Grape.app
+        shell: bash
         run: |
+          fail() { echo "::error::$*"; exit 1; }
           app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          sidecars="ffmpeg ffprobe bsdtar"
+          folders="pdfium ffmpeg libarchive"
+          listed=$(python3 -I -c 'import json, sys; b = json.load(open(sys.argv[1]))["bundle"]; print(" ".join(e.split("/")[-1] for e in b["externalBin"]) + "|" + " ".join(b["resources"].values()))' apps/desktop/src-tauri/tauri.sidecars.macos.conf.json)
+          [ "$listed" = "$sidecars|licenses/ffmpeg/ licenses/libarchive/" ] ||
+            fail "tauri.sidecars.macos.conf.json lists '$listed', but this check expects '$sidecars|licenses/ffmpeg/ licenses/libarchive/'."
+
           lib="$app/Contents/Frameworks/libpdfium.dylib"
-          test -f "$lib" || { echo "::error::$lib is missing."; exit 1; }
-          test -f "$app/Contents/Resources/licenses/pdfium/pdfium.txt" || { echo "::error::licenses/pdfium is missing from Grape.app."; exit 1; }
+          [ -f "$lib" ] || fail "$lib is missing."
           lipo -info "$lib"
-          codesign --verify --strict "$lib"
-          codesign --verify --strict "$app"
+          codesign --verify --strict "$lib" || fail "libpdfium.dylib's signature doesn't verify."
+
+          # Grape's own builds, both halves, signed: the version line the gate
+          # read in binaries/, from the copies in the app.
+          for name in $sidecars; do
+            f="$app/Contents/MacOS/$name"
+            [ -f "$f" ] || fail "$f is missing."
+            archs=$(lipo -archs "$f")
+            case "$archs" in
+              "x86_64 arm64" | "arm64 x86_64") ;;
+              *) fail "$name in Grape.app holds '$archs', not arm64 and x86_64." ;;
+            esac
+            codesign --verify --strict "$f" || fail "$name's signature in Grape.app doesn't verify."
+            if [ "$name" = bsdtar ]; then
+              out=$("$f" --version)
+              re='^bsdtar [^ ]+-grape(\.[0-9]+)? - libarchive '
+            else
+              out=$("$f" -hide_banner -version)
+              re="^$name version [^ ]*-grape(\\.[0-9]+)?( |\$)"
+            fi
+            first=${out%%$'\n'*}
+            echo "$name ($archs): $first"
+            [[ $first =~ $re ]] || fail "$name in Grape.app isn't Grape's own build: $first"
+          done
+          [ ! -e "$app/Contents/MacOS/grape-heif" ] || fail "grape-heif is Windows only: on a Mac, Grape itself is the HEIC worker (D33)."
+
+          # Each license folder whole, byte for byte, and the notices.
+          for folder in $folders; do
+            for src in licenses/"$folder"/*; do
+              dst="$app/Contents/Resources/licenses/$folder/$(basename "$src")"
+              cmp -s "$src" "$dst" || fail "Grape.app lacks licenses/$folder/$(basename "$src"), or it differs."
+            done
+            echo "licenses/$folder: $(find licenses/"$folder" -type f | wc -l | tr -d ' ') files"
+          done
+          for f in THIRD_PARTY_NOTICES.md LICENSE.txt; do
+            [ -f "$app/Contents/Resources/$f" ] || fail "$f is missing from Grape.app."
+          done
+
+          codesign --verify --strict "$app" || fail "Grape.app's signature doesn't verify."
           flags=$(codesign -d --verbose=2 "$app" 2>&1 | grep '^CodeDirectory')
           echo "$flags"
           case "$flags" in
             *runtime*)
-              echo "::error::Grape.app is signed with the hardened runtime, which refuses the ad-hoc libpdfium.dylib."
-              exit 1
+              fail "Grape.app is signed with the hardened runtime, which refuses the ad-hoc libpdfium.dylib."
               ;;
           esac
       # The HEIC worker (D33) is Grape itself: `Grape --grape-heif-worker`
@@ -538,9 +717,9 @@ jobs:
 
   # Sidecars (DECISIONS D25): fetch everything pinned in scripts/sidecars.lock
   # (FFmpeg, ffprobe and PDFium), check it, and list it. Nothing is built
-  # here. No installer or DMG carries FFmpeg until the media engine uses it
-  # and licenses/ffmpeg and its notices entry exist (golden rule 6); the
-  # build jobs above fetch only PDFium (D29).
+  # here. The lock's FFmpeg builds are for dev testing only: the installers
+  # and DMGs carry Grape's own, from the ffmpeg workflow (D24), and the build
+  # jobs above fetch only PDFium from the lock (D29).
   sidecars:
     name: Sidecars (${{ matrix.name }})
     strategy:
@@ -615,12 +794,12 @@ jobs:
         with:
           node-version: 22
       # The lock's FFmpeg builds are for dev testing only (D24). The bundling
-      # gate that tauri.sidecars.conf.json runs must refuse them for lacking
-      # the -grape marker. It also reports bsdtar as missing here: Grape's
-      # bsdtar comes from the bsdtar workflow (scripts/bsdtar, D27), never
-      # from the lock. The step still wants exit 1 and both FFmpeg refusals.
-      # grape-heif isn't in tauri.sidecars.conf.json: build-windows checks it
-      # through the gate run of its own overlay, tauri.heif.windows.conf.json.
+      # gate, which reads the OS's sidecars overlay here
+      # (tauri.sidecars.windows.conf.json or tauri.sidecars.macos.conf.json),
+      # must refuse them for lacking the -grape marker. It also reports bsdtar
+      # and, on Windows, grape-heif as missing here: they come from the bsdtar
+      # and grape-heif workflows (D27, D33), never from the lock. The step
+      # still wants exit 1 and both FFmpeg refusals.
       - name: The bundling gate refuses the dev builds (D25)
         shell: bash
         run: |

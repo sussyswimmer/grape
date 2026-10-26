@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 // The bundling gate for sidecars (DECISIONS D25). A build that bundles
-// sidecars passes an overlay that sets `bundle.externalBin`
-// (`--config src-tauri/tauri.sidecars.conf.json`, or
-// `src-tauri/tauri.heif.windows.conf.json` for grape-heif, D33), and that
-// overlay runs this script first as its `beforeBuildCommand`. It refuses the
-// build unless every sidecar in `externalBin`:
+// sidecars passes its OS's sidecars overlay, the one overlay that sets
+// `bundle.externalBin` (`--config src-tauri/tauri.sidecars.windows.conf.json`:
+// ffmpeg, ffprobe, bsdtar and grape-heif; `tauri.sidecars.macos.conf.json`:
+// ffmpeg, ffprobe and bsdtar), and that overlay runs this script first as its
+// `beforeBuildCommand`. It refuses the build unless every sidecar in
+// `externalBin`:
 //   - is in `apps/desktop/src-tauri/binaries/` for the target being built,
 //   - is Grape's own build: its version line carries the `-grape` marker
-//     (the prebuilt FFmpeg pins in `scripts/sidecars.lock` are for dev
-//     testing only and never ship, D24; bsdtar is built by
+//     (FFmpeg is built by `scripts/ffmpeg/build.sh`, D24, and CI's ffmpeg
+//     workflow; the prebuilt FFmpeg pins in `scripts/sidecars.lock` are for
+//     dev testing only and never ship; bsdtar is built by
 //     `scripts/bsdtar/build.*` from libarchive and Grape's patches, D27;
 //     grape-heif by `tools/grape-heif/build.ps1`, D33),
 //   - has its license texts in `licenses/<folder>/` (with `SOURCE.md` for
@@ -20,7 +22,7 @@
 // Overlays merge as RFC 7396: a later list replaces an earlier one, so no
 // build passes two overlays that both set `externalBin`. Without
 // TAURI_CONFIG (a run by hand, or CI's Sidecars job) the list comes from
-// `--overlay <file>`, by default `tauri.sidecars.conf.json`.
+// `--overlay <file>`, by default the target's OS's sidecars overlay.
 //
 // Usage: node scripts/check-sidecars.mjs [--target <triple>] [--overlay <file>]
 // The target defaults to TAURI_ENV_TARGET_TRIPLE, which the Tauri CLI sets
@@ -33,7 +35,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const FFMPEG_MISSING = "Build it, or take it from CI's build job (D24, D25).";
+const FFMPEG_MISSING = "Build it with scripts/ffmpeg/build.sh, or take it from CI's ffmpeg workflow (D24).";
 const FFMPEG_FOREIGN = 'The pins in scripts/sidecars.lock are for dev testing only and never ship (D24, D25).';
 
 /**
@@ -108,32 +110,53 @@ export function hasSection(notices, name) {
   return new RegExp(`^## ${escaped}(?:\\s|$)`, 'm').test(notices);
 }
 
-/** The overlay read when there's no TAURI_CONFIG and no `--overlay`. */
-export const DEFAULT_OVERLAY = 'tauri.sidecars.conf.json';
+/** Each OS's sidecars overlay: the one overlay per OS that sets `externalBin`. */
+export const SIDECARS_OVERLAYS = {
+  windows: 'tauri.sidecars.windows.conf.json',
+  macos: 'tauri.sidecars.macos.conf.json',
+};
+
+/**
+ * The overlay read when there's no TAURI_CONFIG and no `--overlay`: the
+ * sidecars overlay of the OS `triple` builds for, or undefined for an OS
+ * Grape doesn't ship for.
+ */
+export function defaultOverlay(triple) {
+  if (/-windows-/.test(triple ?? '')) return SIDECARS_OVERLAYS.windows;
+  if (/-apple-darwin$/.test(triple ?? '')) return SIDECARS_OVERLAYS.macos;
+  return undefined;
+}
 
 /**
  * Where the `externalBin` list comes from, for messages: TAURI_CONFIG when
- * `config` is set, otherwise the overlay file's name.
+ * `config` is set, otherwise the overlay file's name, or undefined when
+ * there's none for `triple`.
  */
-export function sourceName({ config, overlay }) {
-  return config !== undefined ? 'TAURI_CONFIG' : basename(overlay ?? DEFAULT_OVERLAY);
+export function sourceName({ config, overlay, triple }) {
+  if (config !== undefined) return 'TAURI_CONFIG';
+  const file = overlay ?? defaultOverlay(triple);
+  return file === undefined ? undefined : basename(file);
 }
 
 /**
  * Runs every check and returns the failures (empty when the build may go on).
  * `config` is TAURI_CONFIG's text when it's set: then its `externalBin`
- * counts. Otherwise `overlay`, a path (default: `tauri.sidecars.conf.json`
- * in apps/desktop/src-tauri), is read. `io` holds what the checks touch, so
+ * counts. Otherwise `overlay`, a path (default: `defaultOverlay(triple)` in
+ * apps/desktop/src-tauri), is read. `io` holds what the checks touch, so
  * tests can fake it: `exists(path)`, `isFile(path)`, `list(dir)`,
  * `read(path)` and `run(file, args)`, which returns stdout or throws.
  */
 export function check({ repo, triple, io, config, overlay }) {
   const failures = [];
   const appDir = join(repo, 'apps', 'desktop', 'src-tauri');
-  const source = sourceName({ config, overlay });
+  const source = sourceName({ config, overlay, triple });
+  const fallback = defaultOverlay(triple);
+  if (config === undefined && overlay === undefined && fallback === undefined) {
+    return [`Grape has no sidecars overlay for ${triple}: it ships for Windows and macOS only. Pass --overlay <file>.`];
+  }
   let entries;
   try {
-    const text = config !== undefined ? config : io.read(overlay ?? join(appDir, DEFAULT_OVERLAY));
+    const text = config !== undefined ? config : io.read(overlay ?? join(appDir, fallback));
     entries = JSON.parse(text)?.bundle?.externalBin;
   } catch (err) {
     return [`Couldn't read ${source}: ${err.message}`];
@@ -235,9 +258,10 @@ function main(argv) {
     console.error('check-sidecars: TAURI_CONFIG is set, so --overlay is ignored: the build bundles what TAURI_CONFIG lists.');
   }
   const failures = check({ repo, triple, io: realIo, config, overlay });
-  const source = sourceName({ config, overlay });
+  const source = sourceName({ config, overlay, triple });
   if (failures.length > 0) {
-    console.error(`check-sidecars: refusing to bundle the sidecars ${source} lists for ${triple}:`);
+    const what = source === undefined ? 'sidecars' : `the sidecars ${source} lists`;
+    console.error(`check-sidecars: refusing to bundle ${what} for ${triple}:`);
     for (const failure of failures) console.error(`  - ${failure}`);
     return 1;
   }

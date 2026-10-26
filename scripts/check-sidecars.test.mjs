@@ -3,10 +3,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join } from 'node:path';
 
-import { check, firstLine, hasSection, sidecarFile, sidecarName } from './check-sidecars.mjs';
+import { check, defaultOverlay, firstLine, hasSection, sidecarFile, sidecarName } from './check-sidecars.mjs';
 
 const REPO = '/repo';
 const APP = join(REPO, 'apps', 'desktop', 'src-tauri');
+const WINDOWS_OVERLAY = join(APP, 'tauri.sidecars.windows.conf.json');
+const MACOS_OVERLAY = join(APP, 'tauri.sidecars.macos.conf.json');
 const OVERLAY = JSON.stringify({
   build: { beforeBuildCommand: 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build' },
   bundle: { externalBin: ['binaries/ffmpeg', 'binaries/ffprobe'] },
@@ -43,7 +45,7 @@ function windowsOk(overrides = {}) {
   const ffprobe = join(APP, 'binaries', 'ffprobe-x86_64-pc-windows-msvc.exe');
   return {
     files: {
-      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY,
+      [WINDOWS_OVERLAY]: OVERLAY,
       [join(REPO, 'about.hbs')]: NOTICES,
       [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES,
       [ffmpeg]: 'MZ',
@@ -83,7 +85,7 @@ test('a universal Mac build checks the universal files', () => {
   const base = windowsOk();
   const io = fakeIo({
     files: {
-      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY,
+      [MACOS_OVERLAY]: OVERLAY,
       [join(REPO, 'about.hbs')]: NOTICES,
       [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES,
       [ffmpeg]: '',
@@ -171,7 +173,7 @@ test('the license checks run once for sidecars that share a folder', () => {
 });
 
 test('a sidecar without a rule, or an overlay without sidecars, is refused', () => {
-  const overlay = join(APP, 'tauri.sidecars.conf.json');
+  const overlay = WINDOWS_OVERLAY;
   let failures = check({
     repo: REPO,
     triple: 'x86_64-pc-windows-msvc',
@@ -189,7 +191,26 @@ test('a sidecar without a rule, or an overlay without sidecars, is refused', () 
 
   failures = check({ repo: REPO, triple: 'x86_64-pc-windows-msvc', io: fakeIo(windowsOk({ files: { [overlay]: '{' } })) });
   assert.equal(failures.length, 1);
-  assert.match(failures[0], /^Couldn't read tauri\.sidecars\.conf\.json/);
+  assert.match(failures[0], /^Couldn't read tauri\.sidecars\.windows\.conf\.json/);
+});
+
+test("each OS reads its own sidecars overlay by default, and Linux has none", () => {
+  assert.equal(defaultOverlay('x86_64-pc-windows-msvc'), 'tauri.sidecars.windows.conf.json');
+  assert.equal(defaultOverlay('aarch64-pc-windows-msvc'), 'tauri.sidecars.windows.conf.json');
+  for (const triple of ['universal-apple-darwin', 'aarch64-apple-darwin', 'x86_64-apple-darwin']) {
+    assert.equal(defaultOverlay(triple), 'tauri.sidecars.macos.conf.json', triple);
+  }
+  assert.equal(defaultOverlay('x86_64-unknown-linux-gnu'), undefined);
+
+  // The Mac reads the macOS overlay: a Windows one alone isn't found.
+  const base = windowsOk();
+  const failures = check({ repo: REPO, triple: 'universal-apple-darwin', io: fakeIo(base) });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^Couldn't read tauri\.sidecars\.macos\.conf\.json/);
+
+  assert.deepEqual(check({ repo: REPO, triple: 'x86_64-unknown-linux-gnu', io: fakeIo(base) }), [
+    'Grape has no sidecars overlay for x86_64-unknown-linux-gnu: it ships for Windows and macOS only. Pass --overlay <file>.',
+  ]);
 });
 
 test('every overlay with sidecars runs this gate before the UI build of the base config', async () => {
@@ -209,8 +230,8 @@ test('every overlay with sidecars runs this gate before the UI build of the base
     assert.deepEqual(Object.keys(overlay), ['build', 'bundle'], name);
     checked.push(name);
   }
-  checked = checked.sort();
-  assert.ok(checked.includes('tauri.sidecars.conf.json') && checked.includes('tauri.heif.windows.conf.json'), checked.join(', '));
+  // One sidecars overlay per OS, and nothing else sets externalBin.
+  assert.deepEqual(checked.sort(), ['tauri.sidecars.macos.conf.json', 'tauri.sidecars.windows.conf.json']);
 });
 
 // bsdtar (D27): Grape's build of libarchive's bsdtar, from scripts/bsdtar.
@@ -227,7 +248,7 @@ function allOk(triple, bsdtarOut, overrides = {}) {
   const file = (name) => join(APP, sidecarFile(`binaries/${name}`, triple));
   return {
     files: {
-      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY_ALL,
+      [join(APP, defaultOverlay(triple))]: OVERLAY_ALL,
       [join(REPO, 'about.hbs')]: NOTICES_ALL,
       [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES_ALL,
       [file('ffmpeg')]: '',
@@ -334,8 +355,8 @@ test('every externalBin in the real overlays has a rule and ships its licenses f
       checked++;
     }
   }
-  // tauri.sidecars.conf.json: ffmpeg, ffprobe and bsdtar at least.
-  assert.ok(checked >= 3, `only ${checked} externalBin entries found`);
+  // Windows: ffmpeg, ffprobe, bsdtar and grape-heif. macOS: the first three.
+  assert.equal(checked, 7, `${checked} externalBin entries found`);
 });
 
 test("the bsdtar workflow's cache keys cover the copyright lines its full build checks", async () => {
@@ -357,13 +378,15 @@ const GRAPE_HEIF =
   'grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors\r\n' +
   'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1\r\n';
 const GATE = 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build';
-const HEIF_OVERLAY = JSON.stringify({
+// An overlay file and a TAURI_CONFIG that list only grape-heif (for these
+// tests only), so the tests below are about its rule and the sources. A real
+// Windows build's list has all four sidecars: see "the real overlays, merged".
+const HEIF_ONLY_FILE = join(APP, 'tauri.test-heif.conf.json');
+const HEIF_ONLY = JSON.stringify({
   build: { beforeBuildCommand: GATE },
   bundle: { externalBin: ['binaries/grape-heif'], resources: { '../../../licenses/grape-heif/': 'licenses/grape-heif/' } },
 });
-// What the Tauri CLI puts in TAURI_CONFIG for build-windows:
-// tauri.pdfium.windows.conf.json, then tauri.heif.windows.conf.json, merged.
-const MERGED = JSON.stringify({
+const HEIF_CONFIG = JSON.stringify({
   bundle: {
     resources: {
       'binaries/pdfium-x86_64-pc-windows-msvc.dll': 'pdfium.dll',
@@ -377,12 +400,12 @@ const MERGED = JSON.stringify({
 const NOTICES_HEIF = `${NOTICES}\n## grape-heif (HEIC on Windows)\n\nGrape converts HEIC on Windows with grape-heif.exe.\n`;
 const HEIF_LICENSES = ['LICENSE.txt', 'SOURCE.md', 'libheif.txt', 'libde265.txt', 'libde265-win32cond.txt', 'x265.txt', 'rust-crates.md'];
 
-/** Everything a passing Windows build with grape-heif has. The sidecars overlay lists FFmpeg, which isn't there. */
+/** Everything a passing check of grape-heif alone has. The default overlay lists FFmpeg, which isn't there. */
 function heifOk(overrides = {}) {
   return {
     files: {
-      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY,
-      [join(APP, 'tauri.heif.windows.conf.json')]: HEIF_OVERLAY,
+      [WINDOWS_OVERLAY]: OVERLAY,
+      [HEIF_ONLY_FILE]: HEIF_ONLY,
       [join(REPO, 'about.hbs')]: NOTICES_HEIF,
       [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES_HEIF,
       [HEIF_EXE]: 'MZ',
@@ -397,7 +420,7 @@ const WIN = 'x86_64-pc-windows-msvc';
 
 test("TAURI_CONFIG's merged list wins over the overlay file", () => {
   const io = fakeIo(heifOk());
-  assert.deepEqual(check({ repo: REPO, triple: WIN, io, config: MERGED }), []);
+  assert.deepEqual(check({ repo: REPO, triple: WIN, io, config: HEIF_CONFIG }), []);
   assert.deepEqual(io.ran, [[HEIF_EXE, ['-hide_banner', '-version']]]);
   // Without it, the default overlay's FFmpeg is checked instead (and missing).
   const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()) });
@@ -414,10 +437,10 @@ test('a TAURI_CONFIG without sidecars, or one that isn\'t JSON, is refused and n
 });
 
 test('--overlay reads that file and names it', () => {
-  const overlay = join(APP, 'tauri.heif.windows.conf.json');
+  const overlay = HEIF_ONLY_FILE;
   assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), overlay }), []);
   let failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ files: { [overlay]: '{"bundle":{}}' } })), overlay });
-  assert.deepEqual(failures, ['tauri.heif.windows.conf.json lists no externalBin, so there is nothing to bundle.']);
+  assert.deepEqual(failures, ['tauri.test-heif.conf.json lists no externalBin, so there is nothing to bundle.']);
   failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), overlay: join(APP, 'tauri.nothing.conf.json') });
   assert.equal(failures.length, 1);
   assert.match(failures[0], /^Couldn't read tauri\.nothing\.conf\.json: /);
@@ -425,7 +448,7 @@ test('--overlay reads that file and names it', () => {
 
 test("grape-heif: Grape's own build passes, anything else is refused", () => {
   for (const out of [GRAPE_HEIF, 'grape-heif version 1.23.7-grape\n', 'grape-heif version 1.23.8-grape.12 Copyright\n']) {
-    assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: out } })), config: MERGED }), [], out);
+    assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: out } })), config: HEIF_CONFIG }), [], out);
   }
   for (const line of [
     // libheif's own tools, or a build without Grape's version.
@@ -436,7 +459,7 @@ test("grape-heif: Grape's own build passes, anything else is refused", () => {
     ' grape-heif version 1.23.7-grape.1',
     'ffmpeg version 9.0.2-grape Copyright',
   ]) {
-    const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: `${line}\n` } })), config: MERGED });
+    const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: `${line}\n` } })), config: HEIF_CONFIG });
     assert.equal(failures.length, 1, line);
     assert.match(failures[0], /^grape-heif: this isn't Grape's own build\./, line);
     assert.match(failures[0], /tools\/grape-heif ever ships \(D33\)\.$/, line);
@@ -446,7 +469,7 @@ test("grape-heif: Grape's own build passes, anything else is refused", () => {
 test('a missing grape-heif.exe points at build.ps1 and the grape-heif workflow', () => {
   const base = heifOk();
   delete base.files[HEIF_EXE];
-  const failures = check({ repo: REPO, triple: WIN, io: fakeIo(base), config: MERGED });
+  const failures = check({ repo: REPO, triple: WIN, io: fakeIo(base), config: HEIF_CONFIG });
   assert.deepEqual(failures, [
     "grape-heif: src-tauri/binaries/grape-heif-x86_64-pc-windows-msvc.exe is missing. Build it with tools/grape-heif/build.ps1, or take it from CI's grape-heif workflow (D33).",
   ]);
@@ -458,23 +481,23 @@ test("grape-heif's licenses: SOURCE.md (GPL) and its notices section", () => {
     repo: REPO,
     triple: WIN,
     io: fakeIo(heifOk({ dirs: { [dir]: HEIF_LICENSES.filter((f) => f !== 'SOURCE.md') } })),
-    config: MERGED,
+    config: HEIF_CONFIG,
   });
   assert.deepEqual(failures, [
     'grape-heif: licenses/grape-heif/SOURCE.md is missing. GPL code ships with where its exact source is (ENGINES.md licensing rule 3).',
   ]);
 
-  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ dirs: { [dir]: [] } })), config: MERGED });
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ dirs: { [dir]: [] } })), config: HEIF_CONFIG });
   assert.deepEqual(failures, ['grape-heif: licenses/grape-heif/ is missing or empty (ENGINES.md licensing rule 3).']);
 
-  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ files: { [join(REPO, 'about.hbs')]: NOTICES } })), config: MERGED });
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ files: { [join(REPO, 'about.hbs')]: NOTICES } })), config: HEIF_CONFIG });
   assert.deepEqual(failures, ['grape-heif: about.hbs has no "## grape-heif" section (licenses/README.md).']);
 
   failures = check({
     repo: REPO,
     triple: WIN,
     io: fakeIo(heifOk({ files: { [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES } })),
-    config: MERGED,
+    config: HEIF_CONFIG,
   });
   assert.equal(failures.length, 1);
   assert.match(failures[0], /^grape-heif: THIRD_PARTY_NOTICES\.md has no "## grape-heif" section/);
@@ -508,27 +531,141 @@ test('the script reads TAURI_CONFIG and --overlay when it runs', async () => {
   assert.equal(r.status, 2, r.stderr);
 });
 
-test('no workflow build passes two overlays that both set externalBin, and the Windows builds bundle grape-heif', async () => {
+/** RFC 7396, as the Tauri CLI merges `--config` overlays: objects merge, everything else replaces. */
+function mergePatch(target, patch) {
+  if (patch === null || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+  const out = target !== null && typeof target === 'object' && !Array.isArray(target) ? { ...target } : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete out[key];
+    else out[key] = mergePatch(out[key], value);
+  }
+  return out;
+}
+
+/** The real overlays in apps/desktop/src-tauri, merged in order onto tauri.conf.json. */
+async function mergedConfig(...names) {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const app = fileURLToPath(new URL('../apps/desktop/src-tauri/', import.meta.url));
+  return names.reduce((conf, name) => mergePatch(conf, JSON.parse(readFileSync(join(app, name), 'utf8'))), {});
+}
+
+test('the real overlays, merged as the Tauri CLI merges them, bundle every sidecar and license folder', async () => {
+  const windows = await mergedConfig('tauri.conf.json', 'tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json');
+  assert.deepEqual(windows.bundle.externalBin, ['binaries/ffmpeg', 'binaries/ffprobe', 'binaries/bsdtar', 'binaries/grape-heif']);
+  for (const [from, to] of [
+    ['binaries/pdfium-x86_64-pc-windows-msvc.dll', 'pdfium.dll'],
+    ['../../../licenses/pdfium/', 'licenses/pdfium/'],
+    ['../../../licenses/ffmpeg/', 'licenses/ffmpeg/'],
+    ['../../../licenses/libarchive/', 'licenses/libarchive/'],
+    ['../../../licenses/grape-heif/', 'licenses/grape-heif/'],
+    ['../../../THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_NOTICES.md'],
+  ]) {
+    assert.equal(windows.bundle.resources[from], to, from);
+  }
+  assert.equal(windows.build.beforeBuildCommand, GATE);
+
+  const macos = await mergedConfig('tauri.conf.json', 'tauri.pdfium.macos.conf.json', 'tauri.sidecars.macos.conf.json');
+  assert.deepEqual(macos.bundle.externalBin, ['binaries/ffmpeg', 'binaries/ffprobe', 'binaries/bsdtar']);
+  assert.deepEqual(macos.bundle.macOS.frameworks, ['binaries/macos/libpdfium.dylib']);
+  for (const folder of ['pdfium', 'ffmpeg', 'libarchive']) {
+    assert.equal(macos.bundle.resources[`../../../licenses/${folder}/`], `licenses/${folder}/`, folder);
+  }
+  assert.equal(macos.bundle.resources['../../../licenses/grape-heif/'], undefined);
+  assert.equal(macos.build.beforeBuildCommand, GATE);
+});
+
+test("a Windows build's real merged list passes with Grape's four sidecars, and names each one missing", async () => {
+  const config = JSON.stringify(await mergedConfig('tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json'));
+  const all = allOk(WIN, BSDTAR_WINDOWS);
+  const heif = heifOk();
+  const base = {
+    files: { ...all.files, [HEIF_EXE]: 'MZ', [join(REPO, 'about.hbs')]: `${NOTICES_ALL}${NOTICES_HEIF}`, [join(REPO, 'THIRD_PARTY_NOTICES.md')]: `${NOTICES_ALL}${NOTICES_HEIF}` },
+    dirs: { ...all.dirs, ...heif.dirs },
+    outputs: { ...all.outputs, ...heif.outputs },
+  };
+  const io = fakeIo(base);
+  assert.deepEqual(check({ repo: REPO, triple: WIN, io, config }), []);
+  assert.deepEqual(
+    io.ran.map(([file]) => file),
+    ['ffmpeg', 'ffprobe', 'bsdtar', 'grape-heif'].map((n) => join(APP, sidecarFile(`binaries/${n}`, WIN))),
+  );
+
+  for (const name of ['ffmpeg', 'ffprobe', 'bsdtar', 'grape-heif']) {
+    const files = { ...base.files };
+    delete files[join(APP, sidecarFile(`binaries/${name}`, WIN))];
+    const failures = check({ repo: REPO, triple: WIN, io: fakeIo({ ...base, files }), config });
+    assert.equal(failures.length, 1, name);
+    assert.ok(failures[0].startsWith(`${name}: src-tauri/binaries/${name}-x86_64-pc-windows-msvc.exe is missing.`), failures[0]);
+  }
+});
+
+test("a universal Mac build's real merged list passes with Grape's three sidecars", async () => {
+  const config = JSON.stringify(await mergedConfig('tauri.pdfium.macos.conf.json', 'tauri.sidecars.macos.conf.json'));
+  const io = fakeIo(allOk('universal-apple-darwin', BSDTAR_MACOS));
+  assert.deepEqual(check({ repo: REPO, triple: 'universal-apple-darwin', io, config }), []);
+  assert.equal(io.ran.length, 3);
+});
+
+/** Every `pnpm tauri build` line in the workflows, with the overlays it passes. */
+async function workflowBuilds() {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const workflows = fileURLToPath(new URL('../.github/workflows/', import.meta.url));
+  const builds = [];
+  for (const file of readdirSync(workflows).filter((f) => f.endsWith('.yml'))) {
+    for (const line of readFileSync(join(workflows, file), 'utf8').split('\n')) {
+      if (!/tauri build/.test(line) || line.trim().startsWith('#')) continue;
+      const overlays = [...line.matchAll(/--config src-tauri\/(\S+)/g)].map((m) => m[1]);
+      builds.push({ file, line, overlays });
+    }
+  }
+  return builds;
+}
+
+test('no workflow build passes two overlays that both set externalBin, and every build passes its OS\'s sidecars overlay', async () => {
   // Arrays replace when overlays merge (RFC 7396), so a second overlay with
   // externalBin would silently drop the first one's sidecars (heic-spec J29).
   const { readdirSync, readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const app = fileURLToPath(new URL('../apps/desktop/src-tauri/', import.meta.url));
-  const workflows = fileURLToPath(new URL('../.github/workflows/', import.meta.url));
   const setsBins = (name) => JSON.parse(readFileSync(join(app, name), 'utf8'))?.bundle?.externalBin !== undefined;
-  const builds = [];
-  for (const file of readdirSync(workflows).filter((f) => f.endsWith('.yml'))) {
-    for (const line of readFileSync(join(workflows, file), 'utf8').split('\n')) {
-      if (!/tauri build/.test(line)) continue;
-      const overlays = [...line.matchAll(/--config src-tauri\/(\S+)/g)].map((m) => m[1]);
-      for (const name of overlays) assert.ok(readdirSync(app).includes(name), `${file}: ${name} doesn't exist`);
-      assert.ok(overlays.filter(setsBins).length <= 1, `${file}: ${line.trim()}`);
-      builds.push({ file, line, overlays });
-    }
+  const builds = await workflowBuilds();
+  for (const { file, line, overlays } of builds) {
+    for (const name of overlays) assert.ok(readdirSync(app).includes(name), `${file}: ${name} doesn't exist`);
+    assert.ok(overlays.filter(setsBins).length <= 1, `${file}: ${line.trim()}`);
   }
-  for (const file of ['ci.yml', 'release.yml']) {
-    const windows = builds.filter((b) => b.file === file && b.overlays.includes('tauri.pdfium.windows.conf.json'));
-    assert.ok(windows.length > 0, `${file} has no Windows build`);
-    for (const b of windows) assert.ok(b.overlays.includes('tauri.heif.windows.conf.json'), `${file}: ${b.line.trim()}`);
+  const want = [
+    ['ci.yml', 'tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json'],
+    ['release.yml', 'tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json'],
+    ['ci.yml', 'tauri.pdfium.macos.conf.json', 'tauri.sidecars.macos.conf.json'],
+  ];
+  for (const [file, pdfium, sidecars] of want) {
+    const found = builds.filter((b) => b.file === file && b.overlays.includes(pdfium));
+    assert.ok(found.length > 0, `${file} has no build with ${pdfium}`);
+    for (const b of found) assert.deepEqual(b.overlays, [pdfium, sidecars], `${file}: ${b.line.trim()}`);
   }
+  // Every build that ships is one of those: none without its sidecars.
+  for (const b of builds.filter((b) => ['ci.yml', 'release.yml'].includes(b.file))) {
+    assert.equal(b.overlays.filter(setsBins).length, 1, `${b.file}: ${b.line.trim()}`);
+  }
+});
+
+test("the ffmpeg workflow's dist caches are keyed on everything the build and its source bundle come from", async () => {
+  // A hit skips build.sh, and with it the notices check and the source
+  // bundle, so a change to the script, the pins or the license texts must
+  // miss the cache (D24).
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const yml = readFileSync(fileURLToPath(new URL('../.github/workflows/ffmpeg.yml', import.meta.url)), 'utf8');
+  const keys = [...yml.matchAll(/^\s*key: (ffmpeg-dist-.*)$/gm)].map((m) => m[1]);
+  assert.equal(keys.length, 3, 'one dist cache key per target');
+  for (const target of ['windows-x86_64', 'macos-arm64', 'macos-x86_64']) {
+    const key = keys.find((k) => k.includes(`-${target}-`));
+    assert.ok(key, `no dist cache key for ${target}`);
+    assert.match(key, /hashFiles\('scripts\/ffmpeg\/\*\*', 'licenses\/ffmpeg\/\*\*'\)/, key);
+  }
+  const tarballs = [...yml.matchAll(/^\s*key: (ffmpeg-tarballs-.*)$/gm)].map((m) => m[1]);
+  assert.equal(tarballs.length, 3, 'one tarball cache key per target');
+  for (const key of tarballs) assert.match(key, /hashFiles\('scripts\/ffmpeg\/sources\.json'\)/, key);
 });

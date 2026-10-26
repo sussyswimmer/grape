@@ -2,10 +2,29 @@ name: bsdtar
 
 # Grape's own bsdtar (DECISIONS D27): libarchive 3.8.10 plus scripts/bsdtar/patches,
 # built per OS, checked, smoke-tested in Grape's exact environment and uploaded as
-# artifacts for the jobs of the run that called this. No GitHub Release until M7.
+# artifacts for the jobs of the run that called this. No GitHub Release of the
+# builds until M7; release.yml builds it clean from its tag for the installer.
 on:
   workflow_call:
+    inputs:
+      cache:
+        description: Use the build cache (release.yml builds clean).
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (release.yml passes its tag); empty for the caller's own ref.
+        type: string
+        default: ""
   workflow_dispatch:
+    inputs:
+      cache:
+        description: Use the build cache.
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (a tag, say); empty for the branch this runs on.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -18,10 +37,12 @@ jobs:
       # Builds third-party code, so it keeps no git credentials.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       # Keyed on everything in scripts/bsdtar and on the copyright lines, which only
       # the full build checks (a hit skips it). Saved only after every check passed.
       - id: cache
+        if: inputs.cache
         uses: actions/cache/restore@v6
         with:
           path: target/bsdtar
@@ -39,7 +60,7 @@ jobs:
         run: ./scripts/bsdtar/build.ps1 -Root target/bsdtar -CheckOnly
       - name: Smoke test (Grape's environment, stdin piped)
         run: python -I scripts/bsdtar/smoke.py --bsdtar target/bsdtar/out/bsdtar-x86_64-pc-windows-msvc.exe --tarball target/bsdtar/dl/libarchive-3.8.10.tar.gz --sources scripts/bsdtar/sources.json
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - if: inputs.cache && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: target/bsdtar
@@ -60,10 +81,12 @@ jobs:
       # Builds third-party code, so it keeps no git credentials.
       - uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
       # Keyed on everything in scripts/bsdtar and on the copyright lines, which only
       # the full build checks (a hit skips it). Saved only after every check passed.
       - id: cache
+        if: inputs.cache
         uses: actions/cache/restore@v6
         with:
           path: target/bsdtar
@@ -77,7 +100,7 @@ jobs:
       # en_US.UTF-8 must exist for Grape's environment (D27).
       - name: Smoke test (Grape's environment, stdin piped)
         run: python3 -I scripts/bsdtar/smoke.py --bsdtar target/bsdtar/out/bsdtar-universal-apple-darwin --tarball target/bsdtar/dl/libarchive-3.8.10.tar.gz --sources scripts/bsdtar/sources.json
-      - if: steps.cache.outputs.cache-hit != 'true'
+      - if: inputs.cache && steps.cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6
         with:
           path: target/bsdtar
