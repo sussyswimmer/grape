@@ -2,7 +2,9 @@
 //! so the reader is lenient and only a file without one usable cue fails.
 //!
 //! - **Lines** split at `\r\n`, `\n` or a lone `\r`, and lose their
-//!   trailing whitespace. The output keeps the first line break's kind.
+//!   trailing whitespace. `\r\r\n` is one break too, never a blank line:
+//!   it is what a CRLF file's line ends become when converted again. The
+//!   output keeps the first line break's kind (`\r\r\n` counts as `\r\n`).
 //!   A text of more than [`MAX_LINES`] lines is too large.
 //! - **WebVTT** is recognized by content: the text starts with `WEBVTT`
 //!   alone or followed by whitespace. Its header (up to the first blank
@@ -176,19 +178,25 @@ pub(crate) fn has_text(line: &[Span]) -> bool {
         .any(|span| matches!(span, Span::Text(text) if !text.trim().is_empty()))
 }
 
-/// `CrLf` if the first line break is `\r\n`, else `Lf`.
+/// `CrLf` if the first line break is `\r\n` or `\r\r\n`, else `Lf`.
 fn newline(text: &str) -> Newline {
     match text.find(['\r', '\n']) {
-        Some(at) if text[at..].starts_with("\r\n") => Newline::CrLf,
+        Some(at) if text[at..].starts_with("\r\n") || text[at..].starts_with("\r\r\n") => {
+            Newline::CrLf
+        }
         _ => Newline::Lf,
     }
 }
 
-/// The lines of `text`, split at `\r\n`, `\n` or a lone `\r`. A line
-/// break at the very end ends the last line; it doesn't start another.
+/// The lines of `text`, split at `\r\n`, `\r\r\n`, `\n` or a lone `\r`. A
+/// line break at the very end ends the last line; it doesn't start another.
 fn split_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.split_terminator('\n')
-        .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
+    text.split_terminator('\n').flat_map(|line| {
+        line.strip_suffix("\r\r")
+            .or_else(|| line.strip_suffix('\r'))
+            .unwrap_or(line)
+            .split('\r')
+    })
 }
 
 /// True for `WEBVTT` followed by the end of the text, a space, a tab or a
@@ -678,7 +686,7 @@ mod tests {
 
     #[test]
     fn lines_split_at_crlf_lf_and_a_lone_cr() {
-        let lines: Vec<&str> = split_lines("a\r\nb\nc\rd\r\r\ne").collect();
+        let lines: Vec<&str> = split_lines("a\r\nb\nc\rd\r\re").collect();
         assert_eq!(lines, ["a", "b", "c", "d", "", "e"]);
         let doc = parsed(
             "1\r00:00:01,000 --> 00:00:02,000\rOne\r\r2\n00:00:03,000 --> 00:00:04,000\r\nTwo",
@@ -687,6 +695,22 @@ mod tests {
             plain(&doc),
             [cue(1000, 2000, &["One"]), cue(3000, 4000, &["Two"])]
         );
+    }
+
+    #[test]
+    fn a_cr_cr_lf_is_one_line_break() {
+        let lines: Vec<&str> = split_lines("a\r\r\nb\r\r\n\r\r\nc\r\r\r\nd").collect();
+        assert_eq!(lines, ["a", "b", "", "c", "", "d"]);
+        // A CRLF SRT whose line ends were converted again: each cue keeps
+        // its text, even text that is only digits.
+        let srt = "1\r\r\n00:00:01,000 --> 00:00:02,000\r\r\n1984\r\r\n\r\r\n\
+                   2\r\r\n00:00:03,000 --> 00:00:04,000\r\r\nNext\r\r\n";
+        let doc = parsed(srt);
+        assert_eq!(
+            plain(&doc),
+            [cue(1000, 2000, &["1984"]), cue(3000, 4000, &["Next"])]
+        );
+        assert_eq!(doc.newline, Newline::CrLf);
     }
 
     #[test]

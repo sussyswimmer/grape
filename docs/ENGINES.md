@@ -66,6 +66,7 @@ Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). N
 **Reading**
 - **Size:** files over 16 MiB are refused unread, and files of over 1,000,000 lines before anything is written ("… is too large to convert").
 - **Encoding:** a BOM first (UTF-8, UTF-16LE, UTF-16BE), then valid UTF-8, else Windows-1252 (WHATWG table). NUL characters are removed.
+- **Line breaks:** `\r\n`, `\n` or a lone `\r`. `\r\r\n` is one break, never a blank line: it is what a CRLF file's line ends become when converted again, and it counts as `\r\n` for the output.
 - **Format by content:** a file that starts with `WEBVTT` is WebVTT; anything else is read as SRT. Its header lines up to the first blank line are skipped (`Kind:`, `Language:`, `X-TIMESTAMP-MAP=`), and so are `NOTE`, `STYLE` and `REGION` blocks.
 - **Timing lines** are `start --> end`; cue settings or SRT coordinates after the end are dropped. Timestamps take optional hours, `.` or `,` before the fraction, and 1–3+ fraction digits read as a decimal (`,5` is 500 ms). Minutes or seconds over 59 make the line invalid, and its cue is skipped.
 - **Cues:** a timing line always starts a new cue, even with no blank line before it. A digits-only line just before it is that cue's number. A block with no timing line joins the previous cue's text.
