@@ -222,7 +222,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - **Styling.** Italic, bold and underline survive both ways (`<i> <b> <u>`, and SRT's `{\i1}`-style codes). Everything else is dropped but its text kept: SRT `<font>` colors, positioning codes like `{\an8}`, WebVTT classes, voices (`<v Name>`, so the speaker's name is lost), language spans, cue settings and `STYLE`/`REGION` blocks. Ruby annotations are written in parentheses: 漢(かん).
   - **TXT** is the spoken text only: one line per subtitle line, no timings, no blank lines, and a line that repeats the one before it is written once (auto-generated captions repeat each line as it scrolls).
   - **Messy files are read leniently**: missing blank lines, `.` or `,` before the milliseconds, missing hours, out-of-order cues (they're sorted, as WebVTT requires) and cues that end before they start (given 1 ms). A file with no readable cue is refused.
-  - **Size:** a subtitle file over 64 MiB is refused unread.
+  - **Size:** a subtitle file over 16 MiB is refused unread.
 - **Why:** both formats are simple enough that a small, fully tested parser is safer than a dependency, and every choice above can change in one place.
 
 ## D21: Share and the Float shelf on Windows (2026-10-25, proposed, confirm)

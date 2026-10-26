@@ -207,7 +207,7 @@ fn a_subtitle_file_over_the_size_limit_is_refused_before_reading() {
     );
     // Sparse where the file system allows it, so the test stays fast.
     let file = fs::OpenOptions::new().write(true).open(&src).unwrap();
-    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
     drop(file);
     let before = SourceState::of(&src);
     let names_before = dir.names();
@@ -223,9 +223,9 @@ fn a_subtitle_file_over_the_size_limit_is_refused_before_reading() {
 #[test]
 fn a_file_at_the_size_limit_is_read() {
     let dir = TestDir::new("at-limit");
-    // Two cues, then a blank line of spaces up to exactly 64 MiB.
+    // Two cues, then a blank line of spaces up to exactly 16 MiB.
     let mut bytes = SRT.as_bytes().to_vec();
-    bytes.resize(64 * 1024 * 1024, b' ');
+    bytes.resize(16 * 1024 * 1024, b' ');
     let (out, _) = convert(&dir, "big.srt", &bytes, Format::Txt);
     assert!(String::from_utf8(out).unwrap().starts_with("Hello there"));
 }

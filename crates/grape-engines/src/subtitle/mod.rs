@@ -39,7 +39,7 @@ use parse::{Document, ParseError};
 
 /// The largest subtitle file Grape reads. Real files are well under 1 MiB;
 /// this only stops a huge file named `.srt` from filling memory.
-pub(crate) const MAX_SOURCE: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_SOURCE: u64 = 16 * 1024 * 1024;
 
 /// True for SRT → VTT or TXT, and WebVTT → SRT or TXT.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
