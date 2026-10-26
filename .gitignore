@@ -5,6 +5,10 @@ target/
 node_modules/
 apps/desktop/ui/dist/
 
+# FFmpeg built by scripts/ffmpeg/build.sh: build trees and outputs
+/build/
+/dist/
+
 # Tauri: sidecars are fetched by scripts, never committed; schemas are generated
 apps/desktop/src-tauri/binaries/
 apps/desktop/src-tauri/gen/
