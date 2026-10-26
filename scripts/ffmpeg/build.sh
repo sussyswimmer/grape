@@ -28,7 +28,8 @@
 # network code, GPL-2.0-or-later (never version3 or nonfree), every
 # component Grape uses, on Windows that the exe needs no DLL beyond
 # Windows' own, and that licenses/ffmpeg/ffmpeg-notices.txt has every
-# license notice in the files it compiled (scripts/ffmpeg/notices.py).
+# license notice in the files it compiled, and a decision for every other
+# statement about a license (scripts/ffmpeg/notices.py).
 #
 # Environment (all optional):
 #   GRAPE_FFMPEG_WORK      build trees, default <repo>/build/ffmpeg. The
@@ -763,12 +764,14 @@ mkdir -p "$out"
 rm -f "$out/ffmpeg$exe" "$out/ffprobe$exe" "$out/BUILDINFO.txt"
 
 # Every file the build compiled, from its dependency records, and the
-# headers those include: each BSD, MIT, ISC, zlib or IJG notice in them
-# must be in ffmpeg-notices.txt, so that a new version or component can't
-# bring one in unnoticed. logs/notices-found.txt has what this build found.
+# headers those include: each license notice in them must be in
+# ffmpeg-notices.txt, and each other statement about a license must have a
+# decision in notices.py (the upstream text it needs, or why it needs
+# nothing more), so that a new version or component can't bring one in
+# unnoticed. logs/notices-found.txt has what this build found.
 if ! notices=$(python3 -I "$script_dir/notices.py" check "$target" "$tdir" "$sources_json" "$licenses_dir"); then
   printf '%s\n' "$notices"
-  fail "licenses/ffmpeg/ffmpeg-notices.txt lacks what's above. See scripts/ffmpeg/README.md, 'License notices'."
+  fail "the license notices check failed (above). See scripts/ffmpeg/README.md, 'License notices'."
 fi
 printf '%s\n' "$notices"
 

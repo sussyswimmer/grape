@@ -12,7 +12,8 @@ licenses/ffmpeg/ffmpeg-notices.txt has every notice in them.
       the target's logs/ folder: compiled-files.txt (every file, by
       source), notices-found.json and notices-found.txt (the notices, in
       the format of ffmpeg-notices.txt). Fails when a notice, or a file
-      that has one, is missing from ffmpeg-notices.txt.
+      that has one, is missing from ffmpeg-notices.txt, or a statement has
+      no decision in STATEMENTS below.
 
   notices.py render <notices-found.json>...
       Prints ffmpeg-notices.txt for the union of the given builds' notices.
@@ -29,7 +30,8 @@ What counts, in each file's comments:
     where the library's own license starts in that comment;
   - a statement: anything else that talks about licenses (LICENSEISH), like
     "based on public domain code" or "BSD licensed", with the copyright
-    lines just before it. They're listed too, so that each one has been read.
+    lines just before it. They're listed too, each with what it means for
+    Grape (STATEMENTS), so that each one has been read and decided.
 Neither is needed for the library's own license given by reference (the GNU
 boilerplate, libvpx's "see the LICENSE file", ...: OWN_LICENSE), nor for a
 notice that's word for word in the library's license file in this folder.
@@ -42,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+import textwrap
 
 ME = "build.sh: notices"
 
@@ -647,6 +650,74 @@ NAMES = {"ffmpeg": "FFmpeg", "x264": "x264", "lame": "LAME", "opus": "Opus", "li
          "libvorbis": "libvorbis", "libvpx": "libvpx", "dav1d": "dav1d", "zlib": "zlib"}
 RULER = "=" * 78
 
+# What each statement means for Grape: (source, words from its text, the
+# license texts in licenses/ffmpeg/ it needs, why). A statement that names a
+# license for code from another project, without that license's text, needs
+# the text; the others say why nothing more is needed. The check fails for a
+# statement with no decision here, so a new one can't go in unread. INTRO
+# names the projects whose texts are here: keep it in step.
+STATEMENTS = (
+    ("ffmpeg", "adapted from mjpeg2jpeg.c, with original copyright: paris 2010 adrian daerr, public domain",
+     (), "public domain."),
+    ("ffmpeg", "dfpwm codec from https://github.com/chenthread/dfpwm",
+     (), "public domain, as each file of that DFPWM code also says."),
+    ("ffmpeg", "based on bsd licensed dsd2pcm by sebastian gesemann",
+     ("dsd2pcm.txt",), "dsd2pcm's license (BSD-2-Clause), from Sebastian Gesemann's own release."),
+    ("ffmpeg", "the 3 alphanumeric copyright notices are md5summed",
+     (), "it explains the names in these files' MIT notice, which is in Part 1."),
+    ("ffmpeg", "based on public domain decoder at http://www.honeypot.net/audio",
+     (), "public domain."),
+    ("ffmpeg", "originally part of vpvision from on2 which is distributed under the gnu gpl",
+     (), "GPL code, and this build's programs are under the GPL as a whole (LICENSE.txt), "
+         "with their complete source."),
+    ("ffmpeg", "copyright \u00a9 2021, videolan and dav1d authors copyright \u00a9 2021, two orioles, llc all rights reserved",
+     ("dav1d.txt",), "dav1d's license (BSD-2-Clause): this assembly comes from dav1d's, and keeps its copyright lines."),
+    ("ffmpeg", "based on gstreamer's gst-plugins-base/ext/ogg/gstoggstream.c released under the lgpl v2.1+",
+     (), "LGPL-2.1-or-later, as FFmpeg's own files are; this build's programs are under the GPL "
+         "(LICENSE.txt), as section 3 of the LGPL allows."),
+    ("ffmpeg", "public domain sha-1 code by steve reid <steve@edmweb.com> and on bsd-licensed sha-2 code by aaron d. gifford",
+     ("sha2-gifford.txt",), "Aaron D. Gifford's license for his SHA-2 code (BSD-3-Clause), from Ruby's "
+                            "copy of it. Steve Reid's SHA-1 code is public domain."),
+    ("ffmpeg", "james almer based on bsd-licensed sha-2 code by aaron d. gifford",
+     ("sha2-gifford.txt",), "Aaron D. Gifford's license for his SHA-2 code (BSD-3-Clause), from Ruby's copy of it."),
+    ("ffmpeg", "originally derives (via libplacebo/mpv) from glumpy",
+     ("glumpy.txt",), "Glumpy's license (BSD-3-Clause), the \"(new) BSD License\" this names."),
+    ("ffmpeg", "the math underlying each filter function was written from scratch",
+     (), "FFmpeg says it wrote this code itself; only the math comes from these sources."),
+    ("x264", "unlike the rest of x264, this file is available under an isc license",
+     (), "it explains the ISC notice at the top of the same file, which is in Part 1."),
+    ("lame", "fft and fht routines",
+     (), "if the GPL it mentions applies, this build's programs are under the GPL anyway (LICENSE.txt), "
+         "and the credit it asks for is this text."),
+    ("libogg", "the crc code is directly derived from public domain code by ross williams",
+     (), "public domain."),
+    ("libvpx", "unlike the rest of x264, this file is available under an isc license",
+     (), "it explains the ISC notice at the top of the same file, which is in Part 1 and libvpx-x86inc.txt."),
+    ("libvpx", "governed by a bsd-style license that can be found in the copying file in the root of the source tree",
+     ("libwebp.txt",), "libwebp's COPYING (BSD-3-Clause): these files come from libwebp, and libvpx has "
+                       "no COPYING. The PATENTS they name is libvpx's, libvpx-PATENTS.txt."),
+)
+
+
+def decision(source, text):
+    """The STATEMENTS entry for a statement, or None."""
+    t = text.lower()
+    hits = [d for d in STATEMENTS if d[0] == source and d[1] in t]
+    if len(hits) > 1:
+        die("more than one entry of STATEMENTS matches this %s statement: %s" % (source, text))
+    return hits[0] if hits else None
+
+
+def statement_line(source, text):
+    """The line under a statement's files in ffmpeg-notices.txt."""
+    d = decision(source, text)
+    if not d:
+        return "Not decided yet: add it to STATEMENTS in scripts/ffmpeg/notices.py."
+    if d[2]:
+        return "Upstream license: %s, %s" % (" and ".join(d[2]), d[3])
+    return "Needs nothing more: " + d[3]
+
+
 INTRO = """\
 Notices in the source of Grape's ffmpeg and ffprobe
 ===================================================
@@ -671,9 +742,20 @@ the Apple silicon build compiles; they were read from the source because
 that build hasn't run yet, and its first run checks them.
 
 Part 1 has the notices. Part 2 has the other things those files' comments
-say about licenses: code that came from the public domain, or that was
-relicensed, or a license named without its text. They need nothing more
-from Grape, and they're here so that each has been read.
+say about licenses: code from the public domain or from another project, or
+a license named without its text. Each of them has one of two lines:
+
+  "Upstream license:" when the file says its code came from another project
+  under a license whose text it doesn't carry (dsd2pcm, Aaron D. Gifford's
+  SHA-2 code, Glumpy, libwebp and dav1d). It names that project's license
+  text, in this folder; SOURCE.md says where each one came from.
+
+  "Needs nothing more:" and why: public domain code, GPL or LGPL code that
+  the programs' own license (LICENSE.txt) covers, or a note about a notice
+  that's in Part 1.
+
+notices.py doesn't pass a statement without one of those lines, so each has
+been read and decided.
 
 Each entry: the source, the license the text reads as (a guide only: the
 text is what counts) and who holds it; the files that carry it, each with
@@ -720,6 +802,9 @@ def render(docs):
         width = max(len(f) for f in files)
         for f in files:
             out.append("  %-*s  %s" % (width, f, ", ".join(sorted(e["files"][f]))))
+        if kind == "statement":
+            out.extend(textwrap.wrap(statement_line(source, text), 78, subsequent_indent="  ",
+                                     break_long_words=False, break_on_hyphens=False))
         out.append("Text:")
         out.append("")
         out.append(excerpt)
@@ -729,7 +814,8 @@ def render(docs):
 
 
 def parse_notices_file(path):
-    """[(number, files, normalized text)] of ffmpeg-notices.txt's entries."""
+    """[(number, files, normalized text, the line between files and text)]
+    of ffmpeg-notices.txt's entries."""
     with open(path, encoding="utf-8") as f:
         text = f.read()
     entries = []
@@ -745,10 +831,13 @@ def parse_notices_file(path):
         while i < len(lines) and lines[i].startswith("  "):
             files.add(lines[i].split()[0])
             i += 1
-        if i >= len(lines) or lines[i] != "Text:":
+        j = i
+        while j < len(lines) and lines[j] != "Text:":
+            j += 1  # a statement's decision, between its files and its text
+        if j >= len(lines):
             die("%s: entry [%s] has no 'Text:' line after its files." % (path, m.group(1)))
-        body = norm(" ".join(strip_decoration(x) for x in lines[i + 1:]))
-        entries.append((int(m.group(1)), files, body))
+        body = norm(" ".join(strip_decoration(x) for x in lines[j + 1:]))
+        entries.append((int(m.group(1)), files, body, norm(" ".join(lines[i:j]))))
     return entries
 
 
@@ -795,14 +884,30 @@ def cmd_check(target, tdir, sources_json, licenses):
 
     entries = parse_notices_file(os.path.join(licenses, "ffmpeg-notices.txt"))
     bad = []
-    for (_, kind, plain), e in sorted(found.items(), key=lambda kv: min(kv[1]["files"])):
-        holders_ = [(no, fs) for no, fs, body in entries if plain in body]
+    for (source, kind, plain), e in sorted(found.items(), key=lambda kv: min(kv[1]["files"])):
+        where = ", ".join(sorted(e["files"]))
+        if kind == "statement":
+            d = decision(source, plain)
+            if not d:
+                bad.append("this statement, in %s, has no decision in STATEMENTS (scripts/ffmpeg/notices.py): "
+                           "say why it needs nothing more, or put the license text of the code it names in "
+                           "licenses/ffmpeg/ and name it:\n%s" % (where, e["excerpt"]))
+            for t in d[2] if d else ():
+                if not os.path.isfile(os.path.join(licenses, t)):
+                    bad.append("licenses/ffmpeg/%s is missing; STATEMENTS names it for %s." % (t, where))
+        holders_ = [(no, fs, note) for no, fs, body, note in entries if plain in body]
         if not holders_:
-            bad.append("ffmpeg-notices.txt lacks this %s, in %s:\n%s" % (kind, ", ".join(sorted(e["files"])), e["excerpt"]))
+            bad.append("ffmpeg-notices.txt lacks this %s, in %s:\n%s" % (kind, where, e["excerpt"]))
             continue
         for f in sorted(e["files"]):
-            if not any(f in fs for _, fs in holders_):
+            if not any(f in fs for _, fs, _ in holders_):
                 bad.append("ffmpeg-notices.txt doesn't list %s under its %s, entry [%d]." % (f, kind, holders_[0][0]))
+        if kind == "statement":
+            line = statement_line(source, plain)
+            for no, fs, note in holders_:
+                if fs & set(e["files"]) and note != norm(line):
+                    bad.append("entry [%d] doesn't say what STATEMENTS does for it (%r); write "
+                               "ffmpeg-notices.txt again." % (no, line))
     kinds = [k for (_, k, _) in found]
     print("  %d notices and %d other statements about licenses, in %d files; ffmpeg-notices.txt has %d entries" % (
         kinds.count("notice"), kinds.count("statement"),
