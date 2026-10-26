@@ -288,11 +288,15 @@ impl Stream {
                 }
             },
             // Camera telemetry: GoPro's GPMF and the camera motion track
-            // hold the position; a timecode track the time of day.
+            // hold the position; a timecode track the time of day. A
+            // QuickTime text track is the chapter track FFmpeg, iTunes and
+            // HandBrake write in MP4 and M4A (M4B), whose chapters ffprobe
+            // lists too.
             "data" => {
                 tags.fields.insert(match self.codec_tag.as_str() {
                     "gpmd" | "camm" => MetaField::Location,
                     "tmcd" => MetaField::CreationDate,
+                    "text" => MetaField::Chapters,
                     _ => MetaField::Other,
                 });
             }
@@ -605,6 +609,61 @@ format.tags.ARTIST="Director"
 format.tags.ENCODER="Lavf60.16.100"
 "#;
 
+    /// H.264 and AAC with two chapters and a title (`-map_chapters` from an
+    /// FFmpeg metadata file): the MP4 muxer writes the chapters as a
+    /// QuickTime text track too. 6.1.1 adds a `vendor_id` to each track
+    /// but the text track.
+    const CHAPTERS_MP4: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="avc1"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.language="und"
+streams.stream.0.tags.handler_name="VideoHandler"
+streams.stream.0.tags.encoder="Lavc60.31.102 libx264"
+streams.stream.1.index=1
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="mp4a"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.1.tags.language="und"
+streams.stream.1.tags.handler_name="SoundHandler"
+streams.stream.2.index=2
+streams.stream.2.codec_type="data"
+streams.stream.2.codec_tag_string="text"
+streams.stream.2.disposition.attached_pic=0
+streams.stream.2.tags.language="eng"
+streams.stream.2.tags.handler_name="SubtitleHandler"
+chapters.chapter.0.id=0
+chapters.chapter.1.id=1
+format.tags.major_brand="isom"
+format.tags.minor_version="512"
+format.tags.compatible_brands="isomiso2avc1mp41"
+format.tags.title="Book"
+format.tags.encoder="Lavf60.16.100"
+"#;
+
+    /// The same audio and chapters as an M4A (`-f ipod`), an audiobook's
+    /// layout.
+    const CHAPTERS_M4A: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_type="audio"
+streams.stream.0.codec_tag_string="mp4a"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.language="und"
+streams.stream.0.tags.handler_name="SoundHandler"
+streams.stream.1.index=1
+streams.stream.1.codec_type="data"
+streams.stream.1.codec_tag_string="text"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.1.tags.language="eng"
+streams.stream.1.tags.handler_name="SubtitleHandler"
+chapters.chapter.0.id=0
+chapters.chapter.1.id=1
+format.tags.major_brand="M4A "
+format.tags.minor_version="512"
+format.tags.compatible_brands="M4A isomiso2"
+format.tags.title="Book"
+format.tags.encoder="Lavf60.16.100"
+"#;
+
     /// [`MP4_META`] with a top-level XMP `uuid` box appended, read with
     /// `-export_xmp 1`: the format tags end with the packet.
     const XMP_TAG: &str = "format.tags.xmp=\"<x:xmpmeta xmlns:x=\\\"adobe:ns:meta/\\\">\
@@ -797,6 +856,25 @@ format.tags.ENCODER="Lavf60.16.100"
     }
 
     #[test]
+    fn an_mp4_chapter_track_is_its_chapters() {
+        for flat in [CHAPTERS_MP4, CHAPTERS_M4A] {
+            let tags = parse(flat);
+            // Not "other fields": the text track is the chapters.
+            assert_eq!(tags.fields, set([Title, Software, Chapters]));
+            assert_eq!(tags.chapters, 2);
+            let older = flat.replace(
+                "tags.handler_name=\"SoundHandler\"\n",
+                "tags.handler_name=\"SoundHandler\"\n\
+                 streams.stream.1.tags.vendor_id=\"[0][0][0][0]\"\n",
+            );
+            assert_eq!(parse(&older), tags);
+        }
+        // The track's language is a stream's like any other.
+        let tags = parse(CHAPTERS_MP4);
+        assert_eq!(tags.languages, BTreeMap::from([(2, "eng".to_owned())]));
+    }
+
+    #[test]
     fn exported_xmp_is_reported() {
         let tags = parse(&format!("{MP4_META}{XMP_TAG}"));
         assert!(tags.fields.contains(&Xmp));
@@ -816,6 +894,7 @@ format.tags.ENCODER="Lavf60.16.100"
         assert_eq!(parse(&data("gpmd")).fields, set([Location]));
         assert_eq!(parse(&data("camm")).fields, set([Location]));
         assert_eq!(parse(&data("tmcd")).fields, set([CreationDate]));
+        assert_eq!(parse(&data("text")).fields, set([Chapters]));
         assert_eq!(parse(&data("mebx")).fields, set([Other]));
         assert_eq!(parse(&data("[0][0][0][0]")).fields, set([Other]));
     }
