@@ -16,6 +16,8 @@
 mod cancel;
 mod headers;
 mod image;
+#[allow(dead_code)] // Wired into run_job in the next commit.
+mod media;
 mod output;
 mod publish;
 mod selection;
