@@ -14,8 +14,9 @@
 //!   which yuv420p needs, and for AVI to at most 8190 px a side. FFmpeg
 //!   turns a rotated source upright as it decodes.
 //! - **GIF** takes two passes: a palette from the whole clip, then the GIF
-//!   drawn with it, both at 12 fps and at most 720 px wide. Both read an
-//!   ASF (WMV) source from its start again after probing ([`gif_passes`]).
+//!   drawn with it, both at 12 fps and at most 720 px wide. The second
+//!   reads an ASF (WMV) source without B-frames from its start again after
+//!   probing ([`gif_passes`]).
 //! - **Audio targets** (and video to MP3) keep `0:a:0`. Lossless targets
 //!   keep 24 bits when the source has more than 16
 //!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
@@ -307,23 +308,27 @@ fn build(
 /// would report as an unreadable source; the second reads it back as a
 /// second input and draws the GIF with it.
 ///
-/// Both read an ASF (WMV) source from its start again once it's probed
-/// (`-ss 0`). The ASF demuxer gives the packets FFmpeg reads while probing
-/// no duration, so in a clip of a few seconds every frame has none. When
-/// such a source ends before the palette's frame has reached the second
-/// pass's filter graph (now and then; more often on a busy machine),
-/// FFmpeg 9.0 drops the end time the decoder worked out and ends the stream at the
-/// last frame's start plus its duration (`configure_filtergraph` closes
-/// the source with `av_buffersrc_add_frame(NULL)`): `fps` then loses the
-/// GIF frames the last source frame should cover. Read again after
-/// probing, every packet has its duration. Other containers give them one.
+/// The second reads an ASF (WMV) source without B-frames from its start
+/// again once it's probed (`-ss 0`). The ASF demuxer gives the packets
+/// FFmpeg reads while probing no duration unless a parser times them
+/// (H.264, MPEG-4 Part 2, HEVC), so in a WMV2 clip of a few seconds every
+/// frame has none. When such a source ends before the palette's frame has
+/// reached the second pass's filter graph (now and then; more often on a
+/// busy machine), FFmpeg 9.0 drops the end time the decoder worked out and
+/// ends the stream at the last frame's start plus its duration
+/// (`configure_filtergraph` closes the source with
+/// `av_buffersrc_add_frame(NULL)`): `fps` then loses the GIF frames the
+/// last source frame should cover. Read again after probing, every packet
+/// has its duration. Other containers give them one, and the palette pass
+/// has no second input to wait for.
+///
+/// A source with B-frames ([`Probe::b_frames`]) is read once: FFmpeg would
+/// seek to 3/23 s before its start, which ASF doesn't take as a rewind but
+/// looks up in its index or by a search, and for H.264 and MPEG-4 WMVs that
+/// lands past the first frames or at the end. Their packets are timed by
+/// the parser anyway; WMV3 and VC-1 ones aren't (a known limit).
 fn gif_passes(src: &Path, probe: &Probe, out: &Path, palette: &Path) -> Vec<Pass> {
-    let reading: &[&str] = if probe.format_name == "asf" {
-        &["-ss", "0"]
-    } else {
-        &[]
-    };
-    let mut first = prefix(src, reading);
+    let mut first = prefix(src, &[]);
     push(
         &mut first,
         &[
@@ -340,7 +345,8 @@ fn gif_passes(src: &Path, probe: &Probe, out: &Path, palette: &Path) -> Vec<Pass
         ],
     );
 
-    let mut second = prefix(src, reading);
+    let rewind = probe.format_name == "asf" && !probe.b_frames;
+    let mut second = prefix(src, if rewind { &["-ss", "0"] } else { &[] });
     push(
         &mut second,
         &["-f", "png_pipe", "-protocol_whitelist", "file", "-i"],
@@ -684,6 +690,7 @@ mod tests {
             duration: Some(Duration::from_secs(1)),
             video,
             audio,
+            b_frames: false,
         }
     }
 
@@ -887,34 +894,44 @@ mod tests {
     }
 
     #[test]
-    fn a_gif_reads_an_asf_source_from_its_start_again() {
+    fn a_gif_pass_reads_an_asf_source_without_b_frames_from_its_start_again() {
         let wmv = Probe {
             format_name: "asf".into(),
             ..typical(Format::Wmv)
         };
         let passes = passes_for(&wmv, Format::Gif).unwrap();
         assert_eq!(passes.len(), 2);
+        let rewound = |args: &[OsString]| args.iter().any(|arg| arg == "-ss");
+        // The GIF pass, from the start; the palette pass reads it once.
         let opening = &PREFIX[..PREFIX.len() - 2];
-        for pass in &passes {
-            let mut start = opening.to_vec();
-            start.extend_from_slice(&["-ss", "0", "-i", "<src>"]);
-            assert!(pass.args.starts_with(&argv(&start)), "{:?}", pass.args);
-            assert_eq!(pass.args.iter().filter(|arg| *arg == "-ss").count(), 1);
-        }
-        // Other containers, and other targets from ASF, read it once.
+        let mut start = opening.to_vec();
+        start.extend_from_slice(&["-ss", "0", "-i", "<src>"]);
+        assert!(passes[1].args.starts_with(&argv(&start)), "{passes:?}");
+        assert_eq!(passes[1].args.iter().filter(|a| *a == "-ss").count(), 1);
+        assert!(passes[0].args.starts_with(&argv(&PREFIX)), "{passes:?}");
+        assert!(!rewound(&passes[0].args));
+        // With B-frames, both passes read it once, as in any container.
+        let b_frames = Probe {
+            b_frames: true,
+            ..wmv.clone()
+        };
+        let mut sources = vec![b_frames];
         for format_name in ["mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm", "avi"] {
-            let source = Probe {
-                format_name: format_name.into(),
-                ..typical(Format::Mp4)
-            };
-            let passes = passes_for(&source, Format::Gif).unwrap();
-            assert!(passes
-                .iter()
-                .all(|pass| !pass.args.iter().any(|a| a == "-ss")));
+            for b_frames in [false, true] {
+                sources.push(Probe {
+                    format_name: format_name.into(),
+                    b_frames,
+                    ..typical(Format::Mp4)
+                });
+            }
         }
+        for source in &sources {
+            let passes = passes_for(source, Format::Gif).unwrap();
+            assert!(!passes.iter().any(|pass| rewound(&pass.args)), "{passes:?}");
+        }
+        // Other targets from ASF read it once.
         for to in [Format::Mp4, Format::Webm, Format::Mp3, Format::Avi] {
-            let args = &passes_for(&wmv, to).unwrap()[0].args;
-            assert!(!args.iter().any(|arg| arg == "-ss"), "{to:?}");
+            assert!(!rewound(&passes_for(&wmv, to).unwrap()[0].args), "{to:?}");
         }
     }
 

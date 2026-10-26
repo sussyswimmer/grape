@@ -18,8 +18,8 @@ use super::args::{file_url, DEMUXERS};
 /// The fields `-show_entries` asks for. Never tags: titles and comments
 /// could contain anything, and the planner doesn't need them.
 const ENTRIES: &str = "format=format_name,duration\
-    :stream=index,codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,\
-    channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
+    :stream=index,codec_type,codec_name,width,height,has_b_frames,pix_fmt,sample_rate,\
+    channels,channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
     :stream_disposition=attached_pic\
     :stream_side_data=rotation";
 
@@ -58,6 +58,10 @@ pub(crate) struct Probe {
     pub(crate) video: Option<Video>,
     /// The stream `-map 0:a:0` picks: the first audio.
     pub(crate) audio: Option<Audio>,
+    /// Some video stream has B-frames: frames its decoder holds back to
+    /// put them in order (`has_b_frames` above 0). FFmpeg then seeks to a
+    /// little before the time asked for (`-ss`).
+    pub(crate) b_frames: bool,
 }
 
 /// A video stream.
@@ -152,11 +156,15 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
             has_layout: s.channel_layout.as_deref() != Some("unknown"),
             depth: depth(s),
         });
+    let b_frames = streams
+        .iter()
+        .any(|(_, s)| s.codec_type == "video" && s.has_b_frames > 0);
     Ok(Probe {
         format_name,
         duration,
         video,
         audio,
+        b_frames,
     })
 }
 
@@ -169,6 +177,7 @@ struct Stream {
     codec_name: String,
     width: u32,
     height: u32,
+    has_b_frames: u32,
     pix_fmt: String,
     sample_rate: u32,
     channels: u32,
@@ -187,6 +196,7 @@ impl Stream {
             "codec_name" => self.codec_name = value,
             "width" => self.width = number(&value),
             "height" => self.height = number(&value),
+            "has_b_frames" => self.has_b_frames = number(&value),
             "pix_fmt" => self.pix_fmt = value,
             "sample_rate" => self.sample_rate = number(&value),
             "channels" => self.channels = number(&value),
@@ -279,6 +289,7 @@ streams.stream.0.codec_name="h264"
 streams.stream.0.codec_type="video"
 streams.stream.0.width=160
 streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
 streams.stream.0.pix_fmt="yuv420p"
 streams.stream.0.bits_per_raw_sample="8"
 streams.stream.0.disposition.attached_pic=0
@@ -302,6 +313,7 @@ streams.stream.0.codec_name="h264"
 streams.stream.0.codec_type="video"
 streams.stream.0.width=160
 streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
 streams.stream.0.pix_fmt="yuv420p"
 streams.stream.0.bits_per_raw_sample="8"
 streams.stream.0.disposition.attached_pic=0
@@ -336,6 +348,7 @@ streams.stream.1.codec_name="png"
 streams.stream.1.codec_type="video"
 streams.stream.1.width=64
 streams.stream.1.height=64
+streams.stream.1.has_b_frames=0
 streams.stream.1.pix_fmt="rgb24"
 streams.stream.1.bits_per_raw_sample="N/A"
 streams.stream.1.disposition.attached_pic=1
@@ -380,6 +393,7 @@ streams.stream.0.codec_name="gif"
 streams.stream.0.codec_type="video"
 streams.stream.0.width=160
 streams.stream.0.height=120
+streams.stream.0.has_b_frames=0
 streams.stream.0.pix_fmt="bgra"
 streams.stream.0.bits_per_raw_sample="N/A"
 streams.stream.0.disposition.attached_pic=0
@@ -404,8 +418,8 @@ format.duration="N/A"
             "mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif",
             "-show_entries",
             "format=format_name,duration\
-             :stream=index,codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,\
-             channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
+             :stream=index,codec_type,codec_name,width,height,has_b_frames,pix_fmt,\
+             sample_rate,channels,channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
              :stream_disposition=attached_pic\
              :stream_side_data=rotation",
             "-of",
@@ -445,6 +459,7 @@ format.duration="N/A"
                     has_layout: true,
                     depth: 16,
                 }),
+                b_frames: true,
             }
         );
     }
@@ -485,6 +500,24 @@ format.duration="N/A"
              streams.stream.2.disposition.attached_pic=0\n"
         );
         assert_eq!(parse(&with_video).unwrap().video.unwrap().codec, "h264");
+    }
+
+    #[test]
+    fn b_frames_in_any_video_stream_are_noticed() {
+        assert!(parse(H264_AAC_MP4).unwrap().b_frames);
+        // WMV2, MPEG-4 without them, and images have none.
+        let none = H264_AAC_MP4.replace("has_b_frames=2", "has_b_frames=0");
+        assert!(!parse(&none).unwrap().b_frames);
+        assert!(!parse(MP3_WITH_COVER).unwrap().b_frames);
+        assert!(!parse(GIF_NO_DURATION).unwrap().b_frames);
+        // FFmpeg's seek looks at every stream, so a second video counts.
+        let second = format!(
+            "{none}streams.stream.2.index=2\n\
+             streams.stream.2.codec_type=\"video\"\n\
+             streams.stream.2.codec_name=\"wmv3\"\n\
+             streams.stream.2.has_b_frames=1\n"
+        );
+        assert!(parse(&second).unwrap().b_frames);
     }
 
     #[test]

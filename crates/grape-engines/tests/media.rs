@@ -1144,11 +1144,14 @@ impl Drop for Lower<'_> {
 #[test]
 fn a_short_wmv_keeps_every_gif_frame() {
     let dir = TestDir::new("media-wmv-gif");
-    // 1 s at 10 fps: the frames start at 0.046 s, after the audio, and
-    // the last ends at 1.046 s, so at 12 fps the GIF has 12 frames and
-    // lasts 1 s. ASF packets read while FFmpeg probes have no duration,
-    // and 9.0 then lost the last two frames now and then, more often on a
-    // busy machine: ten conversions, with a busy thread per core.
+    // 1 s of WMV2 at 10 fps: the frames start at 0.046 s, after the
+    // audio, and the last ends at 1.046 s, so at 12 fps the GIF has 12
+    // frames and lasts 1 s. The ASF packets FFmpeg reads while probing
+    // have no duration, and read only once, 9.0 now and then ended the GIF
+    // a frame early, more often on a busy machine: twenty conversions, with
+    // a busy thread per core. That only catches a race when it happens:
+    // without the rewind, 14 of 15 runs failed here (4 cores), and a
+    // quieter machine may miss it. The argv's unit test is the sure guard.
     let src = make_source(&dir.path, "clip.wmv", Format::Wmv);
     let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
     let busy = AtomicBool::new(true);
@@ -1162,7 +1165,7 @@ fn a_short_wmv_keeps_every_gif_frame() {
             });
         }
         let _lower = Lower(&busy);
-        for _ in 0..10 {
+        for _ in 0..20 {
             let (outcome, _) = convert_file(&dir, &src, Format::Gif)
                 .unwrap_or_else(|e| panic!("{e} ({})", e.detail));
             let gif = &outcome.outputs[0];
@@ -1172,6 +1175,48 @@ fn a_short_wmv_keeps_every_gif_frame() {
         }
     });
     assert!(seen.iter().all(|&run| run == (12, 1.0)), "{seen:?}");
+}
+
+#[test]
+fn b_frame_wmvs_and_avis_make_whole_gifs() {
+    let dir = TestDir::new("media-b-frame-gif");
+    // H.264 and MPEG-4 Part 2 with B-frames in every group (`-b_strategy
+    // 0`), at 30 fps: read from its start again (`-ss 0`), a WMV's GIF lost
+    // frames or had none. Each GIF covers the clip: 12 frames a second,
+    // maybe one more where the decode times round up, and as long.
+    let mut failures = Vec::new();
+    for secs in [1u32, 5, 10] {
+        let video = format!("testsrc=size=160x120:rate=30:duration={secs}");
+        let tone = format!("sine=frequency=440:duration={secs}:sample_rate=44100");
+        for (codec, most) in [("libx264", "3"), ("mpeg4", "2")] {
+            for (ext, muxer, audio) in [("wmv", "asf", "wmav2"), ("avi", "avi", "libmp3lame")] {
+                let name = format!("{codec}-{secs}s.{ext}");
+                let src = dir.join(&name);
+                let mut args = vec!["-f", "lavfi", "-i", &video, "-f", "lavfi", "-i", &tone];
+                args.extend(["-shortest", "-c:v", codec, "-bf", most, "-b_strategy", "0"]);
+                args.extend(["-pix_fmt", "yuv420p", "-c:a", audio, "-f", muxer]);
+                args.push(src.to_str().unwrap());
+                ffmpeg(&args);
+                assert!(b_frames(&src) > 0, "{name} has no B-frames");
+                let gif = match convert_file(&dir, &src, Format::Gif) {
+                    Ok((outcome, _)) => outcome.outputs[0].clone(),
+                    Err(e) => {
+                        failures.push(format!("{name}: {e} ({})", e.detail));
+                        continue;
+                    }
+                };
+                let frames = frame_count(&gif);
+                let duration: f64 = probe(&gif)["format.duration"].parse().unwrap();
+                let whole = 12 * secs as usize;
+                let late = duration - f64::from(secs);
+                if !(whole..=whole + 1).contains(&frames) || !(-0.01..0.09).contains(&late) {
+                    failures.push(format!("{name}: {frames} frames, {duration} s"));
+                }
+                fs::remove_file(&gif).unwrap();
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
