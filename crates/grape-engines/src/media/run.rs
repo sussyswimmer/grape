@@ -132,7 +132,7 @@ pub(crate) fn transcode(
 ) -> Result<Finished, RunError> {
     #[cfg(test)]
     if let Some(fake) = tests::next_fake(args) {
-        return transcode_command(fake.command(), cancel, on_time);
+        return fake.transcode(cancel, on_time);
     }
     transcode_command(command(program, args)?, cancel, on_time)
 }
@@ -529,6 +529,9 @@ pub(super) mod tests {
         /// and [`FAKE_OUT`] to the run's output path (its last argument,
         /// without `file:`).
         Child(&'static str, String),
+        /// `ffmpeg` or `ffprobe` failing this way without a child: how a
+        /// sidecar that can't be started or watched fails.
+        Fails(RunError),
     }
 
     /// A scripted run, ready to start.
@@ -538,15 +541,30 @@ pub(super) mod tests {
     }
 
     impl Next {
-        /// The child of a scripted `ffmpeg` run.
-        pub(super) fn command(self) -> Command {
+        /// The child of a scripted run.
+        fn command(self) -> Command {
             match self.fake {
                 Fake::Child(mode, text) => {
                     let mut command = fake(mode);
                     command.env(FAKE_TEXT, text).env(FAKE_OUT, self.out);
                     command
                 }
+                Fake::Prints(_) | Fake::Runs(_) | Fake::Fails(_) => {
+                    panic!("a scripted run without a child")
+                }
+            }
+        }
+
+        /// The outcome of a scripted `ffmpeg` run.
+        pub(super) fn transcode(
+            self,
+            cancel: &CancelToken,
+            on_time: &mut dyn FnMut(Duration),
+        ) -> Result<Finished, RunError> {
+            match self.fake {
+                Fake::Fails(e) => Err(e),
                 Fake::Prints(_) | Fake::Runs(_) => panic!("ffmpeg was scripted as ffprobe"),
+                Fake::Child(..) => transcode_command(self.command(), cancel, on_time),
             }
         }
 
@@ -559,6 +577,7 @@ pub(super) mod tests {
             match self.fake {
                 Fake::Prints(text) => Ok(text),
                 Fake::Runs(run) => Ok(run()),
+                Fake::Fails(e) => Err(e),
                 Fake::Child(..) => probe_command(self.command(), cancel, timeout),
             }
         }

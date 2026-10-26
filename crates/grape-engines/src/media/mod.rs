@@ -1151,6 +1151,36 @@ mod tests {
         case.assert_clean();
     }
 
+    #[test]
+    fn a_copy_whose_sidecar_cant_be_started_or_watched_isnt_retried() {
+        let not_found = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let broken = std::io::Error::other("the pipe broke");
+        for (error, message) in [
+            (
+                RunError::Spawn(not_found),
+                "Grape's media converter is missing. Reinstall Grape.",
+            ),
+            (RunError::Io(broken), "Grape couldn't write a MP4 file."),
+        ] {
+            let case = Case::new("clip.mkv", Format::Mp4);
+            script([
+                mkv_h264_aac(),
+                Fake::Fails(error),
+                Fake::Child("write", "re-encoded".to_string()),
+                mp4_h264_aac(),
+            ]);
+            let err = case.run().unwrap_err();
+            assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+            assert_eq!(err.user_message, message);
+            // The probe and the copy: no re-encode after it.
+            let ran = ran();
+            assert_eq!(ran.len(), 2, "{message}");
+            assert!(has(&ran[1], ["-c", "copy"]));
+            assert!(!case.dir.0.join("converted.mp4").exists());
+            case.assert_clean();
+        }
+    }
+
     /// The kind of error a failed `ffmpeg` run that wrote `stderr` maps to.
     fn failed(stderr: &str) -> ErrorKind {
         let names = Names::new(
