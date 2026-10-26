@@ -2187,7 +2187,12 @@ mod tests {
         let dir = TestDir::new();
         let src = dir.0.join(std::ffi::OsStr::from_bytes(b"photo\xff.heic"));
         let heic = fake_heic(1, 1, 3, &[0; 3], None);
-        fs::write(&src, &heic).unwrap();
+        if let Err(err) = fs::write(&src, &heic) {
+            // APFS refuses names that aren't UTF-8 ("Illegal byte
+            // sequence"), so no such source can reach Grape on a Mac.
+            assert!(cfg!(target_os = "macos"), "{err}");
+            return;
+        }
         let settings = Settings::new(dir.0.join("fallback"));
         let selection = crate::build_selection(std::slice::from_ref(&src), &settings);
         let job = plan(&selection, &Operation::convert(Format::Png), &settings)

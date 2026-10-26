@@ -191,7 +191,7 @@ jobs:
             $allowed = 'KERNEL32.dll', 'ADVAPI32.dll', 'ntdll.dll', 'bcryptprimitives.dll', 'bcrypt.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'USERENV.dll', 'WS2_32.dll'
             foreach ($d in $deps) {
               if ($d -like 'vcruntime*' -or $d -like 'msvcp*' -or $d -like 'api-ms-win-crt-*' -or $d -like 'ucrtbase*') { Bad "grape-heif.exe needs the Visual C++ runtime ($d): it must be linked statically." }
-              elseif ($d -like 'heif*' -or $d -like 'libde265*' -or $d -like '*x265*') { Bad "grape-heif.exe loads $d: the codecs must be linked statically." }
+              elseif ($d -like 'heif*' -or $d -like 'libde265*' -or $d -like '*x265*') { Bad "grape-heif.exe loads ${d}: the codecs must be linked statically." }
               elseif ($allowed -notcontains $d) { Bad "grape-heif.exe imports $d, which isn't on the list." }
             }
           }
