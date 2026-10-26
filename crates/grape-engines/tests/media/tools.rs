@@ -748,3 +748,386 @@ fn remove_metadata_strips_video_and_keeps_tracks_languages_and_fonts() {
     );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// How the samples of a test WAV are stored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Sample {
+    I16,
+    I24,
+    I32,
+    F32,
+}
+
+/// Writes a 1 s WAV at `rate` whose channels are sines at `tones`, each at
+/// `amplitude` of full scale, stored as `sample`, with the channel mask
+/// `mask` (a `WAVEFORMATEXTENSIBLE` header) or, for `None`, a plain
+/// header with no layout.
+fn write_tones(
+    path: &Path,
+    rate: u32,
+    tones: &[f64],
+    amplitude: f64,
+    mask: Option<u32>,
+    sample: Sample,
+) {
+    let bits: u16 = match sample {
+        Sample::I16 => 16,
+        Sample::I24 => 24,
+        Sample::I32 | Sample::F32 => 32,
+    };
+    let mut data = Vec::new();
+    for n in 0..rate {
+        let t = f64::from(n) / f64::from(rate);
+        for tone in tones {
+            let v = amplitude * (std::f64::consts::TAU * tone * t).sin();
+            match sample {
+                Sample::I16 => data.extend_from_slice(&((v * 32767.0) as i16).to_le_bytes()),
+                Sample::I24 => {
+                    data.extend_from_slice(&((v * 8_388_607.0) as i32).to_le_bytes()[..3])
+                }
+                Sample::I32 => {
+                    data.extend_from_slice(&((v * 2_147_483_647.0) as i32).to_le_bytes())
+                }
+                Sample::F32 => data.extend_from_slice(&(v as f32).to_le_bytes()),
+            }
+        }
+    }
+    let channels = u16::try_from(tones.len()).unwrap();
+    let block = channels * bits / 8;
+    let float = sample == Sample::F32;
+    let mut format = Vec::new();
+    let tag: u16 = match (mask, float) {
+        (Some(_), _) => 0xFFFE,
+        (None, true) => 3,
+        (None, false) => 1,
+    };
+    format.extend_from_slice(&tag.to_le_bytes());
+    format.extend_from_slice(&channels.to_le_bytes());
+    format.extend_from_slice(&rate.to_le_bytes());
+    format.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
+    format.extend_from_slice(&block.to_le_bytes());
+    format.extend_from_slice(&bits.to_le_bytes());
+    if let Some(mask) = mask {
+        // The valid bits, the mask, and the PCM or float subformat GUID.
+        format.extend_from_slice(&22u16.to_le_bytes());
+        format.extend_from_slice(&bits.to_le_bytes());
+        format.extend_from_slice(&mask.to_le_bytes());
+        format.push(if float { 3 } else { 1 });
+        format.extend_from_slice(&[
+            0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+        ]);
+    }
+    let mut body = b"WAVEfmt ".to_vec();
+    body.extend_from_slice(&u32::try_from(format.len()).unwrap().to_le_bytes());
+    body.extend_from_slice(&format);
+    body.extend_from_slice(b"data");
+    body.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+    body.extend_from_slice(&data);
+    let mut wav = b"RIFF".to_vec();
+    wav.extend_from_slice(&u32::try_from(body.len()).unwrap().to_le_bytes());
+    wav.extend_from_slice(&body);
+    fs::write(path, wav).unwrap();
+}
+
+/// The first audio track of `path`, decoded by the test FFmpeg to 32-bit
+/// float: each channel's samples, and the rate.
+fn decode(path: &Path) -> (Vec<Vec<f64>>, f64) {
+    let wav = path.with_extension("decoded.wav");
+    ffmpeg(&[
+        "-i",
+        s(path),
+        "-map",
+        "0:a:0",
+        "-c:a",
+        "pcm_f32le",
+        "-f",
+        "wav",
+        s(&wav),
+    ]);
+    let bytes = fs::read(&wav).unwrap();
+    fs::remove_file(&wav).unwrap();
+    let (mut channels, mut rate, mut data) = (0, 0.0, &[][..]);
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &bytes[at + 8..(at + 8 + size).min(bytes.len())];
+        match &bytes[at..at + 4] {
+            b"fmt " => {
+                channels = usize::from(u16::from_le_bytes([body[2], body[3]]));
+                rate = f64::from(u32::from_le_bytes(body[4..8].try_into().unwrap()));
+            }
+            b"data" => data = body,
+            _ => {}
+        }
+        at += 8 + size + (size & 1);
+    }
+    let mut samples = vec![Vec::new(); channels];
+    for (i, sample) in data.as_chunks::<4>().0.iter().enumerate() {
+        samples[i % channels].push(f64::from(f32::from_le_bytes(*sample)));
+    }
+    (samples, rate)
+}
+
+/// The amplitude of `tone` (Hz) in `samples` at `rate`, over half a
+/// second (Goertzel; every test tone fits it a whole number of times).
+fn level(samples: &[f64], rate: f64, tone: f64) -> f64 {
+    let n = (rate / 2.0) as usize;
+    let k = 2.0 * (std::f64::consts::TAU * tone / rate).cos();
+    let (mut s1, mut s2) = (0.0, 0.0);
+    for &x in samples.iter().take(n) {
+        let s0 = x + k * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    let power = s1 * s1 + s2 * s2 - k * s1 * s2;
+    2.0 * power.max(0.0).sqrt() / n as f64
+}
+
+/// The tones of the channel-mix tests, one a channel, each a whole number
+/// of cycles in half a second at 48 and 96 kHz.
+const MIX_TONES: [f64; 6] = [440.0, 660.0, 880.0, 1100.0, 1320.0, 1540.0];
+
+/// Channels `params` for `channels`.
+fn to_channels(channels: grape_core::Channels) -> ToolParams {
+    ToolParams {
+        channels,
+        ..ToolParams::default()
+    }
+}
+
+/// Runs Audio Channels on a WAV of `tones` (at `amplitude`, with `mask`)
+/// and returns, for each output channel, the level of each tone relative
+/// to `amplitude`.
+fn mixed(
+    dir: &TestDir,
+    name: &str,
+    tones: &[f64],
+    mask: Option<u32>,
+    channels: grape_core::Channels,
+) -> Vec<Vec<f64>> {
+    let src = dir.join(name);
+    write_tones(&src, 48_000, tones, 0.25, mask, Sample::I16);
+    let out = run_tool(dir, &src, ToolKey::AudioChannels, to_channels(channels))
+        .unwrap_or_else(|e| panic!("{name}: {e} ({})", e.detail));
+    let (samples, rate) = decode(&out.outputs[0]);
+    samples
+        .iter()
+        .map(|channel| {
+            tones
+                .iter()
+                .map(|&tone| (level(channel, rate, tone) / 0.25 * 1000.0).round() / 1000.0)
+                .collect()
+        })
+        .collect()
+}
+
+/// Asserts that every level in `got` is within 0.01 of `want`'s.
+fn assert_levels(got: &[Vec<f64>], want: &[&[f64]], what: &str) {
+    let close = got.len() == want.len()
+        && got.iter().zip(want).all(|(g, w)| {
+            g.len() == w.len() && g.iter().zip(*w).all(|(a, b)| (a - b).abs() <= 0.01)
+        });
+    assert!(close, "{what}: got {got:?}, want {want:?}");
+}
+
+#[test]
+fn audio_channels_mix_at_the_documented_levels() {
+    use grape_core::Channels::{Mono, Stereo};
+    let dir = TestDir::new("tools-channels-mix");
+    // Stereo to mono is (L+R)/2; mono to stereo a full-level copy.
+    let got = mixed(&dir, "lr.wav", &MIX_TONES[..2], None, Mono);
+    assert_levels(&got, &[&[0.5, 0.5]], "stereo to mono");
+    let got = mixed(&dir, "mono.wav", &MIX_TONES[..1], None, Stereo);
+    assert_levels(&got, &[&[1.0], &[1.0]], "mono to stereo");
+    // 5.1(side): FL FR FC LFE SL SR, through swresample's normalized
+    // matrix.
+    let got = mixed(&dir, "surround.wav", &MIX_TONES, Some(0x60F), Stereo);
+    let left: &[f64] = &[0.414, 0.0, 0.293, 0.0, 0.293, 0.0];
+    let right: &[f64] = &[0.0, 0.414, 0.293, 0.0, 0.0, 0.293];
+    assert_levels(&got, &[left, right], "5.1 to stereo");
+    let got = mixed(&dir, "surround2.wav", &MIX_TONES, Some(0x60F), Mono);
+    let mono: &[f64] = &[0.207, 0.207, 0.293, 0.0, 0.146, 0.146];
+    assert_levels(&got, &[mono], "5.1 to mono");
+    // Four channels without a layout average to mono, and can't be
+    // stereo.
+    let got = mixed(&dir, "four.wav", &MIX_TONES[..4], None, Mono);
+    assert_levels(&got, &[&[0.25; 4]], "4 unlabeled to mono");
+    let four = dir.join("four2.wav");
+    write_tones(&four, 48_000, &MIX_TONES[..4], 0.25, None, Sample::I16);
+    let err = run_tool(&dir, &four, ToolKey::AudioChannels, to_channels(Stereo)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "four2.wav has 4 channels without speaker positions, so Grape can't tell which are \
+         left and right."
+    );
+    let err = run_tool(
+        &dir,
+        &dir.join("mono.wav"),
+        ToolKey::AudioChannels,
+        to_channels(Mono),
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(err.user_message, "mono.wav is already mono.");
+}
+
+#[test]
+fn audio_channels_keep_codec_depth_rate_and_cover_and_never_clip() {
+    use grape_core::Channels::{Mono, Stereo};
+    let dir = TestDir::new("tools-channels-keep");
+    // Full-scale correlated 5.1 in AAC to stereo: with a plain `-ac 2` it
+    // would reach 1.9 of full scale. (5.1 with back speakers, AAC's own
+    // layout: FFmpeg 6.1 reads back 5.1(side) AAC as having none.)
+    let wav = dir.join("loud51.wav");
+    write_tones(&wav, 48_000, &[440.0; 6], 0.8, Some(0x3F), Sample::I16);
+    let m4a = dir.join("loud51.m4a");
+    ffmpeg(&[
+        "-i",
+        s(&wav),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "384k",
+        "-f",
+        "ipod",
+        s(&m4a),
+    ]);
+    let out = run_tool(&dir, &m4a, ToolKey::AudioChannels, to_channels(Stereo)).unwrap();
+    let (samples, _) = decode(&out.outputs[0]);
+    let peak = samples.iter().flatten().fold(0.0f64, |m, x| m.max(x.abs()));
+    assert_eq!(samples.len(), 2);
+    assert!(peak <= 1.0, "peak {peak}");
+    assert!(peak > 0.6, "peak {peak}");
+    let got = flat(&out.outputs[0], "stream=codec_name");
+    assert_eq!(got["streams.stream.0.codec_name"], "aac");
+
+    // Each source's codec, depth and rate stay.
+    let mut failures = Vec::new();
+    let s24 = dir.join("take24.wav");
+    write_tones(&s24, 96_000, &MIX_TONES[..2], 0.25, None, Sample::I24);
+    let f32 = dir.join("takef.wav");
+    write_tones(&f32, 48_000, &MIX_TONES[..2], 0.25, None, Sample::F32);
+    let alac = dir.join("song.m4a");
+    ffmpeg(&[
+        "-i",
+        s(&s24),
+        "-c:a",
+        "alac",
+        "-sample_fmt",
+        "s32p",
+        "-metadata",
+        "creation_time=2024-05-01T10:20:30.000000Z",
+        "-f",
+        "ipod",
+        s(&alac),
+    ]);
+    for (src, codec, raw, rate) in [
+        (&s24, "pcm_s24le", "24", "96000"),
+        (&f32, "pcm_f32le", "N/A", "48000"),
+        (&alac, "alac", "24", "96000"),
+    ] {
+        let out = match run_tool(&dir, src, ToolKey::AudioChannels, to_channels(Mono)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{}: {e} ({})", src.display(), e.detail));
+                continue;
+            }
+        };
+        let got = flat(
+            &out.outputs[0],
+            "stream=codec_name,channels,sample_rate,bits_per_raw_sample",
+        );
+        let want = [
+            ("codec_name", codec),
+            ("channels", "1"),
+            ("sample_rate", rate),
+            ("bits_per_raw_sample", raw),
+        ];
+        for (key, value) in want {
+            let key = format!("streams.stream.0.{key}");
+            if got.get(&key).map(String::as_str) != Some(value) {
+                failures.push(format!("{}: {key} {:?}", src.display(), got.get(&key)));
+            }
+        }
+        // An M4A keeps the date FFmpeg drops from every new file.
+        if src == &alac {
+            let got = tags(&out.outputs[0]);
+            let date = got.get("format.tags.creation_time").map(String::as_str);
+            if date != Some("2024-05-01T10:20:30.000000Z") {
+                failures.push(format!("m4a creation_time {got:?}"));
+            }
+        }
+    }
+
+    // A mono MP3 and FLAC made stereo keep their cover; ReplayGain goes.
+    for (name, codec, muxer) in [
+        ("song.mp3", "libmp3lame", "mp3"),
+        ("song.flac", "flac", "flac"),
+    ] {
+        let src = tagged_song(&dir, name, codec, muxer);
+        let tagged = dir.join(&format!("rg-{name}"));
+        ffmpeg(&[
+            "-i",
+            s(&src),
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-metadata",
+            "REPLAYGAIN_TRACK_GAIN=-3.20 dB",
+            "-f",
+            muxer,
+            s(&tagged),
+        ]);
+        let out = run_tool(&dir, &tagged, ToolKey::AudioChannels, to_channels(Stereo)).unwrap();
+        let got = tags(&out.outputs[0]);
+        if kinds(&out.outputs[0]) != ["audio", "video"]
+            || got
+                .get("streams.stream.1.disposition.attached_pic")
+                .map(String::as_str)
+                != Some("1")
+        {
+            failures.push(format!("{name}: cover {got:?}"));
+        }
+        if got
+            .keys()
+            .any(|k| k.to_ascii_lowercase().contains("replaygain"))
+        {
+            failures.push(format!("{name}: ReplayGain kept {got:?}"));
+        }
+        if got.get("format.tags.title").map(String::as_str) != Some("Song") {
+            failures.push(format!("{name}: title {got:?}"));
+        }
+    }
+
+    // A 32-bit FLAC (written in FLAC's experimental mode) would come out
+    // 24-bit, so it's refused.
+    let s32 = dir.join("take32.wav");
+    write_tones(&s32, 48_000, &MIX_TONES[..2], 0.3, None, Sample::I32);
+    let flac32 = dir.join("take32.flac");
+    ffmpeg(&[
+        "-i",
+        s(&s32),
+        "-c:a",
+        "flac",
+        "-sample_fmt",
+        "s32",
+        "-strict",
+        "experimental",
+        "-f",
+        "flac",
+        s(&flac32),
+    ]);
+    let err = run_tool(&dir, &flac32, ToolKey::AudioChannels, to_channels(Mono)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "take32.flac is a 32-bit recording. FLAC would cut it, so nothing was saved."
+    );
+    // A 32-bit WAV stays a 32-bit WAV.
+    let out = run_tool(&dir, &s32, ToolKey::AudioChannels, to_channels(Mono)).unwrap();
+    let got = flat(&out.outputs[0], "stream=codec_name");
+    assert_eq!(got["streams.stream.0.codec_name"], "pcm_s32le");
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

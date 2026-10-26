@@ -435,7 +435,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - Tools keep every track except what they remove. They map streams by index, unlike conversions ("only what the user sees", D22).
   - Compress output must be ≤90 % of the source (lossy) or ≤95 % (exact).
   - A job that would change nothing (already compact, mono or stereo, at the target loudness, no sound to remove, too quiet to measure) writes nothing and fails with the new `ErrorKind::NoChange`.
-  - Remove Metadata and Remove Audio never re-encode. Normalize and Channels keep codec, depth and rate.
+  - Remove Metadata and Remove Audio never re-encode. Normalize and Channels keep codec, depth and rate; a 32-bit ALAC or FLAC source, which FFmpeg's encoders would write as 24 bits, is refused.
 - **Remove Metadata:**
   - **Images:** a container-level strip (JPEG segments, PNG chunks, WebP chunks, GIF blocks). Image data stays byte for byte. ICC is kept. An EXIF holding only Orientation (and the DCF Adobe RGB tags when that's how the source signaled its color space) replaces the dropped EXIF when needed, so nothing rotates or shifts color. Data after a JPEG's end (gain maps, motion-photo video, MPF images) is dropped and reported.
   - **Media:** `-c copy -map_metadata -1 -map_chapters -1 -fflags +bitexact`, with track languages and MKV fonts restored. Cover art, data tracks, image attachments, chapters and MP4/MOV timecode are dropped and reported. MP3 gets no ID3 at all. A second ffprobe of the output must find only structural keys, or nothing is published.

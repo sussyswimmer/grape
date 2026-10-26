@@ -1,5 +1,5 @@
 //! The tools that run through FFmpeg (D26), one file in and one out:
-//! Remove Audio and Remove Metadata so far.
+//! Remove Audio, Remove Metadata and Audio Channels so far.
 //!
 //! [`run`] goes through the steps a conversion does ([`super::convert`]),
 //! and every refusal, and every [`ErrorKind::NoChange`], comes before
@@ -8,7 +8,8 @@
 //! 1. [`super::begin`]: the sidecars, the source still a file, its probe.
 //! 2. The tags probe ([`super::tags`]): what the source has, by key, for
 //!    the tool to keep or remove.
-//! 3. The tool's own checks (no sound to remove, no video to keep).
+//! 3. The tool's own checks (no sound to remove, no video to keep,
+//!    already mono, a 32-bit source a codec can't keep).
 //! 4. The temp file, then one of the two FFmpeg slots.
 //! 5. The tool's passes ([`argv`]), then the output's check: the
 //!    conversion's (not empty, `ffprobe` reads it), then the tool's own:
@@ -25,7 +26,7 @@ mod argv;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use grape_core::{Format, Job, ToolKey, ToolParams};
+use grape_core::{Channels, Format, Job, ToolKey, ToolParams};
 
 use super::args::{Missing, Pass};
 use super::probe::{Probe, StreamInfo, StreamKind};
@@ -45,6 +46,7 @@ pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
     use Format::{Flac, M4a, Mkv, Mov, Mp3, Mp4, Wav};
     match tool {
         ToolKey::RemoveMetadata => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
+        ToolKey::AudioChannels => matches!(from, Mp3 | M4a | Wav | Flac),
         ToolKey::MuteVideo => matches!(from, Mp4 | Mov | Mkv),
         _ => false,
     }
@@ -66,7 +68,7 @@ pub(crate) fn run(
     from: Format,
     to: Format,
     tool: ToolKey,
-    _params: &ToolParams,
+    params: &ToolParams,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
@@ -75,6 +77,7 @@ pub(crate) fn run(
     let tags = read_tags(&begun, from, ctx)?;
     let tool = Tool {
         tool,
+        params,
         begun: &begun,
         to,
         tags: &tags,
@@ -83,6 +86,7 @@ pub(crate) fn run(
     match tool.tool {
         ToolKey::MuteVideo => tool.mute(&mut bar),
         ToolKey::RemoveMetadata => tool.strip(&mut bar),
+        ToolKey::AudioChannels => tool.channels(&mut bar),
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
@@ -104,6 +108,8 @@ fn read_tags(begun: &Begun, from: Format, ctx: &EngineCtx) -> Result<Tags, Grape
 /// One tool job, once [`run`] has begun it and read the tags.
 struct Tool<'a> {
     tool: ToolKey,
+    /// The panel's choices.
+    params: &'a ToolParams,
     begun: &'a Begun<'a>,
     /// The output's format.
     to: Format,
@@ -218,6 +224,103 @@ impl Tool<'_> {
         let removed = self.tags.fields.iter().copied().collect();
         outcome.notes.push(Note::MetadataRemoved(removed));
         Ok(outcome)
+    }
+
+    /// Audio Channels: the first audio track remixed to mono or stereo
+    /// ([`argv::mix`]), the same codec, depth and rate ([`argv::same_quality`]),
+    /// its cover art kept and ReplayGain blanked.
+    fn channels(&self, bar: &mut Bar) -> Result<JobOutcome, GrapeError> {
+        let (names, info) = (&self.begun.names, &self.begun.info);
+        let src = self.begun.src;
+        let audio = self.audio()?;
+        let target = self.params.channels;
+        let (filter, unlabeled) = match argv::mix(target, audio.channels, audio.has_layout) {
+            argv::Mix::Already => {
+                let why = match target {
+                    Channels::Mono => "is already mono.",
+                    Channels::Stereo => "is already stereo.",
+                };
+                let detail = format!("{} channels in {}", audio.channels, src.display());
+                return Err(names.no_change(why, detail));
+            }
+            argv::Mix::NoSides => {
+                return Err(GrapeError::new(
+                    ErrorKind::NotYetSupported,
+                    format!(
+                        "{} has {} channels without speaker positions, so Grape can't tell \
+                         which are left and right.",
+                        names.source, audio.channels
+                    ),
+                    format!("no channel layout in {}", src.display()),
+                ));
+            }
+            argv::Mix::Filter { filter, unlabeled } => (filter, unlabeled),
+        };
+        let channels = match target {
+            Channels::Mono => 1,
+            Channels::Stereo => 2,
+        };
+        let codec = self.same_quality(audio, channels)?;
+        let reading: &[&str] = if unlabeled {
+            &["-guess_layout_max", "0"]
+        } else {
+            &[]
+        };
+        let written = self.write(bar, |out| {
+            argv::reencode(
+                &self.begun.src_abs,
+                self.to,
+                info,
+                self.tags,
+                reading,
+                &filter,
+                &codec,
+                out,
+            )
+        })?;
+        let wrote = written
+            .probe
+            .streams
+            .iter()
+            .find(|s| s.kind == StreamKind::Audio)
+            .map(|s| s.channels);
+        if wrote != Some(channels) {
+            return Err(self.wrote_wrong(
+                &written.out,
+                format!("{wrote:?} channels, {channels} asked"),
+            ));
+        }
+        self.publish(written, bar)
+    }
+
+    /// The source's first audio track, which the audio tools work on.
+    fn audio(&self) -> Result<&StreamInfo, GrapeError> {
+        let info = &self.begun.info;
+        info.streams
+            .iter()
+            .find(|s| s.kind == StreamKind::Audio)
+            .ok_or_else(|| no_stream(&self.begun.names, Missing::Audio, self.begun.src))
+    }
+
+    /// [`argv::same_quality`] for `audio` and `channels` channels out, or
+    /// the refusal of a source deeper than its codec writes.
+    fn same_quality(&self, audio: &StreamInfo, channels: u32) -> Result<argv::Codec, GrapeError> {
+        let bit_rate = audio.bit_rate.or(self.begun.info.bit_rate);
+        argv::same_quality(self.to, audio, bit_rate, channels).map_err(|codec| {
+            GrapeError::new(
+                ErrorKind::NotYetSupported,
+                format!(
+                    "{} is a 32-bit recording. {codec} would cut it, so nothing was saved.",
+                    self.begun.names.source
+                ),
+                format!(
+                    "{}-bit {} in {}",
+                    audio.depth,
+                    audio.codec,
+                    self.begun.src.display()
+                ),
+            )
+        })
     }
 
     /// Creates the temp output, waits for an FFmpeg slot, runs the one pass
@@ -401,7 +504,7 @@ mod tests {
             assert_eq!(to, from, "{tool:?} on {from:?}: {planned}");
             assert!(crate::media::args::muxer(to).is_some());
         }
-        assert_eq!(count, 10);
+        assert_eq!(count, 14);
     }
 
     /// A tool job on `name` (the bytes "source") in a fresh folder, with
@@ -721,6 +824,141 @@ mod tests {
         let err = case.run().0.unwrap_err();
         assert_eq!(err.user_message, "empty.mkv has no sound or video in it.");
         assert_eq!(ran().len(), 2);
+        case.assert_clean();
+    }
+
+    /// A Channels job on `name` for `channels`.
+    fn channels_case(name: &str, channels: Channels) -> Case {
+        let mut case = Case::new(name, ToolKey::AudioChannels);
+        let op = Operation::Tool {
+            tool: ToolKey::AudioChannels,
+            params: ToolParams {
+                channels,
+                ..ToolParams::default()
+            },
+        };
+        let planned = grape_core::output_name(name, &op, &HashSet::new());
+        case.job.op = op;
+        case.job.output = JobOutput::File(case.dir.0.join(planned));
+        case
+    }
+
+    /// `ffprobe`'s view of an audio file of `format_name` with `codec`
+    /// audio of `channels` channels, with a layout or not, at `depth`
+    /// bits.
+    fn song(format_name: &str, codec: &str, channels: u32, layout: bool, depth: u32) -> Fake {
+        let flat = flat(format_name, false, codec)
+            .replace("channels=2", &format!("channels={channels}"))
+            .replace(
+                "streams.stream.0.disposition.attached_pic=0\n",
+                &format!(
+                    "streams.stream.0.disposition.attached_pic=0\n\
+                     streams.stream.0.channel_layout=\"{}\"\n\
+                     streams.stream.0.bits_per_raw_sample={depth}\n",
+                    if layout { "stereo" } else { "unknown" }
+                ),
+            );
+        Fake::Prints(flat)
+    }
+
+    #[test]
+    fn channels_remixes_and_checks_the_count() {
+        let case = channels_case("song.mp3", Channels::Mono);
+        script([
+            song("mp3", "mp3", 2, true, 16),
+            no_tags(),
+            Fake::Child("write", "mono".to_owned()),
+            song("mp3", "mp3", 1, true, 16),
+        ]);
+        let (result, seen) = case.run();
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("song Mono.mp3")]);
+        assert!(outcome.notes.is_empty());
+        let ran = ran();
+        assert!(has(&ran[2], ["-af", "pan=mono|c0=0.5*c0+0.5*c1"]));
+        assert!(has(&ran[2], ["-c:a", "libmp3lame"]));
+        assert!(has(&ran[2], ["-metadata", "REPLAYGAIN_TRACK_GAIN="]));
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // An output with the wrong count isn't published.
+        let case = channels_case("take.wav", Channels::Stereo);
+        script([
+            song("wav", "pcm_s24le", 1, true, 24),
+            no_tags(),
+            Fake::Child("write", "still mono".to_owned()),
+            song("wav", "pcm_s24le", 1, true, 24),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(has(&ran_args(2), ["-c:a", "pcm_s24le"]));
+        assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    /// The argv of the scripted run `n`.
+    fn ran_args(n: usize) -> Vec<std::ffi::OsString> {
+        ran()[n].clone()
+    }
+
+    #[test]
+    fn channels_refuses_before_anything_runs() {
+        // (source, target, kind, message)
+        let cases = [
+            (
+                song("flac", "flac", 1, true, 16),
+                Channels::Mono,
+                ErrorKind::NoChange,
+                "song.flac is already mono.",
+            ),
+            (
+                song("flac", "flac", 2, false, 16),
+                Channels::Stereo,
+                ErrorKind::NoChange,
+                "song.flac is already stereo.",
+            ),
+            (
+                song("flac", "flac", 4, false, 16),
+                Channels::Stereo,
+                ErrorKind::NotYetSupported,
+                "song.flac has 4 channels without speaker positions, so Grape can't tell \
+                 which are left and right.",
+            ),
+            (
+                song("flac", "flac", 2, true, 32),
+                Channels::Mono,
+                ErrorKind::NotYetSupported,
+                "song.flac is a 32-bit recording. FLAC would cut it, so nothing was saved.",
+            ),
+            (
+                Fake::Prints(flat("flac", false, "")),
+                Channels::Mono,
+                ErrorKind::DecodeFailed,
+                "song.flac has no sound to save as FLAC.",
+            ),
+        ];
+        for (probe, channels, kind, message) in cases {
+            let case = channels_case("song.flac", channels);
+            script([probe, no_tags()]);
+            let (result, seen) = case.run();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, kind, "{message}: {}", err.detail);
+            assert_eq!(err.user_message, message);
+            assert_eq!(ran().len(), 2, "{message}");
+            assert!(seen.is_empty());
+            assert_eq!(slots_held(), 0);
+            case.assert_clean();
+        }
+        let case = channels_case("song.m4a", Channels::Mono);
+        script([
+            song("mov,mp4,m4a,3gp,3g2,mj2", "alac", 2, true, 32),
+            no_tags(),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(
+            err.user_message,
+            "song.m4a is a 32-bit recording. ALAC would cut it, so nothing was saved."
+        );
         case.assert_clean();
     }
 

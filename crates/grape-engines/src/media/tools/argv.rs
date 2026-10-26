@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use grape_core::Format;
+use grape_core::{Channels, Format};
 
 use crate::media::args::{finish, muxer, prefix_at, push};
 use crate::media::probe::{Probe, StreamInfo, StreamKind};
@@ -228,6 +228,247 @@ pub(super) fn stripped<'a>(
     })
 }
 
+/// `RG`: the tags a change of loudness or channels makes wrong, blanked
+/// (an empty value deletes a key, whatever its case; a missing one is
+/// left alone).
+const REPLAYGAIN: [&str; 14] = [
+    "-metadata",
+    "REPLAYGAIN_TRACK_GAIN=",
+    "-metadata",
+    "REPLAYGAIN_TRACK_PEAK=",
+    "-metadata",
+    "REPLAYGAIN_ALBUM_GAIN=",
+    "-metadata",
+    "REPLAYGAIN_ALBUM_PEAK=",
+    "-metadata",
+    "R128_TRACK_GAIN=",
+    "-metadata",
+    "R128_ALBUM_GAIN=",
+    "-metadata",
+    "iTunNORM=",
+];
+
+/// The end of a 16-bit output's filters: TPDF dither down to 16 bits.
+const DITHER: &str = "aresample=osf=s16:dither_method=triangular";
+
+/// How an audio tool's output is encoded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Codec {
+    /// The encoder's options.
+    pub(super) args: Vec<String>,
+    /// A 16-bit output, whose filters end with TPDF dither.
+    pub(super) dither: bool,
+    /// A lossless output (FLAC, WAV, ALAC).
+    pub(super) exact: bool,
+}
+
+/// `SQ`: Normalize Volume's and Audio Channels' output codec, the same
+/// quality as the source's `audio` (D26, U7), for `channels` channels out:
+///
+/// - MP3: LAME VBR from the source's bitrate per channel (`bit_rate`, the
+///   stream's or else the container's): at least 112k V0, 80k V2, 56k
+///   V4, else V6; V2 when unknown.
+/// - M4A: ALAC stays ALAC at 16 or 24 bits; anything else becomes AAC at
+///   the source's bitrate per channel, 64k to 160k, rounded up to 8k
+///   ([`aac_rate`]); 96k a channel when unknown.
+/// - WAV: the same PCM (16, 24 or 32-bit integer, or 32-bit float; an
+///   8-bit, 64-bit float or compressed WAV becomes 16-bit or 32-bit
+///   float).
+/// - FLAC: FLAC at level 8 with exact Rice parameters, 16 or 24 bits.
+///
+/// `Err` names the codec when the source is deeper than it writes:
+/// FFmpeg's ALAC and FLAC encoders write at most 24 bits (without
+/// FLAC's experimental mode), so a 32-bit ALAC or FLAC source would lose
+/// its last 8 bits.
+pub(super) fn same_quality(
+    to: Format,
+    audio: &StreamInfo,
+    bit_rate: Option<u64>,
+    channels: u32,
+) -> Result<Codec, &'static str> {
+    let per_channel = bit_rate.map(|rate| rate / u64::from(audio.channels.max(1)));
+    let lossy = |args: Vec<String>| Codec {
+        args,
+        dither: false,
+        exact: false,
+    };
+    let exact = |args: Vec<&str>, dither: bool| Codec {
+        args: args.into_iter().map(str::to_owned).collect(),
+        dither,
+        exact: true,
+    };
+    let deep = audio.depth > 16;
+    Ok(match to {
+        Format::Mp3 => {
+            let quality = match per_channel {
+                Some(rate) if rate >= 112_000 => "0",
+                Some(rate) if rate >= 80_000 => "2",
+                Some(rate) if rate >= 56_000 => "4",
+                Some(_) => "6",
+                None => "2",
+            };
+            lossy(owned(&["-c:a", "libmp3lame", "-q:a", quality]))
+        }
+        Format::M4a if audio.codec == "alac" => {
+            if audio.depth > 24 {
+                return Err("ALAC");
+            }
+            let format = if deep { "s32p" } else { "s16p" };
+            exact(vec!["-c:a", "alac", "-sample_fmt", format], !deep)
+        }
+        Format::M4a => {
+            let rate = aac_rate(
+                per_channel.map_or(96_000, |r| r.clamp(64_000, 160_000)),
+                channels,
+            );
+            lossy(owned(&[
+                "-c:a",
+                "aac",
+                "-b:a",
+                &format!("{}k", rate / 1000),
+            ]))
+        }
+        Format::Wav if audio.codec.starts_with("pcm_f") => exact(vec!["-c:a", "pcm_f32le"], false),
+        Format::Wav => match audio.depth {
+            0..=16 => exact(vec!["-c:a", "pcm_s16le"], true),
+            17..=24 => exact(vec!["-c:a", "pcm_s24le"], false),
+            _ => exact(vec!["-c:a", "pcm_s32le"], false),
+        },
+        _ => {
+            if audio.depth > 24 {
+                return Err("FLAC");
+            }
+            let format = if deep { "s32" } else { "s16" };
+            exact(flac(format), !deep)
+        }
+    })
+}
+
+/// FLAC at level 8 with exact Rice parameters, samples as `format` (`s16`,
+/// or `s32` for 24 bits). Levels 11 and 12 would leave the streamable
+/// subset (`flacenc.c`).
+fn flac(format: &str) -> Vec<&str> {
+    vec![
+        "-c:a",
+        "flac",
+        "-compression_level",
+        "8",
+        "-exact_rice_parameters",
+        "1",
+        "-sample_fmt",
+        format,
+    ]
+}
+
+/// An AAC bitrate of `per_channel` bits a second for each of `channels`
+/// channels, rounded up to 8k a channel and at most 512k in all.
+pub(super) fn aac_rate(per_channel: u64, channels: u32) -> u64 {
+    let per_channel = per_channel.div_ceil(8_000) * 8_000;
+    (per_channel * u64::from(channels.max(1))).min(512_000)
+}
+
+fn owned(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| (*s).to_owned()).collect()
+}
+
+/// What Audio Channels does with a source of `channels` channels, with a
+/// channel layout or not, for `target`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Mix {
+    /// It already has what was asked.
+    Already,
+    /// Stereo from 3 or more channels without a layout: there's no left
+    /// and right to make it of (ambisonics, a recorder's polyphonic WAV).
+    NoSides,
+    /// The `-af` filter that remixes it; `unlabeled` reads it with
+    /// `-guess_layout_max 0`, so FFmpeg doesn't guess a layout to remix
+    /// from.
+    Filter { filter: String, unlabeled: bool },
+}
+
+/// [`Mix`] for a source of `channels` channels (`has_layout` when it has a
+/// channel layout) and `target` (D26):
+///
+/// - stereo → mono is (L+R)/2 (`pan`), with a layout or without;
+/// - mono → stereo duplicates at full level (`pan`), where swresample's
+///   matrix would give 0.707;
+/// - 3 or more labeled channels go through swresample's matrix,
+///   normalized with `rematrix_maxval=1` so it can't clip, on every codec
+///   (a plain `-ac 2` is unnormalized for a float encoder such as AAC:
+///   FL 1.0, FC 0.707, SL 0.707). 5.1 → stereo: FL 0.414, FC 0.293, SL
+///   0.293, no LFE;
+/// - 3 or more unlabeled channels average to mono, and can't be stereo.
+pub(super) fn mix(target: Channels, channels: u32, has_layout: bool) -> Mix {
+    let filter = |filter: String, unlabeled| Mix::Filter { filter, unlabeled };
+    match (target, channels) {
+        (Channels::Mono, 1) | (Channels::Stereo, 2) => Mix::Already,
+        (Channels::Mono, 2) => filter("pan=mono|c0=0.5*c0+0.5*c1".to_owned(), false),
+        (Channels::Stereo, 1) => filter("pan=stereo|c0=c0|c1=c0".to_owned(), false),
+        (_, _) if has_layout => {
+            let layout = match target {
+                Channels::Mono => "mono",
+                Channels::Stereo => "stereo",
+            };
+            filter(format!("aresample=ochl={layout}:rematrix_maxval=1"), false)
+        }
+        (Channels::Stereo, _) => Mix::NoSides,
+        (Channels::Mono, n) => {
+            let share = 1.0 / f64::from(n.max(1));
+            let terms: Vec<String> = (0..n).map(|c| format!("{share:.6}*c{c}")).collect();
+            filter(format!("pan=mono|c0={}", terms.join("+")), true)
+        }
+    }
+}
+
+/// The formats an audio tool keeps cover art in.
+fn holds_cover(to: Format) -> bool {
+    matches!(to, Format::Mp3 | Format::M4a | Format::Flac)
+}
+
+/// An audio tool's write pass (Audio Channels, Normalize Volume): the
+/// source's first audio track through `filter` (TPDF dither added for a
+/// 16-bit `codec`) into `codec`, its cover art copied (MP3, M4A, FLAC),
+/// ReplayGain blanked ([`REPLAYGAIN`]) and [`keep`]. `reading` goes before
+/// the source.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reencode(
+    src: &Path,
+    to: Format,
+    probe: &Probe,
+    tags: &Tags,
+    reading: &[&str],
+    filter: &str,
+    codec: &Codec,
+    out: &Path,
+) -> Vec<OsString> {
+    let mut args = prefix_at(src, reading, "error");
+    if let Some(audio) = probe.streams.iter().find(|s| s.kind == StreamKind::Audio) {
+        map(&mut args, audio.index);
+    }
+    let covers: Vec<u32> = probe
+        .streams
+        .iter()
+        .filter(|s| s.attached_pic && holds_cover(to))
+        .map(|s| s.index)
+        .collect();
+    for &index in &covers {
+        map(&mut args, index);
+    }
+    if !covers.is_empty() {
+        push(&mut args, &["-c:v", "copy"]);
+    }
+    let filter = if codec.dither {
+        format!("{filter},{DITHER}")
+    } else {
+        filter.to_owned()
+    };
+    push(&mut args, &["-af", &filter]);
+    args.extend(codec.args.iter().map(OsString::from));
+    push(&mut args, &REPLAYGAIN);
+    keep(&mut args, to, tags);
+    finish(args, muxer_of(to), out)
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
@@ -440,6 +681,22 @@ pub(super) mod tests {
             all.push(strip(&src(), to, &movie(), &movie_tags(), &out()));
         }
         all.push(strip(&src(), Format::Mkv, &mkv(), &mkv_tags(), &out()));
+        for to in [Format::Mp3, Format::M4a, Format::Wav, Format::Flac] {
+            let probe = song("mp3", "mp3");
+            let codec = same_quality(to, &probe.streams[0], None, 1).unwrap();
+            let unlabeled = ["-guess_layout_max", "0"];
+            let args = reencode(
+                &src(),
+                to,
+                &probe,
+                &dated(true),
+                &unlabeled,
+                "anull",
+                &codec,
+                &out(),
+            );
+            all.push(args);
+        }
         for (to, probe) in [
             (Format::Mp3, song("mp3", "mp3")),
             (Format::Flac, song("flac", "flac")),
@@ -575,6 +832,204 @@ pub(super) mod tests {
         );
         assert_eq!(stripped(Format::M4a, &two, &Tags::default()).count(), 2);
         assert_eq!(stripped(Format::Mp3, &two, &Tags::default()).count(), 1);
+    }
+
+    /// An audio stream of `codec` at `depth` bits.
+    fn audio(codec: &str, depth: u32) -> StreamInfo {
+        StreamInfo {
+            depth,
+            ..stream(0, StreamKind::Audio, codec)
+        }
+    }
+
+    /// [`same_quality`]'s options for `audio` at `bit_rate`, `channels`
+    /// out, joined, and whether it dithers.
+    fn sq(to: Format, audio: &StreamInfo, bit_rate: Option<u64>, channels: u32) -> (String, bool) {
+        let codec = same_quality(to, audio, bit_rate, channels).unwrap();
+        (codec.args.join(" "), codec.dither)
+    }
+
+    #[test]
+    fn same_quality_keeps_the_codec_depth_and_about_the_bitrate() {
+        let mp3 = audio("mp3", 16);
+        for (rate, quality) in [
+            (Some(320_000), "0"),
+            (Some(224_000), "0"),
+            (Some(223_999), "2"),
+            (Some(192_000), "2"),
+            (Some(160_000), "2"),
+            (Some(128_000), "4"),
+            (Some(112_000), "4"),
+            (Some(96_000), "6"),
+            (None, "2"),
+        ] {
+            let want = format!("-c:a libmp3lame -q:a {quality}");
+            assert_eq!(sq(Format::Mp3, &mp3, rate, 2), (want, false), "{rate:?}");
+        }
+        // Per channel: a mono source at half the rate is as good.
+        let mono = StreamInfo {
+            channels: 1,
+            ..mp3.clone()
+        };
+        assert_eq!(
+            sq(Format::Mp3, &mono, Some(112_000), 2).0,
+            "-c:a libmp3lame -q:a 0"
+        );
+        let aac = audio("aac", 16);
+        for (rate, channels, want) in [
+            (Some(256_000), 2, "256k"),
+            (Some(256_000), 1, "128k"),
+            (Some(400_000), 2, "320k"),
+            (Some(96_000), 2, "128k"),
+            (Some(130_000), 2, "144k"),
+            (None, 2, "192k"),
+            (None, 1, "96k"),
+            (Some(1_000_000), 6, "512k"),
+        ] {
+            let want = format!("-c:a aac -b:a {want}");
+            assert_eq!(
+                sq(Format::M4a, &aac, rate, channels),
+                (want, false),
+                "{rate:?}"
+            );
+        }
+        let alac = |depth| sq(Format::M4a, &audio("alac", depth), None, 2);
+        assert_eq!(alac(16), ("-c:a alac -sample_fmt s16p".to_owned(), true));
+        assert_eq!(alac(24), ("-c:a alac -sample_fmt s32p".to_owned(), false));
+        let wav = |codec, depth| sq(Format::Wav, &audio(codec, depth), None, 2);
+        assert_eq!(wav("pcm_s16le", 16), ("-c:a pcm_s16le".to_owned(), true));
+        assert_eq!(wav("pcm_u8", 8), ("-c:a pcm_s16le".to_owned(), true));
+        assert_eq!(wav("adpcm_ms", 16), ("-c:a pcm_s16le".to_owned(), true));
+        assert_eq!(wav("pcm_s24le", 24), ("-c:a pcm_s24le".to_owned(), false));
+        assert_eq!(wav("pcm_s32le", 32), ("-c:a pcm_s32le".to_owned(), false));
+        assert_eq!(wav("pcm_f32le", 32), ("-c:a pcm_f32le".to_owned(), false));
+        assert_eq!(wav("pcm_f64le", 64), ("-c:a pcm_f32le".to_owned(), false));
+        let flac = |depth| sq(Format::Flac, &audio("flac", depth), None, 2);
+        let level = "-c:a flac -compression_level 8 -exact_rice_parameters 1";
+        assert_eq!(flac(16), (format!("{level} -sample_fmt s16"), true));
+        assert_eq!(flac(24), (format!("{level} -sample_fmt s32"), false));
+        // 32 bits in ALAC or FLAC would come out as 24.
+        assert_eq!(
+            same_quality(Format::M4a, &audio("alac", 32), None, 2),
+            Err("ALAC")
+        );
+        assert_eq!(
+            same_quality(Format::Flac, &audio("flac", 32), None, 2),
+            Err("FLAC")
+        );
+        assert!(same_quality(Format::Wav, &audio("pcm_s32le", 32), None, 2).is_ok());
+    }
+
+    #[test]
+    fn channels_mix_by_count_and_layout() {
+        use Channels::{Mono, Stereo};
+        let filter = |filter: &str, unlabeled| Mix::Filter {
+            filter: filter.to_owned(),
+            unlabeled,
+        };
+        for has_layout in [true, false] {
+            assert_eq!(mix(Mono, 1, has_layout), Mix::Already);
+            assert_eq!(mix(Stereo, 2, has_layout), Mix::Already);
+            assert_eq!(
+                mix(Mono, 2, has_layout),
+                filter("pan=mono|c0=0.5*c0+0.5*c1", false)
+            );
+            assert_eq!(
+                mix(Stereo, 1, has_layout),
+                filter("pan=stereo|c0=c0|c1=c0", false)
+            );
+        }
+        assert_eq!(
+            mix(Mono, 6, true),
+            filter("aresample=ochl=mono:rematrix_maxval=1", false)
+        );
+        assert_eq!(
+            mix(Stereo, 6, true),
+            filter("aresample=ochl=stereo:rematrix_maxval=1", false)
+        );
+        assert_eq!(
+            mix(Mono, 4, false),
+            filter(
+                "pan=mono|c0=0.250000*c0+0.250000*c1+0.250000*c2+0.250000*c3",
+                true
+            )
+        );
+        assert_eq!(
+            mix(Mono, 3, false),
+            filter("pan=mono|c0=0.333333*c0+0.333333*c1+0.333333*c2", true)
+        );
+        assert_eq!(mix(Stereo, 4, false), Mix::NoSides);
+        assert_eq!(aac_rate(64_001, 2), 144_000);
+        assert_eq!(aac_rate(160_000, 8), 512_000);
+    }
+
+    #[test]
+    fn reencode_keeps_the_cover_and_blanks_replaygain() {
+        let mut rg: Vec<&str> = REPLAYGAIN.to_vec();
+        let mp3 = song("mp3", "mp3");
+        let codec = same_quality(Format::Mp3, &mp3.streams[0], Some(256_000), 1).unwrap();
+        let mut middle = vec![
+            "-map",
+            "0:0",
+            "-map",
+            "0:1",
+            "-c:v",
+            "copy",
+            "-af",
+            "pan=mono|c0=0.5*c0+0.5*c1",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "0",
+        ];
+        middle.append(&mut rg);
+        middle.extend(["-id3v2_version", "3"]);
+        assert_eq!(
+            reencode(
+                &src(),
+                Format::Mp3,
+                &mp3,
+                &Tags::default(),
+                &[],
+                "pan=mono|c0=0.5*c0+0.5*c1",
+                &codec,
+                &out()
+            ),
+            expect(&[], &middle, "mp3")
+        );
+        // A 16-bit FLAC from an unlabeled WAV: dithered, read without a
+        // guessed layout; a WAV source has no cover to keep.
+        let wav = probe_of(
+            "wav",
+            vec![stream(0, StreamKind::Audio, "pcm_s16le"), cover(1)],
+        );
+        let codec = same_quality(Format::Flac, &wav.streams[0], None, 1).unwrap();
+        let args = reencode(
+            &src(),
+            Format::Wav,
+            &wav,
+            &Tags::default(),
+            &["-guess_layout_max", "0"],
+            "anull",
+            &codec,
+            &out(),
+        );
+        let text: Vec<String> = args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(text[10..12], ["-guess_layout_max", "0"]);
+        assert!(!text.contains(&"0:1".to_owned()), "{text:?}");
+        assert!(text.contains(&format!("anull,{DITHER}")), "{text:?}");
+        assert!(text.ends_with(&[
+            "-rf64".to_owned(),
+            "auto".to_owned(),
+            "-progress".to_owned(),
+            "pipe:1".to_owned(),
+            "-f".to_owned(),
+            "wav".to_owned(),
+            file_url(&out()).to_string_lossy().into_owned(),
+        ]));
     }
 
     #[test]
