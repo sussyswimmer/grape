@@ -69,6 +69,21 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: drop on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
 - [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist), and the toast's title says "Saved in Downloads\Grape".
 - [ ] win: with hidden files shown, no `.grape-tmp-…` or `.grape-probe-…` file is left in any folder you converted in, also after a failed or cancelled conversion.
+- [ ] win: convert a very large image (a 100+ MP TIFF or PNG to WEBP) and, while the toast says "Making …", choose tray → Quit → Grape and its tray icon are gone within about 2 s. No file with the output's final name appears, and with hidden files shown no `.grape-tmp-…` file is left. The log shows `jobs: cancelled 1 running drop(s): Grape is quitting`, `jobs: drop cancelled with 1 of 1 job(s) started` and `jobs: waited N ms for 1 cancelled drop(s) to end`. If it says `still running after 2 s; quitting anyway` instead, note it.
+- [ ] win: drop 20 large images on one target and Quit from the tray partway → the files already done stay, the one in progress leaves neither a final-named file nor a temp file, and the rest never start.
+- [ ] win (once FFmpeg ships): Quit during a long video conversion → Task Manager shows no `ffmpeg.exe` or `ffprobe.exe` left.
+
+Sidecars, M3 (D25; the fetch scripts and the app's lookup. No installer or DMG carries FFmpeg yet; run the scripts from the repo root of a fresh clone)
+- [ ] win: `.\scripts\fetch-sidecars.ps1` in Windows PowerShell prints "Downloading btbn-win64-gpl…", "SHA-256 matches the lock.", a `ffmpeg version n9.0.2-17-…` and a `ffprobe version …` line, and "Sidecars are ready". `apps\desktop\src-tauri\binaries\` then holds `ffmpeg-x86_64-pc-windows-msvc.exe`, `ffprobe-x86_64-pc-windows-msvc.exe`, `ffmpeg-LICENSE.txt` and `sidecars.stamp`, and nothing is left under `%TEMP%\grape-sidecars-*`.
+- [ ] win: run it again in PowerShell 7 → "Sidecars are already current", and nothing downloads. `-Force` downloads and checks everything again, including the `-version` lines. After editing one byte of `ffmpeg-LICENSE.txt`, a plain run fetches again.
+- [ ] win: `git status` stays clean after a fetch (`binaries/` is ignored).
+- [ ] win: if scripts are disabled, `powershell -ExecutionPolicy Bypass -File .\scripts\fetch-sidecars.ps1` works the same.
+- [ ] win: after the fetch, from `apps\desktop`, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` → `target\debug` holds `ffmpeg.exe` and `ffprobe.exe`, and the log's `sidecars:` line says `found ffmpeg, ffprobe; missing heif-enc`. Plain `pnpm tauri dev` in a clone that never fetched says `none found (looked for ffmpeg, ffprobe, heif-enc)`.
+- [ ] win: the `sidecars:` line at startup never shows a path. Today's CI installer says `none found (looked for ffmpeg, ffprobe, heif-enc)`; once the installer carries FFmpeg it says `found ffmpeg, ffprobe; missing heif-enc`, and `found ffmpeg, ffprobe, heif-enc` once heif-enc ships too. Put another `ffmpeg.exe` on `PATH` (and, once bundled, remove the one next to `Grape.exe`) → the line still says ffmpeg is missing, and Grape never runs the one on `PATH`.
+- [ ] mac: `./scripts/fetch-sidecars.sh` prints the four downloads, "Made ffmpeg-universal-apple-darwin (arm64 + x86_64), signed ad hoc." with a `ffmpeg version 9.0.2-https://www.martin-riedl.de` line, the same for ffprobe, and "Sidecars are ready". `binaries/` holds the `-aarch64-apple-darwin`, `-x86_64-apple-darwin` and `-universal-apple-darwin` files for both programs, plus `sidecars.stamp`.
+- [ ] mac: `lipo -info apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin` (and ffprobe's) names both `x86_64` and `arm64`, and `codesign -dv` on each says `Signature=adhoc`.
+- [ ] mac: a second run says "already current"; `--force` fetches again. On Apple silicon with Rosetta, both halves print a version line.
+- [ ] mac: the `sidecars:` line at startup says `none found (looked for ffmpeg, ffprobe)` in today's DMG, and `found ffmpeg, ffprobe` once the DMG carries them in `Grape.app/Contents/MacOS`.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
@@ -176,6 +191,7 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Move a large folder to a USB stick and pull the stick out halfway → the toast says "Couldn't move" or "Some of it may not have moved", never "Moved …", and the original folder is still complete in its old place.
 - [ ] mac (needs Xcode): quit Grape, then start it from Terminal with Xcode's Main Thread Checker: `DYLD_INSERT_LIBRARIES=/Applications/Xcode.app/Contents/Developer/usr/lib/libMainThreadChecker.dylib` followed by the path of the Grape executable in `Grape.app/Contents/MacOS/`. Drag files for a minute → Terminal shows no "Main Thread Checker: UI API called on a background thread" report.
 - [ ] mac: Quit from the menu bar → no Grape process is left in Activity Monitor.
+- [ ] mac: convert a very large image and choose Quit from the menu bar while the toast says "Making …" → Grape is gone within about 2 s, no final-named file or `.grape-tmp-…` file is left, and the log shows the same three `jobs:` lines as on Windows (Wheel look and image conversions, above).
 
 Release, M7 (win; on the first real draft; `PLATFORM_WINDOWS.md` → "Releasing")
 - [ ] win: pushing the tag starts Actions → Release; both jobs pass, and Releases shows a draft "Grape X.Y.Z" with exactly `Grape-Setup-x64.exe` and `SHA256SUMS.txt`. Nothing is published, and the notes show the version, not `{{VERSION}}`.

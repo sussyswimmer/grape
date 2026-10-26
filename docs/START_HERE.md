@@ -1,10 +1,10 @@
 # Start here: building Grape for Windows with Claude Code
 
-## Where things stand (2026-10-25)
+## Where things stand (2026-10-26)
 
 Read this first in a fresh Claude Code session; the rest of the file is the original step-by-step guide.
 
-- **Branches.** Lane A (app, platform, UI, CI) works on `claude/beautiful-ritchie-y3qgbr`. Lane B (engines) works on `claude/vigilant-gauss-l5qt5y`. Each session pushes only its own branch, and merges the other's when it moves. DECISIONS numbering: D19, D21 and D23 are lane A's; lane B has D20 and D22. From now on lane B takes even numbers and lane A odd.
+- **Branches.** Lane A (app, platform, UI, CI) works on `claude/beautiful-ritchie-y3qgbr`. Lane B (engines) works on `claude/vigilant-gauss-l5qt5y`. Each session pushes only its own branch, and merges the other's when it moves. DECISIONS numbering: D19, D21, D23 and D25 are lane A's; lane B has D20 and D22. From now on lane B takes even numbers and lane A odd.
 - **After merging lane B.** A merge that adds, removes or bumps a dependency can fail CI's Licenses job until the notices are regenerated: run the command at the top of `THIRD_PARTY_NOTICES.md` (it needs the network) and commit the result. A new license (ISC, BSD-2-Clause and so on) goes in both `deny.toml` and `about.toml`.
 - **PRs.** PR #13 (head `claude/vigilant-gauss-l5qt5y`) and PR #14 ("Add files via upload", head `claude/beautiful-ritchie-y3qgbr`) carry the same commits. Lane B fast-forwards #13 to lane A's pushes. #13 has the full description. Maxwell keeps one and closes the other.
 - **Try it without the dev setup.** Every CI run uploads `Grape-Windows-x64` (an unsigned per-user NSIS installer, `PLATFORM_WINDOWS.md` → "Running a CI build") and `Grape-macOS-universal` (an ad-hoc-signed DMG, `PLATFORM_MACOS.md` → "Running a CI build") under the run's Artifacts.
@@ -13,12 +13,17 @@ Read this first in a fresh Claude Code session; the rest of the file is the orig
   - Windows contrast themes (M6): the wheel, the toast and the shelf switch to the system's colors.
   - M7's notices and license check (D23): cargo-about generates `THIRD_PARTY_NOTICES.md`, CI's new Licenses job checks it and every crate's license with cargo-deny, and both bundles ship it with `LICENSE.txt`.
   - M7's release workflow (`release.yml`): a `vX.Y.Z` tag checks the versions and drafts a GitHub Release with `Grape-Setup-x64.exe` and `SHA256SUMS.txt` for Maxwell to publish (`PLATFORM_WINDOWS.md` → "Releasing"). The first real tag tests it.
+- **Built 2026-10-26, passing every local check, not yet run on GitHub or by hand** (M3's sidecar item, D25):
+  - The fetch scripts: `scripts/fetch-sidecars.ps1` (Windows) and `scripts/fetch-sidecars.sh` (macOS) download the FFmpeg 9.0.2 builds pinned in `scripts/sidecars.lock` (lane B's D22), check them and place them in `apps/desktop/src-tauri/binaries/` (`PLATFORM_WINDOWS.md` and `PLATFORM_MACOS.md` → "Sidecars").
+  - CI's new Sidecars job runs them on `windows-latest` (Windows PowerShell 5.1, then PowerShell 7) and `macos-latest` (`/bin/bash` 3.2). It builds nothing.
+  - The app finds the sidecars next to its executable (`src/sidecars.rs`, never `PATH`), and quitting cancels running jobs and waits up to 2 s for them.
+  - No installer or DMG carries FFmpeg yet: `tauri.sidecars.conf.json` stays off until the gate below.
 - **Next for lane A** (unchecked in `ROADMAP.md`):
+  - M3: bundle FFmpeg once lane B's media engine lands, with `licenses/ffmpeg/`, its `SOURCE.md` (BtbN's build is commit `2a571b6068`, not the `n9.0.2` tag) and the FFmpeg entry in `about.hbs` (D25's gate). Then the build jobs in `ci.yml` and `release.yml` get a fetch step and `--config src-tauri/tauri.sidecars.conf.json`, and CI gets `engines-it` jobs that use the fetched sidecars. heif-enc waits for lane B's pin.
   - M7: code signing (SignPath; Maxwell applies first), and ARM64 and a portable zip if wanted. The opt-in updater needs Maxwell's decision and a DECISIONS entry first (golden rule 3).
-  - M3: `scripts/fetch-sidecars.ps1`, with lane B's pins from D22. Each sidecar then gets its `licenses/` folder and notices entry (`licenses/README.md`).
   - M4: the tool panels, once lane B's tools land.
   - Float on the Mac (it says "Not in this build yet" there).
-- **Checking the Mac target from Linux:** `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings`. The Windows target: `--target x86_64-pc-windows-msvc`. The license check: `cargo deny --locked check licenses bans sources` (D23 says how to install it).
+- **Checking the Mac target from Linux:** `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings`. The Windows target: `--target x86_64-pc-windows-msvc`. The license check: `cargo deny --locked check licenses bans sources` (D23 says how to install it). The fetch scripts' download and hash check: with `GRAPE_SIDECARS_NO_RUN=1` set, run `./scripts/fetch-sidecars.sh`, or the `.ps1` with PowerShell 7 (`pwsh -File`), in a copy of the repo. That skips the `-version` runs and writes no stamp.
 
 A step-by-step path from an empty folder to a Windows installer. Each step has a prompt to paste into Claude Code. Run Claude Code **on the Windows PC**, inside the `grape` folder, so it can build and you can test right away.
 

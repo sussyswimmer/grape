@@ -56,7 +56,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 ## M3: Real wheel + v1 conversions on Windows
 - [ ] Lane A: overlay renders real segments from `grape-core`, with highlight, center label and tick sound. Empty-state messages use the user's key names.
 - [ ] Lane B: engines for images (HEIC via libheif DLLs + `heif-enc` sidecar), audio/video via the FFmpeg sidecar, subtitles, archives, PDF → JPG/PNG/TXT/MD, images → PDF.
-- [ ] Sidecars: a script `scripts/fetch-sidecars.ps1` that downloads the pinned FFmpeg/ffprobe/heif-enc builds, checks their SHA-256, and places them in `apps/desktop/src-tauri/binaries/` with target-triple names. Never commit the binaries.
+- [ ] Sidecars: a script `scripts/fetch-sidecars.ps1` that downloads the pinned FFmpeg/ffprobe/heif-enc builds, checks their SHA-256, and places them in `apps/desktop/src-tauri/binaries/` with target-triple names. Never commit the binaries. *Status 2026-10-26:* built, not run on the PC or a Mac yet. The pins are in `scripts/sidecars.lock` (D22, lane B). `scripts/fetch-sidecars.ps1` (Windows) and `scripts/fetch-sidecars.sh` (macOS, merged universal) download them, check each archive's SHA-256 before extracting, check `-version` and place them in `apps/desktop/src-tauri/binaries/` with target-triple names (D25). CI's Sidecars job fetches and checks them on both OSes, cached by the hashes of the lock and both scripts. The app finds `ffmpeg`, `ffprobe` and, on Windows, `heif-enc` next to its own executable at startup (`src/sidecars.rs`, never `PATH`) and gives every job a copy; quitting cancels every running drop and waits up to 2 s for them to stop. No build carries the sidecars yet: `tauri.sidecars.conf.json` gets switched on once the media engine uses them and `licenses/ffmpeg/` and its notices entry exist. heif-enc waits for lane B's pin. `TESTING.md` → "Sidecars, M3".
 - [ ] Atomic writes, progress events, cancel.
 - [ ] Toast: "Making name…" → "Done", with click-to-reveal in Explorer.
 
@@ -101,7 +101,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [x] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), display bounds in points, AppKit file actions (Share is AirDrop), haptics.
 - [x] The app on macOS: `ActivationPolicy::Accessory`, the overlay and toast shown without focus, drops through wry, and the two macOS controller rules (D18).
 - [ ] Overlay over full-screen apps confirmed on a Mac (`tauri-nspanel` if needed).
-- [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds.
+- [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds. *(`fetch-sidecars.sh` is written (D25; M3's sidecar item) and runs in CI's Sidecars job; not run on a Mac by hand yet.)*
 - [ ] The full `TESTING.md` QA checklist passes on a Mac.
 
 ## M9: Ship Grape for Mac
