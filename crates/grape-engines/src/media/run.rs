@@ -782,12 +782,26 @@ pub(super) mod tests {
             Held { dir, file }
         }
 
-        /// Asserts that the child that held the file is gone: the file can
-        /// be read and deleted (Windows refuses both while the child's
-        /// handle is open) and, on Unix, its pid isn't even a zombie.
+        /// Asserts, right after the run, that the child that held the file
+        /// is gone: on Windows the file opens with no sharing at all, which
+        /// only works once the child's handle is closed; it can be read and
+        /// deleted; and its pid isn't even a zombie (Unix) or is no longer
+        /// listed (Windows, whose process ids aren't reused at once).
         fn assert_gone(&self) {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                // Once, without a retry: the child's handle must already be
+                // closed when the run returns.
+                let alone = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&self.file);
+                assert!(alone.is_ok(), "the child still holds the file: {alone:?}");
+            }
             let pid = std::fs::read_to_string(&self.file).unwrap();
             std::fs::remove_file(&self.file).unwrap();
+            let pid = pid.trim();
             #[cfg(target_os = "linux")]
             assert!(
                 !Path::new(&format!("/proc/{pid}")).exists(),
@@ -796,7 +810,7 @@ pub(super) mod tests {
             #[cfg(all(unix, not(target_os = "linux")))]
             {
                 let status = Command::new("/bin/ps")
-                    .args(["-p", pid.trim()])
+                    .args(["-p", pid])
                     .stdout(Stdio::null())
                     .status()
                     .unwrap();
@@ -806,7 +820,22 @@ pub(super) mod tests {
                 );
             }
             #[cfg(windows)]
-            let _ = pid;
+            {
+                let filter = format!("PID eq {pid}");
+                let out = Command::new("tasklist")
+                    .args(["/FI", filter.as_str(), "/NH"])
+                    .stdin(Stdio::null())
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "tasklist /FI {filter:?} failed");
+                // A match is a row with the pid; no match, a message in the
+                // system's language without it.
+                let listed = String::from_utf8_lossy(&out.stdout);
+                assert!(
+                    !listed.split_whitespace().any(|word| word == pid),
+                    "child {pid} is still running: {listed}"
+                );
+            }
         }
     }
 
