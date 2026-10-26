@@ -30,7 +30,7 @@ On Windows with git, Rust 1.99 and the Visual Studio Build Tools' C++ workload (
 .\tools\grape-heif\build.ps1 -VcpkgRoot C:\gh-vcpkg -BinaryCache C:\gh-vcpkg-cache -Install
 ```
 
-The first build takes 30 minutes or more and about 3 GB. `-Install` copies the result to `apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe`, which `pnpm tauri dev --config src-tauri/tauri.heif.windows.conf.json` (or a build with it) picks up. Or take `grape-heif.exe` from a CI run's `grape-heif-x86_64-pc-windows-msvc` artifact.
+The first build takes 30 minutes or more and about 3 GB. `-Install` copies the result to `apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe`, which `pnpm tauri dev --config src-tauri/tauri.sidecars.windows.conf.json` (or a build with it) picks up; that overlay lists FFmpeg, ffprobe and bsdtar too, so they must be in `binaries\` as well. Or take `grape-heif.exe` from a CI run's `grape-heif-x86_64-pc-windows-msvc` artifact.
 
 CI's `.github/workflows/grape-heif.yml` runs `build.ps1`, then `cargo test`, fmt and clippy here, checks the banner, that no plugin loader is in the exe, the DLLs it imports and the license texts, writes the fixtures and the source bundle, and uploads all three.
 
