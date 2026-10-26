@@ -650,7 +650,8 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - grid encoding over 35.6 MP (libheif-sys `heif_context_add_grid_image` and `add_image_tile`);
   - 10-bit or HDR output;
   - `nclx`-only P3 or BT.2020 HEICs on Windows (they need a synthesized ICC);
-  - a memory cap on macOS (poll `proc_pid_rusage` from the same hook);
+  - a memory cap on macOS (poll `proc_pid_rusage` from the same hook); until then the worker holds ImageIO's decode to the decoder budget from the image's properties;
+  - HEIC → BMP from a Display P3 (or any non-sRGB) HEIC: BMP can't carry the profile, so `publish_pixels` drops it and the colors look duller. The fix is a conversion to sRGB first, in `image.rs` (lane B's) or through a color-management library (a new dependency, so a decision first);
   - HEIC content under a raster extension (`photo.jpg` that's really HEIC);
   - the `.heif` and `.hif` aliases (lane B, grape-core);
   - Mark of the Web on outputs;
