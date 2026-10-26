@@ -1501,6 +1501,14 @@ mod tests {
                 "{timing}"
             );
         }
+        // Turning lines into spans counts on its own too.
+        let text = vec!["x"; CHECK_EVERY + 1];
+        let mut is_cancelled = cancelled_after_first();
+        let mut ticker = Ticker::new(&mut is_cancelled);
+        assert_eq!(
+            push_lines(&mut Vec::new(), &text, false, &mut ticker),
+            Err(Cancelled)
+        );
     }
 
     #[test]
