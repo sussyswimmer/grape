@@ -81,6 +81,7 @@ Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). N
 
 **Known limits**
 - **Cancelling:** after a cancel, the job can take longer to return than the 50 ms allowed between checks. Freeing a large parsed file, an fsync already under way and removing a large temp file add up to about 150 ms on the largest files. Measured in a release build: up to 147–177 ms for 16 MiB files dense with tags or a conversion with an 80 MiB output, and 57–81 ms for a realistic 16 MiB SRT.
+- **SRT text like a negative timing line:** a text line that starts with `-` and a digit and contains `-->` (`-10 degrees --> brr`) is read as an invalid timing line, so it and the rest of its cue are dropped: the whole cue when it is its first line of text. It follows from the negative-timing rule under Timing lines.
 
 ## Metadata removal
 - Images: decode and re-encode without EXIF/XMP/IPTC. Apply the orientation first, so stripping it doesn't rotate the picture.

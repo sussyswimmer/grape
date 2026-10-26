@@ -363,6 +363,9 @@ fn push_lines(
 /// an arrow in SRT text stays text, while a negative timing line (a
 /// shifted SRT has them) or one after a stray BOM is still a timing line,
 /// so its invalid timing drops its cue instead of joining the cue before.
+/// The cost: SRT text that starts with `-` and a digit and has an arrow
+/// (`-10 degrees --> brr`) is taken for an invalid timing line too, and
+/// dropped with the rest of its cue.
 fn looks_like_timing(line: &str, webvtt: bool) -> bool {
     line.split_once(ARROW).is_some_and(|(before, _)| {
         if webvtt {
@@ -1197,6 +1200,15 @@ mod tests {
         assert_eq!(
             plain(&parsed(srt)),
             [cue(1000, 2000, &["First"]), cue(3000, 4000, &["Third"])]
+        );
+        // A known limit (ENGINES.md): text that starts like one is taken
+        // for one, and is dropped with the rest of its cue.
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nCold out\n-10 degrees --> brr\nso cold\n\n\
+                   2\n00:00:03,000 --> 00:00:04,000\n-10 degrees --> brr\n\n\
+                   3\n00:00:05,000 --> 00:00:06,000\nThird\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["Cold out"]), cue(5000, 6000, &["Third"])]
         );
     }
 
