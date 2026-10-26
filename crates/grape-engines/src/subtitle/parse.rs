@@ -6,7 +6,8 @@
 //!   it is what a CRLF file's line ends become when converted again. The
 //!   output keeps the first line break's kind (`\r\r\n` counts as `\r\n`).
 //!   A text of more than [`MAX_LINES`] lines, or with a line longer than
-//!   [`MAX_LINE_BYTES`], is too large.
+//!   [`MAX_LINE_BYTES`], is too large. A line that a WebVTT `&#10;` or
+//!   `&#13;` breaks counts once for each cue line it makes.
 //! - **WebVTT** is recognized by content: the text starts with `WEBVTT`
 //!   alone or followed by whitespace. Its header (up to the first blank
 //!   line, or up to a line with `-->`) is skipped, and so are its `NOTE`,
@@ -34,9 +35,10 @@
 use super::entities;
 use super::{Cancelled, Ticker};
 
-/// The most lines a subtitle text may have. Real files have tens of
-/// thousands; this bounds the memory and time parsing takes, whatever the
-/// lines hold.
+/// The most lines a subtitle text may have, counting a line that a
+/// WebVTT `&#10;` or `&#13;` breaks once for each cue line it makes. Real
+/// files have tens of thousands. With [`MAX_LINE_BYTES`] this bounds the
+/// lines, spans and text a parsed document holds.
 pub(crate) const MAX_LINES: usize = 1_000_000;
 
 /// The longest line a subtitle text may have, in bytes of UTF-8. Real
@@ -146,6 +148,7 @@ pub(crate) fn parse(
         webvtt,
         cues: Vec::new(),
         continues: false,
+        lines: 0,
     };
     // The lines since the last blank line. It is reused, so only the
     // longest block is ever held as lines.
@@ -153,8 +156,9 @@ pub(crate) fn parse(
     // A WebVTT header runs to the first blank line, or to a line with
     // `-->`, which starts the first cue.
     let mut in_header = webvtt;
-    for (n, line) in split_lines(text).enumerate() {
-        if n == MAX_LINES || line.len() > MAX_LINE_BYTES {
+    for line in split_lines(text) {
+        count_lines(&mut reader.lines, 1)?;
+        if line.len() > MAX_LINE_BYTES {
             return Err(ParseError::TooLarge);
         }
         ticker.tick()?;
@@ -182,6 +186,17 @@ pub(crate) fn parse(
         newline,
         webvtt,
     })
+}
+
+/// Adds `more` to `lines`, the lines counted toward [`MAX_LINES`]; past
+/// it, the text is too large.
+fn count_lines(lines: &mut usize, more: usize) -> Result<(), ParseError> {
+    *lines = lines.saturating_add(more);
+    if *lines > MAX_LINES {
+        Err(ParseError::TooLarge)
+    } else {
+        Ok(())
+    }
 }
 
 /// True when `line` has some text that isn't whitespace: what every line
@@ -228,12 +243,15 @@ struct Reader {
     /// false before the first cue and after a dropped one, whose text that
     /// block would be.
     continues: bool,
+    /// The lines counted toward [`MAX_LINES`] so far: every line of the
+    /// text, and each extra cue line that a `&#10;` or `&#13;` makes.
+    lines: usize,
 }
 
 impl Reader {
     /// Reads one block. Every line it looks at or turns into spans counts
     /// as work for `ticker`.
-    fn block(&mut self, mut block: &[&str], ticker: &mut Ticker) -> Result<(), Cancelled> {
+    fn block(&mut self, mut block: &[&str], ticker: &mut Ticker) -> Result<(), ParseError> {
         let webvtt = self.webvtt;
         let is_timing = |line: &str| looks_like_timing(line, webvtt);
         if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
@@ -254,7 +272,7 @@ impl Reader {
                 let stray_index = !cue.lines.is_empty()
                     && find(block, ticker, |line| !is_digits(line))?.is_none();
                 if !stray_index {
-                    push_lines(&mut cue.lines, block, webvtt, ticker)?;
+                    push_lines(&mut cue.lines, block, webvtt, &mut self.lines, ticker)?;
                 }
             }
             return Ok(());
@@ -276,7 +294,7 @@ impl Reader {
                 Some((start_ms, end_ms)) => {
                     // Most cues keep every line, so this is usually exact.
                     let mut lines = Vec::with_capacity(text.len());
-                    push_lines(&mut lines, text, self.webvtt, ticker)?;
+                    push_lines(&mut lines, text, webvtt, &mut self.lines, ticker)?;
                     self.cues.push(Cue {
                         start_ms,
                         end_ms,
@@ -309,16 +327,20 @@ fn find(
 }
 
 /// Appends `text`'s lines to a cue's `lines` as spans, leaving out those
-/// without visible text. Each is shrunk to fit; most already are.
+/// without visible text. Each is shrunk to fit; most already are. A line
+/// that makes more than one cue line adds the extra ones to `counted`.
 fn push_lines(
     lines: &mut Vec<Vec<Span>>,
     text: &[&str],
     webvtt: bool,
+    counted: &mut usize,
     ticker: &mut Ticker,
-) -> Result<(), Cancelled> {
+) -> Result<(), ParseError> {
     for line in text {
         ticker.tick()?;
-        for mut line in cue_lines(line, webvtt) {
+        let parts = cue_lines(line, webvtt);
+        count_lines(counted, parts.len().saturating_sub(1))?;
+        for mut line in parts {
             if has_text(&line) {
                 line.shrink_to_fit();
                 lines.push(line);
@@ -1554,6 +1576,35 @@ mod tests {
     }
 
     #[test]
+    fn each_cue_line_a_numeric_line_break_makes_counts_toward_the_limit() {
+        // One line that `&#10;` breaks into 10,001 cue lines (the last one
+        // empty), then blank lines up to exactly the limit.
+        let broken = "x&#10;".repeat(10_000);
+        let mut vtt = format!("WEBVTT\n\n00:01.000 --> 00:02.000\n{broken}\n");
+        vtt.push_str(&"\n".repeat(MAX_LINES - 4 - 10_000));
+        let doc = parsed(&vtt);
+        assert_eq!(doc.cues[0].lines.len(), 10_000);
+        vtt.push('\n');
+        assert_eq!(parse(&vtt, &mut || false), Err(ParseError::TooLarge));
+        // In SRT the reference is text: the line is one line.
+        let mut srt = format!("1\n00:00:01,000 --> 00:00:02,000\n{broken}\n");
+        srt.push_str(&"\n".repeat(MAX_LINES - 3));
+        assert_eq!(parsed(&srt).cues[0].lines.len(), 1);
+        // push_lines counts them, for a cue's first block of text and for
+        // text after a blank line alike.
+        let mut lines = 0;
+        let mut never = || false;
+        let mut ticker = Ticker::new(&mut never);
+        push_lines(&mut Vec::new(), &[&broken], true, &mut lines, &mut ticker).unwrap();
+        assert_eq!(lines, 10_000);
+        let mut lines = MAX_LINES - 9_999;
+        assert_eq!(
+            push_lines(&mut Vec::new(), &[&broken], true, &mut lines, &mut ticker),
+            Err(ParseError::TooLarge)
+        );
+    }
+
+    #[test]
     fn a_text_with_a_line_over_the_limit_is_too_large() {
         let srt = |line: &str, nl: &str| {
             format!("1{nl}00:00:01,000 --> 00:00:02,000{nl}{line}{nl}{nl}2{nl}00:00:03,000 --> 00:00:04,000{nl}Bye{nl}")
@@ -1619,12 +1670,13 @@ mod tests {
                 webvtt: false,
                 cues: Vec::new(),
                 continues: false,
+                lines: 0,
             };
             let mut is_cancelled = cancelled_after_first();
             let mut ticker = Ticker::new(&mut is_cancelled);
             assert_eq!(
                 reader.block(&block, &mut ticker),
-                Err(Cancelled),
+                Err(ParseError::Cancelled),
                 "{timing}"
             );
         }
@@ -1633,8 +1685,8 @@ mod tests {
         let mut is_cancelled = cancelled_after_first();
         let mut ticker = Ticker::new(&mut is_cancelled);
         assert_eq!(
-            push_lines(&mut Vec::new(), &text, false, &mut ticker),
-            Err(Cancelled)
+            push_lines(&mut Vec::new(), &text, false, &mut 0, &mut ticker),
+            Err(ParseError::Cancelled)
         );
     }
 
