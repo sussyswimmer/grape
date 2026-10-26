@@ -4,6 +4,7 @@ Grape builds its own FFmpeg (DECISIONS D24): `ffmpeg` and `ffprobe` with only wh
 
 - `sources.json` pins every source tarball: URL, size, SHA-256, license. Change a pin here, never in the script.
 - `build.sh <target>` downloads and checks the tarballs, builds the libraries and FFmpeg, checks the result and writes `dist/`.
+- `notices.py` reads every file the build compiled for license notices and checks them against `licenses/ffmpeg/ffmpeg-notices.txt` (below). `build.sh` runs it.
 
 ## Targets
 
@@ -70,7 +71,36 @@ Then FFmpeg with `--disable-everything` and only these turned back on:
 - **encoders:** exactly the sixteen in `the_sidecar_has_everything_grape_uses_and_is_redistributable`, and `h263`, which the `mpeg4` encoder is built on;
 - **filters:** the ones Grape passes (`scale fps palettegen paletteuse`), the ones ffmpeg inserts by itself (`format aformat aresample scale premultiply_dynamic` convert pixel, sample and alpha formats, `null anull` are the default graph, `transpose hflip vflip rotate` turn rotated video upright, `crop` applies a container's crop, `trim atrim` cut; FFmpeg's configure selects most of them for the ffmpeg program anyway), and `sine testsrc pan` with the `lavfi` input device for the engine tests, which make their sources with this ffmpeg. Grape's own argv can't reach `lavfi`: the only input format it names is `png_pipe` (the GIF palette), and the source's `-format_whitelist` lists only file demuxers.
 
-The script checks the result before writing anything to `dist/`; it runs the programs where FFmpeg built them and copies them only once every check has passed: the generated component lists must match exactly, `CONFIG_NETWORK` must be 0, the license GPL without version3 or nonfree; on Linux and macOS `ffmpeg -version` must print the configure line from `config.h` and `ffmpeg -protocols` must list only `file` and `pipe`; on Windows every DLL the exe imports must be part of Windows.
+The script checks the result before writing anything to `dist/`; it runs the programs where FFmpeg built them and copies them only once every check has passed: the generated component lists must match exactly, `CONFIG_NETWORK` must be 0, the license GPL without version3 or nonfree; every license notice in what was compiled must be in `licenses/ffmpeg/ffmpeg-notices.txt` (below); on Linux and macOS `ffmpeg -version` must print the configure line from `config.h` and `ffmpeg -protocols` must list only `file` and `pipe`; on Windows every DLL the exe imports must be part of Windows.
+
+## License notices
+
+FFmpeg and the libraries hold code from other projects under BSD, MIT, ISC, zlib, IJG and Boost licenses, whose notices must go with the binaries: MIPS's fixed-point code, WebRTC's iLBC decoder, musl's `sscanf`, the IJG's DCT, x86inc.asm's ISC notice, Opus's and dav1d's per-file notices, and more. `licenses/ffmpeg/ffmpeg-notices.txt` has each one verbatim, with the files it's in. After building FFmpeg, `build.sh` runs `notices.py check`, which
+
+1. finds every file the build compiled, from the build's own dependency records: FFmpeg's, x264's and libvpx's `.d` files, the autotools libraries' `.deps/*.Plo`, dav1d's `build.ninja` and `ninja -t deps`. NASM leaves `%include` out of some of them, so it follows those itself; zlib's Makefile writes none, so each of its objects counts with the source of the same name and what that includes. Every object must be accounted for, and a header installed into the prefix counts as the library file it came from. The toolchain's own headers aren't read. FFmpeg's `*_host.o` programs (`ffbuild/bin2c`) run on the build machine and are left out;
+2. reads every comment in those files. A *notice* is a permissive license's grant, conditions or disclaimer, with the copyright lines before it; a *statement* is anything else that talks about licenses ("based on public domain code", "BSD licensed", "Released under the LGPL"). The libraries' own license given by reference (the GNU boilerplate, libvpx's "see the LICENSE file", Xiph's "see COPYING", zlib's "see zlib.h") needs neither, and neither does a notice that's word for word in the library's license file in `licenses/ffmpeg/`;
+3. fails when a notice or a statement isn't in `ffmpeg-notices.txt` (compared without comment marks and line breaks), or when a file that has one isn't listed under it.
+
+It writes `compiled-files.txt`, `notices-found.json` and `notices-found.txt` (what this build found, in the format of `ffmpeg-notices.txt`) into `build/ffmpeg/<target>/logs/`. When it fails: read what it found, then write `ffmpeg-notices.txt` again from every target's `notices-found.json`, with the macOS arm64 sources read as below until a Mac build exists:
+
+```
+python3 -I scripts/ffmpeg/notices.py render \
+  build/ffmpeg/linux-x86_64/logs/notices-found.json \
+  build/ffmpeg/windows-x86_64/logs/notices-found.json \
+  build/ffmpeg/arm64-*.json > licenses/ffmpeg/ffmpeg-notices.txt
+```
+
+The macOS arm64 build compiles AArch64 code the x86_64 builds don't (`libavcodec/aarch64/`, dav1d's `src/arm/`, ...). Until it has run, those sources were read with `notices.py scan`, and their entries say `macos-arm64 (read, not built yet)`. From an unpacked source, for each library (FFmpeg shown):
+
+```
+cd ffmpeg-9.0.2
+find libavcodec/aarch64 libavutil/aarch64 libswscale/aarch64 libswresample/aarch64 libavfilter/aarch64 \
+  -type f \( -name '*.c' -o -name '*.h' -o -name '*.S' \) | sort |
+  xargs python3 -I ../scripts/ffmpeg/notices.py scan ../scripts/ffmpeg/sources.json \
+    'macos-arm64 (read, not built yet)' ffmpeg . > ../build/ffmpeg/arm64-ffmpeg.json
+```
+
+The folders read: FFmpeg's above; dav1d's `src/arm/*.c`, `*.h` and `src/arm/64/`; libvpx's `vpx_dsp/arm/`, `vp9/encoder/arm/`, `vp9/common/arm/`, `vpx_ports/aarch64_cpudetect.c`, `arm_cpudetect.h` and `arm.h`; x264's `common/aarch64/`; Opus's `celt/arm/` and `silk/arm/`. The first Mac build checks them for real: if it compiles a file with a notice that isn't listed, it fails, and its `notices-found.json` replaces the read one.
 
 ## Measured
 
@@ -91,4 +121,4 @@ The macOS targets haven't run yet (no Mac here). Their settings are the Linux on
 
 1. Pick the newest release at least 14 days old (D9), or a newer one for a security fix.
 2. Download it and change its entry in `sources.json`: version, `released`, URL, file name, size, SHA-256 and the folder it unpacks to.
-3. Build every target, run the `engines-it` tests against the Linux build, and compare the library's license files with `licenses/ffmpeg/`. Update the texts, `licenses/ffmpeg/SOURCE.md` and the FFmpeg section of `about.hbs` (then regenerate `THIRD_PARTY_NOTICES.md`).
+3. Build every target, run the `engines-it` tests against the Linux build, and compare the library's license files with `licenses/ffmpeg/`. Update the texts, `licenses/ffmpeg/SOURCE.md` and the FFmpeg section of `about.hbs` (then regenerate `THIRD_PARTY_NOTICES.md`). The builds fail until `ffmpeg-notices.txt` has the new version's notices: write it again as in "License notices", and read what changed.

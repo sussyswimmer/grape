@@ -19,7 +19,7 @@ FFmpeg itself is LGPL-2.1-or-later with optional GPL parts (`ffmpeg-LICENSE.md`)
 |---|---|
 | `LICENSE.txt` | The GPL, version 2: FFmpeg 9.0.2's `COPYING.GPLv2`, the license of the programs |
 | `ffmpeg-LICENSE.md` | FFmpeg 9.0.2's `LICENSE.md`: which parts of FFmpeg are under which license |
-| `ffmpeg-ijg.txt` | The Independent JPEG Group's notice. FFmpeg's `libavcodec/jfdctfst.c`, `jfdctint_template.c` and `jrevdct.c` come from the IJG's software, and all three are compiled in (the MPEG-4 encoder and the decoders use them). Their terms ask binaries' documentation to say: this software is based in part on the work of the Independent JPEG Group. `THIRD_PARTY_NOTICES.md` says it too. Grape builds those files exactly as FFmpeg 9.0.2 has them |
+| `ffmpeg-notices.txt` | Every license notice in the source files the builds compile, and the headers those include, that isn't already word for word in a library's license text here: BSD, MIT, ISC, zlib, IJG and Boost notices in FFmpeg's own files (MIPS's fixed-point code, WebRTC's iLBC, musl's `sscanf`, the IJG's DCT, the Ogg demuxer, x86inc.asm and more), Opus's and dav1d's notices file by file, x86inc.asm's in x264, dav1d and libvpx, libvorbis's LPC code and zlib's own. Each verbatim, with the files it's in and the builds that compile them. Then the other things those files say about licenses (code from the public domain, a license named without its text). `scripts/ffmpeg/build.sh` checks it against every build: see "License notices" below |
 | `x264.txt` | x264's `COPYING` (GPL-2.0) |
 | `lame.txt`, `lame-LICENSE.txt` | LAME's `COPYING` (the LGPL, version 2) and its `LICENSE` note, which asks to acknowledge LAME with a link: https://lame.sourceforge.io/ |
 | `opus.txt` | Opus's `COPYING` (BSD-3-Clause, with the IETF patent grants it names) |
@@ -28,11 +28,12 @@ FFmpeg itself is LGPL-2.1-or-later with optional GPL parts (`ffmpeg-LICENSE.md`)
 | `libvpx-x86inc.txt` | libvpx's `third_party/x86inc/LICENSE` (ISC) |
 | `dav1d.txt`, `dav1d-PATENTS.txt` | dav1d's `COPYING` (BSD-2-Clause) and `doc/PATENTS` (the Alliance for Open Media patent license) |
 | `zlib.txt` | zlib's `LICENSE` |
-| `x86inc.txt` | The ISC notice of `x86inc.asm`, x264's assembly macro layer, which FFmpeg, x264, dav1d and libvpx each carry a copy of and assemble into the x86_64 builds (Windows, Intel Mac): the four notices verbatim, which differ only in their years |
 | `mingw-w64-runtime.txt` | Windows only. `COPYING.MinGW-w64-runtime.txt` from mingw-w64 v11.0.1, the runtime of the Ubuntu 24.04 toolchain that built the exe. The exe links parts of that runtime statically: its startup code (`libmingw32`) and from `libmingwex` math functions, `gdtoa` (reading and printing numbers) and its `printf`. This file holds the notices those parts ask binaries to carry |
 | `gcc-runtime-exception.txt` | Windows only. The GCC Runtime Library Exception 3.1, GCC 13.2.0's `COPYING.RUNTIME`. The exe links a few helpers from GCC's `libgcc` statically (stack probing, 64-bit division, popcount), which is GPL-3.0-or-later WITH GCC-exception-3.1. The exception lets the result be distributed under any terms, so it doesn't change the programs' license and asks nothing more; the text is here so that can be checked |
 
-Every text is byte for byte the file from the pinned tarball (or, for the last two, from mingw-w64 v11.0.1 and GCC 13.2.0). `ffmpeg-ijg.txt` and `x86inc.txt` are excerpts: a short note, then the notices verbatim.
+Every text is byte for byte the file from the pinned tarball (or, for the last two, from mingw-w64 v11.0.1 and GCC 13.2.0), except `ffmpeg-notices.txt`, whose excerpts are each verbatim from the file named.
+
+FFmpeg's `libavcodec/jfdctfst.c`, `jfdctint_template.c` and `jrevdct.c` come from the Independent JPEG Group's software, and all three are compiled in (the MPEG-4 encoder and the decoders use them). Their terms ask binaries' documentation to say: this software is based in part on the work of the Independent JPEG Group. `ffmpeg-notices.txt` and `THIRD_PARTY_NOTICES.md` say it.
 
 Windows: `ffmpeg.exe` and `ffprobe.exe` import only `KERNEL32.dll`, `SHELL32.dll`, `bcrypt.dll` and `msvcrt.dll`, all part of Windows. macOS (not built yet): the programs should link only macOS's own `libSystem` dynamically, plus the compiler's builtins from Xcode's clang (compiler-rt, Apache-2.0 WITH LLVM-exception, which asks nothing of binaries). The first macOS build should confirm it with `otool -L`.
 
@@ -40,7 +41,7 @@ Windows: `ffmpeg.exe` and `ffprobe.exe` import only `KERNEL32.dll`, `SHELL32.dll
 
 | Source | Version | License (SPDX) | Tarball | SHA-256 | Texts here |
 |---|---|---|---|---|---|
-| FFmpeg | 9.0.2 | GPL-2.0-or-later in this build | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` | `LICENSE.txt`, `ffmpeg-LICENSE.md`, `ffmpeg-ijg.txt` |
+| FFmpeg | 9.0.2 | GPL-2.0-or-later in this build | https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz | `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e` | `LICENSE.txt`, `ffmpeg-LICENSE.md` |
 | x264 | stable branch, commit `b35605ace3ddf7c1a5d67a2eb553f034aef41d55` (2025-06-08, X264_BUILD 165) | GPL-2.0-or-later | https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2 | `6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224` | `x264.txt` |
 | LAME | 4.0 | LGPL-2.0-or-later | https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz | `3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb` | `lame.txt`, `lame-LICENSE.txt` |
 | Opus | 1.6.1 | BSD-3-Clause | https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz | `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1` | `opus.txt` |
@@ -50,7 +51,7 @@ Windows: `ffmpeg.exe` and `ffprobe.exe` import only `KERNEL32.dll`, `SHELL32.dll
 | dav1d | 1.5.4 | BSD-2-Clause | https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` | `dav1d.txt`, `dav1d-PATENTS.txt` |
 | zlib | 1.3.2 | Zlib | https://zlib.net/fossils/zlib-1.3.2.tar.gz | `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16` | `zlib.txt` |
 
-`scripts/ffmpeg/sources.json` has the same pins with their sizes, and notes how each download was checked.
+`scripts/ffmpeg/sources.json` has the same pins with their sizes, and notes how each download was checked. `ffmpeg-notices.txt` has the notices inside all of them.
 
 How each library is built (all static, into a private prefix that pkg-config alone looks at):
 
@@ -61,6 +62,12 @@ How each library is built (all static, into a private prefix that pkg-config alo
 - **dav1d:** `meson` release build, static, without tools, tests, examples or docs.
 
 `scripts/ffmpeg/build.sh` has every option, per target.
+
+## License notices
+
+`scripts/ffmpeg/build.sh` checks `ffmpeg-notices.txt` against every build, before it copies the programs out. `scripts/ffmpeg/notices.py` lists every file the build compiled, from the build's own dependency records (and the headers they include), reads every comment in them, and stops the build when it finds a license notice, or another statement about a license, that `ffmpeg-notices.txt` doesn't have, or a file that has one but isn't listed under it. So a new FFmpeg version or a new component can't bring in a notice unnoticed. `scripts/ffmpeg/README.md` → "License notices" says what counts and how the file is written.
+
+`ffmpeg-notices.txt` is the union of the `linux-x86_64` and `windows-x86_64` builds of 2026-10-26: 3,220 and 3,227 files, the same but for a few of each OS's own, like Windows' thread code (Linux isn't shipped, but its build is the one the tests run). The macOS builds compile the same sources with Apple's clang, but `macos-arm64` compiles AArch64 code instead of the x86 assembly. That build hasn't run yet, so those sources were read instead (`notices.py scan`): FFmpeg's `aarch64` folders, dav1d's `src/arm`, libvpx's Arm code, x264's `common/aarch64`, Opus's `celt/arm` and `silk/arm`. That found the zlib-license notice of FFmpeg's `libavcodec/aarch64/fdctdsp_neon.S` (libjpeg-turbo's authors), and the BSD notices of dav1d's and Opus's Arm files, file by file. Their entries say `macos-arm64 (read, not built yet)`; the first Mac build checks them for real.
 
 ## The configure line
 

@@ -110,13 +110,13 @@ Their license texts are in the `licenses/ffmpeg` folder: in Grape's install fold
 
 MP3 encoding uses LAME: https://lame.sourceforge.io/
 
-This software is based in part on the work of the Independent JPEG Group. (FFmpeg's DCT code: `licenses/ffmpeg/ffmpeg-ijg.txt`.)
+This software is based in part on the work of the Independent JPEG Group. (FFmpeg's DCT code: its notice is in `licenses/ffmpeg/ffmpeg-notices.txt`.)
 
 These are built into them. Each has its own text in `licenses/ffmpeg`.
 
 | Part | Version | License (SPDX) | Text |
 |---|---|---|---|
-| FFmpeg | 9.0.2 | GPL-2.0-or-later in this build | `LICENSE.txt`, `ffmpeg-LICENSE.md`, `ffmpeg-ijg.txt` |
+| FFmpeg | 9.0.2 | GPL-2.0-or-later in this build | `LICENSE.txt`, `ffmpeg-LICENSE.md` |
 | x264 | stable branch, commit `b35605ac` | GPL-2.0-or-later | `x264.txt` |
 | LAME | 4.0 | LGPL-2.0-or-later | `lame.txt`, `lame-LICENSE.txt` |
 | Opus | 1.6.1 | BSD-3-Clause | `opus.txt` |
@@ -125,11 +125,11 @@ These are built into them. Each has its own text in `licenses/ffmpeg`.
 | libvpx | 1.17.0 | BSD-3-Clause | `libvpx.txt`, `libvpx-PATENTS.txt`, `libvpx-x86inc.txt` |
 | dav1d | 1.5.4 | BSD-2-Clause | `dav1d.txt`, `dav1d-PATENTS.txt` |
 | zlib | 1.3.2 | Zlib | `zlib.txt` |
-| x86inc.asm, in FFmpeg, x264, libvpx and dav1d (Windows and Intel Mac) | | ISC | `x86inc.txt` |
+| Code from other projects inside FFmpeg and the libraries above | | BSD-2-Clause, BSD-3-Clause, MIT, ISC, Zlib, IJG, BSL-1.0 | `ffmpeg-notices.txt` |
 | mingw-w64 runtime (Windows) | 11.0.1 | ZPL-2.1, with the notices in its text | `mingw-w64-runtime.txt` |
 | GCC runtime, libgcc (Windows) | 13.2.0 | GPL-3.0-or-later WITH GCC-exception-3.1 | `gcc-runtime-exception.txt` |
 
-libvpx and dav1d come with patent grants, the `-PATENTS.txt` files. The GCC Runtime Library Exception lets libgcc's code be distributed under any terms, so it doesn't change the programs' license.
+Some of their source files hold code from other projects, like MIPS's fixed-point code, WebRTC's iLBC decoder, musl's `sscanf` and x86inc.asm. `ffmpeg-notices.txt` has each of those notices verbatim, with the files it's in; Grape's build checks that it has every one in what it compiles. libvpx and dav1d come with patent grants, the `-PATENTS.txt` files. The GCC Runtime Library Exception lets libgcc's code be distributed under any terms, so it doesn't change the programs' license.
 
 ## Rust crates
 

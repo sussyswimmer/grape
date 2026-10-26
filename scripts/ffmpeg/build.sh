@@ -24,8 +24,9 @@
 #
 # Then it checks what it built: only the file and pipe protocols, no
 # network code, GPL-2.0-or-later (never version3 or nonfree), every
-# component Grape uses, and on Windows that the exe needs no DLL beyond
-# Windows' own.
+# component Grape uses, on Windows that the exe needs no DLL beyond
+# Windows' own, and that licenses/ffmpeg/ffmpeg-notices.txt has every
+# license notice in the files it compiled (scripts/ffmpeg/notices.py).
 #
 # Environment (all optional):
 #   GRAPE_FFMPEG_WORK      build trees, default <repo>/build/ffmpeg. The
@@ -740,6 +741,16 @@ out="$dist_root/$target"
 mkdir -p "$out"
 rm -f "$out/ffmpeg$exe" "$out/ffprobe$exe" "$out/BUILDINFO.txt"
 
+# Every file the build compiled, from its dependency records, and the
+# headers those include: each BSD, MIT, ISC, zlib or IJG notice in them
+# must be in ffmpeg-notices.txt, so that a new version or component can't
+# bring one in unnoticed. logs/notices-found.txt has what this build found.
+if ! notices=$(python3 -I "$script_dir/notices.py" check "$target" "$tdir" "$sources_json" "$licenses_dir"); then
+  printf '%s\n' "$notices"
+  fail "licenses/ffmpeg/ffmpeg-notices.txt lacks what's above. See scripts/ffmpeg/README.md, 'License notices'."
+fi
+printf '%s\n' "$notices"
+
 case "$target" in
   windows-x86_64)
     # Every DLL the exe imports must ship with Windows.
@@ -839,6 +850,9 @@ first_line() { # command...; its first output line, or "?"
   esac
   echo "  meson: $(first_line meson --version), ninja: $(first_line ninja --version), pkg-config: $(first_line pkg-config --version)"
   echo "  make: $(first_line make --version)"
+  echo
+  echo "License notices (scripts/ffmpeg/notices.py against licenses/ffmpeg/ffmpeg-notices.txt):"
+  printf '%s\n' "$notices"
   echo
   echo "Outputs:"
   for f in "ffmpeg$exe" "ffprobe$exe"; do

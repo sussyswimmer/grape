@@ -47,7 +47,7 @@
   - **Protocols:** `file` and `pipe`, and `--disable-network`: there's no network code in the binary at all (golden rule 3).
   - Hardware encoders are for a later slice. Media Foundation (`--enable-mediafoundation`, Windows) and VideoToolbox (`--enable-videotoolbox`, macOS) are OS frameworks and add no library; NVENC, AMF and oneVPL (`--enable-nvenc --enable-amf --enable-libvpl`) would each add MIT headers or a dispatcher, and a notice.
   - `build.sh` checks the component lists configure generates against these, exactly, and on Windows that the exe imports only Windows' own DLLs. The `engines-it` test `the_sidecar_has_everything_grape_uses_and_is_redistributable` checks the encoders, muxers and demuxers of whatever FFmpeg it's given.
-- **Licenses:** `licenses/ffmpeg/` has the GPLv2 and each library's text, `SOURCE.md` the configure line and the pins, and `about.hbs` the notices entry (rule 3).
+- **Licenses:** `licenses/ffmpeg/` has the GPLv2 and each library's text, `ffmpeg-notices.txt` every license notice inside the sources the build compiles (`build.sh` checks it on every build), `SOURCE.md` the configure line and the pins, and `about.hbs` the notices entry (rule 3).
 - Ship as a Tauri sidecar via `bundle.externalBin` with target-triple suffixes (`ffmpeg-x86_64-pc-windows-msvc.exe`, `ffmpeg-universal-apple-darwin`, …), plus `ffprobe`. The app finds them next to its own executable and passes them in `SidecarPaths`; the engine never looks on `PATH`.
 
 ### How Grape runs FFmpeg (`grape-engines/src/media/`)
