@@ -571,6 +571,23 @@ pub(super) mod tests {
         static RAN: RefCell<Vec<Vec<OsString>>> = const { RefCell::new(Vec::new()) };
     }
 
+    /// Taken by each test that holds an FFmpeg slot or runs a job, so a test
+    /// can count the slots in use ([`slots_held`]).
+    static SLOT_USERS: Mutex<()> = Mutex::new(());
+
+    /// Waits until no other test holds FFmpeg slots or runs a job.
+    pub(crate) fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        SLOT_USERS.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many FFmpeg slots are held.
+    pub(crate) fn slots_held() -> usize {
+        *FFMPEG_SLOTS
+            .busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Makes the next sidecar runs on this thread `fakes`, in order. A run
     /// past the last one starts the real program.
     pub(crate) fn script(fakes: impl IntoIterator<Item = Fake>) {
@@ -1125,6 +1142,7 @@ pub(super) mod tests {
 
     #[test]
     fn the_ffmpeg_gate_has_two_slots() {
+        let _serial = one_at_a_time();
         let token = CancelToken::new();
         let first = acquire(&token).unwrap();
         let second = acquire(&token).unwrap();

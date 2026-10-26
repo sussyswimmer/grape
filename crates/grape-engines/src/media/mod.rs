@@ -521,7 +521,7 @@ mod tests {
 
     use super::*;
     use crate::output::unique_suffix;
-    use run::tests::{ran, script, Fake};
+    use run::tests::{one_at_a_time, ran, script, slots_held, Fake};
 
     /// A fresh folder under the system temp folder, removed on drop.
     struct TestDir(PathBuf);
@@ -629,11 +629,13 @@ mod tests {
         }
 
         fn run(&self) -> Result<JobOutcome, GrapeError> {
+            let _serial = one_at_a_time();
             crate::run_job(&self.job, &ctx(), &mut |_| {})
         }
 
         /// [`Case::run`], also returning every progress value reported.
         fn run_seeing_progress(&self) -> (Result<JobOutcome, GrapeError>, Vec<f32>) {
+            let _serial = one_at_a_time();
             let mut seen = Vec::new();
             let result = crate::run_job(&self.job, &ctx(), &mut |f| seen.push(f));
             (result, seen)
@@ -819,6 +821,23 @@ mod tests {
             assert!(!case.dir.0.join("converted.mp3").exists(), "{why}");
             case.assert_clean();
         }
+    }
+
+    #[test]
+    fn a_job_holds_an_ffmpeg_slot_while_it_runs() {
+        let _serial = one_at_a_time();
+        let case = Case::new("song.wav", Format::Flac);
+        script([
+            Fake::Prints(flat("wav", false, "pcm_s16le")),
+            Fake::Child("write", "flac".to_string()),
+            Fake::Prints(flat("flac", false, "flac")),
+        ]);
+        // Progress comes while FFmpeg runs, and after, until the publish.
+        let mut held = Vec::new();
+        crate::run_job(&case.job, &ctx(), &mut |_| held.push(slots_held())).unwrap();
+        assert!(held.len() > 3, "{held:?}");
+        assert!(held.iter().all(|&slots| slots == 1), "{held:?}");
+        assert_eq!(slots_held(), 0);
     }
 
     #[test]
