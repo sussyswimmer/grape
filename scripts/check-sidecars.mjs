@@ -1,24 +1,36 @@
 #!/usr/bin/env node
 // The bundling gate for sidecars (DECISIONS D25). A build that bundles
-// sidecars passes `--config src-tauri/tauri.sidecars.conf.json`, and that
+// sidecars passes an overlay that sets `bundle.externalBin`
+// (`--config src-tauri/tauri.sidecars.conf.json`, or
+// `src-tauri/tauri.heif.windows.conf.json` for grape-heif, D33), and that
 // overlay runs this script first as its `beforeBuildCommand`. It refuses the
-// build unless every sidecar in the overlay's `externalBin`:
+// build unless every sidecar in `externalBin`:
 //   - is in `apps/desktop/src-tauri/binaries/` for the target being built,
 //   - is Grape's own build: its version line carries the `-grape` marker
 //     (the prebuilt FFmpeg pins in `scripts/sidecars.lock` are for dev
 //     testing only and never ship, D24; bsdtar is built by
-//     `scripts/bsdtar/build.*` from libarchive and Grape's patches, D27),
+//     `scripts/bsdtar/build.*` from libarchive and Grape's patches, D27;
+//     grape-heif by `tools/grape-heif/build.ps1`, D33),
 //   - has its license texts in `licenses/<folder>/` (with `SOURCE.md` for
 //     GPL code) and its section in `about.hbs` and `THIRD_PARTY_NOTICES.md`.
 //
-// Usage: node scripts/check-sidecars.mjs [--target <triple>]
+// Which `externalBin`: the Tauri CLI puts the merged `--config` overlays in
+// TAURI_CONFIG before it runs `beforeBuildCommand`, so a build checks
+// exactly the list it bundles, whichever overlays it passed (heic-spec J30).
+// Overlays merge as RFC 7396: a later list replaces an earlier one, so no
+// build passes two overlays that both set `externalBin`. Without
+// TAURI_CONFIG (a run by hand, or CI's Sidecars job) the list comes from
+// `--overlay <file>`, by default `tauri.sidecars.conf.json`.
+//
+// Usage: node scripts/check-sidecars.mjs [--target <triple>] [--overlay <file>]
 // The target defaults to TAURI_ENV_TARGET_TRIPLE, which the Tauri CLI sets
-// for `beforeBuildCommand`. Exit code 0 when every check passes, 1 when one
-// fails (each failure printed on its own line), 2 on bad usage.
+// for `beforeBuildCommand`. `--overlay` takes a file name in
+// apps/desktop/src-tauri, or a path. Exit code 0 when every check passes, 1
+// when one fails (each failure printed on its own line), 2 on bad usage.
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const FFMPEG_MISSING = "Build it, or take it from CI's build job (D24, D25).";
@@ -59,6 +71,16 @@ export const RULES = {
     missing: "Build it with scripts/bsdtar/build.ps1 -Install or build.sh --install, or take it from CI's bsdtar workflow (D27).",
     foreign: "Only Grape's build, with the patches in scripts/bsdtar, ever ships: never the OS's own bsdtar (D27).",
   },
+  'grape-heif': {
+    args: ['-hide_banner', '-version'],
+    // tools/grape-heif's banner: "grape-heif version 1.23.7-grape.1 Copyright (c) 2026 …".
+    line: /^grape-heif version \S*-grape(?:\.\d+)?(?:\s|$)/,
+    licenses: 'grape-heif',
+    gpl: true,
+    notice: 'grape-heif',
+    missing: "Build it with tools/grape-heif/build.ps1, or take it from CI's grape-heif workflow (D33).",
+    foreign: "Only Grape's own build from tools/grape-heif ever ships (D33).",
+  },
 };
 
 /** How long one `-version` run may take, in milliseconds. */
@@ -86,24 +108,38 @@ export function hasSection(notices, name) {
   return new RegExp(`^## ${escaped}(?:\\s|$)`, 'm').test(notices);
 }
 
+/** The overlay read when there's no TAURI_CONFIG and no `--overlay`. */
+export const DEFAULT_OVERLAY = 'tauri.sidecars.conf.json';
+
+/**
+ * Where the `externalBin` list comes from, for messages: TAURI_CONFIG when
+ * `config` is set, otherwise the overlay file's name.
+ */
+export function sourceName({ config, overlay }) {
+  return config !== undefined ? 'TAURI_CONFIG' : basename(overlay ?? DEFAULT_OVERLAY);
+}
+
 /**
  * Runs every check and returns the failures (empty when the build may go on).
- * `io` holds what the checks touch, so tests can fake it:
- * `exists(path)`, `isFile(path)`, `list(dir)`, `read(path)` and
- * `run(file, args)`, which returns stdout or throws.
+ * `config` is TAURI_CONFIG's text when it's set: then its `externalBin`
+ * counts. Otherwise `overlay`, a path (default: `tauri.sidecars.conf.json`
+ * in apps/desktop/src-tauri), is read. `io` holds what the checks touch, so
+ * tests can fake it: `exists(path)`, `isFile(path)`, `list(dir)`,
+ * `read(path)` and `run(file, args)`, which returns stdout or throws.
  */
-export function check({ repo, triple, io }) {
+export function check({ repo, triple, io, config, overlay }) {
   const failures = [];
   const appDir = join(repo, 'apps', 'desktop', 'src-tauri');
-  const overlayPath = join(appDir, 'tauri.sidecars.conf.json');
+  const source = sourceName({ config, overlay });
   let entries;
   try {
-    entries = JSON.parse(io.read(overlayPath))?.bundle?.externalBin;
+    const text = config !== undefined ? config : io.read(overlay ?? join(appDir, DEFAULT_OVERLAY));
+    entries = JSON.parse(text)?.bundle?.externalBin;
   } catch (err) {
-    return [`Couldn't read tauri.sidecars.conf.json: ${err.message}`];
+    return [`Couldn't read ${source}: ${err.message}`];
   }
   if (!Array.isArray(entries) || entries.length === 0) {
-    return ['tauri.sidecars.conf.json lists no externalBin, so there is nothing to bundle.'];
+    return [`${source} lists no externalBin, so there is nothing to bundle.`];
   }
   const aboutPath = join(repo, 'about.hbs');
   const noticesPath = join(repo, 'THIRD_PARTY_NOTICES.md');
@@ -170,13 +206,18 @@ export const realIo = {
     }),
 };
 
+const USAGE = 'Usage: node scripts/check-sidecars.mjs [--target <triple>] [--overlay <file>]';
+
 function main(argv) {
   let triple = process.env.TAURI_ENV_TARGET_TRIPLE;
+  let overlayArg;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--target' && i + 1 < argv.length) {
       triple = argv[++i];
+    } else if (argv[i] === '--overlay' && i + 1 < argv.length) {
+      overlayArg = argv[++i];
     } else {
-      console.error(`check-sidecars: unknown argument ${argv[i]}. Usage: node scripts/check-sidecars.mjs [--target <triple>]`);
+      console.error(`check-sidecars: unknown argument ${argv[i]}. ${USAGE}`);
       return 2;
     }
   }
@@ -185,13 +226,22 @@ function main(argv) {
     return 2;
   }
   const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const failures = check({ repo, triple, io: realIo });
+  const appDir = join(repo, 'apps', 'desktop', 'src-tauri');
+  // A bare name is an overlay next to tauri.conf.json; anything else is a path.
+  const overlay =
+    overlayArg === undefined ? undefined : /[\\/]/.test(overlayArg) ? resolve(overlayArg) : join(appDir, overlayArg);
+  const config = process.env.TAURI_CONFIG;
+  if (config !== undefined && overlay !== undefined) {
+    console.error('check-sidecars: TAURI_CONFIG is set, so --overlay is ignored: the build bundles what TAURI_CONFIG lists.');
+  }
+  const failures = check({ repo, triple, io: realIo, config, overlay });
+  const source = sourceName({ config, overlay });
   if (failures.length > 0) {
-    console.error(`check-sidecars: refusing to bundle sidecars for ${triple}:`);
+    console.error(`check-sidecars: refusing to bundle the sidecars ${source} lists for ${triple}:`);
     for (const failure of failures) console.error(`  - ${failure}`);
     return 1;
   }
-  console.log(`check-sidecars: every sidecar for ${triple} is Grape's own build, with its licenses.`);
+  console.log(`check-sidecars: every sidecar ${source} lists for ${triple} is Grape's own build, with its licenses.`);
   return 0;
 }
 

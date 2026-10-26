@@ -1,0 +1,11 @@
+{
+  "build": {
+    "beforeBuildCommand": "node ../../scripts/check-sidecars.mjs && pnpm -C ui build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/grape-heif"],
+    "resources": {
+      "../../../licenses/grape-heif/": "licenses/grape-heif/"
+    }
+  }
+}

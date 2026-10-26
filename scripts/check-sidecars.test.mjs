@@ -192,17 +192,25 @@ test('a sidecar without a rule, or an overlay without sidecars, is refused', () 
   assert.match(failures[0], /^Couldn't read tauri\.sidecars\.conf\.json/);
 });
 
-test('the sidecars overlay runs this gate before the UI build of the base config', async () => {
-  const { readFileSync } = await import('node:fs');
+test('every overlay with sidecars runs this gate before the UI build of the base config', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
   const { fileURLToPath } = await import('node:url');
   const app = fileURLToPath(new URL('../apps/desktop/src-tauri/', import.meta.url));
-  const overlay = JSON.parse(readFileSync(join(app, 'tauri.sidecars.conf.json'), 'utf8'));
   const base = JSON.parse(readFileSync(join(app, 'tauri.conf.json'), 'utf8'));
-  // The Tauri CLI runs it in apps/desktop (the folder with package.json), with
-  // cmd /S /C on Windows and sh -c elsewhere; both run the second part only
-  // when the gate exits 0.
-  assert.equal(overlay.build.beforeBuildCommand, `node ../../scripts/check-sidecars.mjs && ${base.build.beforeBuildCommand}`);
-  assert.deepEqual(Object.keys(overlay), ['build', 'bundle']);
+  const names = readdirSync(app).filter((f) => /^tauri\..+\.conf\.json$/.test(f));
+  let checked = [];
+  for (const name of names) {
+    const overlay = JSON.parse(readFileSync(join(app, name), 'utf8'));
+    if (overlay?.bundle?.externalBin === undefined) continue;
+    // The Tauri CLI runs it in apps/desktop (the folder with package.json), with
+    // cmd /S /C on Windows and sh -c elsewhere; both run the second part only
+    // when the gate exits 0.
+    assert.equal(overlay.build.beforeBuildCommand, `node ../../scripts/check-sidecars.mjs && ${base.build.beforeBuildCommand}`, name);
+    assert.deepEqual(Object.keys(overlay), ['build', 'bundle'], name);
+    checked.push(name);
+  }
+  checked = checked.sort();
+  assert.ok(checked.includes('tauri.sidecars.conf.json') && checked.includes('tauri.heif.windows.conf.json'), checked.join(', '));
 });
 
 // bsdtar (D27): Grape's build of libarchive's bsdtar, from scripts/bsdtar.
@@ -340,5 +348,187 @@ test("the bsdtar workflow's cache keys cover the copyright lines its full build 
   assert.equal(keys.length, 2, 'one cache key per OS');
   for (const key of keys) {
     assert.match(key, /hashFiles\('scripts\/bsdtar\/\*\*', 'licenses\/libarchive\/copyright-lines\.txt'\)/);
+  }
+});
+
+// grape-heif (D33): Grape's HEIC helper on Windows, built from tools/grape-heif.
+const HEIF_EXE = join(APP, 'binaries', 'grape-heif-x86_64-pc-windows-msvc.exe');
+const GRAPE_HEIF =
+  'grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors\r\n' +
+  'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1\r\n';
+const GATE = 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build';
+const HEIF_OVERLAY = JSON.stringify({
+  build: { beforeBuildCommand: GATE },
+  bundle: { externalBin: ['binaries/grape-heif'], resources: { '../../../licenses/grape-heif/': 'licenses/grape-heif/' } },
+});
+// What the Tauri CLI puts in TAURI_CONFIG for build-windows:
+// tauri.pdfium.windows.conf.json, then tauri.heif.windows.conf.json, merged.
+const MERGED = JSON.stringify({
+  bundle: {
+    resources: {
+      'binaries/pdfium-x86_64-pc-windows-msvc.dll': 'pdfium.dll',
+      '../../../licenses/pdfium/': 'licenses/pdfium/',
+      '../../../licenses/grape-heif/': 'licenses/grape-heif/',
+    },
+    externalBin: ['binaries/grape-heif'],
+  },
+  build: { beforeBuildCommand: GATE },
+});
+const NOTICES_HEIF = `${NOTICES}\n## grape-heif (HEIC on Windows)\n\nGrape converts HEIC on Windows with grape-heif.exe.\n`;
+const HEIF_LICENSES = ['LICENSE.txt', 'SOURCE.md', 'libheif.txt', 'libde265.txt', 'libde265-win32cond.txt', 'x265.txt', 'rust-crates.md'];
+
+/** Everything a passing Windows build with grape-heif has. The sidecars overlay lists FFmpeg, which isn't there. */
+function heifOk(overrides = {}) {
+  return {
+    files: {
+      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY,
+      [join(APP, 'tauri.heif.windows.conf.json')]: HEIF_OVERLAY,
+      [join(REPO, 'about.hbs')]: NOTICES_HEIF,
+      [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES_HEIF,
+      [HEIF_EXE]: 'MZ',
+      ...overrides.files,
+    },
+    dirs: { [join(REPO, 'licenses', 'grape-heif')]: HEIF_LICENSES, ...overrides.dirs },
+    outputs: { [HEIF_EXE]: GRAPE_HEIF, ...overrides.outputs },
+  };
+}
+
+const WIN = 'x86_64-pc-windows-msvc';
+
+test("TAURI_CONFIG's merged list wins over the overlay file", () => {
+  const io = fakeIo(heifOk());
+  assert.deepEqual(check({ repo: REPO, triple: WIN, io, config: MERGED }), []);
+  assert.deepEqual(io.ran, [[HEIF_EXE, ['-hide_banner', '-version']]]);
+  // Without it, the default overlay's FFmpeg is checked instead (and missing).
+  const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()) });
+  assert.match(failures[0], /^ffmpeg: src-tauri\/binaries\/ffmpeg-x86_64-pc-windows-msvc\.exe is missing\./);
+  assert.ok(failures.every((f) => !f.startsWith('grape-heif')), failures.join('\n'));
+});
+
+test('a TAURI_CONFIG without sidecars, or one that isn\'t JSON, is refused and named', () => {
+  let failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), config: '{"bundle":{"resources":{}}}' });
+  assert.deepEqual(failures, ['TAURI_CONFIG lists no externalBin, so there is nothing to bundle.']);
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), config: '{' });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^Couldn't read TAURI_CONFIG: /);
+});
+
+test('--overlay reads that file and names it', () => {
+  const overlay = join(APP, 'tauri.heif.windows.conf.json');
+  assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), overlay }), []);
+  let failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ files: { [overlay]: '{"bundle":{}}' } })), overlay });
+  assert.deepEqual(failures, ['tauri.heif.windows.conf.json lists no externalBin, so there is nothing to bundle.']);
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk()), overlay: join(APP, 'tauri.nothing.conf.json') });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^Couldn't read tauri\.nothing\.conf\.json: /);
+});
+
+test("grape-heif: Grape's own build passes, anything else is refused", () => {
+  for (const out of [GRAPE_HEIF, 'grape-heif version 1.23.7-grape\n', 'grape-heif version 1.23.8-grape.12 Copyright\n']) {
+    assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: out } })), config: MERGED }), [], out);
+  }
+  for (const line of [
+    // libheif's own tools, or a build without Grape's version.
+    'heif-enc libheif version: 1.23.7',
+    'grape-heif version 1.23.7 Copyright (c) 2026 the Grape contributors',
+    'grape-heif version 1.23.7-grapefruit Copyright',
+    'grape-heif version 1.23.7 configuration: -grape.1',
+    ' grape-heif version 1.23.7-grape.1',
+    'ffmpeg version 9.0.2-grape Copyright',
+  ]) {
+    const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: `${line}\n` } })), config: MERGED });
+    assert.equal(failures.length, 1, line);
+    assert.match(failures[0], /^grape-heif: this isn't Grape's own build\./, line);
+    assert.match(failures[0], /tools\/grape-heif ever ships \(D33\)\.$/, line);
+  }
+});
+
+test('a missing grape-heif.exe points at build.ps1 and the grape-heif workflow', () => {
+  const base = heifOk();
+  delete base.files[HEIF_EXE];
+  const failures = check({ repo: REPO, triple: WIN, io: fakeIo(base), config: MERGED });
+  assert.deepEqual(failures, [
+    "grape-heif: src-tauri/binaries/grape-heif-x86_64-pc-windows-msvc.exe is missing. Build it with tools/grape-heif/build.ps1, or take it from CI's grape-heif workflow (D33).",
+  ]);
+});
+
+test("grape-heif's licenses: SOURCE.md (GPL) and its notices section", () => {
+  const dir = join(REPO, 'licenses', 'grape-heif');
+  let failures = check({
+    repo: REPO,
+    triple: WIN,
+    io: fakeIo(heifOk({ dirs: { [dir]: HEIF_LICENSES.filter((f) => f !== 'SOURCE.md') } })),
+    config: MERGED,
+  });
+  assert.deepEqual(failures, [
+    'grape-heif: licenses/grape-heif/SOURCE.md is missing. GPL code ships with where its exact source is (ENGINES.md licensing rule 3).',
+  ]);
+
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ dirs: { [dir]: [] } })), config: MERGED });
+  assert.deepEqual(failures, ['grape-heif: licenses/grape-heif/ is missing or empty (ENGINES.md licensing rule 3).']);
+
+  failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ files: { [join(REPO, 'about.hbs')]: NOTICES } })), config: MERGED });
+  assert.deepEqual(failures, ['grape-heif: about.hbs has no "## grape-heif" section (licenses/README.md).']);
+
+  failures = check({
+    repo: REPO,
+    triple: WIN,
+    io: fakeIo(heifOk({ files: { [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES } })),
+    config: MERGED,
+  });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^grape-heif: THIRD_PARTY_NOTICES\.md has no "## grape-heif" section/);
+});
+
+test('the script reads TAURI_CONFIG and --overlay when it runs', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const { fileURLToPath } = await import('node:url');
+  const script = fileURLToPath(new URL('./check-sidecars.mjs', import.meta.url));
+  const run = (args, env) =>
+    spawnSync(process.execPath, [script, '--target', WIN, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, TAURI_CONFIG: undefined, TAURI_ENV_TARGET_TRIPLE: undefined, ...env },
+    });
+  // A name with no rule fails the same way whatever is on this machine.
+  let r = run([], { TAURI_CONFIG: JSON.stringify({ bundle: { externalBin: ['binaries/not-a-sidecar'] } }) });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /the sidecars TAURI_CONFIG lists for x86_64-pc-windows-msvc/);
+  assert.match(r.stderr, /not-a-sidecar: the gate has no rule/);
+
+  r = run(['--overlay', 'tauri.nothing.conf.json'], {});
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /Couldn't read tauri\.nothing\.conf\.json/);
+
+  r = run(['--overlay', 'tauri.nothing.conf.json'], { TAURI_CONFIG: '{"bundle":{}}' });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, /--overlay is ignored/);
+  assert.match(r.stderr, /TAURI_CONFIG lists no externalBin/);
+
+  r = run(['--overlay'], {});
+  assert.equal(r.status, 2, r.stderr);
+});
+
+test('no workflow build passes two overlays that both set externalBin, and the Windows builds bundle grape-heif', async () => {
+  // Arrays replace when overlays merge (RFC 7396), so a second overlay with
+  // externalBin would silently drop the first one's sidecars (heic-spec J29).
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const app = fileURLToPath(new URL('../apps/desktop/src-tauri/', import.meta.url));
+  const workflows = fileURLToPath(new URL('../.github/workflows/', import.meta.url));
+  const setsBins = (name) => JSON.parse(readFileSync(join(app, name), 'utf8'))?.bundle?.externalBin !== undefined;
+  const builds = [];
+  for (const file of readdirSync(workflows).filter((f) => f.endsWith('.yml'))) {
+    for (const line of readFileSync(join(workflows, file), 'utf8').split('\n')) {
+      if (!/tauri build/.test(line)) continue;
+      const overlays = [...line.matchAll(/--config src-tauri\/(\S+)/g)].map((m) => m[1]);
+      for (const name of overlays) assert.ok(readdirSync(app).includes(name), `${file}: ${name} doesn't exist`);
+      assert.ok(overlays.filter(setsBins).length <= 1, `${file}: ${line.trim()}`);
+      builds.push({ file, line, overlays });
+    }
+  }
+  for (const file of ['ci.yml', 'release.yml']) {
+    const windows = builds.filter((b) => b.file === file && b.overlays.includes('tauri.pdfium.windows.conf.json'));
+    assert.ok(windows.length > 0, `${file} has no Windows build`);
+    for (const b of windows) assert.ok(b.overlays.includes('tauri.heif.windows.conf.json'), `${file}: ${b.line.trim()}`);
   }
 });

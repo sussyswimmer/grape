@@ -162,12 +162,95 @@ jobs:
           GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
         run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
 
+  # Grape's own HEIC helper for Windows (DECISIONS D33), built in this run
+  # with its source bundle and the HEIC test fixtures.
+  grape-heif:
+    name: grape-heif
+    uses: ./.github/workflows/grape-heif.yml
+
+  # The HEIC engine and the Job Object against the grape-heif.exe just built
+  # (feature heif-it).
+  heif-it-windows:
+    name: HEIC tests (Windows)
+    needs: grape-heif
+    runs-on: windows-latest
+    steps:
+      # The tests run a program built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8      # v8.0.2, 2026-10-07 (checked)
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      - uses: actions/download-artifact@v8
+        with:
+          name: heif-fixtures
+          path: ${{ runner.temp }}/heif-fixtures
+      # The default clippy run doesn't enable heif-it.
+      - name: Clippy (heif-it)
+        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
+      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF.
+      - name: HEIC engine tests (real grape-heif.exe)
+        env:
+          GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}\heif-fixtures
+        run: cargo test -p grape-engines --features heif-it --locked
+      # 35.6 MP under the 2 GiB Job cap; prints the peak (heic-spec J24).
+      - name: Job Object tests (real grape-heif.exe)
+        env:
+          GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
+        run: cargo test -p grape-platform --features heif-it --test job_object --locked -- --nocapture
+
+  # ImageIO (Grape's HEIC worker on macOS) against the fixtures libheif wrote
+  # on Windows. Encoding needs a hardware HEVC encoder, which GitHub's macOS
+  # VMs lack: those tests accept "This Mac can't write HEIC files." here, and
+  # Mac encoding is manual QA (docs/TESTING.md).
+  heif-it-macos:
+    name: HEIC tests (macOS)
+    needs: grape-heif
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: heif-fixtures
+          path: ${{ runner.temp }}/heif-fixtures
+      - name: Clippy (heif-it)
+        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
+      - name: Build the test worker (ImageIO behind the HEIC protocol)
+        run: cargo build -p grape-platform --features heif-it --bin grape-heif-worker --locked
+      # The heif-it tests fail, not skip, without their variables.
+      - name: ImageIO tests (libheif's fixtures)
+        env:
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
+        run: cargo test -p grape-platform --features heif-it --locked --no-fail-fast
+      - name: HEIC engine tests (the ImageIO worker)
+        env:
+          GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
+        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast
+
   # A Windows build anyone can download from the run's Artifacts: the
-  # per-user NSIS installer (no admin needed), with PDFium next to Grape.exe
-  # (D29). It's unsigned until M7, so SmartScreen asks first:
-  # docs/PLATFORM_WINDOWS.md → "Running a CI build".
+  # per-user NSIS installer (no admin needed), with PDFium (D29) and
+  # grape-heif.exe (D33) next to Grape.exe. It's unsigned until M7, so
+  # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
   build-windows:
     name: Build (Windows installer)
+    needs: grape-heif
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -181,23 +264,54 @@ jobs:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
-      - uses: actions/cache@v6
+      # Restore and save apart: the cache is saved right after the fetch, so
+      # the pdfium-Windows key, which rust-windows shares, never holds the
+      # grape-heif.exe copied in below.
+      - id: pdfium-cache
+        uses: actions/cache/restore@v6
         with:
           path: apps/desktop/src-tauri/binaries
           key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
       - name: Fetch PDFium
         shell: powershell
         run: ./scripts/fetch-sidecars.ps1 -Only pdfium
-      # The overlay adds pdfium.dll and licenses/pdfium/ to bundle.resources.
+      - if: steps.pdfium-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: ${{ steps.pdfium-cache.outputs.cache-primary-key }}
+      # grape-heif.exe from this run's grape-heif job, under the name Tauri's
+      # externalBin wants.
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      - name: Put grape-heif.exe in binaries
+        shell: pwsh
+        env:
+          GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          if ($sha -ne $env:GRAPE_HEIF_SHA256) {
+            Write-Output "::error::grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built."
+            exit 1
+          }
+          Copy-Item -LiteralPath $exe -Destination apps/desktop/src-tauri/binaries/grape-heif-x86_64-pc-windows-msvc.exe
+      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
+      # bundle.resources; the HEIC overlay adds grape-heif to externalBin and
+      # licenses/grape-heif/, and runs the sidecar gate first. Never a second
+      # overlay that also sets externalBin (it would replace the list).
       - name: Build Grape and the installer
         working-directory: apps/desktop
-        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json
-      # tauri-build copies the resources next to grape.exe, which is what the
-      # installer installs.
-      - name: Check PDFium is in the build
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.heif.windows.conf.json
+      # tauri-build copies the resources and the sidecars next to grape.exe,
+      # which is what the installer installs.
+      - name: Check PDFium and grape-heif are in the build
         shell: pwsh
         run: |
-          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md') {
+          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md',
+                         'target/release/grape-heif.exe', 'target/release/licenses/grape-heif/LICENSE.txt', 'target/release/licenses/grape-heif/SOURCE.md') {
             if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
               Write-Output "::error::$f is missing from the build."
               exit 1
@@ -259,6 +373,40 @@ jobs:
               exit 1
               ;;
           esac
+      # The HEIC worker (D33) is Grape itself: `Grape --grape-heif-worker`
+      # answers a probe with ImageIO, on each slice the runner can run.
+      # CGImageSourceSetAllowableTypes (macOS 14.2+) must only be looked up
+      # with dlsym: a bound import would stop Grape launching on macOS 13
+      # (its minimum), and this runner, which has the symbol, wouldn't notice.
+      - name: Check the HEIC worker answers and Grape launches on macOS 13
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          bin="$app/Contents/MacOS/$name"
+          if nm -um "$bin" | grep -q '_CGImageSourceSetAllowableTypes'; then
+            echo "::error::$name imports CGImageSourceSetAllowableTypes directly, so it won't launch on macOS 13. Look it up with dlsym (heic-spec §7)."
+            exit 1
+          fi
+          limits='{"maxSourceBytes":536870912,"maxPixels":134217728,"maxEncodePixels":35651584,"maxEncodeSide":16888,"maxIccBytes":16707345,"maxDecoderMemory":1073741824}'
+          request='{"protocol":1,"workDir":"'"$RUNNER_TEMP"'","op":{"kind":"probe"},"limits":'"$limits"'}'
+          probe() {
+            set +e
+            out=$(printf '%s' "$request" | "$@" --grape-heif-worker)
+            code=$?
+            set -e
+            echo "$* --grape-heif-worker: $out (exit $code)"
+            case "$out" in
+              *'"done":{"caps":{"decode":true,'*) [ "$code" -eq 0 ] || { echo "::error::The HEIC worker answered but exited $code."; exit 1; } ;;
+              *) echo "::error::The HEIC worker didn't answer the probe with decode true."; exit 1 ;;
+            esac
+          }
+          probe "$bin"
+          # Rosetta, when this runner has it: the Intel slice too (heic-spec J36).
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then
+            probe arch -x86_64 "$bin"
+          else
+            echo "No Rosetta on this runner: the x86_64 slice's worker isn't run."
+          fi
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal
@@ -297,6 +445,17 @@ jobs:
           cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs
           if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md || [ -n "$(git status --porcelain -- THIRD_PARTY_NOTICES.md)" ]; then
             echo "::error file=THIRD_PARTY_NOTICES.md::THIRD_PARTY_NOTICES.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs"
+            exit 1
+          fi
+      # grape-heif.exe's Rust crates (D33): tools/grape-heif is its own
+      # workspace, with its own deny.toml and about.toml.
+      - name: grape-heif's licenses, bans and sources
+        run: cargo deny --manifest-path tools/grape-heif/Cargo.toml --config tools/grape-heif/deny.toml --locked check licenses bans sources
+      - name: licenses/grape-heif/rust-crates.md is up to date
+        run: |
+          cargo about generate --locked --fail --manifest-path tools/grape-heif/Cargo.toml -c tools/grape-heif/about.toml -o licenses/grape-heif/rust-crates.md tools/grape-heif/about.hbs
+          if ! git diff --exit-code -- licenses/grape-heif/rust-crates.md || [ -n "$(git status --porcelain -- licenses/grape-heif/rust-crates.md)" ]; then
+            echo "::error file=licenses/grape-heif/rust-crates.md::licenses/grape-heif/rust-crates.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path tools/grape-heif/Cargo.toml -c tools/grape-heif/about.toml -o licenses/grape-heif/rust-crates.md tools/grape-heif/about.hbs"
             exit 1
           fi
 
@@ -383,6 +542,8 @@ jobs:
       # the -grape marker. It also reports bsdtar as missing here: Grape's
       # bsdtar comes from the bsdtar workflow (scripts/bsdtar, D27), never
       # from the lock. The step still wants exit 1 and both FFmpeg refusals.
+      # grape-heif isn't in tauri.sidecars.conf.json: build-windows checks it
+      # through the gate run of its own overlay, tauri.heif.windows.conf.json.
       - name: The bundling gate refuses the dev builds (D25)
         shell: bash
         run: |

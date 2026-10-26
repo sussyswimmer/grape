@@ -1,15 +1,16 @@
 name: Release
 
 # A version tag (v1.2.3) builds the Windows installer and makes a DRAFT
-# GitHub Release with it. Nothing is published here: Maxwell checks the draft,
-# writes "What's new" and publishes it by hand. The steps are in
-# docs/PLATFORM_WINDOWS.md → "Releasing".
+# GitHub Release with it, and with the source of grape-heif.exe, the GPL
+# HEIC helper the installer carries (D33). Nothing is published here: Maxwell
+# checks the draft, writes "What's new" and publishes it by hand. The steps
+# are in docs/PLATFORM_WINDOWS.md → "Releasing".
 on:
   push:
     tags:
       - "v*.*.*"
   # Build an existing tag again, for example after a failed run. A draft that
-  # already exists gets its two files replaced; its notes are kept.
+  # already exists gets its files replaced; its notes are kept.
   workflow_dispatch:
     inputs:
       tag:
@@ -32,10 +33,20 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  # grape-heif.exe (D33), built clean from the tag: no vcpkg or cargo cache,
+  # as PDFium is fetched fresh below. Its GPL source bundle goes on the draft.
+  grape-heif:
+    name: grape-heif
+    uses: ./.github/workflows/grape-heif.yml
+    with:
+      cache: false
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
   # The same build as ci.yml's build-windows job, from the tag. It has a
   # read-only token: the build runs third-party build scripts.
   build:
     name: Build (Windows installer)
+    needs: grape-heif
     runs-on: windows-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -104,14 +115,35 @@ jobs:
       - name: Fetch PDFium
         shell: powershell
         run: ./scripts/fetch-sidecars.ps1 -Only pdfium
-      # The overlay adds pdfium.dll and licenses/pdfium/ to bundle.resources.
+      # grape-heif.exe from this run's grape-heif job.
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      - name: Put grape-heif.exe in binaries
+        shell: pwsh
+        env:
+          GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          if ($sha -ne $env:GRAPE_HEIF_SHA256) {
+            Write-Output "::error::grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built."
+            exit 1
+          }
+          Copy-Item -LiteralPath $exe -Destination apps/desktop/src-tauri/binaries/grape-heif-x86_64-pc-windows-msvc.exe
+      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
+      # bundle.resources; the HEIC overlay adds grape-heif to externalBin and
+      # licenses/grape-heif/, and runs the sidecar gate first. Never a second
+      # overlay that also sets externalBin (it would replace the list).
       - name: Build Grape and the installer
         working-directory: apps/desktop
-        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json
-      - name: Check PDFium is in the build
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.heif.windows.conf.json
+      - name: Check PDFium and grape-heif are in the build
         shell: pwsh
         run: |
-          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md') {
+          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md',
+                         'target/release/grape-heif.exe', 'target/release/licenses/grape-heif/LICENSE.txt', 'target/release/licenses/grape-heif/SOURCE.md') {
             if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
               Write-Output "::error::$f is missing from the build."
               exit 1
@@ -147,12 +179,13 @@ jobs:
   # build code.
   release:
     name: Draft the GitHub Release
-    needs: build
+    needs: [build, grape-heif]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
       VERSION: ${{ needs.build.outputs.version }}
+      HEIF_VERSION: ${{ needs.grape-heif.outputs.version }}
     steps:
       # Only for the notes template, as it was at the tag.
       - uses: actions/checkout@v7
@@ -167,6 +200,21 @@ jobs:
       - name: Check the installer against SHA256SUMS.txt
         working-directory: release
         run: sha256sum -c SHA256SUMS.txt
+      # The installer carries grape-heif.exe, which is GPL, so its complete
+      # source goes on the same release (GPL-3.0 section 6; heic-spec J37).
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-source
+          path: release
+      - name: Check the grape-heif source bundle and add it to SHA256SUMS.txt
+        working-directory: release
+        run: |
+          bundle="grape-heif-${HEIF_VERSION}-source.tar.gz"
+          test -f "$bundle" || { echo "::error::$bundle is missing from the grape-heif-source artifact."; exit 1; }
+          sha256sum -c "$bundle.sha256"
+          cat "$bundle.sha256" >> SHA256SUMS.txt
+          rm "$bundle.sha256"
+          sha256sum -c SHA256SUMS.txt
       - name: Fill in the release notes
         run: |
           sed "s/{{VERSION}}/${VERSION}/g" .github/release-notes.md > "$RUNNER_TEMP/release-notes.md"
@@ -179,7 +227,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files=(release/Grape-Setup-x64.exe release/SHA256SUMS.txt)
+          files=(release/Grape-Setup-x64.exe release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz")
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != "true" ]; then
               echo "::error::$TAG is already published, so its files stay as they are. Release a new version instead."
