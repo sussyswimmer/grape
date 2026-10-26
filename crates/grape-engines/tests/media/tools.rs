@@ -97,10 +97,13 @@ fn packets(path: &Path, spec: &str) -> Vec<(i64, u64)> {
         .output()
         .unwrap();
     assert!(out.status.success());
+    // Side data (an AAC packet's skip samples) comes as lines of its own.
     String::from_utf8_lossy(&out.stdout)
         .lines()
-        .filter_map(|line| line.split_once(','))
-        .map(|(pts, size)| (pts.parse().unwrap(), size.parse().unwrap()))
+        .filter_map(|line| {
+            let (pts, size) = line.split_once(',')?;
+            Some((pts.parse().ok()?, size.parse().ok()?))
+        })
         .collect()
 }
 
@@ -475,4 +478,273 @@ fn remove_audio_leaves_a_silent_video_and_refuses_a_song() {
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
     assert_eq!(err.user_message, "song.mov has no video to keep.");
     assert_eq!(dir.names(), ["silent.mp4", "song.mov"]);
+}
+
+/// What's left in `path` that Remove Metadata's output may not keep: a
+/// tag other than the structural ones (with FFmpeg's own values), a
+/// chapter, or cover art.
+fn left_over(path: &Path) -> Vec<String> {
+    let got = tags(path);
+    let mut left: Vec<String> = got
+        .iter()
+        .filter(|(key, value)| {
+            let Some((_, name)) = key.split_once(".tags.") else {
+                return key.starts_with("chapters.")
+                    || (key.ends_with("disposition.attached_pic") && *value == "1");
+            };
+            let ok = match name.to_ascii_lowercase().as_str() {
+                "major_brand" | "minor_version" | "compatible_brands" | "vendor_id"
+                | "language" | "duration" | "filename" | "mimetype" => true,
+                "handler_name" => matches!(
+                    value.as_str(),
+                    "VideoHandler" | "SoundHandler" | "SubtitleHandler" | "DataHandler"
+                ),
+                "encoder" => matches!(value.as_str(), "Lavf" | "Lavc"),
+                _ => false,
+            };
+            !ok
+        })
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect();
+    left.sort();
+    left
+}
+
+/// A 64×64 PNG cover, made with the FFmpeg under test.
+fn cover_png(dir: &TestDir) -> PathBuf {
+    let path = dir.join("cover.png");
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=64x64:duration=0.1",
+        "-frames:v",
+        "1",
+        "-c:v",
+        "png",
+        "-f",
+        "image2pipe",
+        s(&path),
+    ]);
+    path
+}
+
+/// A 1 s song of format `muxer` with `codec`, a PNG cover (unless the
+/// format has none) and title, artist, album and date tags.
+fn tagged_song(dir: &TestDir, name: &str, codec: &str, muxer: &str) -> PathBuf {
+    let cover = cover_png(dir);
+    let path = dir.join(name);
+    let mut args = SINE.to_vec();
+    let with_cover = muxer != "wav";
+    if with_cover {
+        args.extend(["-i", s(&cover), "-map", "0:a", "-map", "1:v", "-c:v", "png"]);
+        args.extend(["-disposition:v:0", "attached_pic"]);
+    }
+    args.extend(["-c:a", codec]);
+    args.extend(["-metadata", "title=Song", "-metadata", "artist=Band"]);
+    args.extend(["-metadata", "album=LP", "-metadata", "date=2023"]);
+    if muxer == "mp3" {
+        args.extend(["-id3v2_version", "3"]);
+    }
+    args.extend(["-f", muxer, s(&path)]);
+    ffmpeg(&args);
+    path
+}
+
+#[test]
+fn remove_metadata_strips_audio_files_and_says_what_went() {
+    use grape_engines::MetaField::*;
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-strip-audio");
+    let mut failures = Vec::new();
+    for (name, codec, muxer, cover) in [
+        ("song.mp3", "libmp3lame", "mp3", true),
+        ("song.flac", "flac", "flac", true),
+        ("song.m4a", "aac", "ipod", true),
+        ("take.wav", "pcm_s24le", "wav", false),
+    ] {
+        let src = tagged_song(&dir, name, codec, muxer);
+        let out = match run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{name}: {e} ({})", e.detail));
+                continue;
+            }
+        };
+        let stripped = &out.outputs[0];
+        let left = left_over(stripped);
+        if !left.is_empty() {
+            failures.push(format!("{name}: left {left:?}"));
+        }
+        if kinds(stripped) != ["audio"] {
+            failures.push(format!("{name}: kinds {:?}", kinds(stripped)));
+        }
+        // Author, title, the date and the album, and the cover; the
+        // encoder's name too where the muxer wrote one with its version.
+        let Note::MetadataRemoved(fields) = &out.notes[0] else {
+            panic!("{:?}", out.notes);
+        };
+        let mut want = vec![Author, Title, CreationDate];
+        if cover {
+            want.push(CoverArt);
+        }
+        want.push(Other);
+        let reported: Vec<_> = fields.iter().filter(|f| **f != Software).copied().collect();
+        if out.notes.len() != 1 || reported != want {
+            failures.push(format!("{name}: notes {:?}", out.notes));
+        }
+        if same_packets_audio(&src, stripped) {
+            continue;
+        }
+        failures.push(format!("{name}: audio packets differ"));
+    }
+    // MP3 has no ID3 tag at all: the file starts with a frame.
+    let mp3 = fs::read(dir.join("song No Metadata.mp3")).unwrap();
+    assert!(
+        mp3.len() > 2 && mp3[0] == 0xFF && mp3[1] & 0xE0 == 0xE0,
+        "{:?}",
+        &mp3[..4]
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// True when the audio packets of `out` are `src`'s, byte counts and
+/// times.
+fn same_packets_audio(src: &Path, out: &Path) -> bool {
+    let (a, b) = (packets(src, "a:0"), packets(out, "a:0"));
+    !a.is_empty() && a == b
+}
+
+#[test]
+fn remove_metadata_strips_video_and_keeps_tracks_languages_and_fonts() {
+    use grape_engines::MetaField::*;
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-strip-video");
+    let mut failures = Vec::new();
+
+    // An MP4 with chapters, a cover, a location and a rotation.
+    let plain = chaptered_mp4(&dir, "plain.mp4");
+    let cover = cover_png(&dir);
+    let src = dir.join("trip.mp4");
+    ffmpeg(&[
+        "-display_rotation:v:0",
+        "90",
+        "-i",
+        s(&plain),
+        "-i",
+        s(&cover),
+        "-map",
+        "0",
+        "-map",
+        "1",
+        "-c",
+        "copy",
+        "-c:v:1",
+        "png",
+        "-disposition:v:1",
+        "attached_pic",
+        "-metadata",
+        "location=+48.8577+002.2950/",
+        "-metadata",
+        "artist=Ann",
+        // The remux drops it, as it would any copy's.
+        "-metadata",
+        "creation_time=2024-05-01T10:20:30.000000Z",
+        "-metadata:s:a:0",
+        "language=eng",
+        "-f",
+        "mp4",
+        s(&src),
+    ]);
+    fs::remove_file(&plain).unwrap();
+    let out = run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()).unwrap();
+    let stripped = &out.outputs[0];
+    let left = left_over(stripped);
+    let got = tags(stripped);
+    let mut check = |ok: bool, what: String| {
+        if !ok {
+            failures.push(what);
+        }
+    };
+    check(left.is_empty(), format!("mp4 left {left:?}"));
+    check(
+        kinds(stripped) == ["video", "audio"],
+        format!("mp4 kinds {:?}", kinds(stripped)),
+    );
+    check(chapters(stripped) == 0, "mp4 chapters".into());
+    check(
+        got.get("streams.stream.1.tags.language")
+            .map(String::as_str)
+            == Some("eng"),
+        format!("mp4 language {got:?}"),
+    );
+    let rotation = flat(stripped, "stream_side_data=rotation");
+    check(
+        rotation.values().any(|r| r == "-90" || r == "90"),
+        format!("mp4 rotation {rotation:?}"),
+    );
+    check(
+        same_packets(&src, stripped, &["v:0", "a:0"]),
+        "mp4 packets differ".into(),
+    );
+    let Note::MetadataRemoved(fields) = &out.notes[0] else {
+        panic!("{:?}", out.notes);
+    };
+    check(
+        *fields
+            == [
+                Location,
+                Author,
+                Title,
+                Software,
+                CreationDate,
+                CoverArt,
+                Chapters,
+            ],
+        format!("mp4 note {fields:?}"),
+    );
+
+    // An iPhone MOV: its keys and timecode go.
+    let src = iphone_mov(&dir);
+    let out = run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()).unwrap();
+    let stripped = &out.outputs[0];
+    let left = left_over(stripped);
+    check(left.is_empty(), format!("mov left {left:?}"));
+    check(
+        kinds(stripped) == ["video", "audio"],
+        format!("mov kinds {:?}", kinds(stripped)),
+    );
+    let Note::MetadataRemoved(fields) = &out.notes[0] else {
+        panic!("{:?}", out.notes);
+    };
+    check(
+        *fields == [Location, Camera, Software, CreationDate],
+        format!("mov note {fields:?}"),
+    );
+
+    // An MKV: both languages and the font stay, its title goes.
+    let src = movie_mkv(&dir, "movie.mkv");
+    let out = run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()).unwrap();
+    let stripped = &out.outputs[0];
+    let left = left_over(stripped);
+    let got = tags(stripped);
+    check(left.is_empty(), format!("mkv left {left:?}"));
+    check(
+        kinds(stripped) == ["video", "audio", "audio", "subtitle", "attachment"],
+        format!("mkv kinds {:?}", kinds(stripped)),
+    );
+    for (index, language) in [(1, "eng"), (2, "fra"), (3, "eng")] {
+        let key = format!("streams.stream.{index}.tags.language");
+        check(
+            got.get(&key).map(String::as_str) == Some(language),
+            format!("mkv {key}: {got:?}"),
+        );
+    }
+    check(
+        got.get("streams.stream.4.tags.filename")
+            .map(String::as_str)
+            == Some("font.ttf"),
+        format!("mkv font {got:?}"),
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

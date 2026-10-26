@@ -1,5 +1,5 @@
 //! The tools that run through FFmpeg (D26), one file in and one out:
-//! Remove Audio so far.
+//! Remove Audio and Remove Metadata so far.
 //!
 //! [`run`] goes through the steps a conversion does ([`super::convert`]),
 //! and every refusal, and every [`ErrorKind::NoChange`], comes before
@@ -11,8 +11,10 @@
 //! 3. The tool's own checks (no sound to remove, no video to keep).
 //! 4. The temp file, then one of the two FFmpeg slots.
 //! 5. The tool's passes ([`argv`]), then the output's check: the
-//!    conversion's (not empty, the stream it's for), then the tool's own.
-//! 6. The publish ([`super::Begun::publish_checked`]).
+//!    conversion's (not empty, `ffprobe` reads it), then the tool's own:
+//!    the streams it planned and, for Remove Metadata, a second tags probe
+//!    that must find nothing left.
+//! 6. The publish ([`super::Begun::publish_checked`]), and the note.
 //!
 //! Tools keep every track but what they remove: streams are mapped by
 //! index. Nothing is retried: a copy tool that re-encoded would lose the
@@ -25,26 +27,32 @@ use std::path::{Path, PathBuf};
 
 use grape_core::{Format, Job, ToolKey, ToolParams};
 
-use super::args::Pass;
-use super::probe::{Probe, StreamKind};
-use super::run::{self, SlotGuard};
+use super::args::{Missing, Pass};
+use super::probe::{Probe, StreamInfo, StreamKind};
+use super::run::{self, RunError, SlotGuard};
 use super::tags::{self, Tags};
 use super::{
-    absolute, begin, check_output, ffmpeg_failed, probe_failed, run_passes, source_is_a_file, Bar,
-    Begun, PASSES_SHARE, PROBE_TIMEOUT,
+    absolute, begin, ffmpeg_failed, no_stream, probe_failed, probe_output, run_passes,
+    source_is_a_file, Bar, Begun, PASSES_SHARE, PROBE_TIMEOUT,
 };
 use crate::output::TempFile;
 use crate::publish;
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome};
+use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 
 /// True when this engine runs `tool` on a file of format `from` (with
 /// `ffmpeg` and `ffprobe`; the caller checks those).
 pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
-    use Format::{Mkv, Mov, Mp4};
+    use Format::{Flac, M4a, Mkv, Mov, Mp3, Mp4, Wav};
     match tool {
+        ToolKey::RemoveMetadata => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
         ToolKey::MuteVideo => matches!(from, Mp4 | Mov | Mkv),
         _ => false,
     }
+}
+
+/// MP4, MOV and M4A: one demuxer, whose XMP the tags probe asks for.
+fn mov_family(format: Format) -> bool {
+    matches!(format, Format::Mp4 | Format::Mov | Format::M4a)
 }
 
 /// Runs `tool` on the file `src` (of format `from`, by its name) into
@@ -74,6 +82,7 @@ pub(crate) fn run(
     };
     match tool.tool {
         ToolKey::MuteVideo => tool.mute(&mut bar),
+        ToolKey::RemoveMetadata => tool.strip(&mut bar),
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
@@ -81,11 +90,10 @@ pub(crate) fn run(
 /// The tags probe of the source: with `-export_xmp 1` for the MOV family,
 /// whose demuxer otherwise drops an XMP packet unseen.
 fn read_tags(begun: &Begun, from: Format, ctx: &EngineCtx) -> Result<Tags, GrapeError> {
-    let mov = matches!(from, Format::Mp4 | Format::Mov | Format::M4a);
     tags::read(
         begun.ffprobe,
         &begun.src_abs,
-        mov,
+        mov_family(from),
         &ctx.cancel,
         PROBE_TIMEOUT,
     )
@@ -103,7 +111,7 @@ struct Tool<'a> {
     ctx: &'a EngineCtx,
 }
 
-/// An output FFmpeg wrote and the conversion's check passed.
+/// An output FFmpeg wrote and `ffprobe` read.
 struct Written {
     temp: TempFile,
     /// `temp`'s absolute path.
@@ -140,14 +148,76 @@ impl Tool<'_> {
             argv::mute(&self.begun.src_abs, self.to, info, self.tags, out)
         })?;
         let out = &written.probe;
-        if count(out, StreamKind::Audio) > 0 || count(out, StreamKind::Subtitle) != subtitles {
-            return Err(self.wrote_wrong(format!(
-                "{} audio and {} subtitle streams, {subtitles} subtitles planned",
-                count(out, StreamKind::Audio),
-                count(out, StreamKind::Subtitle)
-            )));
+        let (video, audio) = (count(out, StreamKind::Video), count(out, StreamKind::Audio));
+        if video == 0 || audio > 0 || count(out, StreamKind::Subtitle) != subtitles {
+            return Err(self.wrote_wrong(
+                &written.out,
+                format!(
+                    "{video} video, {audio} audio and {} subtitle streams, {subtitles} \
+                     subtitles planned",
+                    count(out, StreamKind::Subtitle)
+                ),
+            ));
         }
         self.publish(written, bar)
+    }
+
+    /// Remove Metadata: every track it keeps, copied without its tags
+    /// ([`argv::strip`]), then the output's tags probe, which must find
+    /// only what may stay. The note says what the source's tags probe
+    /// found, even when that's nothing.
+    fn strip(&self, bar: &mut Bar) -> Result<JobOutcome, GrapeError> {
+        let (names, info) = (&self.begun.names, &self.begun.info);
+        let src = self.begun.src;
+        let kept: Vec<&StreamInfo> = argv::stripped(self.to, info, self.tags).collect();
+        if kept.is_empty() {
+            return Err(match self.to {
+                Format::Mp4 | Format::Mov | Format::Mkv => nothing_in_it(names, src),
+                _ => no_stream(names, Missing::Audio, src),
+            });
+        }
+        let written = self.write(bar, |out| {
+            argv::strip(&self.begun.src_abs, self.to, info, self.tags, out)
+        })?;
+        let planned = kinds(kept.iter().copied());
+        let wrote = kinds(written.probe.streams.iter());
+        if wrote != planned {
+            return Err(self.wrote_wrong(
+                &written.out,
+                format!("streams by kind {wrote:?}, {planned:?} planned"),
+            ));
+        }
+        let left = tags::read(
+            self.begun.ffprobe,
+            &written.out,
+            mov_family(self.to),
+            &self.ctx.cancel,
+            PROBE_TIMEOUT,
+        )
+        .map_err(|e| self.unchecked(&written.out, e))?;
+        if !left.fields.is_empty() || left.unlisted {
+            return Err(GrapeError::new(
+                ErrorKind::EncodeFailed,
+                format!(
+                    "Grape couldn't remove all of {}'s metadata. Nothing was saved.",
+                    names.source
+                ),
+                format!(
+                    "check {}: left {:?}{}",
+                    written.out.display(),
+                    left.fields,
+                    if left.unlisted {
+                        " and keys it may not keep"
+                    } else {
+                        ""
+                    }
+                ),
+            ));
+        }
+        let mut outcome = self.publish(written, bar)?;
+        let removed = self.tags.fields.iter().copied().collect();
+        outcome.notes.push(Note::MetadataRemoved(removed));
+        Ok(outcome)
     }
 
     /// Creates the temp output, waits for an FFmpeg slot, runs the one pass
@@ -165,7 +235,7 @@ impl Tool<'_> {
             weight: 1.0,
         };
         let warnings = self.run(&[pass], bar, PASSES_SHARE)?;
-        let probe = self.check(&out, &warnings)?;
+        let probe = self.probe(&out, &warnings)?;
         Ok(Written {
             temp,
             out,
@@ -214,16 +284,17 @@ impl Tool<'_> {
             .map_err(|e| publish::or_cancelled(&self.ctx.cancel, src, e))
     }
 
-    /// The conversion's check of the output `out`, with FFmpeg's
-    /// `warnings` added to a failure's detail.
-    fn check(&self, out: &Path, warnings: &str) -> Result<Probe, GrapeError> {
+    /// The conversion's check of the output `out` but for its streams,
+    /// which each tool checks itself, with FFmpeg's `warnings` added to a
+    /// failure's detail.
+    fn probe(&self, out: &Path, warnings: &str) -> Result<Probe, GrapeError> {
         let Begun {
             ffprobe,
             names,
             src,
             ..
         } = self.begun;
-        check_output(ffprobe, out, self.to, names, self.ctx, src)
+        probe_output(ffprobe, out, self.to, names, self.ctx, src)
             .map_err(|mut e| {
                 if !warnings.trim().is_empty() {
                     e.detail = format!("{}; FFmpeg said: {}", e.detail, warnings.trim());
@@ -233,11 +304,20 @@ impl Tool<'_> {
             .map_err(|e| publish::or_cancelled(&self.ctx.cancel, src, e))
     }
 
-    /// The error for an output that isn't what the tool planned.
-    fn wrote_wrong(&self, detail: String) -> GrapeError {
+    /// The error for an output `out` that isn't what the tool planned.
+    fn wrote_wrong(&self, out: &Path, detail: String) -> GrapeError {
         self.begun
             .names
-            .encode_failed(format!("check {}: {detail}", self.begun.src.display()))
+            .encode_failed(format!("check {}: {detail}", out.display()))
+    }
+
+    /// The error for an output `out` whose tags probe failed: it can't be
+    /// shown to hold nothing.
+    fn unchecked(&self, out: &Path, e: RunError) -> GrapeError {
+        match e {
+            RunError::Cancelled => crate::cancelled(self.begun.src),
+            e => self.wrote_wrong(out, format!("tags probe: {e}")),
+        }
     }
 
     /// Publishes a checked output.
@@ -245,6 +325,31 @@ impl Tool<'_> {
         self.begun
             .publish_checked(written.temp, &written.out, self.ctx, bar)
     }
+}
+
+/// The error for a container with neither sound nor video to keep.
+fn nothing_in_it(names: &publish::Names, src: &Path) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::DecodeFailed,
+        format!("{} has no sound or video in it.", names.source),
+        format!("no audio or video stream in {}", src.display()),
+    )
+}
+
+/// How many video (cover art not counted), audio, subtitle and attachment
+/// streams there are among `streams`.
+fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 4] {
+    let mut counts = [0; 4];
+    for s in streams.filter(|s| !s.attached_pic) {
+        match s.kind {
+            StreamKind::Video => counts[0] += 1,
+            StreamKind::Audio => counts[1] += 1,
+            StreamKind::Subtitle => counts[2] += 1,
+            StreamKind::Attachment => counts[3] += 1,
+            StreamKind::Data => {}
+        }
+    }
+    counts
 }
 
 /// How many streams of `kind` `probe` lists, cover art not counted as
@@ -269,6 +374,7 @@ mod tests {
     use super::*;
     use crate::media::run::tests::{one_at_a_time, ran, script, slots_held, Fake};
     use crate::media::tests::{assert_forward_to_done, ctx, flat, has, TestDir};
+    use crate::Note;
 
     /// Every format and tool.
     fn all_pairs() -> impl Iterator<Item = (ToolKey, Format)> {
@@ -295,7 +401,7 @@ mod tests {
             assert_eq!(to, from, "{tool:?} on {from:?}: {planned}");
             assert!(crate::media::args::muxer(to).is_some());
         }
-        assert_eq!(count, 3);
+        assert_eq!(count, 10);
     }
 
     /// A tool job on `name` (the bytes "source") in a fresh folder, with
@@ -475,6 +581,146 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
         assert_eq!(ran().len(), 3);
         assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    /// `ffprobe`'s view of an MP3 with a PNG cover.
+    fn mp3_with_cover() -> Fake {
+        let cover = "streams.stream.1.index=1\n\
+                     streams.stream.1.codec_name=\"png\"\n\
+                     streams.stream.1.codec_type=\"video\"\n\
+                     streams.stream.1.disposition.attached_pic=1\n";
+        Fake::Prints(format!("{cover}{}", flat("mp3", false, "mp3")))
+    }
+
+    #[test]
+    fn remove_metadata_reports_what_the_source_had() {
+        let case = Case::new("song.mp3", ToolKey::RemoveMetadata);
+        let tags = "streams.stream.1.index=1\n\
+                    streams.stream.1.codec_type=\"video\"\n\
+                    streams.stream.1.disposition.attached_pic=1\n\
+                    format.tags.title=\"Song\"\n\
+                    format.tags.artist=\"Band\"\n\
+                    format.tags.genre=\"Rock\"\n";
+        script([
+            mp3_with_cover(),
+            Fake::Prints(tags.to_owned()),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(flat("mp3", false, "mp3")),
+            // The output's own tags probe: nothing left.
+            Fake::Prints(String::new()),
+        ]);
+        let (result, seen) = case.run();
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("song No Metadata.mp3")]);
+        use crate::MetaField::*;
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![Author, Title, CoverArt, Other])]
+        );
+        let ran = ran();
+        assert_eq!(ran.len(), 5);
+        // The tags probes ask for no XMP from an MP3; the copy keeps only
+        // the audio, with no ID3 at all.
+        assert!(!has(&ran[1], ["-export_xmp", "1"]));
+        assert!(has(&ran[2], ["-map", "0:0"]) && !has(&ran[2], ["-map", "0:1"]));
+        assert!(has(&ran[2], ["-id3v2_version", "0"]));
+        assert!(ran[4]
+            .last()
+            .unwrap()
+            .to_string_lossy()
+            .contains(".grape-tmp-"));
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // A file with nothing to report still gets its (empty) note.
+        script([
+            Fake::Prints(flat("wav", false, "pcm_s16le")),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(flat("wav", false, "pcm_s16le")),
+            no_tags(),
+        ]);
+        let case = Case::new("take.wav", ToolKey::RemoveMetadata);
+        let (result, _) = case.run();
+        assert_eq!(result.unwrap().notes, [Note::MetadataRemoved(Vec::new())]);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn metadata_left_in_the_output_fails_the_job() {
+        for (left, why) in [
+            ("format.tags.encoder=\"Lavf60.16.100\"\n", "Software"),
+            ("format.tags.album=\"LP\"\n", "Other"),
+            ("chapters.chapter.0.id=0\n", "Chapters"),
+            (
+                "streams.stream.0.tags.handler_name=\"Apple\"\n",
+                "may not keep",
+            ),
+        ] {
+            let case = Case::new("clip.mov", ToolKey::RemoveMetadata);
+            script([
+                mp4("aac"),
+                no_tags(),
+                Fake::Child("write", "stripped".to_owned()),
+                mp4("aac"),
+                Fake::Prints(left.to_owned()),
+            ]);
+            let (result, _) = case.run();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::EncodeFailed, "{why}: {}", err.detail);
+            assert_eq!(
+                err.user_message,
+                "Grape couldn't remove all of clip.mov's metadata. Nothing was saved."
+            );
+            assert!(err.detail.contains(why), "{why}: {}", err.detail);
+            assert!(!case.dest().exists());
+            case.assert_clean();
+        }
+        // An output missing a track it should keep, or whose tags can't be
+        // read, isn't published either.
+        let case = Case::new("clip.mp4", ToolKey::RemoveMetadata);
+        script([
+            mp4("aac"),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            mp4(""),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("streams by kind"), "{}", err.detail);
+        case.assert_clean();
+        script([
+            mp4("aac"),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            mp4("aac"),
+            Fake::Fails(RunError::TimedOut),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.user_message, "Grape couldn't write a MP4 file.");
+        assert!(err.detail.contains("tags probe"), "{}", err.detail);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn remove_metadata_needs_something_to_keep() {
+        let case = Case::new("cover.m4a", ToolKey::RemoveMetadata);
+        let cover_only = "streams.stream.0.index=0\n\
+                          streams.stream.0.codec_name=\"mjpeg\"\n\
+                          streams.stream.0.codec_type=\"video\"\n\
+                          streams.stream.0.disposition.attached_pic=1\n\
+                          format.format_name=\"mov,mp4,m4a,3gp,3g2,mj2\"\n";
+        script([Fake::Prints(cover_only.to_owned()), no_tags()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed);
+        assert_eq!(err.user_message, "cover.m4a has no sound to save as M4A.");
+        let case = Case::new("empty.mkv", ToolKey::RemoveMetadata);
+        let empty = cover_only.replace("mov,mp4,m4a,3gp,3g2,mj2", "matroska,webm");
+        script([Fake::Prints(empty), no_tags()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.user_message, "empty.mkv has no sound or video in it.");
+        assert_eq!(ran().len(), 2);
         case.assert_clean();
     }
 

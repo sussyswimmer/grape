@@ -201,10 +201,17 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
 }
 
 /// The tools that run with `ffmpeg` and `ffprobe` (D26), so far.
-const MEDIA_TOOLS: [(ToolKey, Format); 3] = [
+const MEDIA_TOOLS: [(ToolKey, Format); 10] = [
     (ToolKey::MuteVideo, Format::Mp4),
     (ToolKey::MuteVideo, Format::Mov),
     (ToolKey::MuteVideo, Format::Mkv),
+    (ToolKey::RemoveMetadata, Format::Mp3),
+    (ToolKey::RemoveMetadata, Format::M4a),
+    (ToolKey::RemoveMetadata, Format::Wav),
+    (ToolKey::RemoveMetadata, Format::Flac),
+    (ToolKey::RemoveMetadata, Format::Mp4),
+    (ToolKey::RemoveMetadata, Format::Mov),
+    (ToolKey::RemoveMetadata, Format::Mkv),
 ];
 
 #[test]

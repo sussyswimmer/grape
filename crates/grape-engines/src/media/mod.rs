@@ -455,8 +455,33 @@ fn run_passes(
 
 /// Checks that FFmpeg wrote a file of the target's kind: not empty, and
 /// with the stream the target is for. Returns what `ffprobe` said about
-/// it, for the tools' own checks.
+/// it.
 fn check_output(
+    ffprobe: &Path,
+    out: &Path,
+    to: Format,
+    names: &Names,
+    ctx: &EngineCtx,
+    src: &Path,
+) -> Result<Probe, GrapeError> {
+    let output = probe_output(ffprobe, out, to, names, ctx, src)?;
+    match missing_stream(to, &output) {
+        None => Ok(output),
+        Some(Missing::Audio) => Err(names.encode_failed(format!(
+            "check {}: no audio stream in the output",
+            out.display()
+        ))),
+        Some(Missing::Video) => Err(names.encode_failed(format!(
+            "check {}: no video stream in the output",
+            out.display()
+        ))),
+    }
+}
+
+/// [`check_output`] but for the stream: the output isn't empty (nor past
+/// AIFF's limit), and `ffprobe` reads it. The tools check its streams
+/// themselves, since some keep only audio in a video container.
+fn probe_output(
     ffprobe: &Path,
     out: &Path,
     to: Format,
@@ -488,12 +513,7 @@ fn check_output(
                 other => wrote(other.to_string()),
             }
         })?;
-    let output = probe::parse(&flat).map_err(wrote)?;
-    match missing_stream(to, &output) {
-        None => Ok(output),
-        Some(Missing::Audio) => Err(wrote("no audio stream in the output".to_string())),
-        Some(Missing::Video) => Err(wrote("no video stream in the output".to_string())),
-    }
+    probe::parse(&flat).map_err(wrote)
 }
 
 /// The stream a file needs to be a source for, or an output of, `to` but

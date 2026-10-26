@@ -111,10 +111,128 @@ pub(super) fn muted(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamIn
     })
 }
 
+/// Remove Metadata on MP3, M4A, WAV, FLAC, MP4, MOV and MKV: a stream
+/// copy of what it keeps ([`stripped`]) with no tags, chapters or
+/// encoder name (`-map_metadata -1 -map_chapters -1 -fflags +bitexact`).
+///
+/// - Each kept track's language is set again (`-metadata:s:<o>`), from
+///   the tags probe's checked values only.
+/// - An MKV font gets its own tags back (`-map_metadata:s:<o> 0:s:<i>`):
+///   the muxer needs its file name and MIME type, and Grape never reads
+///   them into an argv.
+/// - MP4 and MOV: `-strict unofficial` keeps Dolby Vision, stereo and
+///   spherical boxes; `-write_tmcd 0` drops the timecode, which is the
+///   time of day it was filmed.
+/// - MP3: `-id3v2_version 0` writes no ID3 tag at all (3 would write an
+///   empty one); only the Xing frame stays.
+/// - WAV: RF64 past 4 GiB; with `bitexact` it writes no INFO list.
+pub(super) fn strip(
+    src: &Path,
+    to: Format,
+    probe: &Probe,
+    tags: &Tags,
+    out: &Path,
+) -> Vec<OsString> {
+    let mut args = prefix_at(src, &[], "error");
+    let kept: Vec<&StreamInfo> = stripped(to, probe, tags).collect();
+    for stream in &kept {
+        map(&mut args, stream.index);
+    }
+    push(
+        &mut args,
+        &[
+            "-c",
+            "copy",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-fflags",
+            "+bitexact",
+        ],
+    );
+    for (o, stream) in kept.iter().enumerate() {
+        if let Some(language) = tags.languages.get(&stream.index) {
+            push(
+                &mut args,
+                &[&format!("-metadata:s:{o}"), &format!("language={language}")],
+            );
+        }
+        if tags.font_streams.contains(&stream.index) {
+            push(
+                &mut args,
+                &[
+                    &format!("-map_metadata:s:{o}"),
+                    &format!("0:s:{}", stream.index),
+                ],
+            );
+        }
+    }
+    match to {
+        Format::Mp4 | Format::Mov => push(
+            &mut args,
+            &[
+                "-strict",
+                "unofficial",
+                "-movflags",
+                "+faststart",
+                "-write_tmcd",
+                "0",
+            ],
+        ),
+        Format::M4a => push(&mut args, &["-movflags", "+faststart"]),
+        Format::Mp3 => push(&mut args, &["-id3v2_version", "0"]),
+        Format::Wav => push(&mut args, &["-rf64", "auto"]),
+        _ => {}
+    }
+    finish(args, muxer_of(to), out)
+}
+
+/// The streams [`strip`] keeps, in the source's order:
+///
+/// - MP4 and MOV: every video that isn't cover art, every audio track and
+///   every `mov_text` subtitle;
+/// - M4A: every audio track;
+/// - MKV: every video that isn't cover art (an image attachment is cover
+///   art to the demuxer), audio track and subtitle, and the fonts its
+///   subtitles need;
+/// - MP3, FLAC and WAV: the audio.
+///
+/// Cover art goes (its JPEG keeps the camera's EXIF, and Grape's FFmpeg
+/// has no JPEG encoder to clean it), and so do data tracks and other
+/// attachments.
+pub(super) fn stripped<'a>(
+    to: Format,
+    probe: &'a Probe,
+    tags: &'a Tags,
+) -> impl Iterator<Item = &'a StreamInfo> {
+    let first_audio = probe
+        .streams
+        .iter()
+        .find(|s| s.kind == StreamKind::Audio)
+        .map(|s| s.index);
+    probe.streams.iter().filter(move |s| {
+        let video = s.kind == StreamKind::Video && !s.attached_pic;
+        let audio = s.kind == StreamKind::Audio;
+        match to {
+            Format::Mp4 | Format::Mov => video || audio || is_mov_text(s),
+            Format::M4a => audio,
+            Format::Mkv => {
+                video
+                    || audio
+                    || s.kind == StreamKind::Subtitle
+                    || (s.kind == StreamKind::Attachment && tags.font_streams.contains(&s.index))
+            }
+            _ => Some(s.index) == first_audio,
+        }
+    })
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::PathBuf;
 
     use super::*;
@@ -273,6 +391,32 @@ pub(super) mod tests {
         )
     }
 
+    /// What the tags probe says of [`movie`]: languages, and everything to
+    /// report.
+    fn movie_tags() -> Tags {
+        Tags {
+            languages: BTreeMap::from([(1, "eng".to_owned()), (2, "fra".to_owned())]),
+            ..dated(true)
+        }
+    }
+
+    /// What the tags probe says of [`mkv`]: languages and the font.
+    fn mkv_tags() -> Tags {
+        Tags {
+            languages: BTreeMap::from([(1, "deu".to_owned()), (2, "eng".to_owned())]),
+            font_streams: BTreeSet::from([3]),
+            ..Tags::default()
+        }
+    }
+
+    /// An audio file with a cover, as MP3, FLAC and M4A have them.
+    fn song(format_name: &str, codec: &str) -> Probe {
+        probe_of(
+            format_name,
+            vec![stream(0, StreamKind::Audio, codec), cover(1)],
+        )
+    }
+
     /// Tags with a `creation_time`, and iPhone keys if `apple`.
     pub(in crate::media::tools) fn dated(apple: bool) -> Tags {
         Tags {
@@ -291,6 +435,18 @@ pub(super) mod tests {
                 all.push(mute(&src(), to, &movie(), &tags, &out()));
             }
             all.push(mute(&src(), Format::Mkv, &mkv(), &tags, &out()));
+        }
+        for to in [Format::Mp4, Format::Mov] {
+            all.push(strip(&src(), to, &movie(), &movie_tags(), &out()));
+        }
+        all.push(strip(&src(), Format::Mkv, &mkv(), &mkv_tags(), &out()));
+        for (to, probe) in [
+            (Format::Mp3, song("mp3", "mp3")),
+            (Format::Flac, song("flac", "flac")),
+            (Format::M4a, song("mov,mp4,m4a,3gp,3g2,mj2", "aac")),
+            (Format::Wav, song("wav", "pcm_s16le")),
+        ] {
+            all.push(strip(&src(), to, &probe, &Tags::default(), &out()));
         }
         all
     }
@@ -325,6 +481,100 @@ pub(super) mod tests {
             let planned = planned.to_string_lossy();
             assert!(!text.iter().any(|a| a.contains(&*planned)));
         }
+    }
+
+    /// Remove Metadata's options before the per-stream ones.
+    const STRIP: [&str; 8] = [
+        "-c",
+        "copy",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-fflags",
+        "+bitexact",
+    ];
+
+    #[test]
+    fn strip_copies_what_it_keeps_without_tags() {
+        // MP4 and MOV: the video, both audio tracks and the mov_text
+        // subtitle, with their languages; no DVD subtitle, data or cover.
+        for (to, muxer) in [(Format::Mp4, "mp4"), (Format::Mov, "mov")] {
+            let mut middle = vec!["-map", "0:0", "-map", "0:1", "-map", "0:2", "-map", "0:3"];
+            middle.extend(STRIP);
+            middle.extend([
+                "-metadata:s:1",
+                "language=eng",
+                "-metadata:s:2",
+                "language=fra",
+                "-strict",
+                "unofficial",
+                "-movflags",
+                "+faststart",
+                "-write_tmcd",
+                "0",
+            ]);
+            assert_eq!(
+                strip(&src(), to, &movie(), &movie_tags(), &out()),
+                expect(&[], &middle, muxer),
+                "{to:?}"
+            );
+        }
+        // MKV: the video, audio, subtitle and the font, whose own tags come
+        // back; not the image attachment or the data.
+        let mut middle = vec!["-map", "0:0", "-map", "0:1", "-map", "0:2", "-map", "0:3"];
+        middle.extend(STRIP);
+        middle.extend([
+            "-metadata:s:1",
+            "language=deu",
+            "-metadata:s:2",
+            "language=eng",
+            "-map_metadata:s:3",
+            "0:s:3",
+        ]);
+        assert_eq!(
+            strip(&src(), Format::Mkv, &mkv(), &mkv_tags(), &out()),
+            expect(&[], &middle, "matroska")
+        );
+        // An attachment that isn't a font goes.
+        let no_font = Tags {
+            font_streams: BTreeSet::new(),
+            ..mkv_tags()
+        };
+        let args = strip(&src(), Format::Mkv, &mkv(), &no_font, &out());
+        assert!(!args.iter().any(|a| a == "0:3"));
+        // Audio files: the audio alone, never the cover.
+        let audio = |to, probe: &Probe, last: &[&'static str], muxer| {
+            let mut middle = vec!["-map", "0:0"];
+            middle.extend(STRIP);
+            middle.extend(last);
+            assert_eq!(
+                strip(&src(), to, probe, &Tags::default(), &out()),
+                expect(&[], &middle, muxer),
+                "{to:?}"
+            );
+        };
+        audio(
+            Format::Mp3,
+            &song("mp3", "mp3"),
+            &["-id3v2_version", "0"],
+            "mp3",
+        );
+        audio(Format::Flac, &song("flac", "flac"), &[], "flac");
+        let m4a = song("mov,mp4,m4a,3gp,3g2,mj2", "aac");
+        audio(Format::M4a, &m4a, &["-movflags", "+faststart"], "ipod");
+        let wav = probe_of("wav", vec![stream(0, StreamKind::Audio, "pcm_s24le")]);
+        audio(Format::Wav, &wav, &["-rf64", "auto"], "wav");
+        // An M4A keeps every audio track, an MP3 its first.
+        let two = probe_of(
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            vec![
+                stream(0, StreamKind::Audio, "aac"),
+                stream(1, StreamKind::Audio, "alac"),
+            ],
+        );
+        assert_eq!(stripped(Format::M4a, &two, &Tags::default()).count(), 2);
+        assert_eq!(stripped(Format::Mp3, &two, &Tags::default()).count(), 1);
     }
 
     #[test]

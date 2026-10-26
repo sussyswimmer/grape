@@ -85,6 +85,9 @@ pub(crate) struct Tags {
     pub(crate) font_streams: BTreeSet<u32>,
     /// How many chapters there are.
     pub(crate) chapters: u32,
+    /// Some tag isn't one Remove Metadata's output may keep
+    /// ([`stays`]): the check of its output (D26).
+    pub(crate) unlisted: bool,
 }
 
 impl Tags {
@@ -202,6 +205,7 @@ fn format_tag(tags: &mut Tags, name: &str, value: &str) {
     if key.starts_with(APPLE) {
         tags.apple_keys = true;
     }
+    tags.unlisted |= !stays(&key, value);
     if key == "creation_time" && tags.creation_time.is_none() {
         tags.creation_time = iso_date(value);
     }
@@ -225,6 +229,8 @@ struct Stream {
     language: Option<String>,
     /// From `mimetype`: a font, an image, or something else.
     attachment: Option<Attachment>,
+    /// Some tag isn't one Remove Metadata's output may keep.
+    unlisted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +259,7 @@ impl Stream {
                     }
                     "mimetype" | "filename" => {}
                     _ => {
+                        self.unlisted |= !stays(&key, value);
                         if let Some(field) = field_of(&key, value) {
                             self.fields.insert(field);
                         }
@@ -270,6 +277,7 @@ impl Stream {
         if let Some(language) = self.language {
             tags.languages.insert(index, language);
         }
+        tags.unlisted |= self.unlisted;
         if self.attached_pic {
             tags.fields.insert(MetaField::CoverArt);
             return;
@@ -291,12 +299,13 @@ impl Stream {
             // hold the position; a timecode track the time of day. A
             // QuickTime text track is the chapter track FFmpeg, iTunes and
             // HandBrake write in MP4 and M4A (M4B), whose chapters ffprobe
-            // lists too.
+            // lists too; the MOV demuxer turns a timed-text (`tx3g`)
+            // chapter track into data the same way (`mov_read_chapters`).
             "data" => {
                 tags.fields.insert(match self.codec_tag.as_str() {
                     "gpmd" | "camm" => MetaField::Location,
                     "tmcd" => MetaField::CreationDate,
-                    "text" => MetaField::Chapters,
+                    "text" | "tx3g" => MetaField::Chapters,
                     _ => MetaField::Other,
                 });
             }
@@ -367,6 +376,24 @@ fn field_of(key: &str, value: &str) -> Option<MetaField> {
         },
         other => other,
     }
+}
+
+/// Whether a tag (key lowercase, as flat prints it) may stay in Remove
+/// Metadata's output (D26): one that only describes its structure, with
+/// FFmpeg's own value where it writes one. An empty value holds nothing.
+/// Anything else fails the job before its output is published.
+fn stays(key: &str, value: &str) -> bool {
+    value.is_empty()
+        || match key {
+            "major_brand" | "minor_version" | "compatible_brands" | "vendor_id" | "language"
+            | "duration" => true,
+            "handler_name" => matches!(
+                value,
+                "VideoHandler" | "SoundHandler" | "SubtitleHandler" | "DataHandler"
+            ),
+            "encoder" => matches!(value, "Lavf" | "Lavc"),
+            _ => false,
+        }
 }
 
 /// [`field_of`]'s table (D26, ENGINES.md → Metadata removal).
@@ -734,6 +761,7 @@ format.tags.encoder="Lavf60.16.100"
                 apple_keys: false,
                 font_streams: BTreeSet::new(),
                 chapters: 0,
+                unlisted: true,
             }
         );
         // 6.1.1 adds a vendor_id to each track, which isn't reported.
@@ -828,6 +856,7 @@ format.tags.encoder="Lavf60.16.100"
                 apple_keys: false,
                 font_streams: BTreeSet::from([4]),
                 chapters: 2,
+                unlisted: true,
             }
         );
         // An attachment that's neither a font nor an image, or has no type.
@@ -895,6 +924,7 @@ format.tags.encoder="Lavf60.16.100"
         assert_eq!(parse(&data("camm")).fields, set([Location]));
         assert_eq!(parse(&data("tmcd")).fields, set([CreationDate]));
         assert_eq!(parse(&data("text")).fields, set([Chapters]));
+        assert_eq!(parse(&data("tx3g")).fields, set([Chapters]));
         // Codec tags are compared lowercase.
         assert_eq!(parse(&data("GPMD")).fields, set([Location]));
         assert_eq!(parse(&data("TmCd")).fields, set([CreationDate]));
@@ -979,6 +1009,96 @@ format.tags.encoder="Lavf60.16.100"
         assert_eq!(field_of("encoder", "lavf"), Some(Software));
         // An empty value has nothing to remove.
         assert_eq!(field_of("title", ""), None);
+    }
+
+    /// What Remove Metadata's argv (9.0.2) wrote from [`CHAPTERS_MP4`],
+    /// read by its tags probe: nothing in it may fail the check.
+    const STRIPPED_MP4: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="avc1"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.language="und"
+streams.stream.0.tags.handler_name="VideoHandler"
+streams.stream.1.index=1
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="mp4a"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.1.tags.language="eng"
+streams.stream.1.tags.handler_name="SoundHandler"
+format.tags.major_brand="isom"
+format.tags.minor_version="512"
+format.tags.compatible_brands="isomiso2avc1mp41"
+"#;
+
+    /// The same from [`MOVIE_MKV`], languages set again and the font's own
+    /// tags copied back.
+    const STRIPPED_MKV: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="[0][0][0][0]"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.DURATION="00:00:01.000000000"
+streams.stream.1.index=1
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="[0][0][0][0]"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.1.tags.language="eng"
+streams.stream.1.tags.DURATION="00:00:01.044000000"
+streams.stream.2.index=2
+streams.stream.2.codec_type="audio"
+streams.stream.2.codec_tag_string="[0][0][0][0]"
+streams.stream.2.disposition.attached_pic=0
+streams.stream.2.tags.language="fra"
+streams.stream.2.tags.DURATION="00:00:01.044000000"
+streams.stream.3.index=3
+streams.stream.3.codec_type="subtitle"
+streams.stream.3.codec_tag_string="[0][0][0][0]"
+streams.stream.3.disposition.attached_pic=0
+streams.stream.3.tags.language="eng"
+streams.stream.3.tags.DURATION="00:00:00.900000000"
+streams.stream.4.index=4
+streams.stream.4.codec_type="attachment"
+streams.stream.4.codec_tag_string="[0][0][0][0]"
+streams.stream.4.disposition.attached_pic=0
+streams.stream.4.tags.filename="font.ttf"
+streams.stream.4.tags.mimetype="application/x-truetype-font"
+format.tags.encoder="Lavf"
+"#;
+
+    #[test]
+    fn only_structural_keys_with_ffmpegs_values_may_stay() {
+        for flat in [STRIPPED_MP4, STRIPPED_MKV] {
+            let tags = parse(flat);
+            assert!(!tags.unlisted, "{flat}");
+            assert!(tags.fields.is_empty(), "{flat}");
+        }
+        // Every other key, or another value where FFmpeg writes its own,
+        // is left over; so is a value too long to read whole.
+        for (line, why) in [
+            ("format.tags.album=\"x\"", "a tag"),
+            ("format.tags.encoder=\"Lavf60.16.100\"", "a version"),
+            (
+                "streams.stream.0.tags.handler_name=\"Core Media Video\"",
+                "a handler",
+            ),
+            ("streams.stream.0.tags.bps=\"1234\"", "a statistic"),
+            ("streams.stream.0.tags.umid=\"x\"", "a stream tag"),
+        ] {
+            let tags = parse(&format!("{STRIPPED_MP4}{line}\n"));
+            assert!(tags.unlisted, "{why}");
+        }
+        let mut parser = Parser::default();
+        parser.line("format.tags.encoder=\"Lavf", true);
+        assert!(parser.finish().unlisted);
+        // An empty value holds nothing.
+        assert!(!parse(&format!("{STRIPPED_MP4}format.tags.title=\"\"\n")).unlisted);
+        for (key, value) in [
+            ("handler_name", "SubtitleHandler"),
+            ("handler_name", "DataHandler"),
+            ("encoder", "Lavc"),
+            ("minor_version", "0"),
+        ] {
+            assert!(stays(key, value), "{key}={value}");
+        }
     }
 
     #[test]
