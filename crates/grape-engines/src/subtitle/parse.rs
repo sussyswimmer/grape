@@ -1631,6 +1631,16 @@ mod tests {
     }
 
     #[test]
+    fn cues_are_sorted_by_start_even_when_their_ends_are_in_order() {
+        // Only the starts say whether the cues are already in order.
+        let srt = "1\n00:00:03,000 --> 00:00:04,000\nB\n\n2\n00:00:01,000 --> 00:00:05,000\nA\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 5000, &["A"]), cue(3000, 4000, &["B"])]
+        );
+    }
+
+    #[test]
     fn many_ties_keep_their_order() {
         // Past the length up to which even an unstable sort keeps ties in
         // order: cue i starts at second (i * 7) % 20, three cues to a start.
