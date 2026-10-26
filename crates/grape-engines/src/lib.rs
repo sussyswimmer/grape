@@ -19,6 +19,9 @@ mod cancel;
 mod headers;
 mod image;
 mod output;
+#[allow(dead_code)] // Wired into `run_job` with the PDF sidecar paths (D29).
+#[doc(hidden)] // Public only for the worker entry, `pdf::worker_main` (D29).
+pub mod pdf;
 mod publish;
 mod selection;
 mod subtitle;

@@ -7,6 +7,12 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[features]
+# Integration tests that need a PDFium library: `GRAPE_TEST_PDFIUM` names it
+# (the tests fail, not skip, without it). They run the PDF worker built from
+# src/bin/grape-pdf-worker.rs (DECISIONS D29).
+pdf-it = []
+
 [dependencies]
 grape-core.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
@@ -15,6 +21,25 @@ thiserror.workspace = true
 zip = { version = "=9.0.2", default-features = false, features = ["deflate-flate2", "deflate64"] }
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# PDF (D29). PDFium is bound at run time from an absolute path, only inside
+# the PDF worker process. Never enable image_*, pdfium_enable_v8,
+# pdfium_enable_xfa, pdfium_use_skia, pdfium_use_win32, static or bindings.
+pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+# Never enable embed_image: it pulls image 0.25 with default features.
+lopdf = { version = "=0.45.0", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+# The PDF worker on its own, for the `pdf-it` tests. The app runs the same
+# `grape_engines::pdf::worker_main` as `Grape --grape-pdf-worker`.
+name = "grape-pdf-worker"
+path = "src/bin/grape-pdf-worker.rs"
+required-features = ["pdf-it"]
+
+[[test]]
+name = "pdf"
+required-features = ["pdf-it"]
 
 [lints]
 workspace = true

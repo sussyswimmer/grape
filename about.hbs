@@ -1,9 +1,10 @@
 # Third-party notices
 
-Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them.
+Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
 - **{{len @root.crates}} Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
+- **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **Not here yet:** the helper programs Grape will ship as separate files, like FFmpeg. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -24,7 +25,7 @@ The Rust crates use these, most used first:
 - {{{name}}} (`{{id}}`)
 {{/each}}
 
-The JavaScript is all MIT.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section.
 
 {{#each overview}}
 {{#if (eq id "MPL-2.0")}}
@@ -104,6 +105,38 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
+
+## PDFium
+
+Grape reads PDFs with [PDFium](https://pdfium.googlesource.com/pdfium/) 157.0.8086.0, built by [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/8086) (release `chromium/8086`, without V8 or XFA). It ships as a separate library: `pdfium.dll` in Grape's install folder on Windows, and `Grape.app/Contents/Frameworks/libpdfium.dylib` on macOS. Its license texts ship with it in the `licenses/pdfium` folder, where `SOURCE.md` says exactly where the build and its source come from.
+
+PDFium is built from its own code and these libraries, all under permissive licenses:
+
+| Component | License | Text in `licenses/pdfium` |
+|---|---|---|
+| PDFium | BSD-3-Clause, and Apache-2.0 for some files | `pdfium.txt` |
+| pdfium-binaries, the build's packaging | MIT | `LICENSE.txt` |
+| Abseil | Apache-2.0 | `abseil.txt` |
+| Anti-Grain Geometry 2.3 | The AGG 2.3 notice (permissive) | `agg23.txt` |
+| Dragonbox | Apache-2.0 WITH LLVM-exception, which Grape takes, or BSL-1.0 | `dragonbox-Apache2-LLVM.txt`, `dragonbox-Boost.txt` |
+| fast_float | MIT | `fast_float.txt` |
+| FreeType 2.14.3 | The FreeType License (FTL). FreeType is FTL or GPL-2.0, and Grape takes the FTL | `freetype.txt` |
+| HarfBuzz | Old MIT | `harfbuzz.txt` |
+| ICU | Unicode-3.0 | `icu.txt` |
+| Little CMS | MIT | `lcms.txt` |
+| libjpeg-turbo | IJG, BSD-3-Clause and Zlib | `libjpeg_turbo.md`, `libjpeg_turbo.ijg` |
+| OpenJPEG | BSD-2-Clause | `libopenjpeg.txt` |
+| libpng | PNG Reference Library License version 2 | `libpng.txt` |
+| LLVM libc | Apache-2.0 WITH LLVM-exception | `llvm-libc.txt` |
+| libc++ (LLVM) | Apache-2.0 WITH LLVM-exception | The same text as `llvm-libc.txt`. The build ships no file of its own for it |
+| simdutf | MIT | `simdutf.txt` |
+| zlib 1.3.2.1 | Zlib | `zlib.txt` |
+
+Portions of this software are copyright © 2026 The FreeType Project (www.freetype.org). All rights reserved.
+
+This software is based in part on the work of the Independent JPEG Group.
+
+`icu.txt` also holds GPL texts with the Autoconf exception. They cover two of ICU4C's build scripts, which PDFium's build doesn't use, so no GPL code is in the library. This section is written by hand: check it again when `scripts/sidecars.lock` changes PDFium's version.
 
 ## Rust crates
 

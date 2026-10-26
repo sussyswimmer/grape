@@ -1,5 +1,6 @@
-//! Folder output for Extract Archive: a hidden temp folder next to the
-//! planned one, then a no-clobber publish.
+//! Folder output for Extract Archive (and the PDF engine's page folders,
+//! through [`publish_folder`]): a hidden temp folder next to the planned
+//! one, then a no-clobber publish.
 //!
 //! `std::fs::rename` can't publish a folder safely: on Unix, and on
 //! Windows 10 1607 and later, renaming onto an existing *empty* folder
@@ -155,6 +156,38 @@ pub(crate) fn publish(
     names: &Names,
 ) -> Result<JobOutcome, Failure> {
     let source_name = file_name(src);
+    publish_folder(temp.path(), dest, dir, names, |taken| {
+        grape_core::output_name(&source_name, &job.op, taken)
+    })
+    .map_err(|failure| match failure {
+        PublishFailure::Taken(error) => Failure::Grape(error),
+        PublishFailure::Write(detail) => Failure::Write(detail),
+    })
+}
+
+/// Why [`publish_folder`] failed.
+#[derive(Debug)]
+pub(crate) enum PublishFailure {
+    /// Every name tried was taken (already in Grape's words).
+    Taken(GrapeError),
+    /// Reserving the folder or moving an item into it failed; the detail
+    /// names neither paths nor items.
+    Write(String),
+}
+
+/// [`publish`] for any engine: moves each top-level item of the folder
+/// `from` (a temp folder, or one inside it) into a new folder at `dest` (in
+/// `dir`), never replacing anything. A taken name is re-planned with
+/// `replan`, which gets the names in `dir` plus every name tried so far,
+/// up to [`MAX_REPLANS`] times. On any failure the reserved folder is
+/// removed again; `from` is removed once empty (else by its owner).
+pub(crate) fn publish_folder(
+    from: &Path,
+    dest: &Path,
+    dir: &Path,
+    names: &Names,
+    mut replan: impl FnMut(&HashSet<String>) -> String,
+) -> Result<JobOutcome, PublishFailure> {
     let mut target = dest.to_path_buf();
     let mut attempted: HashSet<String> = HashSet::from([file_name(dest)]);
     let mut replans = 0;
@@ -163,7 +196,7 @@ pub(crate) fn publish(
             Ok(()) => break,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 if replans == MAX_REPLANS {
-                    return Err(Failure::Grape(GrapeError::new(
+                    return Err(PublishFailure::Taken(GrapeError::new(
                         ErrorKind::NameTaken,
                         format!(
                             "A folder named {} keeps appearing; try again.",
@@ -174,13 +207,13 @@ pub(crate) fn publish(
                 }
                 let mut taken = dir_names(dir);
                 taken.extend(attempted.iter().cloned());
-                let name = grape_core::output_name(&source_name, &job.op, &taken);
+                let name = replan(&taken);
                 attempted.insert(name.clone());
                 target = dir.join(name);
                 replans += 1;
             }
             Err(e) => {
-                return Err(Failure::Write(format!(
+                return Err(PublishFailure::Write(format!(
                     "reserving the folder: {:?}",
                     e.kind()
                 )))
@@ -191,15 +224,16 @@ pub(crate) fn publish(
         path: target,
         done: false,
     };
-    let moved = |e: io::Error| Failure::Write(format!("moving into the folder: {:?}", e.kind()));
-    for item in fs::read_dir(temp.path()).map_err(moved)? {
+    let moved =
+        |e: io::Error| PublishFailure::Write(format!("moving into the folder: {:?}", e.kind()));
+    for item in fs::read_dir(from).map_err(moved)? {
         let item = item.map_err(moved)?;
         let to = reserved.path.join(item.file_name());
         retry_denied(&MOVE_RETRY_DELAYS, || fs::rename(item.path(), &to)).map_err(moved)?;
     }
     reserved.done = true;
     // Now empty; if this fails, the temp folder's drop tries again.
-    let _ = fs::remove_dir(temp.path());
+    let _ = fs::remove_dir(from);
     Ok(JobOutcome {
         outputs: vec![reserved.path.clone()],
         renamed: replans > 0,
