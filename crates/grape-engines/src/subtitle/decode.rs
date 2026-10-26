@@ -394,6 +394,14 @@ mod tests {
             utf16(&units, u16::from_le_bytes, &mut cancelled_after_first()),
             Err(Cancelled)
         );
+        // UTF-16 checks by characters: four bytes each at most, for a
+        // character outside the BMP, so a mebibyte of them holds a check.
+        let emoji = utf16le(&"\u{1F600}".repeat(n / 4));
+        assert_eq!(emoji.len(), n);
+        assert_eq!(
+            utf16(&emoji, u16::from_le_bytes, &mut cancelled_after_first()),
+            Err(Cancelled)
+        );
         // Not cancelled, each check is a call: none is skipped.
         let mut calls = 0;
         utf8(&ascii, &mut || {
