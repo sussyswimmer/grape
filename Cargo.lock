@@ -1674,6 +1674,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "grape-heif-proto"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "grape-platform"
 version = "0.1.0"
 dependencies = [

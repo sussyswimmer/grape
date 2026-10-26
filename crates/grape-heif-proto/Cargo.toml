@@ -1,0 +1,22 @@
+[package]
+name = "grape-heif-proto"
+description = "The protocol between Grape and its HEIC helper process: wire types, the raw pixel file, sniffing and the worker loop (D33)"
+# Spelled out, not `workspace = true`: tools/grape-heif builds this crate by
+# path from outside the workspace (heic-spec J2).
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/sussyswimmer/grape"
+publish = false
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+# The workspace's lints, copied for the same reason.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+undocumented_unsafe_blocks = "deny"
