@@ -1297,6 +1297,17 @@ mod tests {
     }
 
     #[test]
+    fn a_cues_number_cut_off_after_a_cue_without_text_is_that_cues_text() {
+        // A known limit (ENGINES.md): the number can't be told from text.
+        let srt =
+            "1\n00:00:01,000 --> 00:00:02,000\n\n2\n\n00:00:03,000 --> 00:00:04,000\nSecond\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["2"]), cue(3000, 4000, &["Second"])]
+        );
+    }
+
+    #[test]
     fn a_text_block_without_a_timing_line_continues_the_previous_cue() {
         let srt = "Title before any cue\n\n1\n00:00:01,000 --> 00:00:02,000\nHi\n\nthere\n42\n\n\nfriend\n\n2\n00:00:03,000 --> 00:00:04,000\nBye";
         assert_eq!(
