@@ -21,7 +21,11 @@ jobs:
     name: Rust (Windows)
     runs-on: windows-latest
     steps:
+      # The PDF tests load a downloaded library, so the job keeps no git
+      # credentials.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       # Same toolchain as rust-toolchain.toml, so clippy's lints match local runs.
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -34,6 +38,21 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test
         run: cargo test --workspace --locked
+      # PDFium only (D29): the PDF tests don't need FFmpeg. Its own cache key,
+      # so a folder with only PDFium never stands in for the Sidecars job's.
+      # The script checks a restored folder against its stamp.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
+      - name: PDF tests (PDFium)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: cargo test -p grape-engines --features pdf-it --locked
 
   ui-windows:
     name: UI (Windows)
@@ -59,7 +78,11 @@ jobs:
     name: Rust (macOS)
     runs-on: macos-latest
     steps:
+      # The PDF tests load a downloaded library, so the job keeps no git
+      # credentials.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99"
@@ -70,10 +93,23 @@ jobs:
       # Every crate's tests, even after one fails: the Mac runs are new.
       - name: Test
         run: cargo test --workspace --locked --no-fail-fast
+      # PDFium only (D29), as on Windows. /bin/bash is macOS's own bash 3.2.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        run: /bin/bash ./scripts/fetch-sidecars.sh --only pdfium
+      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
+      - name: PDF tests (PDFium)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}/apps/desktop/src-tauri/binaries/libpdfium-universal-apple-darwin.dylib
+        run: cargo test -p grape-engines --features pdf-it --locked --no-fail-fast
 
   # A Windows build anyone can download from the run's Artifacts: the
-  # per-user NSIS installer (no admin needed). It's unsigned until M7, so
-  # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
+  # per-user NSIS installer (no admin needed), with PDFium next to Grape.exe
+  # (D29). It's unsigned until M7, so SmartScreen asks first:
+  # docs/PLATFORM_WINDOWS.md → "Running a CI build".
   build-windows:
     name: Build (Windows installer)
     runs-on: windows-latest
@@ -89,9 +125,28 @@ jobs:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      # The overlay adds pdfium.dll and licenses/pdfium/ to bundle.resources.
       - name: Build Grape and the installer
         working-directory: apps/desktop
-        run: pnpm tauri build --bundles nsis --ci
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json
+      # tauri-build copies the resources next to grape.exe, which is what the
+      # installer installs.
+      - name: Check PDFium is in the build
+        shell: pwsh
+        run: |
+          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md') {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
+              Write-Output "::error::$f is missing from the build."
+              exit 1
+            }
+          }
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-Windows-x64
@@ -99,9 +154,9 @@ jobs:
           if-no-files-found: error
 
   # A Mac build anyone can download from the run's Artifacts: a universal
-  # (Apple silicon + Intel) Grape.app in a DMG. It's ad-hoc signed, not
-  # notarized, so the first open needs the steps in docs/PLATFORM_MACOS.md
-  # → "Running a CI build".
+  # (Apple silicon + Intel) Grape.app in a DMG, with PDFium in
+  # Contents/Frameworks (D29). It's ad-hoc signed, not notarized, so the first
+  # open needs the steps in docs/PLATFORM_MACOS.md → "Running a CI build".
   build-macos:
     name: Build (macOS DMG)
     runs-on: macos-latest
@@ -118,9 +173,36 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        run: /bin/bash ./scripts/fetch-sidecars.sh --only pdfium
+      # The overlay adds binaries/macos/libpdfium.dylib to
+      # bundle.macOS.frameworks and licenses/pdfium/ to bundle.resources.
       - name: Build Grape.app and the DMG
         working-directory: apps/desktop
-        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci
+        run: pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci --config src-tauri/tauri.pdfium.macos.conf.json
+      # The ad-hoc app must not have the hardened runtime: its library
+      # validation would refuse the ad-hoc dylib (tauri.conf.json, D29).
+      - name: Check PDFium is in Grape.app
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          lib="$app/Contents/Frameworks/libpdfium.dylib"
+          test -f "$lib" || { echo "::error::$lib is missing."; exit 1; }
+          test -f "$app/Contents/Resources/licenses/pdfium/pdfium.txt" || { echo "::error::licenses/pdfium is missing from Grape.app."; exit 1; }
+          lipo -info "$lib"
+          codesign --verify --strict "$lib"
+          codesign --verify --strict "$app"
+          flags=$(codesign -d --verbose=2 "$app" 2>&1 | grep '^CodeDirectory')
+          echo "$flags"
+          case "$flags" in
+            *runtime*)
+              echo "::error::Grape.app is signed with the hardened runtime, which refuses the ad-hoc libpdfium.dylib."
+              exit 1
+              ;;
+          esac
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal
@@ -162,10 +244,11 @@ jobs:
             exit 1
           fi
 
-  # Sidecars (DECISIONS D25): fetch FFmpeg and ffprobe as pinned in
-  # scripts/sidecars.lock, check them, and list them. Nothing is built with
-  # them: no installer or DMG carries FFmpeg until the media engine uses it
-  # and licenses/ffmpeg and its notices entry exist (golden rule 6).
+  # Sidecars (DECISIONS D25): fetch everything pinned in scripts/sidecars.lock
+  # (FFmpeg, ffprobe and PDFium), check it, and list it. Nothing is built
+  # here. No installer or DMG carries FFmpeg until the media engine uses it
+  # and licenses/ffmpeg and its notices entry exist (golden rule 6); the
+  # build jobs above fetch only PDFium (D29).
   sidecars:
     name: Sidecars (${{ matrix.name }})
     strategy:
@@ -232,6 +315,7 @@ jobs:
       - name: List the sidecars
         if: runner.os == 'macOS'
         run: |
-          ls -l apps/desktop/src-tauri/binaries
-          lipo -info apps/desktop/src-tauri/binaries/*-universal-apple-darwin
+          ls -lR apps/desktop/src-tauri/binaries
+          lipo -info apps/desktop/src-tauri/binaries/*-universal-apple-darwin apps/desktop/src-tauri/binaries/*-universal-apple-darwin.dylib
+          codesign -dv apps/desktop/src-tauri/binaries/macos/libpdfium.dylib
           cat apps/desktop/src-tauri/binaries/sidecars.stamp

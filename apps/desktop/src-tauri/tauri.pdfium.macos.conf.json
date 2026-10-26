@@ -1,0 +1,10 @@
+{
+  "bundle": {
+    "resources": {
+      "../../../licenses/pdfium/": "licenses/pdfium/"
+    },
+    "macOS": {
+      "frameworks": ["binaries/macos/libpdfium.dylib"]
+    }
+  }
+}

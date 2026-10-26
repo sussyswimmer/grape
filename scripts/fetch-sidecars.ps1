@@ -1,18 +1,23 @@
 <#
 .SYNOPSIS
-Fetches the sidecars pinned in scripts/sidecars.lock for Windows builds.
+Fetches the sidecars and libraries pinned in scripts/sidecars.lock for Windows
+builds.
 
 .DESCRIPTION
 Puts FFmpeg and ffprobe in apps/desktop/src-tauri/binaries/ with Tauri's
 target-triple names, ffmpeg-x86_64-pc-windows-msvc.exe and
-ffprobe-x86_64-pc-windows-msvc.exe (DECISIONS D25; the pin itself is D22).
+ffprobe-x86_64-pc-windows-msvc.exe (DECISIONS D25; the pin itself is D22),
+and PDFium as pdfium-x86_64-pc-windows-msvc.dll (D29).
 
 It downloads each archive once into a new temp folder, checks its size and
 SHA-256 before extracting anything, and extracts only the files the lock
-names. The build's license text is kept as binaries/ffmpeg-LICENSE.txt for
-the bundle step. Then it runs each program with -hide_banner -version: the
-first line must name the lock's version, and the configuration line must not
-have --enable-nonfree. The stamp file binaries/sidecars.stamp is written
+names: from a zip with .NET, from a .tgz with Windows' own tar
+(%SystemRoot%\System32\tar.exe, never one on PATH). The build's license text
+is kept as binaries/ffmpeg-LICENSE.txt for the bundle step. Then it runs each
+program with -hide_banner -version: the first line must name the lock's
+version, and the configuration line must not have --enable-nonfree. A
+library can't be run, so the SHA-256 of the file taken from its archive must
+match the lock instead. The stamp file binaries/sidecars.stamp is written
 last: the lock's hash, the target, and each file's SHA-256. A run that finds
 them all matching changes nothing.
 
@@ -26,15 +31,23 @@ everything again.
 .PARAMETER Force
 Fetch again even when binaries/ already matches the lock.
 
+.PARAMETER Only
+Fetch just this one sidecar or library from the lock, such as pdfium. The
+other files in binaries/ stay, and so do their lines in the stamp.
+
 .EXAMPLE
 .\scripts\fetch-sidecars.ps1
 
 .EXAMPLE
 .\scripts\fetch-sidecars.ps1 -Force
+
+.EXAMPLE
+.\scripts\fetch-sidecars.ps1 -Only pdfium
 #>
 [CmdletBinding()]
 param(
-    [switch]$Force
+    [switch]$Force,
+    [string]$Only
 )
 
 Set-StrictMode -Version 2.0
@@ -44,6 +57,7 @@ $ProgressPreference = 'SilentlyContinue'
 
 $me = 'fetch-sidecars'
 $triple = 'x86_64-pc-windows-msvc'
+$onlyGiven = $PSBoundParameters.ContainsKey('Only')
 
 function Fail([string]$Message) {
     throw $Message
@@ -83,13 +97,14 @@ function Test-Keys($Obj, [string]$Where, [string[]]$Required, [string[]]$Optiona
     }
 }
 
-# A plain relative path: no wildcards, no backslashes, nothing absolute and
-# no . or .. parts. The same rules as in fetch-sidecars.sh.
+# A plain relative path: no wildcards, no backslashes, nothing absolute, no
+# leading - (tar and unzip would read it as an option) and no . or .. parts.
+# The same rules as in fetch-sidecars.sh.
 function Test-ArchivePath($Path, [string]$Where) {
     if ($Path -isnot [string] -or $Path.Length -eq 0) {
         Fail "scripts/sidecars.lock: $Where must be a non-empty string."
     }
-    if ($Path.StartsWith('/') -or $Path -cmatch '[\\*?\[\]]') {
+    if ($Path.StartsWith('/') -or $Path.StartsWith('-') -or $Path -cmatch '[\\*?\[\]]') {
         Fail "scripts/sidecars.lock: $Where must be a plain relative path with / separators: '$Path'."
     }
     if ($Path -cmatch '[\x00-\x1f]') {
@@ -102,21 +117,48 @@ function Test-ArchivePath($Path, [string]$Where) {
     }
 }
 
+function Test-Sha256($Value, [string]$Where) {
+    if ($Value -isnot [string] -or $Value -cnotmatch '^[0-9a-f]{64}$') {
+        Fail "scripts/sidecars.lock: $Where must be 64 lower-case hex digits."
+    }
+}
+
+# How an archive is extracted, from the end of its URL.
+function Get-ArchiveType([string]$Url, [string]$Where) {
+    if ($Url.EndsWith('.zip', [System.StringComparison]::Ordinal)) { return 'zip' }
+    if ($Url.EndsWith('.tgz', [System.StringComparison]::Ordinal) -or
+        $Url.EndsWith('.tar.gz', [System.StringComparison]::Ordinal)) { return 'tgz' }
+    Fail "scripts/sidecars.lock: $Where must end in .zip, .tgz or .tar.gz, so the script knows how to extract it."
+}
+
+# A library's name in binaries/: its file name with the target before the
+# extension, so bin/pdfium.dll becomes pdfium-x86_64-pc-windows-msvc.dll.
+function Get-LibraryFileName([string]$Path, [string]$Target) {
+    $file = $Path.Split('/')[-1]
+    $dot = $file.LastIndexOf('.')
+    if ($dot -gt 0) {
+        return $file.Substring(0, $dot) + '-' + $Target + $file.Substring($dot)
+    }
+    return "$file-$Target"
+}
+
 # Reads and checks the whole lock, and returns what Windows needs from it:
-# the archives to download and the files to take from them.
-function Read-Lock([string]$LockPath) {
+# the archives to download and the files to take from them. With a name, only
+# that sidecar's or library's.
+function Read-Lock([string]$LockPath, $OnlyName) {
     try {
         $lock = [System.IO.File]::ReadAllText($LockPath) | ConvertFrom-Json
     } catch {
         Fail "scripts/sidecars.lock: can't read it as JSON ($($_.Exception.Message))."
     }
-    Test-Keys $lock 'the file' @('format', 'archives', 'sidecars')
+    Test-Keys $lock 'the file' @('format', 'archives', 'sidecars', 'libraries')
     $format = Get-Key $lock 'format'
-    if (-not ($format -is [int] -or $format -is [long]) -or $format -ne 1) {
-        Fail "scripts/sidecars.lock: 'format' must be 1. This script reads format 1 only."
+    if (-not ($format -is [int] -or $format -is [long]) -or $format -ne 2) {
+        Fail "scripts/sidecars.lock: 'format' must be 2. This script reads format 2 only."
     }
 
     $nameRe = '^[a-z0-9][a-z0-9-]*$'
+    $tripleRe = '^[a-z0-9_]+(-[a-z0-9_]+){2,3}$'
     $archives = @{}
     foreach ($p in (Get-Entries (Get-Key $lock 'archives') 'archives')) {
         $id = $p.Name
@@ -132,17 +174,16 @@ function Read-Lock([string]$LockPath) {
         if ($url -isnot [string] -or $url -cnotmatch '^https://\S+$') {
             Fail "scripts/sidecars.lock: $where.url must be an https:// URL."
         }
-        if ($sha -isnot [string] -or $sha -cnotmatch '^[0-9a-f]{64}$') {
-            Fail "scripts/sidecars.lock: $where.sha256 must be 64 lower-case hex digits."
-        }
+        $type = Get-ArchiveType $url "$where.url"
+        Test-Sha256 $sha "$where.sha256"
         if (-not ($size -is [int] -or $size -is [long]) -or $size -le 0) {
             Fail "scripts/sidecars.lock: $where.size must be the archive's size in bytes."
         }
-        $archives[$id] = [pscustomobject]@{ Id = $id; Url = $url; Sha256 = $sha; Size = [long]$size }
+        $archives[$id] = [pscustomobject]@{ Id = $id; Url = $url; Sha256 = $sha; Size = [long]$size; Type = $type }
     }
 
     $files = @()
-    $used = @()
+    $names = @()
     foreach ($p in (Get-Entries (Get-Key $lock 'sidecars') 'sidecars')) {
         $name = $p.Name
         $s = $p.Value
@@ -150,6 +191,7 @@ function Read-Lock([string]$LockPath) {
         if ($name -cnotmatch $nameRe) {
             Fail "scripts/sidecars.lock: sidecar names are lower-case letters, digits and dashes: '$name'."
         }
+        $names += $name
         Test-Keys $s $where @('version', 'targets')
         $version = Get-Key $s 'version'
         if ($version -isnot [string] -or $version -cnotmatch '^[0-9]+(\.[0-9]+)*$') {
@@ -158,7 +200,7 @@ function Read-Lock([string]$LockPath) {
         foreach ($tp in (Get-Entries (Get-Key $s 'targets') "$where.targets")) {
             $t = $tp.Value
             $twhere = "$where.targets.$($tp.Name)"
-            if ($tp.Name -cnotmatch '^[a-z0-9_]+(-[a-z0-9_]+){2,3}$' -or $tp.Name.StartsWith('universal-')) {
+            if ($tp.Name -cnotmatch $tripleRe -or $tp.Name.StartsWith('universal-')) {
                 Fail "scripts/sidecars.lock: ${where}: '$($tp.Name)' isn't a target triple Grape fetches."
             }
             Test-Keys $t $twhere @('archive', 'path') @('license')
@@ -173,17 +215,83 @@ function Read-Lock([string]$LockPath) {
             }
             if ($tp.Name -cne $triple) { continue }
             $files += [pscustomobject]@{
+                Kind    = 'sidecar'
                 Name    = $name
                 Version = $version
                 Archive = $archive
                 Path    = (Get-Key $t 'path')
                 License = $license
+                Sha256  = $null
+                Output  = "$name-$triple.exe"
             }
-            if ($used -cnotcontains $archive) { $used += $archive }
+        }
+    }
+
+    foreach ($p in (Get-Entries (Get-Key $lock 'libraries') 'libraries')) {
+        $name = $p.Name
+        $l = $p.Value
+        $where = "libraries.$name"
+        if ($name -cnotmatch $nameRe) {
+            Fail "scripts/sidecars.lock: library names are lower-case letters, digits and dashes: '$name'."
+        }
+        if ($names -ccontains $name) {
+            Fail "scripts/sidecars.lock: '$name' is both a sidecar and a library."
+        }
+        $names += $name
+        Test-Keys $l $where @('version', 'targets')
+        $version = Get-Key $l 'version'
+        if ($version -isnot [string] -or $version -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$') {
+            Fail "scripts/sidecars.lock: $where.version must look like chromium/8086."
+        }
+        foreach ($tp in (Get-Entries (Get-Key $l 'targets') "$where.targets")) {
+            $t = $tp.Value
+            $tname = $tp.Name
+            $twhere = "$where.targets.$tname"
+            $universal = ($tname -ceq 'universal-apple-darwin')
+            if ($tname -cnotmatch $tripleRe -or ($tname.StartsWith('universal-') -and -not $universal)) {
+                Fail "scripts/sidecars.lock: ${where}: '$tname' isn't a target Grape fetches."
+            }
+            if ($tname.EndsWith('-apple-darwin') -and -not $universal) {
+                Fail "scripts/sidecars.lock: ${where}: give the Mac library as universal-apple-darwin, not '$tname'. The scripts don't merge libraries with lipo."
+            }
+            Test-Keys $t $twhere @('archive', 'path', 'sha256')
+            $archive = Get-Key $t 'archive'
+            if ($archive -isnot [string] -or -not $archives.ContainsKey($archive)) {
+                Fail "scripts/sidecars.lock: $twhere.archive names '$archive', which isn't under archives."
+            }
+            $path = Get-Key $t 'path'
+            Test-ArchivePath $path "$twhere.path"
+            $sha = Get-Key $t 'sha256'
+            Test-Sha256 $sha "$twhere.sha256"
+            if ($tname -cne $triple) { continue }
+            $files += [pscustomobject]@{
+                Kind    = 'library'
+                Name    = $name
+                Version = $version
+                Archive = $archive
+                Path    = $path
+                License = $null
+                Sha256  = $sha
+                Output  = (Get-LibraryFileName $path $triple)
+            }
+        }
+    }
+
+    if ($null -ne $OnlyName) {
+        if ($names -cnotcontains $OnlyName) {
+            Fail "scripts/sidecars.lock has no sidecar or library named '$OnlyName'."
+        }
+        $files = @($files | Where-Object { $_.Name -ceq $OnlyName })
+        if ($files.Count -eq 0) {
+            Fail "scripts/sidecars.lock: '$OnlyName' has no $triple target."
         }
     }
     if ($files.Count -eq 0) {
-        Fail "scripts/sidecars.lock: no sidecar has a $triple target."
+        Fail "scripts/sidecars.lock: no sidecar or library has a $triple target."
+    }
+    $used = @()
+    foreach ($f in $files) {
+        if ($used -cnotcontains $f.Archive) { $used += $f.Archive }
     }
     return [pscustomobject]@{
         Archives = @($used | ForEach-Object { $archives[$_] })
@@ -191,32 +299,38 @@ function Read-Lock([string]$LockPath) {
     }
 }
 
-# The files a full run leaves in binaries/.
+# The files this run leaves in binaries/.
 function Get-ExpectedFiles($Plan) {
     $names = @()
     foreach ($f in $Plan.Files) {
-        $names += "$($f.Name)-$triple.exe"
+        $names += $f.Output
         if ($null -ne $f.License) { $names += "$($f.Name)-LICENSE.txt" }
     }
     return @($names | Sort-Object -Unique)
 }
 
-# True when the stamp was written from this lock for this target, and every
-# file it should list is there with the SHA-256 it recorded.
-function Test-StampCurrent([string]$Stamp, [string]$BinDir, [string]$LockHash, [string[]]$Expected) {
-    if (-not (Test-Path -LiteralPath $Stamp -PathType Leaf)) { return $false }
+# The SHA-256 the stamp lists for each file, when it was written from this
+# lock for this target. Otherwise an empty table.
+function Read-Stamp([string]$Stamp, [string]$LockHash) {
+    $hashes = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
+    if (-not (Test-Path -LiteralPath $Stamp -PathType Leaf)) { return $hashes }
     $lines = @([System.IO.File]::ReadAllLines($Stamp))
-    if ($lines -cnotcontains "lock $LockHash") { return $false }
-    if ($lines -cnotcontains "target $triple") { return $false }
+    if ($lines -cnotcontains "lock $LockHash") { return $hashes }
+    if ($lines -cnotcontains "target $triple") { return $hashes }
+    foreach ($line in $lines) {
+        if ($line -cmatch '^([0-9a-f]{64})  (.+)$') { $hashes[$Matches[2]] = $Matches[1] }
+    }
+    return $hashes
+}
+
+# True when every file this run should leave is there with the SHA-256 the
+# stamp recorded for it.
+function Test-StampCurrent($Recorded, [string]$BinDir, [string[]]$Expected) {
     foreach ($file in $Expected) {
         $path = Join-Path $BinDir $file
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
-        $want = $null
-        foreach ($line in $lines) {
-            if ($line -cmatch '^([0-9a-f]{64})  (.+)$' -and $Matches[2] -ceq $file) { $want = $Matches[1] }
-        }
-        if ($null -eq $want) { return $false }
-        if ((Get-Sha256 $path) -cne $want) { return $false }
+        if (-not $Recorded.ContainsKey($file)) { return $false }
+        if ((Get-Sha256 $path) -cne $Recorded[$file]) { return $false }
     }
     return $true
 }
@@ -244,17 +358,67 @@ function Save-Archive($Archive, [string]$Dest) {
     }
 }
 
-function Expand-OneFile([string]$Zip, [string]$Id, [string]$Path, [string]$Dest) {
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($Zip)
-    try {
-        $entry = $archive.GetEntry($Path)
-        if ($null -eq $entry -or $entry.FullName.EndsWith('/')) {
-            Fail "$Id has no file '$Path' in it."
+# Windows' own tar, by its full path. Another OS has one only for testing
+# (GRAPE_SIDECARS_NO_RUN=1).
+function Get-Tar {
+    if ($env:OS -eq 'Windows_NT') {
+        if ([string]::IsNullOrEmpty($env:SystemRoot)) {
+            Fail "SystemRoot isn't set, so Windows' tar.exe can't be found."
         }
-        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $Dest, $false)
-    } finally {
-        $archive.Dispose()
+        $tar = Join-Path $env:SystemRoot 'System32\tar.exe'
+        $hint = ' Windows 10 1803 and later have it.'
+    } else {
+        $tar = '/usr/bin/tar'
+        $hint = ''
     }
+    if (-not (Test-Path -LiteralPath $tar -PathType Leaf)) {
+        Fail "$tar is missing.$hint"
+    }
+    return $tar
+}
+
+# Extracts one file the lock names from an archive that was already checked.
+function Expand-OneFile($Archive, [string]$File, [string]$Path, [string]$Dest) {
+    if ($Archive.Type -ceq 'zip') {
+        $zip = [System.IO.Compression.ZipFile]::OpenRead($File)
+        try {
+            $entry = $zip.GetEntry($Path)
+            if ($null -eq $entry -or $entry.FullName.EndsWith('/')) {
+                Fail "$($Archive.Id) has no file '$Path' in it."
+            }
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $Dest, $false)
+        } finally {
+            $zip.Dispose()
+        }
+        return
+    }
+
+    # A .tgz: tar extracts just this path, into a folder for this archive.
+    $dir = Join-Path (Join-Path $script:tmp 'x') $Archive.Id
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    $tar = Get-Tar
+    $previous = $ErrorActionPreference
+    # Native programs' stderr must not turn into errors here.
+    $ErrorActionPreference = 'Continue'
+    try {
+        $said = @(& $tar -xzf $File -C $dir $Path 2>&1)
+        $exitCode = $LASTEXITCODE
+    } catch {
+        Fail "tar couldn't start ($($_.Exception.GetBaseException().Message))."
+    } finally {
+        $ErrorActionPreference = $previous
+    }
+    if ($exitCode -ne 0) {
+        foreach ($line in $said) { [Console]::Error.WriteLine([string]$line) }
+        Fail "$($Archive.Id) has no file '$Path' in it, or tar couldn't read it (exit code $exitCode)."
+    }
+    $src = Join-Path $dir $Path
+    $item = Get-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item.PSIsContainer -or
+        ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+        Fail "'$Path' in $($Archive.Id) isn't a plain file."
+    }
+    Copy-Item -LiteralPath $src -Destination $Dest
 }
 
 # Runs a sidecar with -hide_banner -version and checks what it says.
@@ -301,6 +465,13 @@ function Invoke-Fetch {
     if ($env:OS -ne 'Windows_NT' -and -not $noRun) {
         Fail 'this script is for Windows. On macOS, run ./scripts/fetch-sidecars.sh.'
     }
+    $onlyName = $null
+    if ($onlyGiven) {
+        if ([string]::IsNullOrEmpty($Only)) {
+            Fail '-Only needs the name of a sidecar or library in scripts/sidecars.lock, such as pdfium.'
+        }
+        $onlyName = $Only
+    }
 
     $repo = Split-Path -Parent $PSScriptRoot
     $lockPath = Join-Path $PSScriptRoot 'sidecars.lock'
@@ -310,12 +481,17 @@ function Invoke-Fetch {
         Fail "can't find scripts/sidecars.lock."
     }
 
-    $plan = Read-Lock $lockPath
+    $plan = Read-Lock $lockPath $onlyName
     $expected = Get-ExpectedFiles $plan
     $lockHash = Get-Sha256 $lockPath
+    $recorded = Read-Stamp $stamp $lockHash
 
-    if (-not $Force -and (Test-StampCurrent $stamp $binDir $lockHash $expected)) {
-        Write-Host 'Sidecars are already current in apps/desktop/src-tauri/binaries (they match scripts/sidecars.lock). Pass -Force to fetch them again.'
+    if (-not $Force -and (Test-StampCurrent $recorded $binDir $expected)) {
+        if ($null -ne $onlyName) {
+            Write-Host "$onlyName is already current in apps/desktop/src-tauri/binaries (it matches scripts/sidecars.lock). Pass -Force to fetch it again."
+        } else {
+            Write-Host 'Sidecars are already current in apps/desktop/src-tauri/binaries (they match scripts/sidecars.lock). Pass -Force to fetch them again.'
+        }
         return
     }
 
@@ -324,35 +500,46 @@ function Invoke-Fetch {
 
     $script:tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("grape-sidecars-" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $script:tmp | Out-Null
-    $zipDir = Join-Path $script:tmp 'zip'
+    $dlDir = Join-Path $script:tmp 'dl'
     $out = Join-Path $script:tmp 'out'
-    New-Item -ItemType Directory -Path $zipDir, $out | Out-Null
+    New-Item -ItemType Directory -Path $dlDir, $out | Out-Null
 
     # Download each archive and check it before anything reads it.
+    $downloaded = @{}
     foreach ($a in $plan.Archives) {
-        $zip = Join-Path $zipDir "$($a.Id).zip"
+        $file = Join-Path $dlDir "$($a.Id).$($a.Type)"
         Write-Host "Downloading $($a.Id) ($($a.Size) bytes) from $($a.Url)"
-        Save-Archive $a $zip
-        $size = (Get-Item -LiteralPath $zip).Length
+        Save-Archive $a $file
+        $size = (Get-Item -LiteralPath $file).Length
         if ($size -ne $a.Size) {
-            Remove-Item -LiteralPath $zip -Force
+            Remove-Item -LiteralPath $file -Force
             Fail "$($a.Id) is $size bytes, but the lock says $($a.Size). Deleted it; nothing was extracted or changed."
         }
-        $sha = Get-Sha256 $zip
+        $sha = Get-Sha256 $file
         if ($sha -cne $a.Sha256) {
-            Remove-Item -LiteralPath $zip -Force
+            Remove-Item -LiteralPath $file -Force
             Fail "$($a.Id) has SHA-256 $sha, but the lock says $($a.Sha256). Deleted it; nothing was extracted or changed."
         }
         Write-Host '  SHA-256 matches the lock.'
+        $downloaded[$a.Id] = [pscustomobject]@{ Archive = $a; File = $file }
     }
 
-    # Extract only the paths the lock names.
+    # Extract only the paths the lock names. A library's file must have the
+    # SHA-256 the lock gives it.
     foreach ($f in $plan.Files) {
-        $zip = Join-Path $zipDir "$($f.Archive).zip"
-        Expand-OneFile $zip $f.Archive $f.Path (Join-Path $out "$($f.Name)-$triple.exe")
+        $d = $downloaded[$f.Archive]
+        $dest = Join-Path $out $f.Output
+        Expand-OneFile $d.Archive $d.File $f.Path $dest
         Write-Host "Extracted $($f.Name) for $triple."
         if ($null -ne $f.License) {
-            Expand-OneFile $zip $f.Archive $f.License (Join-Path $out "$($f.Name)-LICENSE.txt")
+            Expand-OneFile $d.Archive $d.File $f.License (Join-Path $out "$($f.Name)-LICENSE.txt")
+        }
+        if ($f.Kind -ceq 'library') {
+            $sha = Get-Sha256 $dest
+            if ($sha -cne $f.Sha256) {
+                Fail "'$($f.Path)' in $($f.Archive) has SHA-256 $sha, but the lock says $($f.Sha256). Nothing was changed."
+            }
+            Write-Host "  $($f.Name) $($f.Version): its SHA-256 matches the lock."
         }
     }
 
@@ -360,7 +547,8 @@ function Invoke-Fetch {
         Write-Host 'GRAPE_SIDECARS_NO_RUN=1: skipped the -version checks. That''s for testing only.'
     } else {
         foreach ($f in $plan.Files) {
-            Test-Version (Join-Path $out "$($f.Name)-$triple.exe") $f.Name $f.Version
+            if ($f.Kind -cne 'sidecar') { continue }
+            Test-Version (Join-Path $out $f.Output) $f.Name $f.Version
         }
     }
 
@@ -376,15 +564,27 @@ function Invoke-Fetch {
         return
     }
 
-    $text = "# Written by scripts/fetch-sidecars.ps1. Delete this file or pass -Force to fetch again.`n"
-    $text += "lock $lockHash`n"
-    $text += "target $triple`n"
+    # What this run didn't fetch keeps its line while its file is there. The
+    # next run checks that file's SHA-256 against it as usual.
+    $entries = New-Object System.Collections.Hashtable ([System.StringComparer]::Ordinal)
+    foreach ($file in @($recorded.Keys)) {
+        if ($expected -ccontains $file) { continue }
+        if (Test-Path -LiteralPath (Join-Path $binDir $file) -PathType Leaf) {
+            $entries[$file] = $recorded[$file]
+        }
+    }
     foreach ($file in $expected) {
         $path = Join-Path $binDir $file
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             Fail "$file is missing from binaries/ after the move."
         }
-        $text += "$(Get-Sha256 $path)  $file`n"
+        $entries[$file] = Get-Sha256 $path
+    }
+    $text = "# Written by scripts/fetch-sidecars.ps1. Delete this file or pass -Force to fetch again.`n"
+    $text += "lock $lockHash`n"
+    $text += "target $triple`n"
+    foreach ($file in (@($entries.Keys) | Sort-Object)) {
+        $text += "$($entries[$file])  $file`n"
     }
     # LF and no BOM, the same as the macOS script's stamp.
     [System.IO.File]::WriteAllText($stamp, $text, (New-Object System.Text.UTF8Encoding $false))
