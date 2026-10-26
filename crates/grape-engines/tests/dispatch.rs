@@ -1,0 +1,44 @@
+//! Which conversions this build runs: [`supports`] and [`run_job`] decide
+//! from the same table, so a pair is offered exactly when it can run.
+#![allow(clippy::unwrap_used)]
+
+use grape_core::{pairs, Features, Format, Operation, ToolKey};
+use grape_engines::supports;
+
+const RASTER: [Format; 5] = [
+    Format::Jpg,
+    Format::Png,
+    Format::Webp,
+    Format::Tiff,
+    Format::Bmp,
+];
+
+#[test]
+fn supports_exactly_the_twenty_raster_pairs() {
+    let supported: Vec<(Format, Format)> = pairs(Features::V1_ONLY)
+        .into_iter()
+        .filter(|&(from, to)| supports(&Operation::convert(to), Some(from)))
+        .collect();
+    assert_eq!(supported.len(), 20);
+    for (from, to) in &supported {
+        assert!(RASTER.contains(from) && RASTER.contains(to) && from != to);
+    }
+    let full = pairs(Features::FULL)
+        .into_iter()
+        .filter(|&(from, to)| supports(&Operation::convert(to), Some(from)))
+        .count();
+    assert_eq!(full, 20);
+    assert!(!supports(
+        &Operation::convert(Format::Png),
+        Some(Format::Png)
+    ));
+    assert!(!supports(&Operation::convert(Format::Png), None));
+    assert!(!supports(
+        &Operation::convert(Format::Png),
+        Some(Format::Heic)
+    ));
+    assert!(!supports(
+        &Operation::tool(ToolKey::Compress),
+        Some(Format::Png)
+    ));
+}
