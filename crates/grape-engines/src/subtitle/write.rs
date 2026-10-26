@@ -6,11 +6,14 @@
 //! - **Timestamps** are `HH:MM:SS.mmm` (WebVTT) or `HH:MM:SS,mmm` (SRT),
 //!   with more hour digits when needed.
 //! - **Tags:** only `<i>`, `<b>` and `<u>` are written, balanced per cue:
-//!   see [`tagged_lines`]. Each line is written as soon as it is rendered,
-//!   so a cue is never held whole as text.
+//!   see [`tagged_lines`].
 //! - **Text that would read back as structure** is made safe: WebVTT
 //!   escapes `&`, `<` and `>`, and SRT writes a `-->` in text as `->`, so
 //!   a text line can never become a timing line.
+//! - **Streaming:** text goes to `out` in pieces as it is escaped, never
+//!   gathered into a line or a cue first. Writing allocates nothing but
+//!   the list of styles open in a cue (at most three), so its memory
+//!   doesn't grow with the document, a cue or a line.
 //! - **Cancellation:** `is_cancelled` is asked before anything is written
 //!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) units of work, a
 //!   cue or a line each; once it says so, the writer fails with an error.
@@ -19,6 +22,7 @@
 //! so even a document that wasn't normalized can't produce a blank line in
 //! a cue.
 
+use std::fmt;
 use std::io::{self, Write};
 
 use super::parse::{has_text, Cue, Document, Span, Style};
@@ -43,11 +47,9 @@ pub(crate) fn write_vtt(
     write!(out, "WEBVTT{nl}")?;
     for (i, cue) in visible_cues(doc).enumerate() {
         ticker.tick()?;
-        let (start, end) = (timestamp(cue.start_ms, '.'), timestamp(cue.end_ms, '.'));
+        let (start, end) = (Timestamp(cue.start_ms, '.'), Timestamp(cue.end_ms, '.'));
         write!(out, "{nl}{}{nl}{start} --> {end}{nl}", i + 1)?;
-        tagged_lines(cue, escape_vtt, &mut ticker, |line| {
-            write!(out, "{line}{nl}")
-        })?;
+        tagged_lines(cue, &mut VttText(&mut *out), nl, &mut ticker)?;
     }
     Ok(())
 }
@@ -71,11 +73,13 @@ pub(crate) fn write_srt(
         if i > 0 {
             out.write_all(nl.as_bytes())?;
         }
-        let (start, end) = (timestamp(cue.start_ms, ','), timestamp(cue.end_ms, ','));
+        let (start, end) = (Timestamp(cue.start_ms, ','), Timestamp(cue.end_ms, ','));
         write!(out, "{}{nl}{start} --> {end}{nl}", i + 1)?;
-        tagged_lines(cue, String::push_str, &mut ticker, |line| {
-            write!(out, "{}{nl}", defuse_arrows(line))
-        })?;
+        let mut text = SrtText {
+            out: &mut *out,
+            dashes: 0,
+        };
+        tagged_lines(cue, &mut text, nl, &mut ticker)?;
     }
     Ok(())
 }
@@ -91,25 +95,19 @@ pub(crate) fn write_txt(
     let nl = doc.newline.as_str();
     let mut ticker = Ticker::new(is_cancelled);
     ticker.tick()?;
-    let mut previous = String::new();
-    let mut text = String::new();
+    let mut previous: Option<&[Span]> = None;
     for cue in &doc.cues {
         ticker.tick()?;
         for line in &cue.lines {
             ticker.tick()?;
-            text.clear();
-            for span in line {
-                if let Span::Text(t) = span {
-                    text.push_str(t);
-                }
-            }
-            let trimmed = text.trim();
-            if trimmed.is_empty() || trimmed == previous {
+            if !has_text(line) || previous.is_some_and(|before| trimmed(before).eq(trimmed(line))) {
                 continue;
             }
-            write!(out, "{text}{nl}")?;
-            previous.clear();
-            previous.push_str(trimmed);
+            for t in texts(line) {
+                out.write_all(t.as_bytes())?;
+            }
+            out.write_all(nl.as_bytes())?;
+            previous = Some(line);
         }
     }
     Ok(())
@@ -122,21 +120,134 @@ fn visible_cues(doc: &Document) -> impl Iterator<Item = &Cue> {
         .filter(|cue| cue.lines.iter().any(|line| has_text(line)))
 }
 
-/// `ms` as `HH:MM:SS` and three-digit milliseconds after `separator`.
-fn timestamp(ms: u64, separator: char) -> String {
-    let hours = ms / 3_600_000;
-    let rest = ms % 3_600_000;
-    format!(
-        "{hours:02}:{:02}:{:02}{separator}{:03}",
-        rest / 60_000,
-        rest / 1000 % 60,
-        rest % 1000
-    )
+/// The text spans of a line.
+fn texts(line: &[Span]) -> impl DoubleEndedIterator<Item = &str> {
+    line.iter().filter_map(|span| match span {
+        Span::Text(text) => Some(text.as_str()),
+        _ => None,
+    })
 }
 
-/// Renders the cue's lines with visible text one at a time and hands each
-/// to `emit`, each line counted as work for `ticker`. `text` writes each
-/// text span, and `<i>`, `<b>` and `<u>` tags are balanced across the cue:
+/// The characters of a line's text, without leading and trailing
+/// whitespace (as `str::trim` has it).
+fn trimmed(line: &[Span]) -> impl Iterator<Item = char> + '_ {
+    let chars = || texts(line).flat_map(str::chars);
+    let total = chars().count();
+    let leading = chars().take_while(|c| c.is_whitespace()).count();
+    let trailing = chars().rev().take_while(|c| c.is_whitespace()).count();
+    chars()
+        .skip(leading)
+        .take(total.saturating_sub(leading + trailing))
+}
+
+/// `ms` written as `HH:MM:SS` and three-digit milliseconds after the
+/// separator.
+struct Timestamp(u64, char);
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Timestamp(ms, separator) = *self;
+        let hours = ms / 3_600_000;
+        let rest = ms % 3_600_000;
+        write!(
+            f,
+            "{hours:02}:{:02}:{:02}{separator}{:03}",
+            rest / 60_000,
+            rest / 1000 % 60,
+            rest % 1000
+        )
+    }
+}
+
+/// Where [`tagged_lines`] writes a cue's text: the text of its spans, and
+/// the tags and line breaks around them as they are.
+trait CueText {
+    fn text(&mut self, text: &str) -> io::Result<()>;
+    fn markup(&mut self, markup: &str) -> io::Result<()>;
+}
+
+/// WebVTT cue text: `&`, `<` and `>` escaped.
+struct VttText<'a, W>(&'a mut W);
+
+impl<W: Write> CueText for VttText<'_, W> {
+    fn text(&mut self, text: &str) -> io::Result<()> {
+        let mut rest = text;
+        while let Some(at) = rest.find(['&', '<', '>']) {
+            let (before, special) = rest.split_at(at);
+            self.0.write_all(before.as_bytes())?;
+            self.0.write_all(match special.as_bytes()[0] {
+                b'&' => b"&amp;",
+                b'<' => b"&lt;",
+                _ => b"&gt;",
+            })?;
+            rest = &special[1..];
+        }
+        self.0.write_all(rest.as_bytes())
+    }
+
+    fn markup(&mut self, markup: &str) -> io::Result<()> {
+        self.0.write_all(markup.as_bytes())
+    }
+}
+
+/// SRT cue text: raw, but with every `-->` written as `->`, even one
+/// split across spans. A run of dashes is held back until what follows
+/// it is known: before `>`, any run of two or more becomes `->`.
+struct SrtText<'a, W> {
+    out: &'a mut W,
+    /// The dashes held back.
+    dashes: usize,
+}
+
+impl<W: Write> SrtText<'_, W> {
+    /// Writes the dashes held back.
+    fn dashes(&mut self) -> io::Result<()> {
+        const DASHES: [u8; 64] = [b'-'; 64];
+        while self.dashes > 0 {
+            let n = self.dashes.min(DASHES.len());
+            self.out.write_all(&DASHES[..n])?;
+            self.dashes -= n;
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> CueText for SrtText<'_, W> {
+    fn text(&mut self, text: &str) -> io::Result<()> {
+        let mut rest = text;
+        while let Some(at) = rest.find(['-', '>']) {
+            let (before, special) = rest.split_at(at);
+            if !before.is_empty() {
+                self.dashes()?;
+                self.out.write_all(before.as_bytes())?;
+            }
+            if special.starts_with('-') {
+                self.dashes += 1;
+            } else if self.dashes >= 2 {
+                self.dashes = 0;
+                self.out.write_all(b"->")?;
+            } else {
+                self.dashes()?;
+                self.out.write_all(b">")?;
+            }
+            rest = &special[1..];
+        }
+        if !rest.is_empty() {
+            self.dashes()?;
+            self.out.write_all(rest.as_bytes())?;
+        }
+        Ok(())
+    }
+
+    fn markup(&mut self, markup: &str) -> io::Result<()> {
+        self.dashes()?;
+        self.out.write_all(markup.as_bytes())
+    }
+}
+
+/// Writes the cue's lines with visible text to `out`, each ended by `nl`
+/// and counted as work for `ticker`. `<i>`, `<b>` and `<u>` tags are
+/// balanced across the cue:
 /// - opening a style that is already open, or closing one that isn't,
 ///   writes nothing;
 /// - closing a style that isn't the innermost closes the inner ones, then
@@ -145,38 +256,36 @@ fn timestamp(ms: u64, separator: char) -> String {
 ///   of the last line.
 fn tagged_lines(
     cue: &Cue,
-    text: fn(&mut String, &str),
+    out: &mut impl CueText,
+    nl: &str,
     ticker: &mut Ticker,
-    mut emit: impl FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
     let Some(last) = cue.lines.iter().rposition(|line| has_text(line)) else {
         return Ok(());
     };
     let mut open: Vec<Style> = Vec::new();
-    let mut rendered = String::new();
     for (i, line) in cue.lines.iter().enumerate() {
         ticker.tick()?;
         if !has_text(line) {
             continue;
         }
-        rendered.clear();
         for span in line {
             match span {
-                Span::Text(t) => text(&mut rendered, t),
+                Span::Text(t) => out.text(t)?,
                 Span::Open(style) => {
                     if !open.contains(style) {
                         open.push(*style);
-                        rendered.push_str(open_tag(*style));
+                        out.markup(open_tag(*style))?;
                     }
                 }
                 Span::Close(style) => {
                     if let Some(at) = open.iter().position(|s| s == style) {
                         for inner in open[at..].iter().rev() {
-                            rendered.push_str(close_tag(*inner));
+                            out.markup(close_tag(*inner))?;
                         }
                         open.remove(at);
                         for inner in &open[at..] {
-                            rendered.push_str(open_tag(*inner));
+                            out.markup(open_tag(*inner))?;
                         }
                     }
                 }
@@ -184,10 +293,10 @@ fn tagged_lines(
         }
         if i == last {
             for style in open.iter().rev() {
-                rendered.push_str(close_tag(*style));
+                out.markup(close_tag(*style))?;
             }
         }
-        emit(&rendered)?;
+        out.markup(nl)?;
     }
     Ok(())
 }
@@ -206,44 +315,6 @@ fn close_tag(style: Style) -> &'static str {
         Style::Bold => "</b>",
         Style::Underline => "</u>",
     }
-}
-
-/// Appends `text` to `out` escaped for WebVTT cue text.
-fn escape_vtt(out: &mut String, text: &str) {
-    for c in text.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(c),
-        }
-    }
-}
-
-/// `line` with every `-->` written as `->`. A longer run of dashes before
-/// `>` becomes `->` too, so no `-->` is left once it's done.
-fn defuse_arrows(line: &str) -> std::borrow::Cow<'_, str> {
-    if !line.contains("-->") {
-        return line.into();
-    }
-    let mut out = String::with_capacity(line.len());
-    let mut dashes = 0;
-    for c in line.chars() {
-        match c {
-            '-' => dashes += 1,
-            '>' if dashes >= 2 => {
-                out.push_str("->");
-                dashes = 0;
-            }
-            _ => {
-                out.extend(std::iter::repeat_n('-', dashes));
-                out.push(c);
-                dashes = 0;
-            }
-        }
-    }
-    out.extend(std::iter::repeat_n('-', dashes));
-    out.into()
 }
 
 #[cfg(test)]
@@ -314,6 +385,7 @@ mod tests {
 
     #[test]
     fn timestamps_have_at_least_two_hour_digits_and_three_millisecond_digits() {
+        let timestamp = |ms, separator| Timestamp(ms, separator).to_string();
         assert_eq!(timestamp(0, '.'), "00:00:00.000");
         assert_eq!(timestamp(3_723_456, ','), "01:02:03,456");
         assert_eq!(timestamp(59_999, '.'), "00:00:59.999");
@@ -450,10 +522,35 @@ mod tests {
             srt_text(vec![vec![text("a --> b ---> c -> d - > e --")]]),
             "a -> b -> c -> d - > e --\n"
         );
-        // Split across spans, the arrow is still caught.
+        assert_eq!(srt_text(vec![vec![text("-->-->")]]), "->->\n");
+        assert_eq!(srt_text(vec![vec![text("no-arrow-")]]), "no-arrow-\n");
+        // Split across spans, the arrow is still caught, also where a
+        // style that writes no tag comes between.
         assert_eq!(srt_text(vec![vec![text("x--"), text(">y")]]), "x->y\n");
-        assert_eq!(defuse_arrows("-->-->"), "->->");
-        assert_eq!(defuse_arrows("no arrow"), "no arrow");
+        assert_eq!(
+            srt_text(vec![vec![text("a-"), text("-"), text("---"), text(">b")]]),
+            "a->b\n"
+        );
+        assert_eq!(
+            srt_text(vec![vec![
+                Span::Open(Style::Italic),
+                text("x--"),
+                Span::Open(Style::Italic),
+                text(">y")
+            ]]),
+            "<i>x->y</i>\n"
+        );
+        // A tag between the dashes and the `>` leaves no arrow to defuse.
+        assert_eq!(
+            srt_text(vec![vec![text("x--"), Span::Open(Style::Bold), text(">y")]]),
+            "x--<b>>y</b>\n"
+        );
+        // Dashes at the end of a line are kept, however many.
+        let dashes = "-".repeat(150);
+        assert_eq!(
+            srt_text(vec![vec![text(&dashes)], vec![text(">")]]),
+            format!("{dashes}\n>\n")
+        );
     }
 
     // Rule 18: balanced tags.
@@ -539,6 +636,26 @@ mod tests {
         );
         let crlf = read(b"1\r\n00:00:01,000 --> 00:00:02,000\r\n<b>a</b>\r\n");
         assert_eq!(txt(&crlf), "a\r\n");
+    }
+
+    #[test]
+    fn txt_compares_lines_by_their_trimmed_text_whatever_the_spans() {
+        let doc = one_cue(vec![
+            vec![text(" a"), Span::Open(Style::Bold), text("b\t")],
+            vec![
+                text(" "),
+                text("a"),
+                Span::Close(Style::Bold),
+                text("b"),
+                text(" "),
+            ],
+            vec![text("ab"), text("c")],
+            vec![text("a"), text("b c")],
+            vec![text("ab c")],
+            vec![text("\u{A0}ab c\u{3000}")],
+            vec![text("ab")],
+        ]);
+        assert_eq!(txt(&doc), " ab\t\nabc\nab c\nab\n");
     }
 
     // Cancellation.
