@@ -22,7 +22,7 @@ src/
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media.rs          FFmpeg arg builders (pure fns, unit-tested) + runner
   pdf.rs            pdfium-render, lopdf
-  archive.rs        zip/tar/flate2, libarchive for RAR; zip-slip guard
+  archive/          zip/tar/gz convert + extract (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link; RAR later via bsdtar
   docs.rs           v2, behind feature "v2"
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar
