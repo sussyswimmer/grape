@@ -16,7 +16,6 @@
 mod cancel;
 mod headers;
 mod image;
-#[allow(dead_code)] // Wired into run_job in the next commit.
 mod media;
 mod output;
 mod publish;
@@ -33,8 +32,9 @@ use std::sync::{
 
 use grape_core::{Format, Job, JobOutput, Operation};
 
-/// Sidecar locations injected by the app. All `None` in this slice: the
-/// image and subtitle engines need no sidecar. Engines never look sidecars up on `PATH`.
+/// Sidecar locations injected by the app: absolute paths to the bundled
+/// executables. The image and subtitle engines need none; audio and video
+/// need `ffmpeg` and `ffprobe`. Engines never look sidecars up on `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarPaths {
     /// The bundled `ffmpeg` executable.
@@ -142,13 +142,21 @@ impl GrapeError {
 
 /// Can this build execute `op` for an input of format `from`?
 ///
-/// In this build: conversions between two different raster formats among
-/// JPG, PNG, WebP, TIFF and BMP (20 pairs), and SRT to VTT or TXT and VTT
-/// to SRT or TXT (4 pairs). Everything else (HEIC, AVIF, SVG, PDF, audio,
-/// video, documents, archives, every tool) is `false`.
+/// In this build, with no sidecars: conversions between two different
+/// raster formats among JPG, PNG, WebP, TIFF and BMP (20 pairs), and SRT to
+/// VTT or TXT and VTT to SRT or TXT (4 pairs). Audio and video need the
+/// FFmpeg sidecar: see [`supports_with`]. Everything else (HEIC, AVIF, SVG,
+/// PDF, documents, archives, every tool) is `false`.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
+    supports_with(&SidecarPaths::default(), op, from)
+}
+
+/// [`supports`] with the app's sidecars: also the audio and video pairs
+/// (104) when both `ffmpeg` and `ffprobe` are set. Pure: it doesn't check
+/// that the files are there; [`run_job`] fails cleanly if one is missing.
+pub fn supports_with(sidecars: &SidecarPaths, op: &Operation, from: Option<Format>) -> bool {
     match (op, from) {
-        (Operation::Convert { to }, Some(from)) => engine_for(from, *to).is_some(),
+        (Operation::Convert { to }, Some(from)) => engine_for(from, *to, sidecars).is_some(),
         _ => false,
     }
 }
@@ -160,15 +168,20 @@ enum Engine {
     Image,
     /// SRT and WebVTT subtitles ([`subtitle`]).
     Subtitle,
+    /// Audio and video through the FFmpeg sidecar ([`media`]).
+    Media,
 }
 
-/// The engine that converts `from` to `to`, if this build has one. The one
-/// place that decides, so [`supports`] and [`run_job`] always agree.
-fn engine_for(from: Format, to: Format) -> Option<Engine> {
+/// The engine that converts `from` to `to`, if this build has one and it
+/// has the sidecars it runs. The one place that decides, so
+/// [`supports_with`] and [`run_job`] always agree.
+fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engine> {
     if image::supports(from, to) {
         Some(Engine::Image)
     } else if subtitle::supports(from, to) {
         Some(Engine::Subtitle)
+    } else if media::supports(from, to) && media::has_sidecars(sidecars) {
+        Some(Engine::Media)
     } else {
         None
     }
@@ -197,11 +210,12 @@ pub fn run_job(
         .and_then(|name| Format::from_file_name(&name.to_string_lossy()));
     match (from, job.inputs.as_slice(), &job.output, job.op) {
         (Some(from), [src], JobOutput::File(dest), Operation::Convert { to }) => {
-            match engine_for(from, to) {
+            match engine_for(from, to, &ctx.sidecars) {
                 Some(Engine::Image) => image::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Subtitle) => {
                     subtitle::convert(job, src, dest, from, to, ctx, progress)
                 }
+                Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 None => Err(not_yet_supported(job, Some(from))),
             }
         }

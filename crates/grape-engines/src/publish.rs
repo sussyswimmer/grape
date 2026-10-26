@@ -139,7 +139,7 @@ pub(crate) struct Names {
     /// "file".
     noun: &'static str,
     /// The target format's display name.
-    to: &'static str,
+    pub(crate) to: &'static str,
     /// The destination folder's name.
     folder: String,
     /// The planned output file name.

@@ -13,5 +13,10 @@ image = { version = "0.25.10", default-features = false, features = ["jpeg", "pn
 zune-jpeg = "0.5.15"
 thiserror.workspace = true
 
+[features]
+# Real audio and video conversions through FFmpeg; needs GRAPE_TEST_FFMPEG
+# and GRAPE_TEST_FFPROBE set to the sidecars' absolute paths.
+engines-it = []
+
 [lints]
 workspace = true
