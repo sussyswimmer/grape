@@ -621,9 +621,11 @@ build_dav1d
 # rotated video upright, crop applies a container's crop, trim/atrim cut to
 # -ss/-t, scale/aresample/format/aformat/premultiply_dynamic convert between
 # filters, null/anull are the default graph. (FFmpeg's configure selects
-# most of those for the ffmpeg program anyway.) lavfi with sine, testsrc
-# and pan is only for the engine tests, which make their sources with this
-# ffmpeg; Grape's -format_whitelist keeps it out of reach of Grape's argv.
+# most of those for the ffmpeg program anyway.) pan is Grape's own: it lays
+# out audio without a channel layout for Opus and Vorbis. lavfi with sine
+# and testsrc is only for the engine tests, which make their sources with
+# this ffmpeg; Grape's -format_whitelist keeps it out of reach of Grape's
+# argv.
 protocols="file,pipe"
 demuxers="mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif,image_png_pipe"
 muxers="mp4,mov,matroska,webm,avi,asf,gif,mp3,ipod,wav,flac,ogg,opus,aiff,image2pipe"

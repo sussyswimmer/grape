@@ -1328,8 +1328,9 @@ fn a_short_wmv_keeps_every_gif_frame() {
     // have no duration, and read only once, 9.0 now and then ended the GIF
     // a frame early, more often on a busy machine: twenty conversions, with
     // a busy thread per core. That only catches a race when it happens:
-    // without the rewind, 14 of 15 runs failed here (4 cores), and a
-    // quieter machine may miss it. The argv's unit test is the sure guard.
+    // without the rewind, from 3 in 8 to 14 in 15 runs failed here (4
+    // cores, depending on load), and a quieter machine may miss it. The
+    // argv's unit test is the sure guard.
     let src = make_source(&dir.path, "clip.wmv", Format::Wmv);
     let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
     let busy = AtomicBool::new(true);
