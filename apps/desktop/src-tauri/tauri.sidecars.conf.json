@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/ffmpeg", "binaries/ffprobe"],
+    "resources": {
+      "../../../licenses/ffmpeg/": "licenses/ffmpeg/"
+    }
+  }
+}
