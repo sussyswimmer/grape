@@ -895,13 +895,30 @@ fn run_job_runs_every_pdf_job_with_the_sidecars() {
     let (a, b) = (dir.join("a.pdf"), dir.join("b.pdf"));
     fs::write(&a, numbered(1)).unwrap();
     fs::write(&b, numbered(3)).unwrap();
+    let sources = [SourceState::of(&a), SourceState::of(&b)];
     let merge = Operation::tool(ToolKey::MergePdf);
     let selection = build_selection(&[a.clone(), b.clone()], &settings);
     let jobs = plan(&selection, &merge, &settings).unwrap().jobs;
     assert_eq!(jobs.len(), 1);
     let outcome = run_job(&jobs[0], &ctx, &mut |_| {}).unwrap();
-    assert_eq!(outcome.outputs, vec![dir.join("a Merged.pdf")]);
+    let merged = dir.join("a Merged.pdf");
+    assert_eq!(outcome.outputs, vec![merged.clone()]);
     assert_eq!(outcome.notes, Vec::new());
+    // Every page of both, a's first: the name alone can't show that.
+    let (_, job) = plan_one(
+        &dir,
+        "merged copy.pdf",
+        &fs::read(&merged).unwrap(),
+        Operation::convert(Format::Txt),
+    );
+    let text = run_job(&job, &ctx, &mut |_| {}).unwrap().outputs;
+    assert_eq!(
+        fs::read_to_string(&text[0]).unwrap(),
+        "Page 1\n\nPage 1\n\nPage 2\n\nPage 3\n"
+    );
+    for source in &sources {
+        source.assert_unchanged();
+    }
     assert_no_leftovers(&dir.path);
 }
 
