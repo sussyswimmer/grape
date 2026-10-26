@@ -317,7 +317,18 @@ fn encode_round_trips_or_says_this_mac_cant() {
             Ok(heic) => heic,
             Err(failure) if failure.kind == FailKind::NoEncoder => {
                 println!("this Mac can't write HEIC: {}", failure.detail);
-                assert!(!ImageIo.caps().encode || failure.detail.contains("destination"));
+                // Not listed: the list check said so. Listed (GitHub's VMs
+                // and Macs without the hardware): no destination, or no
+                // finish.
+                let listed = ImageIo.caps().encode;
+                let why = failure.detail.as_str();
+                let expected = if listed {
+                    why == "ImageIO made no HEIC destination"
+                        || why.starts_with("ImageIO couldn't finish the HEIC")
+                } else {
+                    why == "public.heic isn't an image destination type"
+                };
+                assert!(expected, "listed {listed}: {why}");
                 std::fs::remove_dir_all(&dir).unwrap();
                 return;
             }

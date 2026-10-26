@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 /// One line from the helper.
 ///
 /// - `image` comes at most once, only for `decode`, and before any pixel is
-///   decoded.
+///   written: before decoding with libheif, right after ImageIO's own
+///   decode on the Mac ([`crate::Codec::decode`]).
 /// - The last line is exactly one of `done` or `error`. The exit code is 0
 ///   after `done` and 1 after `error` (2 for bad usage, before any line).
 /// - The parent skips a line longer than [`crate::MAX_LINE_BYTES`] or one
@@ -23,7 +24,7 @@ pub enum Message {
     Error(Failure),
 }
 
-/// What a decode will produce, sent before any pixel is decoded.
+/// What a decode will produce, sent before any pixel is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageInfo {

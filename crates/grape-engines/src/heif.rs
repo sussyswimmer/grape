@@ -12,10 +12,11 @@
 //!   ([`image::convert`], FORMAT_MATRIX rule 3); HEIF with another codec is
 //!   refused. For HEIC, the helper decodes the primary image, upright and
 //!   8-bit, into `pixels.rgba` in a private work folder under the OS temp
-//!   folder. Its `image` line comes before any pixel is decoded, so a
-//!   picture whose conversion wouldn't fit the working set
-//!   ([`image::pixels_fit`]) is stopped there. The pixels are read once,
-//!   into the one buffer `pixels_fit` counted, and published by
+//!   folder. Its `image` line comes before any pixel is written (libheif
+//!   sends it before decoding, ImageIO after its own decode, held to the
+//!   decoder budget), so a picture whose conversion wouldn't fit the
+//!   working set ([`image::pixels_fit`]) is stopped there. The pixels are
+//!   read once, into the one buffer `pixels_fit` counted, and published by
 //!   [`image::publish_pixels`] (no EXIF, so nothing is rotated twice).
 //! - **Raster → HEIC:** the raster engine decodes the source
 //!   ([`image::decode`], EXIF orientation applied), its size is checked

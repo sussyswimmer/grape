@@ -10,14 +10,14 @@ src/
   lib.rs              trait DragMonitor, DragSignal, DropEvent, display_bounds_at, haptic_tick
   tracker.rs          the pure candidate-drag rules (threshold or start_now, baseline keys, Esc, missed release)
   file_actions.rs     copy, copy path, terminal (TerminalApp), move, share (ShareOutcome: opened + skipped), reveal, pick_folder (Settings): the API the app calls, per-OS dispatch
-  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move); tested on every OS
+  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move, the HEIC worker's decoder budget); tested on every OS
   win_rules.rs        pure Windows rules (Terminal: wt, or PowerShell for a `;` path or by choice; Share: what's skipped, `\\?\` stripped, the sheet's title, the anchor's frame; the tool panel's hand-back plan); tested on every OS
   macos/
     drag.rs           the drag thread: pressedMouseButtons + modifierFlags + drag-pasteboard changeCount/types; starts at once on a file drag session, holds an App Nap activity
     display.rs        screen cache filled on the main thread (refresh_screens), CoreGraphics fallback
     window.rs         overlay/toast/panel NSWindow: level per WindowRole (overlay 101, toast 100, panel 99), collection behavior, frame + orderFrontRegardless; the panel's show_panel (key, activate) and hide_panel (hand back)
     actions.rs        pasteboard copy, open -a Terminal or -b iTerm2 (only if NSWorkspace finds it) / open -R, AirDrop, NSOpenPanel + NSFileManager move (per-item snapshot, volume roots stay, focus handed back), the same panel for pick_folder, haptics
-    heif.rs           ImageIo, the HEIC worker's codec (grape_heif_proto::Codec, D33): size from the properties before decoding, a full-size upright thumbnail drawn into RGBA8 and un-premultiplied, ICC kept; encode only when CGImageDestinationCopyTypeIdentifiers lists public.heic; CGImageSourceSetAllowableTypes through dlsym (14.2+)
+    heif.rs           ImageIo, the HEIC worker's codec (grape_heif_proto::Codec, D33): size and the decoder budget (mac_rules::heif_decode_bytes) from the properties before decoding, `image` after ImageIO's decode and before the bitmap, a full-size upright thumbnail drawn into RGBA8 and un-premultiplied, ICC kept; encode only when CGImageDestinationCopyTypeIdentifiers lists public.heic; CGImageSourceSetAllowableTypes through dlsym (14.2+)
   windows/
     hook.rs           WH_MOUSE_LL on a message-pumping thread
     drag.rs           the drag worker: allowlist, GetAsyncKeyState polling, DragTracker (its key_down also backs mod.rs's escape_down, the tool panel's Esc poll)

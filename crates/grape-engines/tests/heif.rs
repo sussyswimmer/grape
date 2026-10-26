@@ -593,19 +593,26 @@ fn cancel_ends_a_large_encode_quickly() {
     let cancelled_at = Arc::new(Mutex::new(None));
     let at = Arc::clone(&cancelled_at);
     let mut armed = false;
+    // 0.4 comes once input.rgba is written, as the helper starts. x265
+    // takes far longer than 2 s for 30 MP, so on Windows the cancel lands
+    // mid-encode. A Mac's hardware encoder can finish 30 MP in under a
+    // second, so there it lands while the worker reads its input.
+    let delay = if cfg!(target_os = "macos") {
+        Duration::from_millis(50)
+    } else {
+        Duration::from_secs(2)
+    };
     let ran = convert_with(
         &dir,
         "large.bmp",
         &bmp.into_inner(),
         Format::Heic,
         &mut |fraction, token| {
-            // Once the helper has its request, give it a moment to start
-            // encoding, then cancel.
             if fraction >= 0.4 && !armed {
                 armed = true;
                 let (token, at) = (token.clone(), Arc::clone(&at));
                 thread::spawn(move || {
-                    thread::sleep(Duration::from_secs(2));
+                    thread::sleep(delay);
                     *at.lock().unwrap() = Some(Instant::now());
                     token.cancel();
                 });
@@ -619,7 +626,7 @@ fn cancel_ends_a_large_encode_quickly() {
             return;
         }
         Err(e) => assert_eq!(e.kind, ErrorKind::Cancelled, "{e:?}"),
-        Ok(_) => panic!("a 30 MP encode finished within 2 s; nothing was cancelled"),
+        Ok(_) => panic!("a 30 MP encode finished within {delay:?}; nothing was cancelled"),
     }
     let at = cancelled_at.lock().unwrap().expect("the job was cancelled");
     let took = ended.duration_since(at);

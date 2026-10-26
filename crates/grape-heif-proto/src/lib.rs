@@ -7,7 +7,7 @@
 //! - The parent writes one [`Request`] as JSON to the helper's stdin and
 //!   closes it.
 //! - The helper answers with JSON lines on stdout, one [`Message`] each:
-//!   `image` (before any pixel is decoded), `progress`, then exactly one of
+//!   `image` (before any pixel is written), `progress`, then exactly one of
 //!   `done` (exit code 0) or `error` (exit code 1).
 //! - Pixels never go through the pipe. They go through raw pixel files
 //!   ([`PixelWriter`], [`read_pixels`]) in the request's work folder, under

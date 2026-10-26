@@ -8,14 +8,21 @@
 //!
 //! - **Decode** takes the primary image, upright, as ImageIO's full-size
 //!   "thumbnail" built from the image itself with its transform applied.
-//!   Its size comes from the image's properties first, so a picture over
-//!   the limit is refused before anything is decoded. It's drawn into an
-//!   8-bit bitmap in the image's own RGB color space (with that space's
-//!   ICC profile), Display P3 for PQ or HLG, or sRGB for anything else, and
-//!   alpha is un-premultiplied row by row.
+//!   Its size and bit depth come from the image's properties first, so a
+//!   picture over the pixel limit, or whose decode wouldn't fit the
+//!   request's decoder budget (`max_decoder_memory`, as libheif's on
+//!   Windows), is refused before anything is decoded. The `image` line
+//!   goes out once ImageIO has decoded it (only then is the upright size
+//!   certain) and before Grape's own bitmap is made, so the parent can
+//!   still stop it there. It's drawn into an 8-bit bitmap in the image's
+//!   own RGB color space (with that space's ICC profile), Display P3 for PQ
+//!   or HLG, or sRGB for anything else; ImageIO's picture is let go once
+//!   it's drawn, and alpha is un-premultiplied row by row.
 //! - **Encode** checks that this Mac can write `public.heic` at all
 //!   (Macs without a hardware HEVC encoder, and GitHub's macOS VMs, can't),
-//!   then writes one picture at ImageIO's lossy quality 0.8 by default.
+//!   then writes one picture at ImageIO's lossy quality 0.8 by default. A
+//!   finish that fails is the same "this Mac can't write HEIC": that's how
+//!   ImageIO fails on hardware without an encoder that still lists the type.
 //! - Before its first decode the worker restricts ImageIO to the HEIF types
 //!   with `CGImageSourceSetAllowableTypes` on macOS 14.2 and later, looked
 //!   up with `dlsym`: a bound import would stop Grape from launching on
@@ -40,7 +47,7 @@ use objc2_core_graphics::{
     CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_image_io::{
-    kCGImageDestinationLossyCompressionQuality, kCGImagePropertyOrientation,
+    kCGImageDestinationLossyCompressionQuality, kCGImagePropertyDepth, kCGImagePropertyOrientation,
     kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
     kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform,
     kCGImageSourceShouldAllowFloat, kCGImageSourceShouldCache,
@@ -360,10 +367,25 @@ fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(),
             format!("{width}x{height} is over {} pixels", limits.max_pixels),
         ));
     }
+    // ImageIO's decode has to fit the decoder budget, as libheif's does on
+    // Windows: nothing caps this process's memory.
+    // SAFETY: the key is a constant CFString ImageIO exports.
+    let depth = number(properties, unsafe { kCGImagePropertyDepth });
+    let needs = crate::mac_rules::heif_decode_bytes(width, height, depth);
+    if needs > limits.max_decoder_memory {
+        return Err(fail(
+            FailKind::TooLarge,
+            format!(
+                "decoding {width}x{height} at {} bits needs about {} MiB, over {} MiB",
+                depth.unwrap_or(8),
+                needs >> 20,
+                limits.max_decoder_memory >> 20
+            ),
+        ));
+    }
 
     let image = full_size_upright(&src, primary, width.max(height))?;
-    let image: &CGImage = &image;
-    let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+    let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
     let (width, height) = (width as usize, height as usize);
     // J17: never a scaled-down picture.
     if (w, h) != (width, height) && (w, h) != (height, width) {
@@ -408,40 +430,30 @@ fn full_size_upright(
 }
 
 /// Draws `image` (`w` × `h`) into an 8-bit bitmap and hands it to `out`,
-/// one row at a time, with straight alpha.
+/// one row at a time, with straight alpha. `out` hears of the image before
+/// the bitmap is made, and `image` is let go once it's drawn.
 fn draw_rows(
-    image: &CGImage,
+    image: CFRetained<CGImage>,
     w: usize,
     h: usize,
     limits: &Limits,
     out: &mut dyn PixelSink,
 ) -> Result<(), Failure> {
     let max_icc = usize::try_from(limits.max_icc_bytes).unwrap_or(usize::MAX);
-    let layout = Layout::of(image);
-    let stride = w
-        .checked_mul(4)
-        .ok_or_else(|| fail(FailKind::TooLarge, "the row doesn't fit in memory"))?;
-    let len = stride
-        .checked_mul(h)
-        .ok_or_else(|| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
-    let mut buffer: Vec<u8> = Vec::new();
-    buffer
-        .try_reserve_exact(len)
-        .map_err(|_| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
-    buffer.resize(len, 0);
-
-    let target = Target::for_image(image, max_icc)
+    let layout = Layout::of(&image);
+    let target = Target::for_image(&image, max_icc)
         .ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
-    let (context, target) = match bitmap(&mut buffer, w, h, stride, &target, layout) {
-        Some(context) => (context, target),
+    // CoreGraphics takes a space and a layout or not, whatever the size: a
+    // one-pixel try settles the target before `begin` names its profile.
+    let target = if bitmap_takes(&target, layout) {
+        target
+    } else {
         // Once more in sRGB, without a profile.
-        None => {
-            let srgb =
-                Target::srgb().ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
-            let context = bitmap(&mut buffer, w, h, stride, &srgb, layout)
-                .ok_or_else(|| fail(FailKind::Internal, "no bitmap context"))?;
-            (context, srgb)
+        let srgb = Target::srgb().ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
+        if !bitmap_takes(&srgb, layout) {
+            return Err(fail(FailKind::Internal, "no bitmap context"));
         }
+        srgb
     };
 
     let (width, height) = (
@@ -462,10 +474,26 @@ fn draw_rows(
         target.icc.as_deref(),
     )?;
 
+    let stride = w
+        .checked_mul(4)
+        .ok_or_else(|| fail(FailKind::TooLarge, "the row doesn't fit in memory"))?;
+    let len = stride
+        .checked_mul(h)
+        .ok_or_else(|| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
+    let mut buffer: Vec<u8> = Vec::new();
+    buffer
+        .try_reserve_exact(len)
+        .map_err(|_| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
+    buffer.resize(len, 0);
+    let context = bitmap(&mut buffer, w, h, stride, &target, layout)
+        .ok_or_else(|| fail(FailKind::Internal, "no bitmap context"))?;
+
     let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
-    CGContext::draw_image(Some(&*context), rect, Some(image));
+    CGContext::draw_image(Some(&*context), rect, Some(&*image));
     // The context writes into `buffer`; it's gone before `buffer` is read.
     drop(context);
+    // ImageIO's picture isn't needed once it's drawn.
+    drop(image);
 
     // Row 0 of the bitmap is the image's top row.
     let mut row = Vec::with_capacity(w * usize::from(layout.channels()));
@@ -509,6 +537,13 @@ fn bitmap(
             layout.bitmap_info(),
         )
     }
+}
+
+/// True when CoreGraphics makes a bitmap context in `target`'s space with
+/// `layout` (tried on one pixel).
+fn bitmap_takes(target: &Target, layout: Layout) -> bool {
+    let mut pixel = [0u8; 4];
+    bitmap(&mut pixel, 1, 1, 4, target, layout).is_some()
 }
 
 /// RGBX → RGB: drops every fourth byte.
@@ -615,10 +650,22 @@ fn encode(pixels: &Pixels, quality: Option<u8>) -> Result<Vec<u8>, Failure> {
         destination.finalize()
     };
     if !finished {
-        return Err(fail(FailKind::Encode, "ImageIO couldn't finish the HEIC"));
+        return Err(finish_failed());
     }
     drop(destination);
     Ok(out.to_vec())
+}
+
+/// A `CGImageDestinationFinalize` that returned false for `public.heic`.
+/// That's how ImageIO fails on a Mac or VM without a HEVC encoder that
+/// still lists the type and makes the destination ("CGImageDestinationFinalize
+/// failed for output type 'public.heic'"), so it's "this Mac can't write
+/// HEIC files", not a failed write.
+fn finish_failed() -> Failure {
+    fail(
+        FailKind::NoEncoder,
+        "ImageIO couldn't finish the HEIC (no HEVC encoder?)",
+    )
 }
 
 /// The space the pixels are in: their ICC profile's when it's an RGB one,
@@ -684,6 +731,15 @@ mod tests {
         let mut row = Vec::new();
         unpremultiply(&[1, 2, 0, 3, 1, 0, 0, 2], &mut row);
         assert_eq!(row, [85, 170, 0, 3, 128, 0, 0, 2]);
+    }
+
+    #[test]
+    fn a_finish_that_fails_means_this_mac_cant_write_heic() {
+        let failure = finish_failed();
+        assert_eq!(failure.kind, FailKind::NoEncoder);
+        assert!(failure
+            .detail
+            .starts_with("ImageIO couldn't finish the HEIC"));
     }
 
     #[test]
