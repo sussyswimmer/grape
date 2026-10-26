@@ -61,7 +61,7 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
 - [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
 - [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
-- The app runs `grape-engines` jobs for the 20 raster pairs; every other conversion and every tool shows an info toast instead:
+- The app runs `grape-engines` jobs for the 20 raster pairs and the 4 subtitle pairs (next section); every other conversion and every tool shows an info toast instead:
 - [ ] win: Shift-drop `photo.png` on JPG → the toast reads "Making photo.jpg…" then "Done / photo.jpg"; `photo.jpg` appears next to the original and opens in Photos. `Get-FileHash` of `photo.png` is the same before and after.
 - [ ] win: do it again → `photo 2.jpg`; the first `photo.jpg` is untouched.
 - [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.
@@ -69,6 +69,14 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: drop on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
 - [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist), and the toast's title says "Saved in Downloads\Grape".
 - [ ] win: with hidden files shown, no `.grape-tmp-…` or `.grape-probe-…` file is left in any folder you converted in, also after a failed or cancelled conversion.
+
+Subtitles, M3 (D20; win; use scratch copies of files)
+- [ ] win: Shift-drag `movie.srt` → the wheel offers VTT and TXT. Drop on VTT → "Done / movie.vtt" appears next to the original; open it in a text editor → it starts with `WEBVTT`, cues are numbered 1, 2, 3…, and times read `00:01:02.500 --> 00:01:04.000`. `Get-FileHash` of `movie.srt` is the same before and after.
+- [ ] win: play the video with `movie.vtt` loaded in VLC (Subtitle → Add Subtitle File…) → lines appear on time, and italic lines are still italic.
+- [ ] win: Shift-drop the VTT on SRT → `movie 2.srt` (or `movie.srt` in another folder) plays in VLC or Media Player with the same timings; accented letters (é, ñ, ü) display correctly.
+- [ ] win: drop an SRT or VTT on TXT → the `.txt` holds only the spoken lines, no numbers or times, and no line twice in a row.
+- [ ] win: an old SRT saved in Notepad as "ANSI" with accented letters → its VTT shows them correctly.
+- [ ] win: a `.srt` that isn't a subtitle file (rename any `.txt`) → the toast says it has no subtitles in it, and nothing is written.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

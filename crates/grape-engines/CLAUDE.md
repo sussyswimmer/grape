@@ -8,19 +8,24 @@ Executes `JobPlan`s from `grape-core`: images, FFmpeg sidecar, PDF, archives, su
 - **Sidecars come from `SidecarPaths`** injected by the app. Never use `PATH` lookups, which would pick up whatever FFmpeg the user has installed.
 - **Licensing:** read `docs/ENGINES.md` → Licensing rules before adding any crate or binary. Log it in `docs/DECISIONS.md`.
 - **Cancellation:** every engine takes a `CancelToken`. FFmpeg children get killed. Long Rust loops check the token at least every 50 ms of work.
-- **Progress:** emit `Progress { job_id, fraction: Option<f32> }`. FFmpeg uses `-progress pipe:1` + `ffprobe` duration.
+- **Progress:** call `run_job`'s `progress` callback with fractions in 0.0..=1.0 (it may never be called). FFmpeg uses `-progress pipe:1` + `ffprobe` duration.
 
 ## Layout
 ```
 src/
-  lib.rs            run(plan, ctx) -> Stream<Event>
-  image.rs          image crate, ravif, resvg; HEIC via cfg(target_os)
+  lib.rs            supports, run_job(job, ctx, progress) -> JobOutcome; engine_for picks the engine
+  publish.rs        shared by every engine: destination folder, no-clobber finalize, user-message names
+  output.rs         temp files and the no-clobber hard link
+  cancel.rs         Cancellable reader/writer
+  image.rs          image crate (raster); later ravif, resvg; HEIC via cfg(target_os)
+  headers.rs        header readers that bound what the image decoders keep
+  subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media.rs          FFmpeg arg builders (pure fns, unit-tested) + runner
   pdf.rs            pdfium-render, lopdf
   archive.rs        zip/tar/flate2, libarchive for RAR; zip-slip guard
-  subtitle.rs       srt/vtt/txt parser + writer
   docs.rs           v2, behind feature "v2"
-tests/              feature "engines-it": real conversions on fixtures/
+tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
+                    feature "engines-it" adds the ones that need the FFmpeg sidecar
 ```
 
 ## FFmpeg argument builders

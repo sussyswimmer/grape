@@ -21,7 +21,7 @@
 | **PDF → TXT / MD** | PDFium text extraction. MD = paragraphs + headings by font-size heuristics | Scanned PDFs: OCR is v2 (Apple Vision on mac, `Windows.Media.Ocr` on Windows) |
 | **PDF split / merge / metadata** | `lopdf` | |
 | **PDF compress** (v2) | Downsample embedded images via pdfium + lopdf rewrite | No Ghostscript |
-| **Subtitles** | Our own parser in `grape-engines` (srt ⇄ vtt ⇄ txt) | Tiny, fully tested |
+| **Subtitles** | Our own parser in `grape-engines` (srt ⇄ vtt ⇄ txt) | Tiny, fully tested. Rules in "Subtitles" below (D20) |
 | **Archives** | `zip`, `tar`, `flate2`; RAR read via `compress-tools` (libarchive) | Zip-slip guard on extract: reject `..` and absolute paths |
 | **Documents** (v2) | `pandoc` sidecar (GPL, rule 2) for docx/md/html/epub/txt/rtf. macOS can also use `NSAttributedString` for docx/rtf/rtfd | → PDF: render HTML in the system webview and print to PDF (WKWebView `createPDF`, WebView2 `PrintToPdfAsync`). No LaTeX |
 | **Spreadsheets** (v2) | `calamine` (read xlsx/xls/ods), `rust_xlsxwriter` (xlsx), `spreadsheet-ods` (ods), `csv` | → PDF via HTML table + webview print |
@@ -57,6 +57,24 @@
 | wma | — | `wmav2 192k` | |
 
 Run FFmpeg with `-nostdin -hide_banner -y`, write to a temp name, parse `-progress pipe:1` for the progress bar, and kill the child process on cancel.
+
+## Subtitles
+
+Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). No crate, no sidecar.
+
+**Reading**
+- **Encoding:** a BOM first (UTF-8, UTF-16LE, UTF-16BE), then valid UTF-8, else Windows-1252 (WHATWG table). NUL characters are removed. Files over 64 MiB are refused unread.
+- **Format by content:** a file that starts with `WEBVTT` is WebVTT; anything else is read as SRT. Its header lines up to the first blank line are skipped (`Kind:`, `Language:`, `X-TIMESTAMP-MAP=`), and so are `NOTE`, `STYLE` and `REGION` blocks.
+- **Timing lines** are `start --> end`; cue settings or SRT coordinates after the end are dropped. Timestamps take optional hours, `.` or `,` before the fraction, and 1–3+ fraction digits read as a decimal (`,5` is 500 ms). Minutes or seconds over 59 make the line invalid, and its cue is skipped.
+- **Cues:** a timing line always starts a new cue, even with no blank line before it. A digits-only line just before it is that cue's number. A block with no timing line joins the previous cue's text.
+- **Styling** is read into italic, bold and underline: `<i> <b> <u>` (with WebVTT classes) and SRT's `{\i1}`/`{\i0}`-style codes. Other `{\…}` codes, `<font>`, `<c>`, `<v>`, `<lang>`, `<ruby>` and inline timestamps are dropped, keeping their text; `<rt>` text goes in parentheses. WebVTT entities (`&amp;`, `&lt;`, `&#233;` …) are decoded; SRT text is taken as is.
+- **Normalizing:** cues are sorted by start time; a cue that ends at or before its start gets 1 ms; blank lines and empty cues are dropped. No cue left → "… has no subtitles in it".
+
+**Writing** (UTF-8; line endings follow the source)
+- **WebVTT:** `WEBVTT`, then cues numbered 1…n, `HH:MM:SS.mmm --> HH:MM:SS.mmm`, and text with `&`, `<` and `>` escaped. No BOM.
+- **SRT:** cues numbered 1…n, `HH:MM:SS,mmm --> HH:MM:SS,mmm`, and raw text; a `-->` inside text is written `->`. A UTF-8 BOM unless the source was BOM-less UTF-8.
+- **Styling:** `<i> <b> <u>`, balanced within each cue.
+- **TXT:** only the text, one line per subtitle line, with no timings or blank lines; a line identical to the one before is written once. No BOM.
 
 ## Metadata removal
 - Images: decode and re-encode without EXIF/XMP/IPTC. Apply the orientation first, so stripping it doesn't rotate the picture.
