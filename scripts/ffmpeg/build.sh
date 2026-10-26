@@ -622,15 +622,19 @@ build_dav1d
 # -ss/-t, scale/aresample/format/aformat/premultiply_dynamic convert between
 # filters, null/anull are the default graph. (FFmpeg's configure selects
 # most of those for the ffmpeg program anyway.) pan is Grape's own: it lays
-# out audio without a channel layout for Opus and Vorbis. lavfi with sine
-# and testsrc is only for the engine tests, which make their sources with
-# this ffmpeg; Grape's -format_whitelist keeps it out of reach of Grape's
-# argv.
+# out audio without a channel layout for Opus and Vorbis. The tools (D26,
+# media/tools.rs) add ebur128, volume and alimiter (Normalize Volume
+# measures loudness and true peak, then sets a gain and limits), the null
+# muxer (its measuring passes write no file), and the alac, pcm_s32le and
+# pcm_f32le encoders (Normalize and Audio Channels keep ALAC, 32-bit and
+# float WAV as they are). lavfi with sine and testsrc is only for the
+# engine tests, which make their sources with this ffmpeg; Grape's
+# -format_whitelist keeps it out of reach of Grape's argv.
 protocols="file,pipe"
 demuxers="mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif,image_png_pipe"
-muxers="mp4,mov,matroska,webm,avi,asf,gif,mp3,ipod,wav,flac,ogg,opus,aiff,image2pipe"
-encoders="libx264,aac,libvpx_vp9,libopus,mpeg4,libmp3lame,wmv2,wmav2,gif,png,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,flac,libvorbis"
-filters="scale,fps,palettegen,paletteuse,format,aformat,aresample,null,anull,transpose,hflip,vflip,rotate,crop,trim,atrim,premultiply_dynamic,sine,testsrc,pan"
+muxers="mp4,mov,matroska,webm,avi,asf,gif,mp3,ipod,wav,flac,ogg,opus,aiff,image2pipe,null"
+encoders="libx264,aac,libvpx_vp9,libopus,mpeg4,libmp3lame,wmv2,wmav2,gif,png,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,flac,libvorbis,alac,pcm_s32le,pcm_f32le"
+filters="scale,fps,palettegen,paletteuse,format,aformat,aresample,null,anull,transpose,hflip,vflip,rotate,crop,trim,atrim,premultiply_dynamic,sine,testsrc,pan,ebur128,volume,alimiter"
 # FFmpeg's own decoders come first anyway; these copies are never picked.
 library_decoders="libopus,libvorbis,libvpx_vp8,libvpx_vp9"
 

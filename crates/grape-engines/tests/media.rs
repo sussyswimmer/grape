@@ -53,7 +53,7 @@ fn ctx() -> EngineCtx {
 /// lists them on the build's branch. Sources made with anything else
 /// would only fail against that build, so [`ffmpeg`] refuses them with
 /// every FFmpeg. Keep these in step with D24.
-const BUILD_ENCODERS: [&str; 16] = [
+const BUILD_ENCODERS: [&str; 19] = [
     "libx264",
     "aac",
     "libvpx-vp9",
@@ -70,8 +70,11 @@ const BUILD_ENCODERS: [&str; 16] = [
     "pcm_s24be",
     "flac",
     "libvorbis",
+    "alac",
+    "pcm_s32le",
+    "pcm_f32le",
 ];
-const BUILD_FILTERS: [&str; 20] = [
+const BUILD_FILTERS: [&str; 23] = [
     "scale",
     "fps",
     "palettegen",
@@ -92,8 +95,11 @@ const BUILD_FILTERS: [&str; 20] = [
     "sine",
     "testsrc",
     "pan",
+    "ebur128",
+    "volume",
+    "alimiter",
 ];
-const BUILD_MUXERS: [&str; 15] = [
+const BUILD_MUXERS: [&str; 16] = [
     "mp4",
     "mov",
     "matroska",
@@ -109,6 +115,7 @@ const BUILD_MUXERS: [&str; 15] = [
     "opus",
     "aiff",
     "image2pipe",
+    "null",
 ];
 
 /// The first encoder, filter or format in an `ffmpeg` argv that Grape's
@@ -1678,6 +1685,11 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         "pcm_s24be",
         "flac",
         "libvorbis",
+        // The tools (D26): Normalize and Audio Channels keep ALAC, 32-bit
+        // and float WAV.
+        "alac",
+        "pcm_s32le",
+        "pcm_f32le",
     ] {
         assert!(
             encoders
@@ -1703,6 +1715,8 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         "opus",
         "aiff",
         "image2pipe",
+        // Normalize's measuring passes (D26).
+        "null",
     ] {
         assert!(
             muxers
@@ -1730,6 +1744,11 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         "hflip",
         "vflip",
         "trim",
+        // Normalize Volume (D26): loudness and true peak, the gain, the
+        // limiter.
+        "ebur128",
+        "volume",
+        "alimiter",
     ] {
         assert!(
             filters

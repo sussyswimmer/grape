@@ -66,10 +66,10 @@ Then FFmpeg with `--disable-everything` and only these turned back on:
 
 - **protocols:** `file` and `pipe`, and `--disable-network`, so the binary itself can't open a URL (golden rule 3);
 - **demuxers:** the ten Grape reads (`mov matroska avi asf mp3 flac ogg wav aiff gif`) and `image_png_pipe` for the GIF palette;
-- **muxers:** the fourteen Grape writes (`mp4 mov matroska webm avi asf gif mp3 ipod wav flac ogg opus aiff`; WMV and WMA share `asf`) and `image2pipe`;
+- **muxers:** the fourteen Grape writes (`mp4 mov matroska webm avi asf gif mp3 ipod wav flac ogg opus aiff`; WMV and WMA share `asf`), `image2pipe`, and `null`, which the tools' measuring passes write to (it opens no file);
 - **all decoders, parsers and bitstream filters**, because people drop every kind of file and copying a stream needs the bitstream filters; except the Opus, Vorbis and VPx decoders of the libraries, which FFmpeg's own decoders come before anyway;
-- **encoders:** exactly the sixteen in `the_sidecar_has_everything_grape_uses_and_is_redistributable`, and `h263`, which the `mpeg4` encoder is built on;
-- **filters:** the ones Grape passes (`scale fps palettegen paletteuse aformat`, and `pan`, which lays out audio without a channel layout for Opus and Vorbis), the ones ffmpeg inserts by itself (`format aresample scale premultiply_dynamic` convert pixel, sample and alpha formats, `null anull` are the default graph, `transpose hflip vflip rotate` turn rotated video upright, `crop` applies a container's crop, `trim atrim` cut to an input's `-ss`; FFmpeg's configure selects most of them for the ffmpeg program anyway), and `sine testsrc` with the `lavfi` input device for the engine tests, which make their sources with this ffmpeg. Grape's own argv can't reach `lavfi`: the only input format it names is `png_pipe` (the GIF palette), and the source's `-format_whitelist` lists only file demuxers.
+- **encoders:** exactly the nineteen in `the_sidecar_has_everything_grape_uses_and_is_redistributable` (`alac`, `pcm_s32le` and `pcm_f32le` for the tools, D26), and `h263`, which the `mpeg4` encoder is built on;
+- **filters:** the ones Grape passes (`scale fps palettegen paletteuse aformat`, `pan`, which lays out audio without a channel layout for Opus and Vorbis, and `ebur128 volume alimiter` for Normalize Volume, D26), the ones ffmpeg inserts by itself (`format aresample scale premultiply_dynamic` convert pixel, sample and alpha formats, `null anull` are the default graph, `transpose hflip vflip rotate` turn rotated video upright, `crop` applies a container's crop, `trim atrim` cut to an input's `-ss`; FFmpeg's configure selects most of them for the ffmpeg program anyway), and `sine testsrc` with the `lavfi` input device for the engine tests, which make their sources with this ffmpeg. Grape's own argv can't reach `lavfi`: the only input format it names is `png_pipe` (the GIF palette), and the source's `-format_whitelist` lists only file demuxers.
 
 The script checks the result before writing anything to `dist/`; it runs the programs where FFmpeg built them and copies them only once every check has passed: the generated component lists must match exactly, `CONFIG_NETWORK` must be 0, the license GPL without version3 or nonfree; every license notice in what was compiled must be in `licenses/ffmpeg/ffmpeg-notices.txt` (below); on Linux and macOS `ffmpeg -version` must print the configure line from `config.h` and `ffmpeg -protocols` must list only `file` and `pipe`; on Windows every DLL the exe imports must be part of Windows.
 
@@ -105,7 +105,7 @@ The folders read: FFmpeg's above; dav1d's `src/arm/*.c`, `*.h` and `src/arm/64/`
 
 ## Measured
 
-On a shared 4-core container (2026-10-26, Ubuntu 24.04, GCC 13.3, mingw-w64 GCC 13.2 with runtime 11.0.1), from tarballs already downloaded:
+On a shared 4-core container (2026-10-26, Ubuntu 24.04, GCC 13.3, mingw-w64 GCC 13.2 with runtime 11.0.1), from tarballs already downloaded. These are the first builds, before D26 added the tools' components; D24's amendment has the builds with them.
 
 | Target | Whole run | FFmpeg alone | ffmpeg | ffprobe |
 |---|---|---|---|---|
