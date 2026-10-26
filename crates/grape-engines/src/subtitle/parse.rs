@@ -32,6 +32,7 @@
 //!   after it starts lasts 1 ms, and lines without visible text (and cues
 //!   left without lines) are dropped.
 
+use super::decode::CP1252_80_9F;
 use super::entities;
 use super::{Cancelled, Ticker};
 
@@ -548,9 +549,10 @@ fn sort_by_start(cues: &mut [Cue], ticker: &mut Ticker) -> Result<(), Cancelled>
 ///   (case-sensitive, so `&Eacute;` is É and `&EACUTE;` stays text), or by
 ///   number (`&#233;`, `&#xE9;`). As in HTML, a name of HTML 3.2 (see
 ///   [`entities::legacy`]) needs no `;` when what follows it isn't a letter
-///   or digit: `&copy 2024` is "© 2024", `&copy2024` stays text. `&#10;`
-///   and `&#13;` break the line, as a line of cue text can't hold one;
-///   `&#0;` stays text.
+///   or digit: `&copy 2024` is "© 2024", `&copy2024` stays text. `&#128;`
+///   to `&#159;` are read as Windows-1252, as HTML does (see [`numeric`]).
+///   `&#10;` and `&#13;` break the line, as a line of cue text can't hold
+///   one; `&#0;` stays text.
 fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
     let mut out = Spans::new();
     let mut rest = line;
@@ -772,13 +774,23 @@ fn reference(rest: &str) -> Option<(usize, Reference)> {
 }
 
 /// What the digits of a numeric reference (`65`, `x41` or `X41`) stand
-/// for. `None` for a number that isn't a Unicode scalar value, and for NUL.
+/// for. As in HTML, 128 to 159 are the Windows-1252 bytes a page meant:
+/// `&#150;` is "–", and the five bytes Windows-1252 leaves undefined stay
+/// C1 controls. `None` for a number that isn't a Unicode scalar value, and
+/// for NUL.
 fn numeric(digits: &str) -> Option<Reference> {
     let code = match digits.strip_prefix(['x', 'X']) {
         Some(hex) => in_radix(hex, 16),
         None => in_radix(digits, 10),
     }?;
-    match char::from_u32(code)? {
+    let windows_1252 = code
+        .checked_sub(0x80)
+        .and_then(|i| CP1252_80_9F.get(usize::try_from(i).ok()?));
+    let c = match windows_1252 {
+        Some(&c) => c,
+        None => char::from_u32(code)?,
+    };
+    match c {
         '\0' => None,
         '\n' | '\r' => Some(Reference::LineBreak),
         c => Some(Reference::Char(c)),
@@ -1483,6 +1495,26 @@ mod tests {
         assert_eq!(
             spans("&euro &hellip &apos &mdash; &COPY;&REG;", true),
             [text("&euro &hellip &apos — ©®")]
+        );
+    }
+
+    #[test]
+    fn numbers_from_128_to_159_are_read_as_windows_1252() {
+        // HTML's table, the five undefined ones (0x81, 0x8D, 0x8F, 0x90 and
+        // 0x9D) left as they are.
+        let html = [
+            0x20AC, 0x81, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160,
+            0x2039, 0x0152, 0x8D, 0x017D, 0x8F, 0x90, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022,
+            0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x9D, 0x017E, 0x0178,
+        ];
+        for (n, want) in (128u32..=159).zip(html) {
+            let want = char::from_u32(want).unwrap().to_string();
+            assert_eq!(spans(&format!("&#{n};"), true), [text(&want)], "{n}");
+            assert_eq!(spans(&format!("&#x{n:X};"), true), [text(&want)], "{n}");
+        }
+        assert_eq!(
+            spans("&#127;&#150;&#160;&#x9f;", true),
+            [text("\u{7F}–\u{A0}Ÿ")]
         );
     }
 

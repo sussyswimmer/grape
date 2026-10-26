@@ -20,7 +20,8 @@ const CHECK_BYTES: usize = 1024 * 1024;
 /// What Windows-1252 bytes 0x80 to 0x9F decode to, from the WHATWG
 /// encoding standard's table. The five bytes the code page leaves
 /// undefined decode to the C1 control of the same value, as browsers do.
-const CP1252_80_9F: [char; 32] = [
+/// HTML reads the numeric references `&#128;` to `&#159;` the same way.
+pub(super) const CP1252_80_9F: [char; 32] = [
     '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
     '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
 ];
