@@ -37,11 +37,12 @@ use std::sync::{
 
 use grape_core::{Format, Job, JobOutput, Operation, ToolKey};
 
-/// Sidecar locations injected by the app, which finds them next to its own
-/// executable at startup (`apps/desktop/src-tauri/src/sidecars.rs`). One
-/// that isn't there is `None`. The image and subtitle engines need none;
-/// audio and video need `ffmpeg` and `ffprobe`. Engines never look sidecars
-/// up on `PATH`.
+/// Sidecar locations injected by the app: absolute paths, which it finds
+/// next to its own executable at startup
+/// (`apps/desktop/src-tauri/src/sidecars.rs`). One that isn't there is
+/// `None`. The image, subtitle and ZIP/TAR/GZIP engines need none; audio and
+/// video need `ffmpeg` and `ffprobe`. Engines never look sidecars up on
+/// `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarPaths {
     /// The bundled `ffmpeg` executable.
