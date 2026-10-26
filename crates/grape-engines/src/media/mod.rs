@@ -781,6 +781,47 @@ mod tests {
     }
 
     #[test]
+    fn ffmpeg_exiting_0_without_a_usable_output_publishes_nothing() {
+        let wav = || Fake::Prints(flat("wav", false, "pcm_s16le"));
+        let cases = [
+            // Nothing written: no need to probe it.
+            (
+                Fake::Child("progress", String::new()),
+                None,
+                "FFmpeg wrote nothing",
+            ),
+            // Something ffprobe can't read.
+            (
+                Fake::Child("write", "not an mp3".to_string()),
+                Some(Fake::Child(
+                    "error",
+                    "[in#0 @ 0x1] Error opening input: Invalid data found when processing input"
+                        .to_string(),
+                )),
+                "the sidecar exited with code 1",
+            ),
+            // A file without the sound it's for.
+            (
+                Fake::Child("write", "an mp3".to_string()),
+                Some(Fake::Prints(flat("mp3", false, ""))),
+                "no audio stream in the output",
+            ),
+        ];
+        for (ffmpeg, check, why) in cases {
+            let case = Case::new("song.wav", Format::Mp3);
+            let runs = 2 + usize::from(check.is_some());
+            script([wav(), ffmpeg].into_iter().chain(check));
+            let err = case.run().unwrap_err();
+            assert_eq!(err.kind, ErrorKind::EncodeFailed, "{why}: {}", err.detail);
+            assert_eq!(err.user_message, "Grape couldn't write a MP3 file.");
+            assert!(err.detail.contains(why), "{why}: {}", err.detail);
+            assert_eq!(ran().len(), runs, "{why}");
+            assert!(!case.dir.0.join("converted.mp3").exists(), "{why}");
+            case.assert_clean();
+        }
+    }
+
+    #[test]
     fn the_bar_only_moves_forward_and_fills_once_published() {
         let mut seen = Vec::new();
         let mut report = |f| seen.push(f);
