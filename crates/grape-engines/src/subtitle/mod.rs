@@ -122,24 +122,8 @@ pub(crate) fn convert(
         return Err(crate::cancelled(src));
     };
     drop(bytes);
-    let doc = match parse::parse(&text, &mut is_cancelled) {
-        Ok(doc) => doc,
-        Err(ParseError::Cancelled) => return Err(crate::cancelled(src)),
-        Err(ParseError::TooLarge) => {
-            return Err(names.too_large(format!(
-                "parse {}: over the {} line limit for a subtitle file",
-                src.display(),
-                parse::MAX_LINES
-            )))
-        }
-        Err(ParseError::NoCues) => {
-            return Err(GrapeError::new(
-                ErrorKind::DecodeFailed,
-                format!("{} has no subtitles in it.", names.source),
-                format!("no cue in {}, read as {}", src.display(), encoding.name()),
-            ))
-        }
-    };
+    let doc = parse::parse(&text, &mut is_cancelled)
+        .map_err(|e| parse_failed(e, src, &names, encoding, cancel))?;
     drop(text);
     progress(0.5);
 
@@ -157,6 +141,32 @@ pub(crate) fn convert(
     drop(temp);
     progress(1.0);
     Ok(outcome)
+}
+
+/// The error for a text that `parse` refused. Once the job is cancelled
+/// it is a cancel, whatever `parse` found: the cancel may have come after
+/// its last check.
+fn parse_failed(
+    e: ParseError,
+    src: &Path,
+    names: &Names,
+    encoding: Encoding,
+    cancel: &CancelToken,
+) -> GrapeError {
+    let err = match e {
+        ParseError::Cancelled => crate::cancelled(src),
+        ParseError::TooLarge => names.too_large(format!(
+            "parse {}: over the {} line limit for a subtitle file",
+            src.display(),
+            parse::MAX_LINES
+        )),
+        ParseError::NoCues => GrapeError::new(
+            ErrorKind::DecodeFailed,
+            format!("{} has no subtitles in it.", names.source),
+            format!("no cue in {}, read as {}", src.display(), encoding.name()),
+        ),
+    };
+    publish::or_cancelled(cancel, src, err)
 }
 
 /// Reads `src` read-only, refusing a file over [`MAX_SOURCE`] before reading
@@ -227,6 +237,28 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn a_text_parse_refused_is_a_cancel_once_the_job_is_cancelled() {
+        let src = Path::new("shows/subs.srt");
+        let names = Names::new(src, Path::new("shows/subs.vtt"), Format::Srt, Format::Vtt);
+        let token = CancelToken::new();
+        let failed = |e| parse_failed(e, src, &names, Encoding::Utf8, &token);
+        let err = failed(ParseError::NoCues);
+        assert_eq!(err.kind, ErrorKind::DecodeFailed);
+        assert_eq!(err.user_message, "subs.srt has no subtitles in it.");
+        let err = failed(ParseError::TooLarge);
+        assert_eq!(err.kind, ErrorKind::DecodeFailed);
+        assert_eq!(err.user_message, "subs.srt is too large to convert.");
+        token.cancel();
+        for e in [
+            ParseError::Cancelled,
+            ParseError::NoCues,
+            ParseError::TooLarge,
+        ] {
+            assert_eq!(failed(e).kind, ErrorKind::Cancelled, "{e:?}");
+        }
+    }
 
     #[test]
     fn a_ticker_checks_at_the_first_unit_and_every_check_every_after() {
