@@ -469,6 +469,23 @@ pub(super) fn reencode(
     finish(args, muxer_of(to), out)
 }
 
+/// A measuring or check pass of Normalize Volume: the source's first
+/// audio track through `filter` (which ends with `ebur128`), logged at
+/// `info` so the summary is printed, into the `null` muxer. It opens no
+/// file (`AVFMT_NOFILE`), so the output is `-` and nothing is written:
+/// these passes run before the temp file exists.
+pub(super) fn measure(src: &Path, probe: &Probe, filter: &str) -> Vec<OsString> {
+    let mut args = prefix_at(src, &[], "info");
+    if let Some(audio) = probe.streams.iter().find(|s| s.kind == StreamKind::Audio) {
+        map(&mut args, audio.index);
+    }
+    push(
+        &mut args,
+        &["-af", filter, "-progress", "pipe:1", "-f", "null", "-"],
+    );
+    args
+}
+
 #[cfg(test)]
 pub(super) mod tests {
     #![allow(clippy::unwrap_used)]
@@ -697,6 +714,7 @@ pub(super) mod tests {
             );
             all.push(args);
         }
+        all.push(measure(&src(), &song("mp3", "mp3"), "ebur128=peak=true"));
         for (to, probe) in [
             (Format::Mp3, song("mp3", "mp3")),
             (Format::Flac, song("flac", "flac")),
@@ -728,13 +746,20 @@ pub(super) mod tests {
             assert!(at("-format_whitelist") < at("-i"));
             assert_eq!(text.iter().filter(|a| *a == "-i").count(), 1);
             assert_eq!(args[at("-i") + 1], src_url);
-            // A forced muxer, then the temp output, last.
+            // A forced muxer, then the temp output, last; or the null
+            // muxer, which writes nothing.
             let n = args.len();
             assert_eq!(text[n - 3], "-f", "{text:?}");
-            assert_eq!(args[n - 1], file_url(&out()));
+            let null = text[n - 2] == "null";
+            if null {
+                assert_eq!(text[n - 1], "-");
+            } else {
+                assert_eq!(args[n - 1], file_url(&out()));
+            }
             // No other path, and never the planned name.
             let dir = dir().to_string_lossy().into_owned();
-            assert_eq!(text.iter().filter(|a| a.contains(&dir)).count(), 2);
+            let paths = text.iter().filter(|a| a.contains(&dir)).count();
+            assert_eq!(paths, if null { 1 } else { 2 });
             let planned = planned.to_string_lossy();
             assert!(!text.iter().any(|a| a.contains(&*planned)));
         }
@@ -1030,6 +1055,36 @@ pub(super) mod tests {
             "wav".to_owned(),
             file_url(&out()).to_string_lossy().into_owned(),
         ]));
+    }
+
+    #[test]
+    fn measuring_writes_nothing() {
+        let probe = probe_of("mp3", vec![cover(0), stream(1, StreamKind::Audio, "mp3")]);
+        let args = measure(&src(), &probe, "ebur128=peak=true:framelog=quiet");
+        let mut want = argv(&[
+            "-nostdin",
+            "-hide_banner",
+            "-nostats",
+            "-v",
+            "info",
+            "-y",
+            "-protocol_whitelist",
+            "file",
+            "-format_whitelist",
+            "mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif",
+            "-i",
+            "<src>",
+            "-map",
+            "0:1",
+            "-af",
+            "ebur128=peak=true:framelog=quiet",
+            "-progress",
+            "pipe:1",
+            "-f",
+            "null",
+        ]);
+        want.push(OsString::from("-"));
+        assert_eq!(args, want);
     }
 
     #[test]

@@ -770,6 +770,8 @@ pub(super) mod tests {
     /// - `write`: writes [`FAKE_TEXT`] to [`FAKE_OUT`], then as `progress`;
     /// - `error`: as `progress`, but then [`FAKE_TEXT`] on stderr and
     ///   exits 1;
+    /// - `measure`: as `progress`, then [`FAKE_TEXT`] on stderr, and exits
+    ///   0 (a measuring pass, whose output is `-`);
     /// - `hold`: writes its pid to [`FAKE_OUT`] and holds it open (on
     ///   Windows, so nobody else can open or delete it), reports one output
     ///   time, then runs until killed, or for 30 s;
@@ -830,6 +832,12 @@ pub(super) mod tests {
                 let text = std::env::var(FAKE_TEXT).unwrap();
                 io::stderr().lock().write_all(text.as_bytes()).unwrap();
                 1
+            }
+            "measure" => {
+                fake_progress();
+                let text = std::env::var(FAKE_TEXT).unwrap();
+                io::stderr().lock().write_all(text.as_bytes()).unwrap();
+                0
             }
             "hold" => {
                 let mut options = std::fs::OpenOptions::new();

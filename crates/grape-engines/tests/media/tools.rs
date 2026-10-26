@@ -770,16 +770,35 @@ fn write_tones(
     mask: Option<u32>,
     sample: Sample,
 ) {
+    let wave =
+        |t: f64, channel: usize| amplitude * (std::f64::consts::TAU * tones[channel] * t).sin();
+    write_wave(path, rate, tones.len(), 1.0, mask, sample, wave);
+}
+
+/// Writes a WAV of `seconds` at `rate` with `channels` channels whose
+/// sample at time `t` on channel `c` is `wave(t, c)` (full scale ±1),
+/// stored as `sample`, with the channel mask `mask` or, for `None`, a
+/// plain header with no layout.
+fn write_wave(
+    path: &Path,
+    rate: u32,
+    channels: usize,
+    seconds: f64,
+    mask: Option<u32>,
+    sample: Sample,
+    wave: impl Fn(f64, usize) -> f64,
+) {
     let bits: u16 = match sample {
         Sample::I16 => 16,
         Sample::I24 => 24,
         Sample::I32 | Sample::F32 => 32,
     };
     let mut data = Vec::new();
-    for n in 0..rate {
+    let frames = (f64::from(rate) * seconds) as u32;
+    for n in 0..frames {
         let t = f64::from(n) / f64::from(rate);
-        for tone in tones {
-            let v = amplitude * (std::f64::consts::TAU * tone * t).sin();
+        for c in 0..channels {
+            let v = wave(t, c).clamp(-1.0, 1.0);
             match sample {
                 Sample::I16 => data.extend_from_slice(&((v * 32767.0) as i16).to_le_bytes()),
                 Sample::I24 => {
@@ -792,7 +811,7 @@ fn write_tones(
             }
         }
     }
-    let channels = u16::try_from(tones.len()).unwrap();
+    let channels = u16::try_from(channels).unwrap();
     let block = channels * bits / 8;
     let float = sample == Sample::F32;
     let mut format = Vec::new();
@@ -1130,4 +1149,240 @@ fn audio_channels_keep_codec_depth_rate_and_cover_and_never_clip() {
     let got = flat(&out.outputs[0], "stream=codec_name");
     assert_eq!(got["streams.stream.0.codec_name"], "pcm_s32le");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The integrated loudness and true peak of `path`'s first audio track,
+/// as the test FFmpeg's `ebur128` measures them (mono as dual mono when
+/// `dual`).
+fn loudness(path: &Path, dual: bool) -> (f64, f64) {
+    let filter = if dual {
+        "ebur128=peak=true:framelog=quiet:dualmono=true"
+    } else {
+        "ebur128=peak=true:framelog=quiet"
+    };
+    let out = Command::new(tool("GRAPE_TEST_FFMPEG"))
+        .args(["-nostdin", "-hide_banner", "-nostats", "-i"])
+        .arg(path)
+        .args(["-map", "0:a:0", "-af", filter, "-f", "null", "-"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let summary = stderr.rsplit("Summary:").next().unwrap();
+    let value = |key: &str| -> f64 {
+        let line = summary
+            .lines()
+            .find(|l| l.trim_start().starts_with(key))
+            .unwrap();
+        line.split_whitespace().nth(1).unwrap().parse().unwrap()
+    };
+    (value("I:"), value("Peak:"))
+}
+
+/// Normalize Volume `params` for `target_lufs`.
+fn to_lufs(target_lufs: i8) -> ToolParams {
+    ToolParams {
+        target_lufs,
+        ..ToolParams::default()
+    }
+}
+
+/// A 3 s stereo 44.1 kHz voice-like WAV: a quiet tone with a loud click
+/// every half second, like the plosives that make a linear gain clip.
+fn plosives(path: &Path) {
+    write_wave(path, 44_100, 2, 3.0, None, Sample::I16, |t, _| {
+        let tone = 0.03 * (std::f64::consts::TAU * 300.0 * t).sin();
+        let click = if t % 0.5 < 0.003 {
+            0.9 * (std::f64::consts::TAU * 1000.0 * t).sin()
+        } else {
+            0.0
+        };
+        tone + click
+    });
+}
+
+/// A 3 s WAV of a 997 Hz tone at `db` dBFS, with `channels` channels.
+fn steady(path: &Path, db: f64, channels: usize, rate: u32, sample: Sample) {
+    let amplitude = 10f64.powf(db / 20.0);
+    write_wave(path, rate, channels, 3.0, None, sample, |t, _| {
+        amplitude * (std::f64::consts::TAU * 997.0 * t).sin()
+    });
+}
+
+#[test]
+fn normalize_volume_reaches_the_target_under_the_ceiling() {
+    let dir = TestDir::new("tools-normalize");
+    let mut failures = Vec::new();
+    // (source, target, lossy, path the plan takes)
+    let quiet = dir.join("quiet.wav");
+    steady(&quiet, -40.0, 2, 48_000, Sample::I16);
+    let peaky = dir.join("peaky.wav");
+    plosives(&peaky);
+    // Its clicks would pass the ceiling at a linear gain: the limiter runs.
+    let (lufs, peak) = loudness(&peaky, false);
+    assert!(peak + (-16.0 - lufs) > 2.0, "{lufs} LUFS, {peak} dBTP");
+    let mp3 = dir.join("voice.mp3");
+    ffmpeg(&[
+        "-i",
+        s(&peaky),
+        "-c:a",
+        "libmp3lame",
+        "-q:a",
+        "2",
+        "-f",
+        "mp3",
+        s(&mp3),
+    ]);
+    let m4a = dir.join("voice.m4a");
+    ffmpeg(&[
+        "-i",
+        s(&peaky),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-f",
+        "ipod",
+        s(&m4a),
+    ]);
+    let flac = dir.join("quiet.flac");
+    ffmpeg(&["-i", s(&quiet), "-c:a", "flac", "-f", "flac", s(&flac)]);
+    for (src, target, lossy) in [
+        (&quiet, -16, false),
+        (&quiet, -23, false),
+        (&peaky, -16, false),
+        (&flac, -16, false),
+        (&mp3, -16, true),
+        (&m4a, -16, true),
+    ] {
+        let name = src.file_name().unwrap().to_string_lossy();
+        let out = match run_tool(&dir, src, ToolKey::NormalizeAudio, to_lufs(target)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{name} at {target}: {e} ({})", e.detail));
+                continue;
+            }
+        };
+        let (lufs, peak) = loudness(&out.outputs[0], false);
+        let (near, ceiling) = if lossy { (1.0, -2.0) } else { (0.5, -1.0) };
+        if (lufs - f64::from(target)).abs() > near || peak > ceiling + 0.3 {
+            failures.push(format!("{name} at {target}: {lufs} LUFS, {peak} dBTP"));
+        }
+        fs::remove_file(&out.outputs[0]).unwrap();
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn normalize_volume_keeps_the_format_and_leaves_alone_what_it_cant_help() {
+    let dir = TestDir::new("tools-normalize-keep");
+    // Mono is measured as dual mono: at -16 it's -19 measured plainly.
+    let mono = dir.join("mono.wav");
+    steady(&mono, -30.0, 1, 48_000, Sample::I16);
+    let out = run_tool(&dir, &mono, ToolKey::NormalizeAudio, to_lufs(-16)).unwrap();
+    let (dual, _) = loudness(&out.outputs[0], true);
+    let (plain, _) = loudness(&out.outputs[0], false);
+    assert!((dual + 16.0).abs() <= 0.5, "{dual}");
+    assert!((plain + 19.0).abs() <= 0.5, "{plain}");
+
+    // A 24-bit 96 kHz WAV and a 24-bit ALAC stay as they are, and lose
+    // their ReplayGain.
+    let deep = dir.join("deep.wav");
+    steady(&deep, -30.0, 2, 96_000, Sample::I24);
+    let alac = dir.join("deep.m4a");
+    ffmpeg(&[
+        "-i",
+        s(&deep),
+        "-c:a",
+        "alac",
+        "-sample_fmt",
+        "s32p",
+        "-metadata",
+        "REPLAYGAIN_TRACK_GAIN=+4.00 dB",
+        "-f",
+        "ipod",
+        s(&alac),
+    ]);
+    for (src, codec) in [(&deep, "pcm_s24le"), (&alac, "alac")] {
+        let out = run_tool(&dir, src, ToolKey::NormalizeAudio, to_lufs(-16)).unwrap();
+        let got = flat(
+            &out.outputs[0],
+            "stream=codec_name,sample_rate,bits_per_raw_sample:format_tags",
+        );
+        assert_eq!(got["streams.stream.0.codec_name"], codec);
+        assert_eq!(got["streams.stream.0.sample_rate"], "96000");
+        assert_eq!(got["streams.stream.0.bits_per_raw_sample"], "24");
+        assert!(
+            !got.keys()
+                .any(|k| k.to_ascii_lowercase().contains("replaygain")),
+            "{got:?}"
+        );
+    }
+
+    // Silence and a file already at the target are left alone.
+    let silent = dir.join("silent.wav");
+    steady(&silent, -200.0, 2, 48_000, Sample::I16);
+    let err = run_tool(&dir, &silent, ToolKey::NormalizeAudio, to_lufs(-16)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "silent.wav is too short or too quiet to measure its loudness."
+    );
+    let there = dir.join("there.wav");
+    steady(&there, -30.0, 2, 48_000, Sample::I16);
+    let (lufs, _) = loudness(&there, false);
+    let at = dir.join("at.wav");
+    // The tone's level that measures -23 LUFS.
+    steady(&at, -30.0 + (-23.0 - lufs), 2, 48_000, Sample::I16);
+    let err = run_tool(&dir, &at, ToolKey::NormalizeAudio, to_lufs(-23)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(err.user_message, "at.wav is already at \u{2212}23 LUFS.");
+}
+
+#[test]
+fn a_cancel_in_normalizes_second_pass_leaves_nothing() {
+    let dir = TestDir::new("tools-normalize-cancel");
+    let src = dir.join("long.wav");
+    steady(&src, -40.0, 2, 48_000, Sample::I16);
+    // 60 s, so the write pass is still running when the cancel comes.
+    let long = dir.join("long60.wav");
+    ffmpeg(&[
+        "-stream_loop",
+        "19",
+        "-i",
+        s(&src),
+        "-c:a",
+        "pcm_s16le",
+        "-f",
+        "wav",
+        s(&long),
+    ]);
+    let settings = Settings::new(dir.join("fallback"));
+    let sel = grape_engines::build_selection(std::slice::from_ref(&long), &settings);
+    let op = Operation::Tool {
+        tool: ToolKey::NormalizeAudio,
+        params: to_lufs(-16),
+    };
+    let job = grape_core::plan(&sel, &op, &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    let before = SourceState::of(&long);
+    let ctx = ctx();
+    let app_side = ctx.cancel.clone();
+    let err = run_job(&job, &ctx, &mut |f| {
+        // Past the measure's quarter of the bar: the write is running.
+        if f > 0.3 {
+            app_side.cancel();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled, "{}", err.detail);
+    before.assert_unchanged();
+    assert!(!planned_file(&job).exists());
+    assert_no_leftovers(&dir.path);
 }

@@ -13,7 +13,7 @@
 //!   has, by key, for what Remove Metadata reports and what the other
 //!   tools set again.
 //! - [`tools`] runs the tools (D26) on one file each, with the same
-//!   steps as [`convert`].
+//!   steps as [`convert`]; [`loudness`] is Normalize Volume's plan.
 //!
 //! **Offline and contained.** Both tools run with `-protocol_whitelist
 //! file` and `-format_whitelist` [`args::DEMUXERS`], and every path goes in
@@ -37,6 +37,7 @@
 //! [`crate::publish`] like every engine.
 
 pub(crate) mod args;
+pub(crate) mod loudness;
 pub(crate) mod probe;
 pub(crate) mod run;
 pub(crate) mod tags;

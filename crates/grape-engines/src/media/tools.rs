@@ -1,5 +1,6 @@
 //! The tools that run through FFmpeg (D26), one file in and one out:
-//! Remove Audio, Remove Metadata and Audio Channels so far.
+//! Remove Audio, Remove Metadata, Audio Channels and Normalize Volume so
+//! far.
 //!
 //! [`run`] goes through the steps a conversion does ([`super::convert`]),
 //! and every refusal, and every [`ErrorKind::NoChange`], comes before
@@ -10,7 +11,10 @@
 //!    the tool to keep or remove.
 //! 3. The tool's own checks (no sound to remove, no video to keep,
 //!    already mono, a 32-bit source a codec can't keep).
-//! 4. The temp file, then one of the two FFmpeg slots.
+//! 4. The temp file, then one of the two FFmpeg slots. Normalize Volume
+//!    takes the slot first: its measuring passes write nothing (the `null`
+//!    muxer), and what they find can still end it with `NoChange`, so the
+//!    temp file comes after them.
 //! 5. The tool's passes ([`argv`]), then the output's check: the
 //!    conversion's (not empty, `ffprobe` reads it), then the tool's own:
 //!    the streams it planned and, for Remove Metadata, a second tags probe
@@ -29,6 +33,7 @@ use std::path::{Path, PathBuf};
 use grape_core::{Channels, Format, Job, ToolKey, ToolParams};
 
 use super::args::{Missing, Pass};
+use super::loudness::{self, Correction, Plan};
 use super::probe::{Probe, StreamInfo, StreamKind};
 use super::run::{self, RunError, SlotGuard};
 use super::tags::{self, Tags};
@@ -46,7 +51,7 @@ pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
     use Format::{Flac, M4a, Mkv, Mov, Mp3, Mp4, Wav};
     match tool {
         ToolKey::RemoveMetadata => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
-        ToolKey::AudioChannels => matches!(from, Mp3 | M4a | Wav | Flac),
+        ToolKey::AudioChannels | ToolKey::NormalizeAudio => matches!(from, Mp3 | M4a | Wav | Flac),
         ToolKey::MuteVideo => matches!(from, Mp4 | Mov | Mkv),
         _ => false,
     }
@@ -87,6 +92,7 @@ pub(crate) fn run(
         ToolKey::MuteVideo => tool.mute(&mut bar),
         ToolKey::RemoveMetadata => tool.strip(&mut bar),
         ToolKey::AudioChannels => tool.channels(&mut bar),
+        ToolKey::NormalizeAudio => tool.normalize(&mut bar),
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
@@ -293,6 +299,139 @@ impl Tool<'_> {
         self.publish(written, bar)
     }
 
+    /// Normalize Volume ([`loudness`]): measure, plan, check the limiter's
+    /// result at most twice, then write with the gain, keeping the codec,
+    /// depth and rate. The measuring and check passes write nothing, so
+    /// only the last pass has a temp file.
+    fn normalize(&self, bar: &mut Bar) -> Result<JobOutcome, GrapeError> {
+        let (names, info) = (&self.begun.names, &self.begun.info);
+        let src = self.begun.src;
+        let target = self.params.target_lufs;
+        if !ToolParams::lufs_ok(target) {
+            return Err(GrapeError::new(
+                ErrorKind::EncodeFailed,
+                "Grape couldn't use that loudness.",
+                format!(
+                    "target {target} LUFS outside {}..={}",
+                    ToolParams::LUFS_MIN,
+                    ToolParams::LUFS_MAX
+                ),
+            ));
+        }
+        let audio = self.audio()?;
+        let codec = self.same_quality(audio, audio.channels)?;
+        let (goal, ceiling) = (f64::from(target), loudness::ceiling(codec.exact));
+        let mono = audio.channels == 1;
+
+        let slot = self.slot()?;
+        let mut done = MEASURE_SHARE;
+        let measured = self.measure(&loudness::measure(None, mono), bar, done)?;
+        let chain = match loudness::plan(measured, goal, ceiling) {
+            Plan::TooQuiet => {
+                let detail = format!("measured {measured:?} in {}", src.display());
+                return Err(
+                    names.no_change("is too short or too quiet to measure its loudness.", detail)
+                );
+            }
+            Plan::AtTarget => {
+                let detail = format!("measured {measured:?} in {}", src.display());
+                let why = format!("is already at {} LUFS.", minus(target));
+                return Err(names.no_change(&why, detail));
+            }
+            Plan::Linear(gain) => loudness::linear(gain),
+            Plan::Limited(mut gain) => {
+                let rate = audio.sample_rate;
+                let mut checks = 0;
+                loop {
+                    checks += 1;
+                    done += CHECK_SHARE;
+                    let chain = loudness::limited(gain, ceiling, rate);
+                    let filter = loudness::measure(Some(&chain), mono);
+                    let lufs = self.measure(&filter, bar, done)?.map(|m| m.lufs);
+                    let Some(lufs) = lufs else {
+                        return Err(names.encode_failed(format!(
+                            "check {}: no loudness summary at gain {gain:.2} dB",
+                            src.display()
+                        )));
+                    };
+                    match loudness::correct(goal, gain, lufs, checks) {
+                        Correction::Write(last) => break loudness::limited(last, ceiling, rate),
+                        Correction::Check(next) => gain = next,
+                    }
+                }
+            }
+        };
+
+        let (temp, out) = self.temp()?;
+        let pass = Pass {
+            args: argv::reencode(
+                &self.begun.src_abs,
+                self.to,
+                info,
+                self.tags,
+                &[],
+                &chain,
+                &codec,
+                &out,
+            ),
+            weight: 1.0,
+        };
+        let warnings = self.run(&[pass], bar, PASSES_SHARE)?;
+        let probe = self.probe(&out, &warnings)?;
+        let wrote = probe
+            .streams
+            .iter()
+            .find(|s| s.kind == StreamKind::Audio)
+            .map(|s| s.sample_rate);
+        if wrote != Some(audio.sample_rate) {
+            return Err(self.wrote_wrong(
+                &out,
+                format!("rate {wrote:?}, {} in the source", audio.sample_rate),
+            ));
+        }
+        let written = Written {
+            temp,
+            out,
+            probe,
+            _slot: slot,
+        };
+        self.publish(written, bar)
+    }
+
+    /// Runs a measuring or check pass with `filter` ([`argv::measure`]),
+    /// filling the bar to `share` of [`PASSES_SHARE`], and reads its
+    /// summary. A failure's detail holds no stderr: at `-v info` it
+    /// repeats the source's tags.
+    fn measure(
+        &self,
+        filter: &str,
+        bar: &mut Bar,
+        share: f32,
+    ) -> Result<Option<loudness::Measured>, GrapeError> {
+        let Begun {
+            ffmpeg,
+            info,
+            names,
+            src,
+            src_abs,
+            ..
+        } = self.begun;
+        let pass = Pass {
+            args: argv::measure(src_abs, info, filter),
+            weight: 1.0,
+        };
+        let end = PASSES_SHARE * share;
+        match run_passes(ffmpeg, &[pass], info.duration, self.ctx, bar, end) {
+            Ok(stderr) => Ok(loudness::parse(&stderr)),
+            Err(e) => {
+                let detail = format!("measure {}: {e}", src.display());
+                let mut failed = ffmpeg_failed(names, e, src);
+                failed.detail = detail;
+                Err(publish::or_cancelled(&self.ctx.cancel, src, failed))
+            }
+        }
+    }
+
     /// The source's first audio track, which the audio tools work on.
     fn audio(&self) -> Result<&StreamInfo, GrapeError> {
         let info = &self.begun.info;
@@ -430,6 +569,21 @@ impl Tool<'_> {
     }
 }
 
+/// Normalize Volume's measuring pass's share of the passes' bar.
+const MEASURE_SHARE: f32 = 0.25;
+
+/// Each check pass's share of it.
+const CHECK_SHARE: f32 = 0.2;
+
+/// A loudness as the panel shows it: "−16", with U+2212 MINUS SIGN.
+fn minus(lufs: i8) -> String {
+    if lufs < 0 {
+        format!("\u{2212}{}", lufs.unsigned_abs())
+    } else {
+        lufs.to_string()
+    }
+}
+
 /// The error for a container with neither sound nor video to keep.
 fn nothing_in_it(names: &publish::Names, src: &Path) -> GrapeError {
     GrapeError::new(
@@ -504,7 +658,7 @@ mod tests {
             assert_eq!(to, from, "{tool:?} on {from:?}: {planned}");
             assert!(crate::media::args::muxer(to).is_some());
         }
-        assert_eq!(count, 14);
+        assert_eq!(count, 18);
     }
 
     /// A tool job on `name` (the bytes "source") in a fresh folder, with
@@ -959,6 +1113,225 @@ mod tests {
             err.user_message,
             "song.m4a is a 32-bit recording. ALAC would cut it, so nothing was saved."
         );
+        case.assert_clean();
+    }
+
+    /// A Normalize job on `name` for `target_lufs`.
+    fn normalize_case(name: &str, target_lufs: i8) -> Case {
+        let mut case = Case::new(name, ToolKey::NormalizeAudio);
+        case.job.op = Operation::Tool {
+            tool: ToolKey::NormalizeAudio,
+            params: ToolParams {
+                target_lufs,
+                ..ToolParams::default()
+            },
+        };
+        case
+    }
+
+    /// A measuring pass that prints an `ebur128` summary of `lufs` and
+    /// `peak`, after the input's tags.
+    fn measured(lufs: &str, peak: &str) -> Fake {
+        let stderr = format!(
+            "Input #0, flac, from 'file:/x/song.flac':\n  Metadata:\n    title           : secret\n\
+             [Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:  {lufs} LUFS\n\
+             \x20   Threshold: -31.1 LUFS\n\n  True peak:\n    Peak:  {peak} dBFS\n"
+        );
+        Fake::Child("measure", stderr)
+    }
+
+    /// The `-af` filter of the scripted run's argv `args`.
+    fn filter(args: &[std::ffi::OsString]) -> String {
+        let at = args.iter().position(|a| a == "-af").unwrap();
+        args[at + 1].to_string_lossy().into_owned()
+    }
+
+    fn stereo_flac() -> Fake {
+        song("flac", "flac", 2, true, 16)
+    }
+
+    #[test]
+    fn normalize_measures_then_writes_with_a_linear_gain() {
+        let case = normalize_case("song.flac", -16);
+        script([
+            stereo_flac(),
+            no_tags(),
+            measured("-21.1", "-18.1"),
+            Fake::Child("write", "louder".to_owned()),
+            stereo_flac(),
+        ]);
+        let (result, seen) = case.run();
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("song Normalized.flac")]);
+        assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), b"louder");
+        let ran = ran();
+        assert_eq!(ran.len(), 5);
+        // The measure: at info level, into nothing.
+        assert!(has(&ran[2], ["-v", "info"]) && has(&ran[2], ["-f", "null"]));
+        assert_eq!(ran[2].last().unwrap(), "-");
+        assert_eq!(filter(&ran[2]), "ebur128=peak=true:framelog=quiet");
+        // The write: the gain, dithered to 16 bits, FLAC as it was.
+        assert_eq!(
+            filter(&ran[3]),
+            "aformat=sample_fmts=dbl,volume=5.10dB:precision=double,\
+             aresample=osf=s16:dither_method=triangular"
+        );
+        assert!(has(&ran[3], ["-sample_fmt", "s16"]));
+        // The measure fills a quarter of the passes' share, the write the
+        // rest.
+        assert_forward_to_done(&seen);
+        assert!(seen.iter().any(|&f| (f - 0.245).abs() < 1e-6), "{seen:?}");
+        case.assert_clean();
+    }
+
+    #[test]
+    fn normalize_checks_a_limited_gain_at_most_twice() {
+        // The design's peaky.wav (§5.4): G 11.0 measured -21.5, then 16.5
+        // measured -17.0, written at 17.5. Mono is measured as dual mono.
+        let case = normalize_case("take.wav", -16);
+        let wav = || song("wav", "pcm_s24le", 1, true, 24);
+        script([
+            wav(),
+            no_tags(),
+            measured("-27.0", "-2.9"),
+            measured("-21.5", "-1.6"),
+            measured("-17.0", "-1.5"),
+            Fake::Child("write", "limited".to_owned()),
+            wav(),
+        ]);
+        let (result, seen) = case.run();
+        result.unwrap();
+        let ran = ran();
+        assert_eq!(ran.len(), 7);
+        let limiter = "aresample=192000,alimiter=limit=0.84140:attack=5:release=50:level=0:\
+                       latency=1,aresample=48000";
+        let dual = "ebur128=peak=true:framelog=quiet:dualmono=true";
+        let gain = |g: &str| format!("aformat=sample_fmts=dbl,volume={g}dB:precision=double");
+        assert_eq!(filter(&ran[2]), dual);
+        assert_eq!(
+            filter(&ran[3]),
+            format!("{},{limiter},{dual}", gain("11.00"))
+        );
+        assert_eq!(
+            filter(&ran[4]),
+            format!("{},{limiter},{dual}", gain("16.50"))
+        );
+        // A 24-bit WAV: no dither.
+        assert_eq!(filter(&ran[5]), format!("{},{limiter}", gain("17.50")));
+        assert!(has(&ran[5], ["-c:a", "pcm_s24le"]));
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // A check within 0.3 LU writes at once.
+        let case = normalize_case("loud.flac", -16);
+        script([
+            stereo_flac(),
+            no_tags(),
+            measured("-13.5", "1.6"),
+            measured("-16.0", "-1.5"),
+            Fake::Child("write", "limited".to_owned()),
+            stereo_flac(),
+        ]);
+        case.run().0.unwrap();
+        let again = crate::media::run::tests::ran();
+        assert_eq!(again.len(), 6);
+        assert!(filter(&again[4]).starts_with(&gain("-2.50")));
+        case.assert_clean();
+    }
+
+    #[test]
+    fn normalize_leaves_a_file_at_its_target_or_too_quiet_alone() {
+        for (lufs, peak, target, message) in [
+            (
+                "-16.3",
+                "-3.0",
+                -16,
+                "song.flac is already at \u{2212}16 LUFS.",
+            ),
+            (
+                "-23.4",
+                "-9.0",
+                -23,
+                "song.flac is already at \u{2212}23 LUFS.",
+            ),
+            (
+                "-70.0",
+                "-inf",
+                -16,
+                "song.flac is too short or too quiet to measure its loudness.",
+            ),
+        ] {
+            let case = normalize_case("song.flac", target);
+            script([stereo_flac(), no_tags(), measured(lufs, peak)]);
+            let (result, _) = case.run();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NoChange, "{message}: {}", err.detail);
+            assert_eq!(err.user_message, message);
+            // Only the measure ran, and nothing was created.
+            assert_eq!(ran().len(), 3);
+            assert_eq!(slots_held(), 0);
+            assert!(!case.dest().exists());
+            case.assert_clean();
+        }
+        // A measure that printed no summary is too short to measure.
+        let case = normalize_case("song.flac", -16);
+        script([
+            stereo_flac(),
+            no_tags(),
+            Fake::Child("measure", String::new()),
+        ]);
+        assert_eq!(case.run().0.unwrap_err().kind, ErrorKind::NoChange);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn normalize_refuses_a_target_out_of_range_and_hides_the_tags() {
+        for target in [-25, -9, 0] {
+            let case = normalize_case("song.flac", target);
+            script([stereo_flac(), no_tags()]);
+            let err = case.run().0.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::EncodeFailed, "{target}");
+            assert_eq!(err.user_message, "Grape couldn't use that loudness.");
+            assert_eq!(ran().len(), 2);
+            case.assert_clean();
+        }
+        // A measure that fails says only how: its stderr repeats the tags.
+        let case = normalize_case("song.flac", -16);
+        script([
+            stereo_flac(),
+            no_tags(),
+            Fake::Child("error", "    title           : secret\n".to_owned()),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(!err.detail.contains("secret"), "{}", err.detail);
+        assert!(err.detail.contains("exited with code 1"), "{}", err.detail);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn a_cancel_between_normalize_passes_starts_nothing_more() {
+        let _serial = one_at_a_time();
+        let case = normalize_case("take.wav", -16);
+        script([
+            song("wav", "pcm_s16le", 2, true, 16),
+            no_tags(),
+            measured("-27.0", "-2.9"),
+            measured("-21.5", "-1.6"),
+        ]);
+        let ctx = ctx();
+        let cancel = ctx.cancel.clone();
+        // The measure ends at a quarter of the passes' share.
+        let err = crate::run_job(&case.job, &ctx, &mut |f| {
+            if f >= 0.245 {
+                cancel.cancel();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Cancelled, "{}", err.detail);
+        assert_eq!(ran().len(), 3);
+        assert_eq!(slots_held(), 0);
+        assert!(!case.dest().exists());
         case.assert_clean();
     }
 
