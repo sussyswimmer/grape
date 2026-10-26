@@ -1,11 +1,14 @@
-//! Audio and video conversions with the bundled FFmpeg sidecar: the pure
-//! half, which builds every argv and reads `ffprobe`'s answer.
+//! Audio and video conversions with the bundled FFmpeg sidecar
+//! (`docs/ENGINES.md`).
 //!
 //! - [`probe`] asks `ffprobe` for the container, the duration (for
 //!   progress) and the few stream fields the planner needs, and parses its
 //!   `-of flat` output into a [`probe::Probe`].
 //! - [`args`] turns the probe and the target format into the `ffmpeg`
 //!   passes: one per conversion, two for GIF (palette, then the GIF).
+//! - [`run`] starts `ffmpeg` and `ffprobe` from [`crate::SidecarPaths`]
+//!   only, reads the output time from `-progress pipe:1`, kills the child
+//!   on cancel and lets at most two FFmpeg jobs run at once.
 //!
 //! **Offline and contained.** Both tools run with `-protocol_whitelist
 //! file` and `-format_whitelist` [`args::DEMUXERS`], and every path goes in
@@ -23,3 +26,4 @@
 
 pub(crate) mod args;
 pub(crate) mod probe;
+pub(crate) mod run;

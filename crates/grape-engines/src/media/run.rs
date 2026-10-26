@@ -1,0 +1,885 @@
+//! Running the `ffmpeg` and `ffprobe` sidecars.
+//!
+//! - **Only from [`crate::SidecarPaths`]:** [`command`] refuses a program
+//!   path that isn't absolute, because a bare name would be looked up on
+//!   `PATH` and run whatever FFmpeg the user installed.
+//! - **Never stuck on a full pipe:** two reader threads drain the child's
+//!   stdout and stderr while the calling thread watches the child. Only the
+//!   last [`TAIL_BYTES`] of stderr are kept, for the log.
+//! - **Cancel and timeouts** are checked at least every [`POLL`]. The child
+//!   is killed and then waited for: on Windows its temp output can't be
+//!   deleted while the process still holds it open.
+//! - **Two at a time:** [`acquire`] holds an FFmpeg job back until one of
+//!   the [`MAX_FFMPEG_JOBS`] slots is free (`docs/ARCHITECTURE.md`).
+
+use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::io::{self, BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Condvar, Mutex, PoisonError};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use crate::CancelToken;
+
+/// How many FFmpeg jobs may run at once (`docs/ARCHITECTURE.md`).
+const MAX_FFMPEG_JOBS: usize = 2;
+
+/// The longest the calling thread waits before it checks the cancel token,
+/// the deadline and the child again.
+const POLL: Duration = Duration::from_millis(50);
+
+/// The pause between checks once the child closed its stdout, which it
+/// usually does by exiting: there is nothing left to wait on but the child.
+const EXIT_POLL: Duration = Duration::from_millis(10);
+
+/// How much of the end of stderr is kept for the log.
+const TAIL_BYTES: usize = 16 * 1024;
+
+/// The most stdout [`probe`] accepts.
+const MAX_PROBE_OUTPUT: usize = 4 * 1024 * 1024;
+
+/// The longest `-progress` line that is parsed; longer ones are skipped.
+const MAX_LINE: usize = 4 * 1024;
+
+/// `CREATE_NO_WINDOW`: no console window flashes up for a child of a GUI app.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// `BELOW_NORMAL_PRIORITY_CLASS`: an encode doesn't starve the desktop.
+#[cfg(windows)]
+const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+
+/// Why running a sidecar failed.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum RunError {
+    /// The program path isn't absolute. Nothing was started.
+    #[error("sidecar path isn't absolute: {}", .0.display())]
+    NotAbsolute(PathBuf),
+    /// The child couldn't be started (missing file, no permission).
+    #[error("couldn't start the sidecar: {0}")]
+    Spawn(io::Error),
+    /// The child exited with a failure status.
+    #[error("the sidecar exited with {}", exit_text(.code))]
+    Exit {
+        /// The exit code; `None` when a signal ended the child.
+        code: Option<i32>,
+        /// The end of what it wrote to stderr.
+        stderr_tail: String,
+    },
+    /// The token was cancelled. The child, if it was started, is gone.
+    #[error("cancelled")]
+    Cancelled,
+    /// The child ran past its timeout and was killed.
+    #[error("the sidecar timed out")]
+    TimedOut,
+    /// Watching the child or reading its output failed. The child is gone.
+    #[error("sidecar I/O failed: {0}")]
+    Io(io::Error),
+}
+
+/// "code 3", or how a child ended without one.
+fn exit_text(code: &Option<i32>) -> String {
+    match code {
+        Some(code) => format!("code {code}"),
+        None => "no code (ended by a signal)".to_string(),
+    }
+}
+
+/// A child that exited with status 0.
+#[derive(Debug)]
+pub(crate) struct Finished {
+    /// The end of what it wrote to stderr (FFmpeg warns there even when it
+    /// succeeds), for the log.
+    pub(crate) stderr_tail: String,
+}
+
+/// A [`Command`] for the sidecar at `program`: stdin empty, stdout and
+/// stderr piped, `FFREPORT` removed so a user's setting can't make FFmpeg
+/// write a report file. On Windows the child gets no console window and
+/// below-normal priority.
+pub(crate) fn command(program: &Path, args: &[OsString]) -> Result<Command, RunError> {
+    if !program.is_absolute() {
+        return Err(RunError::NotAbsolute(program.to_path_buf()));
+    }
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("FFREPORT");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+    }
+    Ok(command)
+}
+
+/// Runs `ffmpeg` with `args` (which include `-progress pipe:1`) and calls
+/// `on_time`, on this thread, with each output time it reports. Kills it
+/// when `cancel` is cancelled, even as it exits. Nothing is started if the
+/// token is already cancelled.
+pub(crate) fn transcode(
+    program: &Path,
+    args: &[OsString],
+    cancel: &CancelToken,
+    on_time: &mut dyn FnMut(Duration),
+) -> Result<Finished, RunError> {
+    transcode_command(command(program, args)?, cancel, on_time)
+}
+
+/// [`transcode`] with a ready [`Command`] (tests add environment to it).
+fn transcode_command(
+    command: Command,
+    cancel: &CancelToken,
+    on_time: &mut dyn FnMut(Duration),
+) -> Result<Finished, RunError> {
+    supervise(command, cancel, None, read_progress, &mut |time| {
+        on_time(time);
+        Ok(())
+    })
+}
+
+/// Runs `ffprobe` with `args` and returns its stdout (lossy UTF-8). Kills
+/// it when `cancel` is cancelled or after `timeout`, and refuses more than
+/// [`MAX_PROBE_OUTPUT`] of output.
+pub(crate) fn probe(
+    program: &Path,
+    args: &[OsString],
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<String, RunError> {
+    probe_command(command(program, args)?, cancel, timeout)
+}
+
+/// [`probe`] with a ready [`Command`] (tests add environment to it).
+fn probe_command(
+    command: Command,
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<String, RunError> {
+    let deadline = Instant::now().checked_add(timeout);
+    let mut output = None;
+    let mut keep = |read: io::Result<Vec<u8>>| match read {
+        Ok(bytes) => {
+            output = Some(bytes);
+            Ok(())
+        }
+        Err(e) => Err(RunError::Io(e)),
+    };
+    supervise(command, cancel, deadline, read_all, &mut keep)?;
+    let bytes =
+        output.ok_or_else(|| RunError::Io(io::Error::other("the sidecar's stdout was lost")))?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Starts `command` and sees it through: `read_stdout` runs on its own
+/// thread and sends messages that `on_message` handles on this one; stderr
+/// is drained into a [`Tail`]. An error from `on_message`, a cancel or the
+/// deadline kills the child. Returns once the child is gone and both
+/// readers have finished.
+fn supervise<M: Send>(
+    mut command: Command,
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+    read_stdout: impl FnOnce(ChildStdout, Sender<M>) + Send,
+    on_message: &mut dyn FnMut(M) -> Result<(), RunError>,
+) -> Result<Finished, RunError> {
+    if cancel.is_cancelled() {
+        return Err(RunError::Cancelled);
+    }
+    let mut child = command.spawn().map_err(RunError::Spawn)?;
+    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        stop(&mut child);
+        return Err(RunError::Io(io::Error::other(
+            "the sidecar's output isn't piped",
+        )));
+    };
+    let (sender, messages) = mpsc::channel();
+    thread::scope(|scope| {
+        let readers = thread::Builder::new()
+            .name("grape-sidecar-stdout".to_string())
+            .spawn_scoped(scope, move || read_stdout(stdout, sender))
+            .and_then(|out| {
+                thread::Builder::new()
+                    .name("grape-sidecar-stderr".to_string())
+                    .spawn_scoped(scope, move || drain_tail(stderr))
+                    .map(|err| (out, err))
+            });
+        let (out, err) = match readers {
+            Ok(readers) => readers,
+            Err(e) => {
+                stop(&mut child);
+                return Err(RunError::Io(e));
+            }
+        };
+        let status = match watch(&mut child, cancel, deadline, &messages, on_message) {
+            Ok(status) => status,
+            Err(e) => {
+                stop(&mut child);
+                return Err(e);
+            }
+        };
+        // The child has exited, so its pipes are closed and both readers end.
+        let _ = out.join();
+        let stderr_tail = err.join().map(Tail::render).unwrap_or_default();
+        let drained = messages.try_iter().try_for_each(&mut *on_message);
+        if cancel.is_cancelled() {
+            return Err(RunError::Cancelled);
+        }
+        drained?;
+        if status.success() {
+            Ok(Finished { stderr_tail })
+        } else {
+            Err(RunError::Exit {
+                code: status.code(),
+                stderr_tail,
+            })
+        }
+    })
+}
+
+/// Hands messages to `on_message` until the child exits, checking the
+/// token, the child and the deadline at least every [`POLL`]. On an error
+/// the child may still be running; the caller stops it.
+fn watch<M>(
+    child: &mut Child,
+    cancel: &CancelToken,
+    deadline: Option<Instant>,
+    messages: &Receiver<M>,
+    on_message: &mut dyn FnMut(M) -> Result<(), RunError>,
+) -> Result<ExitStatus, RunError> {
+    loop {
+        let stdout_closed = match messages.recv_timeout(POLL) {
+            Ok(message) => {
+                on_message(message)?;
+                false
+            }
+            Err(RecvTimeoutError::Timeout) => false,
+            Err(RecvTimeoutError::Disconnected) => true,
+        };
+        if cancel.is_cancelled() {
+            return Err(RunError::Cancelled);
+        }
+        if let Some(status) = child.try_wait().map_err(RunError::Io)? {
+            return Ok(status);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            return Err(RunError::TimedOut);
+        }
+        if stdout_closed {
+            // `recv_timeout` returns at once from now on.
+            thread::sleep(EXIT_POLL);
+        }
+    }
+}
+
+/// Kills the child and always waits for it: on Windows the output file
+/// can't be deleted until the process is really gone.
+fn stop(child: &mut Child) {
+    // Fails only if the child already exited; `wait` then reaps it.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The stdout reader for [`transcode`]: sends each output time it parses.
+fn read_progress(stdout: ChildStdout, times: Sender<Duration>) {
+    let mut parser = ProgressParser::new();
+    read_lines(stdout, |line| {
+        if let Some(time) = parser.feed(line) {
+            // The receiver outlives the reader: both live in one scope.
+            let _ = times.send(time);
+        }
+    });
+}
+
+/// The stdout reader for [`probe`]: sends all of stdout once it ends, or an
+/// error as soon as it passes [`MAX_PROBE_OUTPUT`]. Returning drops the
+/// pipe, so a child that keeps writing gets an error instead of blocking.
+fn read_all(stdout: ChildStdout, output: Sender<io::Result<Vec<u8>>>) {
+    let mut bytes = Vec::new();
+    let limit = MAX_PROBE_OUTPUT as u64 + 1;
+    let read = match stdout.take(limit).read_to_end(&mut bytes) {
+        Ok(_) if bytes.len() > MAX_PROBE_OUTPUT => Err(io::Error::other(format!(
+            "the sidecar printed more than {} MiB",
+            MAX_PROBE_OUTPUT >> 20
+        ))),
+        Ok(_) => Ok(bytes),
+        Err(e) => Err(e),
+    };
+    let _ = output.send(read);
+}
+
+/// Calls `each` with every line of `reader` (lossy UTF-8, line end
+/// included), until the end or a read error. A line longer than
+/// [`MAX_LINE`] is skipped whole, so output without line ends can't grow
+/// the buffer.
+fn read_lines(reader: impl Read, mut each: impl FnMut(&str)) {
+    let mut reader = BufReader::new(reader);
+    let mut line = Vec::new();
+    let mut skipping = false;
+    loop {
+        line.clear();
+        match reader
+            .by_ref()
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', &mut line)
+        {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {
+                // A full buffer without a line end is part of an overlong line.
+                let overlong = line.len() == MAX_LINE && line.last() != Some(&b'\n');
+                if !skipping && !overlong {
+                    each(&String::from_utf8_lossy(&line));
+                }
+                skipping = overlong;
+            }
+        }
+    }
+}
+
+/// Reads `stderr` to the end (or a read error), keeping its [`Tail`].
+fn drain_tail(mut stderr: impl Read) -> Tail {
+    let mut tail = Tail::default();
+    let mut buf = [0u8; 8 * 1024];
+    loop {
+        match stderr.read(&mut buf) {
+            Ok(0) => return tail,
+            Ok(n) => tail.push(&buf[..n]),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(_) => return tail,
+        }
+    }
+}
+
+/// The last [`TAIL_BYTES`] bytes of a stream.
+#[derive(Debug, Default)]
+struct Tail {
+    bytes: VecDeque<u8>,
+}
+
+impl Tail {
+    /// Appends `chunk`, dropping the oldest bytes past [`TAIL_BYTES`].
+    fn push(&mut self, chunk: &[u8]) {
+        let chunk = &chunk[chunk.len().saturating_sub(TAIL_BYTES)..];
+        let excess = (self.bytes.len() + chunk.len()).saturating_sub(TAIL_BYTES);
+        self.bytes.drain(..excess);
+        self.bytes.extend(chunk);
+    }
+
+    /// The bytes as text; invalid UTF-8 (such as a character cut in two at
+    /// the start) becomes U+FFFD.
+    fn render(mut self) -> String {
+        String::from_utf8_lossy(self.bytes.make_contiguous()).into_owned()
+    }
+}
+
+/// Reads `ffmpeg -progress pipe:1` output, one `key=value` line at a time.
+#[derive(Debug, Default)]
+pub(crate) struct ProgressParser;
+
+impl ProgressParser {
+    /// A parser for a new run.
+    pub(crate) fn new() -> Self {
+        ProgressParser
+    }
+
+    /// The output time on an `out_time_us=N` line (microseconds), else
+    /// `None`. A trailing `\r` (CRLF) is ignored. `N/A` and negative times
+    /// (before the first frame) give `None`, as does every other line:
+    /// `progress=end`, the other keys, and `out_time_ms`, which despite its
+    /// name holds the same microseconds (FFmpeg 6–9).
+    pub(crate) fn feed(&mut self, line: &str) -> Option<Duration> {
+        let (key, value) = line.trim_end().split_once('=')?;
+        if key != "out_time_us" {
+            return None;
+        }
+        value.parse::<u64>().ok().map(Duration::from_micros)
+    }
+}
+
+/// A counting gate: at most `slots` holders at once.
+#[derive(Debug)]
+struct Gate {
+    /// How many slots are held.
+    busy: Mutex<usize>,
+    /// Notified whenever a slot is released.
+    freed: Condvar,
+    /// How many holders may run at once.
+    slots: usize,
+}
+
+impl Gate {
+    const fn new(slots: usize) -> Gate {
+        Gate {
+            busy: Mutex::new(0),
+            freed: Condvar::new(),
+            slots,
+        }
+    }
+
+    /// Waits for a free slot, rechecking `cancel` at least every [`POLL`].
+    /// `None` once the token is cancelled, even if a slot is free: a
+    /// cancelled job doesn't start.
+    fn acquire(&self, cancel: &CancelToken) -> Option<SlotGuard<'_>> {
+        // The count stays right even if a holder panicked, so a poisoned
+        // lock is still usable.
+        let mut busy = self.busy.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            if *busy < self.slots {
+                *busy += 1;
+                return Some(SlotGuard { gate: self });
+            }
+            busy = self
+                .freed
+                .wait_timeout(busy, POLL)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+}
+
+/// The FFmpeg job slots.
+static FFMPEG_SLOTS: Gate = Gate::new(MAX_FFMPEG_JOBS);
+
+/// Waits until fewer than [`MAX_FFMPEG_JOBS`] FFmpeg jobs run, and holds a
+/// slot until the guard drops. `None` if `cancel` is cancelled first.
+pub(crate) fn acquire(cancel: &CancelToken) -> Option<SlotGuard<'static>> {
+    FFMPEG_SLOTS.acquire(cancel)
+}
+
+/// A held job slot, released when dropped.
+#[derive(Debug)]
+#[must_use = "the slot is released as soon as the guard drops"]
+pub(crate) struct SlotGuard<'a> {
+    gate: &'a Gate,
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        let mut busy = self
+            .gate
+            .busy
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        *busy = busy.saturating_sub(1);
+        drop(busy);
+        self.gate.freed.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::io::{Cursor, Write};
+
+    use super::*;
+
+    /// The environment variable that turns [`fake_child`] into a child.
+    const FAKE_MODE: &str = "GRAPE_FAKE_CHILD";
+
+    /// Runs only [`fake_child`] in this test binary, printing straight to
+    /// the pipes.
+    const FAKE_CHILD_ARGS: [&str; 4] = [
+        "--exact",
+        "media::run::tests::fake_child",
+        "--nocapture",
+        "--test-threads=1",
+    ];
+
+    /// What the fake child prints in `probe` mode.
+    const PROBE_OUTPUT: &str = "{\n  \"format\": {\n    \"duration\": \"12.345000\"\n  }\n}\n";
+
+    /// A stand-in for `ffmpeg` and `ffprobe`, so these tests need neither.
+    /// It does nothing in a normal test run. The tests start this test
+    /// binary again with [`FAKE_MODE`] set, and it then acts as a child:
+    /// - `progress`: `-progress` blocks on stdout, then exits 0;
+    /// - `stderr-flood`: [`flood`] (over 1 MiB) on stderr, then exits 0;
+    /// - `sleep`: runs until killed;
+    /// - `fail`: "boom" on stderr, then exits 3;
+    /// - `probe`: [`PROBE_OUTPUT`] on stdout, then exits 0;
+    /// - `big`: 5 MiB on stdout, then exits 0.
+    #[test]
+    fn fake_child() {
+        let Ok(mode) = std::env::var(FAKE_MODE) else {
+            return;
+        };
+        let code = match mode.as_str() {
+            "progress" => fake_progress(),
+            "stderr-flood" => {
+                io::stderr().lock().write_all(&flood()).unwrap();
+                0
+            }
+            "sleep" => loop {
+                thread::sleep(Duration::from_millis(50));
+            },
+            "fail" => {
+                io::stderr().lock().write_all(b"boom\n").unwrap();
+                3
+            }
+            "probe" => {
+                // Ends the harness's "test ... " line first.
+                print_flushed(format!("\n{PROBE_OUTPUT}").as_bytes());
+                0
+            }
+            "big" => {
+                // Fails with a broken pipe once the reader gives up.
+                let _ = io::stdout().lock().write_all(&vec![b'x'; 5 << 20]);
+                0
+            }
+            other => panic!("unknown {FAKE_MODE} mode {other:?}"),
+        };
+        std::process::exit(code);
+    }
+
+    fn print_flushed(bytes: &[u8]) {
+        let mut out = io::stdout().lock();
+        out.write_all(bytes).unwrap();
+        out.flush().unwrap();
+    }
+
+    /// Output times 0, 0.5, 1, 1.5 and 2 s, among lines to ignore.
+    fn fake_progress() -> i32 {
+        // Ends the harness's "test ... " line, so the first key starts a line.
+        print_flushed(b"\nout_time_us=N/A\nout_time_us=-23220\nprogress=continue\n");
+        for frame in 0u64..4 {
+            let us = frame * 500_000;
+            let block = format!(
+                "frame={frame}\nfps=0.00\nout_time_us={us}\nout_time_ms={us}\n\
+                 out_time=00:00:00.000000\nspeed=N/A\nprogress=continue\n"
+            );
+            print_flushed(block.as_bytes());
+            thread::sleep(Duration::from_millis(20));
+        }
+        print_flushed(b"out_time_us=2000000\r\nout_time_ms=2000000\r\nprogress=end\r\n");
+        0
+    }
+
+    /// What the fake child writes to stderr in `stderr-flood` mode.
+    fn flood() -> Vec<u8> {
+        (0..45_000)
+            .flat_map(|i| format!("stderr flood line {i:07}\n").into_bytes())
+            .collect()
+    }
+
+    /// A command that starts this test binary as a fake child in `mode`.
+    fn fake(mode: &str) -> Command {
+        let exe = std::env::current_exe().unwrap();
+        let args: Vec<OsString> = FAKE_CHILD_ARGS.iter().map(OsString::from).collect();
+        let mut fake = command(&exe, &args).unwrap();
+        fake.env(FAKE_MODE, mode);
+        fake
+    }
+
+    /// Cancels `token` if the test still runs after 10 s, so a hang fails
+    /// the test instead of stalling the run. Dropping the returned sender
+    /// ends the watch.
+    fn watchdog(token: &CancelToken) -> Sender<()> {
+        let (done, wait) = mpsc::channel::<()>();
+        let token = token.clone();
+        thread::spawn(move || {
+            if wait.recv_timeout(Duration::from_secs(10)) == Err(RecvTimeoutError::Timeout) {
+                token.cancel();
+            }
+        });
+        done
+    }
+
+    #[test]
+    fn progress_arrives_in_order_and_a_zero_exit_is_ok() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let mut times = Vec::new();
+        transcode_command(fake("progress"), &token, &mut |time| times.push(time)).unwrap();
+        assert_eq!(times, [0, 500, 1000, 1500, 2000].map(Duration::from_millis));
+    }
+
+    #[test]
+    fn a_stderr_flood_cannot_block_the_child_and_only_its_tail_is_kept() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let finished = transcode_command(fake("stderr-flood"), &token, &mut |_| {}).unwrap();
+        let tail = finished.stderr_tail;
+        assert!(tail.len() <= TAIL_BYTES, "{}", tail.len());
+        assert!(tail.ends_with("stderr flood line 0044999\n"));
+        let flood = flood();
+        assert_eq!(tail.as_bytes(), &flood[flood.len() - TAIL_BYTES..]);
+    }
+
+    #[test]
+    fn cancel_kills_a_running_child_within_a_second() {
+        let token = CancelToken::new();
+        let canceller = {
+            let token = token.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(200));
+                token.cancel();
+                Instant::now()
+            })
+        };
+        let result = transcode_command(fake("sleep"), &token, &mut |_| {});
+        let returned = Instant::now();
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        // Returning at all means `wait` returned after the kill, and that
+        // both readers saw their pipe close: the child is gone.
+        let cancelled = canceller.join().unwrap();
+        assert!(returned.duration_since(cancelled) < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_cancel_as_the_child_exits_still_cancels() {
+        let token = CancelToken::new();
+        let result = transcode_command(fake("progress"), &token, &mut |time| {
+            if time == Duration::from_secs(2) {
+                token.cancel();
+            }
+        });
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn a_cancelled_token_starts_nothing() {
+        let token = CancelToken::new();
+        token.cancel();
+        // A missing program would fail to spawn, so `Cancelled` means no
+        // spawn was tried.
+        let missing = missing_program();
+        let result = transcode(&missing, &[], &token, &mut |_| {});
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        let result = probe(&missing, &[], &token, Duration::from_secs(1));
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn a_failing_child_reports_its_code_and_stderr() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let result = transcode_command(fake("fail"), &token, &mut |_| {});
+        match result {
+            Err(RunError::Exit {
+                code: Some(3),
+                stderr_tail,
+            }) => assert!(stderr_tail.contains("boom"), "{stderr_tail:?}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn probe_returns_stdout() {
+        let token = CancelToken::new();
+        let output = probe_command(fake("probe"), &token, Duration::from_secs(10)).unwrap();
+        // The test harness prints its own lines around it.
+        assert!(output.contains(PROBE_OUTPUT), "{output:?}");
+    }
+
+    #[test]
+    fn probe_refuses_more_than_4_mib() {
+        let token = CancelToken::new();
+        let result = probe_command(fake("big"), &token, Duration::from_secs(10));
+        assert!(
+            matches!(&result, Err(RunError::Io(e)) if e.kind() == io::ErrorKind::Other),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn probe_times_out() {
+        let token = CancelToken::new();
+        let started = Instant::now();
+        let result = probe_command(fake("sleep"), &token, Duration::from_millis(300));
+        assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
+        let took = started.elapsed();
+        assert!(took >= Duration::from_millis(300), "{took:?}");
+        // Generous, for a slow CI machine: the point is that it ends.
+        assert!(took < Duration::from_secs(2), "{took:?}");
+    }
+
+    #[test]
+    fn relative_programs_are_refused_before_spawning() {
+        let relative: &[&str] = if cfg!(windows) {
+            &["ffmpeg", r"bin\ffmpeg.exe", r"\ffmpeg.exe", "C:ffmpeg.exe"]
+        } else {
+            &["ffmpeg", "bin/ffmpeg", "./ffmpeg"]
+        };
+        let token = CancelToken::new();
+        for program in relative.iter().map(Path::new) {
+            let result = command(program, &[]);
+            assert!(
+                matches!(&result, Err(RunError::NotAbsolute(p)) if p == program),
+                "{result:?}"
+            );
+            let result = transcode(program, &[], &token, &mut |_| {});
+            assert!(
+                matches!(result, Err(RunError::NotAbsolute(_))),
+                "{result:?}"
+            );
+            let result = probe(program, &[], &token, Duration::from_secs(1));
+            assert!(
+                matches!(result, Err(RunError::NotAbsolute(_))),
+                "{result:?}"
+            );
+        }
+    }
+
+    /// An absolute path to a program that doesn't exist.
+    fn missing_program() -> PathBuf {
+        let path = std::env::current_exe()
+            .unwrap()
+            .with_file_name("grape-no-such-sidecar");
+        assert!(path.is_absolute() && !path.exists());
+        path
+    }
+
+    #[test]
+    fn a_missing_program_fails_to_spawn() {
+        let token = CancelToken::new();
+        let missing = missing_program();
+        let result = transcode(&missing, &[], &token, &mut |_| {});
+        assert!(
+            matches!(&result, Err(RunError::Spawn(e)) if e.kind() == io::ErrorKind::NotFound),
+            "{result:?}"
+        );
+        let result = probe(&missing, &[], &token, Duration::from_secs(1));
+        assert!(
+            matches!(&result, Err(RunError::Spawn(e)) if e.kind() == io::ErrorKind::NotFound),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn the_progress_parser_reads_out_time_us_only() {
+        let mut parser = ProgressParser::new();
+        let mut feed = |line| parser.feed(line);
+        assert_eq!(
+            feed("out_time_us=1500000"),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(feed("out_time_us=0\n"), Some(Duration::ZERO));
+        assert_eq!(
+            feed("out_time_us=2500000\r\n"),
+            Some(Duration::from_millis(2500))
+        );
+        assert_eq!(
+            feed("out_time_us=2500000\r"),
+            Some(Duration::from_millis(2500))
+        );
+        assert_eq!(feed("out_time_us=N/A"), None);
+        assert_eq!(feed("out_time_us=-23220"), None);
+        assert_eq!(feed("out_time_us="), None);
+        assert_eq!(feed("out_time_ms=1500000"), None);
+        assert_eq!(feed("out_time=00:00:01.500000"), None);
+        assert_eq!(feed("progress=continue"), None);
+        assert_eq!(feed("progress=end\r\n"), None);
+        assert_eq!(feed("running 1 test"), None);
+        assert_eq!(
+            feed("test media::run::tests::fake_child ... out_time_us=5"),
+            None
+        );
+        assert_eq!(feed(""), None);
+    }
+
+    #[test]
+    fn the_line_reader_skips_overlong_lines_and_keeps_the_last_one() {
+        let overlong = "x".repeat(MAX_LINE * 2 + 7);
+        let exact = format!("{}\n", "y".repeat(MAX_LINE - 1));
+        let text = format!("a=1\r\n{overlong}\nb=2\n{exact}c=3");
+        let mut lines = Vec::new();
+        read_lines(Cursor::new(text), |line| lines.push(line.to_string()));
+        assert_eq!(lines, ["a=1\r\n", "b=2\n", exact.as_str(), "c=3"]);
+    }
+
+    #[test]
+    fn the_tail_keeps_the_last_16_kib() {
+        let mut tail = Tail::default();
+        tail.push(&[b'a'; 10 * 1024]);
+        tail.push(&[b'b'; 10 * 1024]);
+        let text = tail.render();
+        assert_eq!(text.len(), TAIL_BYTES);
+        assert_eq!(
+            text,
+            format!("{}{}", "a".repeat(6 * 1024), "b".repeat(10 * 1024))
+        );
+
+        let mut tail = Tail::default();
+        let big: Vec<u8> = (0..TAIL_BYTES + 100)
+            .map(|i| b'0' + (i % 10) as u8)
+            .collect();
+        tail.push(&big);
+        assert_eq!(tail.render().as_bytes(), &big[100..]);
+
+        let mut tail = Tail::default();
+        tail.push(b"ok \xff");
+        assert_eq!(tail.render(), "ok \u{fffd}");
+    }
+
+    #[test]
+    fn a_third_job_waits_until_a_slot_frees() {
+        let gate = Gate::new(MAX_FFMPEG_JOBS);
+        let token = CancelToken::new();
+        let first = gate.acquire(&token).unwrap();
+        let second = gate.acquire(&token).unwrap();
+        thread::scope(|scope| {
+            let (sender, got) = mpsc::channel();
+            let (gate, token) = (&gate, &token);
+            let third = scope.spawn(move || {
+                let guard = gate.acquire(token);
+                sender.send(()).unwrap();
+                guard.is_some()
+            });
+            assert_eq!(
+                got.recv_timeout(Duration::from_millis(200)),
+                Err(RecvTimeoutError::Timeout)
+            );
+            drop(first);
+            got.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(third.join().unwrap());
+        });
+        drop(second);
+        assert_eq!(*gate.busy.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn a_cancelled_waiter_gets_no_slot() {
+        let gate = Gate::new(1);
+        let _held = gate.acquire(&CancelToken::new()).unwrap();
+        let token = CancelToken::new();
+        thread::scope(|scope| {
+            let waiter = scope.spawn(|| gate.acquire(&token).is_none());
+            thread::sleep(Duration::from_millis(100));
+            let cancelled = Instant::now();
+            token.cancel();
+            assert!(waiter.join().unwrap());
+            assert!(cancelled.elapsed() < Duration::from_millis(500));
+        });
+        assert_eq!(*gate.busy.lock().unwrap(), 1);
+        // A token cancelled beforehand gets nothing, even from a free slot.
+        assert!(Gate::new(1).acquire(&token).is_none());
+    }
+
+    #[test]
+    fn the_ffmpeg_gate_has_two_slots() {
+        let token = CancelToken::new();
+        let first = acquire(&token).unwrap();
+        let second = acquire(&token).unwrap();
+        let waiting = CancelToken::new();
+        let canceller = {
+            let waiting = waiting.clone();
+            thread::spawn(move || {
+                thread::sleep(Duration::from_millis(100));
+                waiting.cancel();
+            })
+        };
+        assert!(acquire(&waiting).is_none());
+        canceller.join().unwrap();
+        drop((first, second));
+        assert!(acquire(&token).is_some());
+    }
+}
