@@ -839,23 +839,26 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_source_without_the_needed_stream_is_refused_before_anything_else() {
+    /// Runs `case` with both FFmpeg slots busy and its output in Grape's
+    /// fallback folder, which isn't there yet, with `probe` as the only
+    /// scripted run: a refusal that waited for a slot, or made the folder,
+    /// shows. Returns the error and how long it took; a job that waits for
+    /// a slot is cancelled after 2 s.
+    fn refuse_with_slots_busy(case: &Case, probe: Fake) -> (GrapeError, Duration) {
         let _serial = one_at_a_time();
-        // Both slots are busy: a refusal that waited for one wouldn't come.
         let token = crate::CancelToken::new();
         let busy = (run::acquire(&token).unwrap(), run::acquire(&token).unwrap());
-        let case = Case::new("silent.mp4", Format::Mp3);
-        // It falls back to Grape's folder, which isn't there yet.
+        let JobOutput::File(dest) = &case.job.output else {
+            panic!("{:?}", case.job.output);
+        };
         let fallback = case.dir.0.join("fallback");
         let job = Job {
-            output: JobOutput::File(fallback.join("silent.mp3")),
+            output: JobOutput::File(fallback.join(dest.file_name().unwrap())),
             used_fallback: true,
             ..case.job.clone()
         };
-        script([Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, ""))]);
+        script([probe]);
         let ctx = ctx();
-        // Ends a job that waits for a slot after 2 s.
         let (finished, watching) = std::sync::mpsc::channel::<()>();
         let watchdog = {
             let cancel = ctx.cancel.clone();
@@ -870,13 +873,32 @@ mod tests {
         let took = started.elapsed();
         drop(finished);
         watchdog.join().unwrap();
+        drop(busy);
+        assert!(!fallback.exists(), "{}", err.detail);
+        assert_eq!(ran().len(), 1, "{}", err.detail);
+        case.assert_clean();
+        (err, took)
+    }
+
+    #[test]
+    fn a_source_without_the_needed_stream_is_refused_before_anything_else() {
+        let case = Case::new("silent.mp4", Format::Mp3);
+        let silent = Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, ""));
+        let (err, took) = refuse_with_slots_busy(&case, silent);
         assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
         assert_eq!(err.user_message, "silent.mp4 has no sound to save as MP3.");
         assert!(took < Duration::from_secs(1), "{took:?}");
-        assert!(!fallback.exists());
-        assert_eq!(ran().len(), 1);
-        drop(busy);
-        case.assert_clean();
+    }
+
+    #[test]
+    fn a_source_too_long_for_aiff_is_refused_before_anything_else() {
+        let case = Case::new("long.flac", Format::Aiff);
+        // 16-bit stereo at 48 kHz for 100 000 s: 19.2 GB of samples.
+        let long = lasting(flat("flac", false, "flac"), Some("100000.000000"));
+        let (err, took) = refuse_with_slots_busy(&case, long);
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "long.flac is too long to save as AIFF.");
+        assert!(took < Duration::from_secs(1), "{took:?}");
     }
 
     #[test]
