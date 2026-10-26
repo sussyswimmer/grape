@@ -582,6 +582,64 @@ fn tools_table_matches_info() {
 }
 
 #[test]
+fn v1_panel_list_matches_has_v1_panel() {
+    let tools_section = section(TOOLS_AND_ACTIONS, "## Tools");
+    let intro = "**[Grape] v1 panels.**";
+    assert_pinned(
+        line_with(tools_section, intro),
+        &["Four tools open a small panel before they run", "D31"],
+    );
+    let start = tools_section.find(intro).unwrap();
+    let (mut panels, mut at_once) = (Vec::new(), Vec::new());
+    for line in tools_section[start..].lines().skip(1) {
+        let Some(rest) = line.strip_prefix("- **") else {
+            continue;
+        };
+        let (name, text) = rest.split_once("**").unwrap();
+        let t = ToolKey::ALL
+            .into_iter()
+            .find(|t| t.name() == name)
+            .unwrap_or_else(|| panic!("unknown tool name {name:?}"));
+        if text.trim_start().starts_with("runs at once") {
+            at_once.push(t);
+        } else {
+            panels.push(t);
+        }
+    }
+    assert_eq!(panels.len(), 4, "{panels:?}");
+    assert_eq!(at_once, [ToolKey::RemoveMetadata]);
+    let mut listed = panels.clone();
+    listed.sort();
+    let coded: Vec<ToolKey> = ToolKey::ALL
+        .into_iter()
+        .filter(|t| t.has_v1_panel())
+        .collect();
+    assert_eq!(listed, coded);
+    for t in panels {
+        assert!(t.opens_panel(), "{t:?} has panel = Y in the table");
+        assert_eq!(t.base_tier(), Tier::V1, "{t:?}");
+    }
+}
+
+#[test]
+fn normalize_range_matches_the_panel_line() {
+    let line = line_with(TOOLS_AND_ACTIONS, "- **Normalize Volume** is");
+    assert_pinned(
+        line,
+        &["from −24 to −10 LUFS in steps of 1", "−16 LUFS by default"],
+    );
+    assert_eq!(
+        (
+            ToolParams::LUFS_MIN,
+            ToolParams::LUFS_MAX,
+            ToolParams::LUFS_STEP
+        ),
+        (-24, -10, 1)
+    );
+    assert_eq!(ToolParams::DEFAULT.target_lufs, -16);
+}
+
+#[test]
 fn tool_and_action_counts_match() {
     assert_eq!(
         number_after(TOOLS_AND_ACTIONS, "# Tools ("),

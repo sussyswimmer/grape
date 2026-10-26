@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use grape_core::{
     actions, tool_row, tool_tier, tools, tools_enabled, ActionKey, Category, Features, Format,
-    Platform, Tier, ToolKey, TOOL_ROWS,
+    Platform, Tier, ToolKey, ToolParams, TOOL_ROWS,
 };
 use Format::*;
 use ToolKey::*;
@@ -352,6 +352,45 @@ fn v1_tools_per_row() {
         vec![RemoveMetadata, SplitPdf, MergePdf]
     );
     assert_eq!(tools_enabled(Rar, 1, v1), vec![ExtractArchive]);
+}
+
+#[test]
+fn v1_panels_are_four_tools_that_open_one() {
+    let panels: Vec<ToolKey> = ToolKey::ALL
+        .into_iter()
+        .filter(|t| t.has_v1_panel())
+        .collect();
+    assert_eq!(panels, [Compress, NormalizeAudio, AudioChannels, MergePdf]);
+    for t in panels {
+        assert!(t.opens_panel(), "{t:?}");
+        assert_eq!(t.base_tier(), Tier::V1, "{t:?}");
+    }
+    // Marked Panel in the table, but it runs at once in v1.
+    assert!(RemoveMetadata.opens_panel());
+    assert!(!RemoveMetadata.has_v1_panel());
+}
+
+#[test]
+fn normalize_targets_run_from_minus_24_to_minus_10_lufs() {
+    let cases = [
+        (i8::MIN, false),
+        (-25, false),
+        (-24, true),
+        (-23, true),
+        (-16, true),
+        (-10, true),
+        (-9, false),
+        (0, false),
+        (i8::MAX, false),
+    ];
+    for (lufs, ok) in cases {
+        assert_eq!(ToolParams::lufs_ok(lufs), ok, "{lufs}");
+    }
+    assert!(ToolParams::lufs_ok(ToolParams::DEFAULT.target_lufs));
+    let offered = (i8::MIN..=i8::MAX)
+        .filter(|&lufs| ToolParams::lufs_ok(lufs))
+        .count();
+    assert_eq!(offered, 15);
 }
 
 #[test]

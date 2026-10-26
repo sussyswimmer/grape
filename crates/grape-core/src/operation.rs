@@ -70,6 +70,26 @@ impl ToolParams {
         speed: Speed::DEFAULT,
         target_lufs: -16,
     };
+
+    /// The quietest Normalize target, in LUFS.
+    pub const LUFS_MIN: i8 = -24;
+    /// The loudest Normalize target, in LUFS.
+    pub const LUFS_MAX: i8 = -10;
+    /// The Normalize panel's step, in LU.
+    pub const LUFS_STEP: u8 = 1;
+
+    /// True when `lufs` is a Normalize target Grape runs: in
+    /// [`ToolParams::LUFS_MIN`]..=[`ToolParams::LUFS_MAX`] and on the
+    /// [`ToolParams::LUFS_STEP`] grid from the minimum
+    /// (`TOOLS_AND_ACTIONS.md` → "[Grape] v1 panels"). The engine checks it
+    /// again before it runs.
+    pub const fn lufs_ok(lufs: i8) -> bool {
+        lufs >= Self::LUFS_MIN
+            && lufs <= Self::LUFS_MAX
+            && lufs
+                .abs_diff(Self::LUFS_MIN)
+                .is_multiple_of(Self::LUFS_STEP)
+    }
 }
 
 impl Default for ToolParams {

@@ -205,6 +205,20 @@ impl ToolKey {
         self.info().panel
     }
 
+    /// True for the four tools that open a panel in v1: Compress, Audio
+    /// Channels, Normalize Volume and Merge PDFs (`TOOLS_AND_ACTIONS.md` →
+    /// "[Grape] v1 panels", D31). Remove Metadata is marked Panel in the
+    /// table ([`ToolKey::opens_panel`]) but runs at once in v1.
+    pub const fn has_v1_panel(self) -> bool {
+        matches!(
+            self,
+            ToolKey::Compress
+                | ToolKey::AudioChannels
+                | ToolKey::NormalizeAudio
+                | ToolKey::MergePdf
+        )
+    }
+
     /// True when the tool turns many inputs into one output.
     pub const fn is_combine(self) -> bool {
         self.info().combine
