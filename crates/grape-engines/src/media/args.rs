@@ -114,10 +114,12 @@ impl CopyPlan {
 }
 
 /// `"file:"` followed by `p`, an absolute path, without any lossy
-/// conversion. The prefix makes FFmpeg's file protocol read the rest as a
-/// path, so a name like `pipe:1`, `concat:a|b` or `-i` is never a protocol
-/// or an option. The file protocol strips `file:`, so on Windows
-/// `C:\x\y.mp4` becomes `file:C:\x\y.mp4`.
+/// conversion here. The prefix makes FFmpeg's file protocol read the rest
+/// as a path, so a name like `pipe:1`, `concat:a|b` or `-i` is never a
+/// protocol or an option. The file protocol strips `file:`, so on Windows
+/// `C:\x\y.mp4` becomes `file:C:\x\y.mp4`. FFmpeg itself, on Windows,
+/// turns an unpaired surrogate in its argv into U+FFFD, so `convert`
+/// refuses such a path before FFmpeg runs.
 pub(crate) fn file_url(p: &Path) -> OsString {
     let mut url = OsString::from("file:");
     url.push(p.as_os_str());
@@ -1448,6 +1450,8 @@ mod tests {
         );
     }
 
+    /// `file_url` itself is lossless; FFmpeg's own argv conversion isn't,
+    /// which is why `convert` refuses these names on Windows.
     #[cfg(windows)]
     #[test]
     fn file_url_keeps_unpaired_surrogates() {

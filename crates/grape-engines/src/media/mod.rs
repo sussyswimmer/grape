@@ -98,6 +98,23 @@ pub(crate) fn convert(
     // folder.
     let src_abs = absolute(src).map_err(|e| names.read_failed(e))?;
     source_is_a_file(&src_abs, src, &names)?;
+    // The temp files are this folder plus an ASCII name, so they pass when
+    // it does.
+    let dir_abs = absolute(dir).map_err(|e| names.write_failed(e))?;
+    if !ffmpeg_gets_unchanged(&src_abs) {
+        return Err(unnamable(
+            names.read_failed(String::new()),
+            &src_abs,
+            &names,
+        ));
+    }
+    if !ffmpeg_gets_unchanged(&dir_abs) {
+        return Err(unnamable(
+            names.write_failed(String::new()),
+            &dir_abs,
+            &names,
+        ));
+    }
     let info = probe_source(ffprobe, &src_abs, src, &names, ctx).map_err(or_cancelled)?;
     // Refuse a source without the stream the target needs before anything
     // is created.
@@ -181,6 +198,33 @@ pub(crate) fn convert(
     drop(temp);
     progress(1.0);
     Ok(outcome)
+}
+
+/// Whether FFmpeg gets `path` as it is. On Windows FFmpeg rebuilds its argv
+/// as UTF-8 (`prepare_app_arguments` in `cmdutils.c`), which turns an
+/// unpaired surrogate, allowed in NTFS names, into U+FFFD: it would open or
+/// write another file. Elsewhere it gets the bytes unchanged.
+fn ffmpeg_gets_unchanged(path: &Path) -> bool {
+    cfg!(not(windows)) || path.to_str().is_some()
+}
+
+/// `error` (a read or write failure) for `path`, a name FFmpeg can't get
+/// unchanged ([`ffmpeg_gets_unchanged`]), with a message that says so.
+fn unnamable(mut error: GrapeError, path: &Path, names: &Names) -> GrapeError {
+    error.user_message = match error.kind {
+        ErrorKind::ReadFailed => format!(
+            "{} or its folder has a name Grape's media converter can't open. \
+             Rename it and try again.",
+            names.source
+        ),
+        _ => format!(
+            "{} or a folder above it has a name Grape's media converter can't \
+             write to. Rename it and try again.",
+            names.folder
+        ),
+    };
+    error.detail = format!("not valid Unicode: {}", path.display());
+    error
 }
 
 /// Checks that the source is still a file: a folder or a pipe named like
@@ -559,6 +603,81 @@ mod tests {
             }
             assert_eq!(fs::read(&self.job.inputs[0]).unwrap(), b"source");
         }
+    }
+
+    #[test]
+    fn only_windows_refuses_names_that_arent_unicode() {
+        assert!(ffmpeg_gets_unchanged(Path::new("/Zoë/100% -x/clip.mp4")));
+        #[cfg(unix)]
+        {
+            use std::ffi::OsStr;
+            use std::os::unix::ffi::OsStrExt;
+            // The bytes reach FFmpeg's open() as they are.
+            let path = Path::new(OsStr::from_bytes(b"/tmp/\xff\xfe clip.mp4"));
+            assert!(ffmpeg_gets_unchanged(path));
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStringExt;
+            let mut wide: Vec<u16> = r"C:\x\clip".encode_utf16().collect();
+            wide.push(0xD800);
+            wide.extend(".mp4".encode_utf16());
+            assert!(!ffmpeg_gets_unchanged(Path::new(&OsString::from_wide(
+                &wide
+            ))));
+        }
+    }
+
+    /// A name with an unpaired surrogate, which NTFS allows.
+    #[cfg(windows)]
+    fn unpaired(prefix: &str, suffix: &str) -> OsString {
+        use std::os::windows::ffi::OsStringExt;
+        let mut wide: Vec<u16> = prefix.encode_utf16().collect();
+        wide.push(0xD800);
+        wide.extend(suffix.encode_utf16());
+        OsString::from_wide(&wide)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_name_ffmpeg_would_change_is_refused_before_it_runs() {
+        // The source's name.
+        let case = Case::new("clip.mp4", Format::Mov);
+        let src = case.dir.0.join(unpaired("clip", ".mp4"));
+        fs::rename(&case.job.inputs[0], &src).unwrap();
+        let job = Job {
+            inputs: vec![src],
+            ..case.job.clone()
+        };
+        script([mp4_h264_aac()]);
+        let err = crate::run_job(&job, &ctx(), &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ReadFailed, "{}", err.detail);
+        assert!(
+            err.user_message.contains("can't open"),
+            "{}",
+            err.user_message
+        );
+        assert!(ran().is_empty());
+
+        // The output folder's name.
+        let case = Case::new("clip.mp4", Format::Mov);
+        let out_dir = case.dir.0.join(unpaired("out", ""));
+        fs::create_dir(&out_dir).unwrap();
+        let job = Job {
+            output: JobOutput::File(out_dir.join("clip.mov")),
+            ..case.job.clone()
+        };
+        script([mp4_h264_aac()]);
+        let err = crate::run_job(&job, &ctx(), &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+        assert!(
+            err.user_message.contains("can't write to"),
+            "{}",
+            err.user_message
+        );
+        assert!(ran().is_empty());
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 0);
+        case.assert_clean();
     }
 
     #[test]

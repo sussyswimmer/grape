@@ -141,7 +141,7 @@ pub(crate) struct Names {
     /// The target format's display name.
     pub(crate) to: &'static str,
     /// The destination folder's name.
-    folder: String,
+    pub(crate) folder: String,
     /// The planned output file name.
     pub(crate) planned: String,
 }
