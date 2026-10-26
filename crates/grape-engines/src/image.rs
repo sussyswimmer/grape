@@ -39,6 +39,10 @@
 //!   for every engine: a temp file next to the final name, then a
 //!   no-clobber finalize that re-plans the name with
 //!   [`grape_core::output_name`] if it was taken meanwhile.
+//! - **Pixels decoded elsewhere** (HEIC, by a helper process) are checked
+//!   with [`pixels_fit`] before they are held, then prepared, encoded and
+//!   published by [`publish_pixels`], the second half of [`convert`]. A
+//!   HEIC target gets 8-bit RGBA from [`decode`] and [`prepare`].
 //! - **Cancellation** is checked between steps; the source reader and the
 //!   temp file's writer fail once the job is cancelled, which stops a
 //!   decoder or encoder at its next read or write; and flattening checks
@@ -147,6 +151,37 @@ pub(crate) fn convert(
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
     let names = Names::new(src, dest, from, to);
+    publish::dest_dir(dest, &names)?;
+    let cancel = &ctx.cancel;
+
+    if cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    let (img, icc) =
+        decode(src, from, to, &names, cancel).map_err(|e| publish::or_cancelled(cancel, src, e))?;
+    progress(0.5);
+    publish_pixels(job, src, dest, from, to, img, icc, ctx, progress)
+}
+
+/// Writes pixels that are already decoded and upright as `to` at `dest`,
+/// the way [`convert`] writes its own: converted for the target
+/// ([`prepare`]), with the ICC profile if it fits ([`icc_fits`]), then
+/// published without replacing anything. Also for an engine that decodes
+/// `src` some other way, such as a helper process. Reports 1.0 once the
+/// output is published.
+#[allow(clippy::too_many_arguments)] // `convert`'s, plus the pixels.
+pub(crate) fn publish_pixels(
+    job: &Job,
+    src: &Path,
+    dest: &Path,
+    from: Format,
+    to: Format,
+    img: DynamicImage,
+    icc: Option<Vec<u8>>,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+) -> Result<JobOutcome, GrapeError> {
+    let names = Names::new(src, dest, from, to);
     let dir = publish::dest_dir(dest, &names)?;
     let cancel = &ctx.cancel;
     let or_cancelled = |e| publish::or_cancelled(cancel, src, e);
@@ -154,12 +189,6 @@ pub(crate) fn convert(
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let (img, icc) = decode(src, from, to, &names, cancel).map_err(or_cancelled)?;
-    progress(0.5);
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-
     let img = match prepare(img, to, cancel) {
         Some(img) if !cancel.is_cancelled() => img,
         _ => return Err(crate::cancelled(src)),
@@ -200,7 +229,7 @@ impl From<ImageError> for DecodeFailure {
 /// Opens `src` read-only and decodes its first frame, upright, with its ICC
 /// profile if it has one. Refuses, before decoding any pixel, a file or an
 /// image whose conversion to `to` wouldn't fit the memory limits.
-fn decode(
+pub(crate) fn decode(
     src: &Path,
     from: Format,
     to: Format,
@@ -392,6 +421,40 @@ enum DecoderKeeps {
     WebP { layout: WebpLayout },
 }
 
+/// `Err` with the reason when converting pixels that are already decoded
+/// and upright, `width`×`height` of `color` with a `profile` of that many
+/// bytes, to `to` wouldn't fit [`WORKING_SET_LIMIT`]. For an engine that
+/// decodes some other way ([`publish_pixels`]), to check before it holds
+/// the pixels.
+#[allow(dead_code)] // For lane A's HEIC engine (heif.rs).
+pub(crate) fn pixels_fit(
+    width: u32,
+    height: u32,
+    color: ColorType,
+    to: Format,
+    profile: u64,
+) -> Result<(), String> {
+    let keeps = DecoderKeeps::Little;
+    let peak = working_set(
+        width,
+        height,
+        color,
+        keeps,
+        Orientation::NoTransforms,
+        to,
+        profile,
+    );
+    if peak > WORKING_SET_LIMIT {
+        return Err(format!(
+            "{width}x{height} {color:?} to {} needs about {} MiB, over the {} MiB limit",
+            to.key(),
+            peak / MIB,
+            WORKING_SET_LIMIT / MIB
+        ));
+    }
+    Ok(())
+}
+
 /// The most memory converting a `width`×`height` `color` image to `to`
 /// holds at once, in bytes, when its decoder `keeps` that and it is turned
 /// by `orientation`. The steps run one after another, so the peak is the
@@ -485,7 +548,8 @@ fn image_format(f: Format) -> Option<ImageFormat> {
 /// The pixel layout `to` is written in, for decoded pixels of `color`:
 /// JPEG takes 8-bit gray or RGB (alpha is flattened onto white); PNG keeps
 /// the layout (float becomes 16-bit); WebP and BMP take 8-bit RGB(A); TIFF
-/// keeps 8- and 16-bit gray/RGB/RGBA and maps the rest to RGB(A).
+/// keeps 8- and 16-bit gray/RGB/RGBA and maps the rest to RGB(A); HEIC's
+/// encoder, a helper process, takes 8-bit RGBA.
 fn target_color(color: ColorType, to: Format) -> ColorType {
     use ColorType::{La16, Rgb16, Rgb32F, Rgb8, Rgba16, Rgba32F, Rgba8, L16, L8};
     let alpha = color.has_alpha();
@@ -506,6 +570,7 @@ fn target_color(color: ColorType, to: Format) -> ColorType {
             _ if alpha => Rgba8,
             _ => Rgb8,
         },
+        Format::Heic => Rgba8,
         _ => color,
     }
 }
@@ -517,7 +582,7 @@ fn flattens(color: ColorType, to: Format) -> bool {
 
 /// Converts the pixels to what the target writes ([`target_color`]).
 /// `None` when the job was cancelled meanwhile.
-fn prepare(img: DynamicImage, to: Format, cancel: &CancelToken) -> Option<DynamicImage> {
+pub(crate) fn prepare(img: DynamicImage, to: Format, cancel: &CancelToken) -> Option<DynamicImage> {
     let color = img.color();
     let target = target_color(color, to);
     if target == color {
@@ -577,7 +642,7 @@ fn icc_size_fits(len: usize) -> bool {
 /// would make viewers show wrong colors, so such a profile is dropped and
 /// the conversion goes ahead without it. (Its size was checked against
 /// [`MAX_ICC`] when it was read.)
-fn icc_fits(profile: &[u8], img: &DynamicImage) -> bool {
+pub(crate) fn icc_fits(profile: &[u8], img: &DynamicImage) -> bool {
     use ColorType::{La16, La8, L16, L8};
     let expected: &[u8] = if matches!(img.color(), L8 | L16 | La8 | La16) {
         b"GRAY"
@@ -877,5 +942,128 @@ mod tests {
         assert_eq!(color(&la8, Format::Tiff), ColorType::Rgba8);
         assert_eq!(color(&l16, Format::Tiff), ColorType::L16);
         assert_eq!(color(&rgb32f, Format::Tiff), ColorType::Rgb8);
+        assert_eq!(color(&rgb32f, Format::Heic), ColorType::Rgba8);
+        assert_eq!(color(&l16, Format::Heic), ColorType::Rgba8);
+        assert_eq!(color(&la8, Format::Heic), ColorType::Rgba8);
+    }
+
+    #[test]
+    fn pixels_from_elsewhere_are_held_to_the_working_set() {
+        // 8-bit RGBA to PNG peaks at the pixels plus PNG's in-memory copy:
+        // 8 bytes a pixel, so 2^27 pixels is exactly 1 GiB.
+        assert_eq!(
+            pixels_fit(16_384, 8_192, ColorType::Rgba8, Format::Png, 0),
+            Ok(())
+        );
+        let over = pixels_fit(16_384, 8_193, ColorType::Rgba8, Format::Png, 0).unwrap_err();
+        assert!(over.contains("over the 1024 MiB limit"), "{over}");
+        // The ICC profile counts too.
+        assert!(pixels_fit(16_384, 8_192, ColorType::Rgba8, Format::Png, 1).is_err());
+        // RGB to HEIC holds the decoded pixels and their RGBA copy at once.
+        let pixels = WORKING_SET_LIMIT / 7;
+        let side = |n: u64| u32::try_from(n).unwrap();
+        assert_eq!(
+            pixels_fit(side(pixels), 1, ColorType::Rgb8, Format::Heic, 0),
+            Ok(())
+        );
+        assert!(pixels_fit(side(pixels + 1), 1, ColorType::Rgb8, Format::Heic, 0).is_err());
+    }
+
+    /// A job converting `name` (written to a fresh folder) to `to`.
+    fn job_for(name: &str, to: Format) -> (std::path::PathBuf, std::path::PathBuf, Job) {
+        let dir = std::env::temp_dir().join(format!(
+            "grape-image-unit-{}",
+            crate::output::unique_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let src = dir.join(name);
+        fs::write(&src, b"decoded elsewhere").unwrap();
+        let settings = grape_core::Settings::new(dir.join("fallback"));
+        let selection = crate::build_selection(std::slice::from_ref(&src), &settings);
+        let op = grape_core::Operation::Convert { to };
+        let mut plan = grape_core::plan(&selection, &op, &settings).unwrap();
+        (dir, src, plan.jobs.remove(0))
+    }
+
+    fn planned(job: &Job) -> std::path::PathBuf {
+        match &job.output {
+            grape_core::JobOutput::File(path) => path.clone(),
+            other => panic!("expected a file output, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pixels_from_elsewhere_are_published_like_a_conversion() {
+        let (dir, src, job) = job_for("photo.heic", Format::Jpg);
+        let dest = planned(&job);
+        let ctx = EngineCtx {
+            sidecars: crate::SidecarPaths::default(),
+            cancel: CancelToken::new(),
+            fallback_dir: None,
+        };
+        let img = DynamicImage::ImageRgba8(::image::RgbaImage::from_fn(4, 2, |x, _| {
+            ::image::Rgba([0, 0, 0, if x < 2 { 0 } else { 255 }])
+        }));
+        let mut reported = Vec::new();
+
+        let outcome = publish_pixels(
+            &job,
+            &src,
+            &dest,
+            Format::Heic,
+            Format::Jpg,
+            img,
+            None,
+            &ctx,
+            &mut |p| reported.push(p),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outputs, vec![dest.clone()]);
+        assert!(!outcome.renamed);
+        assert_eq!(reported, vec![1.0]);
+        let written = ::image::open(&dest).unwrap().into_rgb8();
+        assert_eq!(written.dimensions(), (4, 2));
+        // Transparent pixels are flattened onto white, as for any JPEG.
+        assert!(written.get_pixel(0, 0).0.iter().all(|&c| c > 240));
+        assert!(written.get_pixel(3, 0).0.iter().all(|&c| c < 15));
+        assert_eq!(fs::read(&src).unwrap(), b"decoded elsewhere");
+        let mut names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["photo.heic", "photo.jpg"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pixels_from_a_cancelled_job_publish_nothing() {
+        let (dir, src, job) = job_for("photo.heic", Format::Png);
+        let dest = planned(&job);
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let ctx = EngineCtx {
+            sidecars: crate::SidecarPaths::default(),
+            cancel,
+            fallback_dir: None,
+        };
+
+        let result = publish_pixels(
+            &job,
+            &src,
+            &dest,
+            Format::Heic,
+            Format::Png,
+            DynamicImage::new_rgba8(2, 2),
+            None,
+            &ctx,
+            &mut |_| panic!("no progress for a cancelled job"),
+        );
+
+        assert_eq!(result.unwrap_err().kind, crate::ErrorKind::Cancelled);
+        let names: Vec<_> = fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(names.len(), 1, "only the source is there");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
