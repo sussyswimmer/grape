@@ -10,6 +10,8 @@
 //! - tar is read as a stream, so each entry is checked as it comes. Every
 //!   entry's data is read to its end before the next header, so the bytes
 //!   between two entries' data are headers only (see `MAX_HEADER_BYTES`).
+//!   A [`Tap`] sees every entry and its data on the way (RAR: bsdtar's tar
+//!   is held to the RAR's own headers, `super::rar::tap`).
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -21,6 +23,7 @@ use zip::{CompressionMethod, ExtraField, ZipArchive, SUPPORTED_COMPRESSION_METHO
 
 use super::gz::{GzInfo, GzMembers};
 use super::names::{self, Added, Clash, NameSet};
+use super::rar::RarFailure;
 use super::sink::Sink;
 use super::sniff::{self, Container, EMPTY_TAR_MAX, HEAD};
 use super::stream::{read_prefix, Counting, Exact, Metered, Pump, Run, Side};
@@ -81,6 +84,9 @@ pub(crate) enum RawKind {
     Symlink(Option<String>),
     /// A tar hard link.
     HardLink,
+    /// A RAR5 file-copy reference, which bsdtar writes as an empty file
+    /// (`super::rar::tap`); left out like a hard link.
+    FileCopy,
     /// A device, FIFO or socket, or a tar type Grape doesn't know.
     Special,
     /// Not an item at all: a PAX global header or a GNU volume label.
@@ -226,6 +232,10 @@ impl Walk {
                 bump(&mut self.left_out.links);
                 return Ok(None);
             }
+            RawKind::FileCopy => {
+                bump(&mut self.left_out.copies);
+                return Ok(None);
+            }
             RawKind::Special => {
                 bump(&mut self.left_out.specials);
                 return Ok(None);
@@ -336,6 +346,8 @@ pub(crate) fn open<'r>(
     match container {
         Container::Zip => Ok(Opened::Zip(file)),
         Container::Tar => Ok(Opened::Tar(Box::new(Metered::new(run, source(run, file))))),
+        // Read through bsdtar before this is reached (`super::rar::walk`).
+        Container::Rar => Err(Failure::Rar(RarFailure::NoHelper)),
         Container::Gzip => {
             let (members, info) = GzMembers::new(source(run, file));
             let mut stream = Metered::new(run, members);
@@ -675,12 +687,89 @@ fn tar_raw<R: Read>(entry: &tar::Entry<'_, R>) -> Raw {
     Raw {
         name: names::decode(&entry.path_bytes()),
         kind: raw_kind,
-        mtime: header
-            .mtime()
-            .ok()
-            .map(|t| i64::try_from(t).unwrap_or(i64::MAX)),
+        // A negative base-256 time (before 1970, as bsdtar writes one)
+        // reads as a huge number: no time, rather than the year 2107.
+        mtime: header.mtime().ok().and_then(|t| i64::try_from(t).ok()),
         mode: header.mode().ok(),
     }
+}
+
+/// What a [`Tap`] learns about a tar entry beyond its [`Raw`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TarFacts {
+    /// A regular file (or a contiguous one).
+    pub(crate) regular: bool,
+    /// Its data's size, PAX `size` included.
+    pub(crate) size: u64,
+    /// Its PAX records say `hdrcharset=BINARY`: the name isn't UTF-8.
+    pub(crate) binary_name: bool,
+}
+
+/// Watches a tar walk: every entry before it is checked, every byte of its
+/// data, and its end.
+pub(crate) trait Tap {
+    /// False for [`NoTap`]: facts aren't computed, so plain tars behave
+    /// exactly as before taps existed.
+    const ACTIVE: bool;
+    /// Before `Walk::admit`. May rewrite `raw` or refuse the archive.
+    fn entry(&mut self, facts: &TarFacts, raw: &mut Raw) -> Result<(), Failure>;
+    /// Every data byte of the current entry, whether written or drained.
+    fn data(&mut self, bytes: &[u8]);
+    /// After the entry's data was read to its end.
+    fn done(&mut self) -> Result<(), Failure>;
+}
+
+/// The tap of a plain tar: sees nothing, refuses nothing.
+pub(crate) struct NoTap;
+
+impl Tap for NoTap {
+    const ACTIVE: bool = false;
+
+    fn entry(&mut self, _facts: &TarFacts, _raw: &mut Raw) -> Result<(), Failure> {
+        Ok(())
+    }
+
+    fn data(&mut self, _bytes: &[u8]) {}
+
+    fn done(&mut self) -> Result<(), Failure> {
+        Ok(())
+    }
+}
+
+/// An entry's data, shown to a [`Tap`] as it is read.
+struct Tapped<'t, R, T> {
+    inner: R,
+    tap: &'t mut T,
+}
+
+impl<R: Read, T: Tap> Read for Tapped<'_, R, T> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.tap.data(&buf[..n]);
+        Ok(n)
+    }
+}
+
+/// The [`TarFacts`] of `entry`.
+fn tar_facts<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<TarFacts, Failure> {
+    let kind = entry.header().entry_type();
+    let regular = kind.is_file() || kind.is_contiguous();
+    let size = entry.size();
+    let malformed = || Failure::Corrupt("tar: a malformed PAX record".into());
+    let mut binary_name = false;
+    if let Some(records) = entry.pax_extensions().map_err(|_| malformed())? {
+        for record in records {
+            let record = record.map_err(|_| malformed())?;
+            if record.key_bytes() == b"hdrcharset" && record.value_bytes() == b"BINARY" {
+                binary_name = true;
+            }
+        }
+    }
+    Ok(TarFacts {
+        regular,
+        size,
+        binary_name,
+    })
 }
 
 /// Walks a tar stream, writing admitted entries to `sink` (none in
@@ -690,7 +779,20 @@ pub(crate) fn walk_tar<R: Read>(
     run: &Run<'_>,
     stream: R,
     walk: &mut Walk,
+    sink: Option<&mut dyn Sink>,
+) -> Result<R, Failure> {
+    walk_tar_with(run, stream, walk, sink, &mut NoTap)
+}
+
+/// [`walk_tar`], with `tap` shown every entry before it is checked and
+/// every byte of its data ([`Mode::Check`] reads no data, so a tap sees
+/// only the entries there).
+pub(crate) fn walk_tar_with<R: Read, T: Tap>(
+    run: &Run<'_>,
+    stream: R,
+    walk: &mut Walk,
     mut sink: Option<&mut dyn Sink>,
+    tap: &mut T,
 ) -> Result<R, Failure> {
     let mut archive = tar::Archive::new(stream);
     {
@@ -701,7 +803,11 @@ pub(crate) fn walk_tar<R: Read>(
         for item in entries {
             run.check()?;
             let mut entry = item.map_err(|e| run.failure(&e, Side::Read, "tar header"))?;
-            let raw = tar_raw(&entry);
+            let mut raw = tar_raw(&entry);
+            if T::ACTIVE {
+                let facts = tar_facts(&mut entry)?;
+                tap.entry(&facts, &mut raw)?;
+            }
             let admitted = walk.admit(run, raw)?;
             if walk.mode == Mode::Check {
                 // The data isn't read: the tar reader skips it on its way
@@ -711,6 +817,10 @@ pub(crate) fn walk_tar<R: Read>(
                 run.start_entry_after(skipped);
                 continue;
             }
+            let mut entry = Tapped {
+                inner: &mut entry,
+                tap: &mut *tap,
+            };
             if let (Some(admitted), Some(sink)) = (admitted, sink.as_deref_mut()) {
                 match &admitted.kind {
                     Kind::Dir => sink.dir(run, &admitted)?,
@@ -723,6 +833,7 @@ pub(crate) fn walk_tar<R: Read>(
                 }
             }
             drain(run, &mut entry, "tar entry")?;
+            tap.done()?;
             run.start_entry();
         }
     }
@@ -848,9 +959,17 @@ mod tests {
             LeftOut {
                 links: 2,
                 specials: 1,
-                mac_metadata: 2
+                mac_metadata: 2,
+                copies: 0,
             }
         );
+        assert_eq!(
+            extract
+                .admit(&run, raw("copy.txt", RawKind::FileCopy))
+                .unwrap(),
+            None
+        );
+        assert_eq!(extract.left_out.copies, 1);
         let dir = extract.admit(&run, raw("old/", file())).unwrap().unwrap();
         assert_eq!(dir.kind, Kind::Dir);
 
@@ -915,5 +1034,33 @@ mod tests {
         assert_eq!(zip_kind(Some(0o140_755), false), RawKind::Special);
         assert_eq!(method_name(CompressionMethod::BZIP2), Some("bzip2"));
         assert_eq!(method_name(CompressionMethod::Stored), None);
+    }
+
+    #[test]
+    fn a_tar_time_before_1970_is_no_time_not_the_year_2107() {
+        // bsdtar writes a pre-1970 RAR5 time in base-256: -1 is all 0xFF.
+        let mut header = tar::Header::new_ustar();
+        header.set_path("old.txt").unwrap();
+        header.set_size(0);
+        header.as_old_mut().mtime = [0xFF; 12];
+        header.set_cksum();
+        let mut bytes = header.as_bytes().to_vec();
+        bytes.extend([0u8; 1024]);
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(entry.header().mtime().unwrap(), u64::MAX);
+        assert_eq!(tar_raw(&entry).mtime, None);
+
+        // An ordinary time is unchanged.
+        let mut header = tar::Header::new_ustar();
+        header.set_path("new.txt").unwrap();
+        header.set_size(0);
+        header.set_mtime(1_700_000_000);
+        header.set_cksum();
+        let mut bytes = header.as_bytes().to_vec();
+        bytes.extend([0u8; 1024]);
+        let mut archive = tar::Archive::new(&bytes[..]);
+        let entry = archive.entries().unwrap().next().unwrap().unwrap();
+        assert_eq!(tar_raw(&entry).mtime, Some(1_700_000_000));
     }
 }

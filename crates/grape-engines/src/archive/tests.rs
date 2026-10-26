@@ -30,21 +30,21 @@ use sink::Sink;
 use source::Entry;
 
 /// An even time (DOS times have 2-second steps): 2023-11-14 22:13:20 UTC.
-const T: i64 = 1_700_000_000;
+pub(super) const T: i64 = 1_700_000_000;
 
 // ---- Folders, sources and runs -------------------------------------------
 
 /// A fresh folder under the system temp folder, removed when dropped.
-struct TestDir(PathBuf);
+pub(super) struct TestDir(PathBuf);
 
 impl TestDir {
-    fn new() -> TestDir {
+    pub(super) fn new() -> TestDir {
         let path = std::env::temp_dir().join(format!("grape-archive-unit-{}", unique_suffix()));
         fs::create_dir_all(&path).unwrap();
         TestDir(path)
     }
 
-    fn join(&self, name: &str) -> PathBuf {
+    pub(super) fn join(&self, name: &str) -> PathBuf {
         self.0.join(name)
     }
 }
@@ -55,7 +55,7 @@ impl Drop for TestDir {
     }
 }
 
-fn listing(dir: &Path) -> Vec<String> {
+pub(super) fn listing(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -64,7 +64,7 @@ fn listing(dir: &Path) -> Vec<String> {
     names
 }
 
-fn assert_no_leftovers(dir: &Path) {
+pub(super) fn assert_no_leftovers(dir: &Path) {
     let left: Vec<String> = listing(dir)
         .into_iter()
         .filter(|name| name.starts_with(".grape-"))
@@ -73,7 +73,7 @@ fn assert_no_leftovers(dir: &Path) {
 }
 
 /// A file's length and a hash of its bytes, plus its mtime.
-struct SourceState {
+pub(super) struct SourceState {
     path: PathBuf,
     digest: (usize, u64),
     modified: SystemTime,
@@ -91,7 +91,7 @@ impl SourceState {
         }
     }
 
-    fn assert_unchanged(&self) {
+    pub(super) fn assert_unchanged(&self) {
         let now = SourceState::of(&self.path);
         assert_eq!(now.digest, self.digest, "the source's bytes changed");
         assert_eq!(now.modified, self.modified, "the source's mtime changed");
@@ -99,15 +99,15 @@ impl SourceState {
 }
 
 /// One source in its own folder, planned the way the app plans it.
-struct Case {
-    dir: TestDir,
-    src: PathBuf,
-    from: Format,
-    job: Job,
-    source: SourceState,
+pub(super) struct Case {
+    pub(super) dir: TestDir,
+    pub(super) src: PathBuf,
+    pub(super) from: Format,
+    pub(super) job: Job,
+    pub(super) source: SourceState,
 }
 
-fn case(name: &str, bytes: &[u8], op: Operation) -> Case {
+pub(super) fn case(name: &str, bytes: &[u8], op: Operation) -> Case {
     let dir = TestDir::new();
     let src = dir.join(name);
     fs::write(&src, bytes).unwrap();
@@ -124,24 +124,34 @@ fn case(name: &str, bytes: &[u8], op: Operation) -> Case {
     }
 }
 
-fn convert_case(name: &str, bytes: &[u8], to: Format) -> Case {
+pub(super) fn convert_case(name: &str, bytes: &[u8], to: Format) -> Case {
     case(name, bytes, Operation::convert(to))
 }
 
-fn extract_case(name: &str, bytes: &[u8]) -> Case {
+pub(super) fn extract_case(name: &str, bytes: &[u8]) -> Case {
     case(name, bytes, Operation::tool(ToolKey::ExtractArchive))
 }
 
 impl Case {
-    fn planned(&self) -> PathBuf {
+    pub(super) fn planned(&self) -> PathBuf {
         self.job.output.display_path().to_path_buf()
     }
 
     /// Runs the job; cancels it once progress reaches `cancel_at`.
-    fn run_with(
+    pub(super) fn run_with(
         &self,
         limits: Limits,
         cancel_at: Option<f32>,
+    ) -> Result<ArchiveOutcome, GrapeError> {
+        self.run_rar(limits, cancel_at, None)
+    }
+
+    /// [`Case::run_with`], with bsdtar started as `rar` says.
+    pub(super) fn run_rar(
+        &self,
+        limits: Limits,
+        cancel_at: Option<f32>,
+        rar: Option<&Launch>,
     ) -> Result<ArchiveOutcome, GrapeError> {
         let cancel = CancelToken::new();
         let ctx = EngineCtx {
@@ -166,6 +176,7 @@ impl Case {
                     &ctx,
                     &mut progress,
                     limits,
+                    rar,
                 ),
                 (JobOutput::Folder(dest), Operation::Tool { .. }) => extract_with(
                     &self.job,
@@ -175,6 +186,7 @@ impl Case {
                     &ctx,
                     &mut progress,
                     limits,
+                    rar,
                 ),
                 other => panic!("not an archive job: {other:?}"),
             }
@@ -192,30 +204,30 @@ impl Case {
         result
     }
 
-    fn ok(&self) -> ArchiveOutcome {
+    pub(super) fn ok(&self) -> ArchiveOutcome {
         let outcome = self.run_with(Limits::default(), None).unwrap();
         assert_eq!(outcome.outcome.outputs, [self.planned()]);
         assert!(!outcome.outcome.renamed);
         outcome
     }
 
-    fn fails_with(&self, limits: Limits) -> GrapeError {
+    pub(super) fn fails_with(&self, limits: Limits) -> GrapeError {
         let error = self.run_with(limits, None).unwrap_err();
         self.assert_no_output();
         error
     }
 
-    fn fails(&self) -> GrapeError {
+    pub(super) fn fails(&self) -> GrapeError {
         self.fails_with(Limits::default())
     }
 
     /// Nothing but the source is in the folder.
-    fn assert_no_output(&self) {
+    pub(super) fn assert_no_output(&self) {
         let name = self.src.file_name().unwrap().to_string_lossy().into_owned();
         assert_eq!(listing(&self.dir.0), [name]);
     }
 
-    fn output_bytes(&self) -> Vec<u8> {
+    pub(super) fn output_bytes(&self) -> Vec<u8> {
         fs::read(self.planned()).unwrap()
     }
 }
@@ -223,7 +235,7 @@ impl Case {
 // ---- Fixtures --------------------------------------------------------------
 
 /// Deterministic bytes that don't compress.
-fn noise(len: usize, seed: u64) -> Vec<u8> {
+pub(super) fn noise(len: usize, seed: u64) -> Vec<u8> {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
     (0..len)
         .map(|_| {
@@ -358,7 +370,7 @@ fn gzip_named(data: &[u8], name: &str, mtime: u32) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn gunzip(bytes: &[u8]) -> Vec<u8> {
+pub(super) fn gunzip(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     MultiGzDecoder::new(bytes).read_to_end(&mut out).unwrap();
     out
@@ -384,7 +396,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Vec<usize> {
 
 /// One tar entry, header and data padded to whole blocks, with the name
 /// bytes written straight into the header (at most 100).
-fn raw_entry(name: &[u8], kind: EntryType, data: &[u8]) -> Vec<u8> {
+pub(super) fn raw_entry(name: &[u8], kind: EntryType, data: &[u8]) -> Vec<u8> {
     let mut header = Header::new_ustar();
     header.as_old_mut().name[..name.len()].copy_from_slice(name);
     header.set_size(data.len() as u64);
@@ -399,7 +411,7 @@ fn raw_entry(name: &[u8], kind: EntryType, data: &[u8]) -> Vec<u8> {
 }
 
 /// One PAX record: `{len} {key}={value}\n`, its length counting itself.
-fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
+pub(super) fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
     let base = key.len() + value.len() + 3;
     let mut len = base + 1;
     while len != base + len.to_string().len() {
@@ -412,7 +424,7 @@ fn pax_record(key: &str, value: &[u8]) -> Vec<u8> {
 }
 
 /// A tar of `entries` (from [`raw_entry`]) and its end marker.
-fn tar_raw_of(entries: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn tar_raw_of(entries: &[Vec<u8>]) -> Vec<u8> {
     let mut out = entries.concat();
     out.extend([0u8; 1024]);
     out
@@ -421,7 +433,7 @@ fn tar_raw_of(entries: &[Vec<u8>]) -> Vec<u8> {
 // ---- Reading outputs back ------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Node {
+pub(super) enum Node {
     File(Vec<u8>),
     Dir,
     Link(String),
@@ -430,11 +442,11 @@ enum Node {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Item {
-    name: String,
-    node: Node,
-    mtime: Option<i64>,
-    mode: Option<u32>,
+pub(super) struct Item {
+    pub(super) name: String,
+    pub(super) node: Node,
+    pub(super) mtime: Option<i64>,
+    pub(super) mode: Option<u32>,
 }
 
 fn sorted(mut items: Vec<Item>) -> Vec<Item> {
@@ -442,7 +454,7 @@ fn sorted(mut items: Vec<Item>) -> Vec<Item> {
     items
 }
 
-fn zip_items(bytes: &[u8]) -> Vec<Item> {
+pub(super) fn zip_items(bytes: &[u8]) -> Vec<Item> {
     let mut zip = ZipArchive::new(Cursor::new(bytes)).unwrap();
     let mut items = Vec::new();
     for i in 0..zip.len() {
@@ -472,7 +484,7 @@ fn zip_items(bytes: &[u8]) -> Vec<Item> {
     sorted(items)
 }
 
-fn tar_items(bytes: &[u8]) -> Vec<Item> {
+pub(super) fn tar_items(bytes: &[u8]) -> Vec<Item> {
     let mut archive = tar::Archive::new(bytes);
     let mut items = Vec::new();
     for entry in archive.entries().unwrap() {
@@ -510,7 +522,7 @@ fn tar_items(bytes: &[u8]) -> Vec<Item> {
 }
 
 /// An extracted folder as items: never a link; modes on Unix only.
-fn tree_items(root: &Path) -> Vec<Item> {
+pub(super) fn tree_items(root: &Path) -> Vec<Item> {
     fn walk(root: &Path, dir: &Path, items: &mut Vec<Item>) {
         for entry in fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -631,9 +643,17 @@ fn supports_the_six_v1_pairs_and_extracts_three_formats() {
     let mut pairs = Vec::new();
     for from in archives {
         for to in archives {
-            if supports(from, to) {
+            if supports(from, to, false) {
                 pairs.push((from, to));
             }
+            // With bsdtar, RAR → ZIP, TAR, GZIP too, and nothing else.
+            assert_eq!(
+                supports(from, to, true),
+                supports(from, to, false)
+                    || (from == Format::Rar
+                        && matches!(to, Format::Zip | Format::Tar | Format::Gz)),
+                "{from:?} → {to:?}"
+            );
         }
     }
     assert_eq!(
@@ -647,9 +667,18 @@ fn supports_the_six_v1_pairs_and_extracts_three_formats() {
             (Format::Gz, Format::Tar),
         ]
     );
-    assert!(!supports(Format::Png, Format::Zip));
-    assert!(extracts(Format::Zip) && extracts(Format::Tar) && extracts(Format::Gz));
-    assert!(!extracts(Format::Rar) && !extracts(Format::Png));
+    assert!(!supports(Format::Png, Format::Zip, true));
+    assert!(!supports(Format::Rar, Format::Rar, true));
+    for has_bsdtar in [false, true] {
+        assert!(
+            extracts(Format::Zip, has_bsdtar)
+                && extracts(Format::Tar, has_bsdtar)
+                && extracts(Format::Gz, has_bsdtar)
+        );
+        assert!(!extracts(Format::Png, has_bsdtar));
+    }
+    assert!(!extracts(Format::Rar, false));
+    assert!(extracts(Format::Rar, true));
     assert_eq!(
         Limits::default(),
         Limits {
@@ -733,7 +762,8 @@ fn tar_to_zip_keeps_long_names_and_links_and_leaves_out_the_rest() {
         LeftOut {
             links: 1,
             specials: 1,
-            mac_metadata: 0
+            mac_metadata: 0,
+            copies: 0,
         }
     );
     // Odd-second mtimes survive through the extended timestamp.
@@ -913,7 +943,8 @@ fn extract_zip_writes_the_tree_and_leaves_out_links_and_mac_metadata() {
         LeftOut {
             links: 1,
             specials: 0,
-            mac_metadata: 2
+            mac_metadata: 2,
+            copies: 0,
         }
     );
     let mut items = zip_items(&source);
@@ -955,7 +986,8 @@ fn extract_tar_and_tarballs() {
             LeftOut {
                 links: 3,
                 specials: 1,
-                mac_metadata: 0
+                mac_metadata: 0,
+                copies: 0,
             },
             "{name}"
         );
@@ -1821,6 +1853,7 @@ fn a_cancelled_job_does_not_start() {
         Format::Zip,
         &ctx,
         &mut |_: f32| {},
+        None,
     )
     .unwrap_err();
     assert_eq!(error.kind, ErrorKind::Cancelled);
@@ -1881,11 +1914,21 @@ fn mark_of_the_web_follows_converted_and_extracted_files() {
         let ctx = EngineCtx::default();
         match (&job.output, job.op) {
             (JobOutput::File(dest), Operation::Convert { to }) => {
-                convert(&job, &src, dest, Format::Zip, to, &ctx, &mut |_: f32| {}).unwrap();
+                convert(
+                    &job,
+                    &src,
+                    dest,
+                    Format::Zip,
+                    to,
+                    &ctx,
+                    &mut |_: f32| {},
+                    None,
+                )
+                .unwrap();
                 assert_eq!(fs::read(motw::zone_stream(dest)).unwrap(), mark);
             }
             (JobOutput::Folder(dest), _) => {
-                extract(&job, &src, dest, Format::Zip, &ctx, &mut |_: f32| {}).unwrap();
+                extract(&job, &src, dest, Format::Zip, &ctx, &mut |_: f32| {}, None).unwrap();
                 // Entry `i` of `zip_of` is dated `T + 7200 * i`.
                 for (file, i) in [("docs/readme.txt", 1), ("top.txt", 2)] {
                     let path = dest.join(file);

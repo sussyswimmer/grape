@@ -132,6 +132,13 @@ impl<'a> Run<'a> {
         self.tick();
     }
 
+    /// Sets the source bytes read so far to `n`, never backwards: a RAR's
+    /// bytes written into bsdtar, counted on another thread.
+    pub(crate) fn set_consumed(&self, n: u64) {
+        self.consumed.set(self.consumed.get().max(n));
+        self.tick();
+    }
+
     /// Reports progress if it moved enough: source bytes read over the
     /// total, never backwards, below [`PROGRESS_CAP`].
     fn tick(&self) {

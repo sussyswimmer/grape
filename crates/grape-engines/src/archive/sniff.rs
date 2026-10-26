@@ -8,7 +8,13 @@ pub(crate) const HEAD: usize = 512;
 /// (20 blocks). The tar crate writes 1024 bytes.
 pub(crate) const EMPTY_TAR_MAX: usize = 10_240;
 
-/// The archive containers Grape reads in this slice.
+/// A RAR 4 archive's signature (RAR 1.5 to 4.x), at offset 0.
+pub(crate) const RAR4_SIG: &[u8] = b"Rar!\x1A\x07\x00";
+
+/// A RAR 5 archive's signature, at offset 0.
+pub(crate) const RAR5_SIG: &[u8] = b"Rar!\x1A\x07\x01\x00";
+
+/// The archive containers Grape reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Container {
     /// `PK\x03\x04`, or `PK\x05\x06` for an empty ZIP.
@@ -18,6 +24,9 @@ pub(crate) enum Container {
     /// A tar header block: `ustar` at offset 257, or an old v7 header with
     /// a valid checksum.
     Tar,
+    /// [`RAR4_SIG`] or [`RAR5_SIG`], read through Grape's bsdtar
+    /// (`super::rar`).
+    Rar,
 }
 
 /// The container `head` (a file's first [`HEAD`] bytes, or all of a
@@ -27,6 +36,8 @@ pub(crate) fn sniff(head: &[u8]) -> Option<Container> {
         Some(Container::Zip)
     } else if head.starts_with(&[0x1F, 0x8B]) {
         Some(Container::Gzip)
+    } else if head.starts_with(RAR4_SIG) || head.starts_with(RAR5_SIG) {
+        Some(Container::Rar)
     } else if is_tar_header(head) {
         Some(Container::Tar)
     } else {
@@ -122,6 +133,20 @@ mod tests {
         gnu.set_path("b").unwrap();
         gnu.set_cksum();
         assert_eq!(sniff(gnu.as_bytes()), Some(Container::Tar));
+    }
+
+    #[test]
+    fn sniffs_both_rar_signatures_at_the_start_only() {
+        assert_eq!(sniff(b"Rar!\x1A\x07\x00\xCF\x90"), Some(Container::Rar));
+        assert_eq!(sniff(b"Rar!\x1A\x07\x01\x00\x33"), Some(Container::Rar));
+        assert_eq!(sniff(RAR4_SIG), Some(Container::Rar));
+        assert_eq!(sniff(RAR5_SIG), Some(Container::Rar));
+        // A future version, a cut signature, and one that isn't at 0.
+        assert_eq!(sniff(b"Rar!\x1A\x07\x02\x00"), None);
+        assert_eq!(sniff(b"Rar!\x1A\x07\x01\x01"), None);
+        assert_eq!(sniff(b"Rar!\x1A\x07\x01"), None);
+        assert_eq!(sniff(b"Rar!\x1A\x07"), None);
+        assert_eq!(sniff(b"MZRar!\x1A\x07\x00"), None);
     }
 
     #[test]

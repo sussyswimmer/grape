@@ -12,6 +12,9 @@ publish.workspace = true
 # (the tests fail, not skip, without it). They run the PDF worker built from
 # src/bin/grape-pdf-worker.rs (DECISIONS D29).
 pdf-it = []
+# The RAR tests that run the real bsdtar: GRAPE_TEST_BSDTAR names it (the tests
+# fail, not skip, without it). Unit tests in src/archive/rar/it.rs (D27).
+rar-it = []
 
 [dependencies]
 grape-core.workspace = true
@@ -21,6 +24,9 @@ thiserror.workspace = true
 zip = { version = "=9.0.2", default-features = false, features = ["deflate-flate2", "deflate64"] }
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# RAR (D27). Both were already in Cargo.lock (flate2; lopdf → stringprep).
+crc32fast = "1.5.2"
+unicode-normalization = "0.1.25"
 # PDF (D29). PDFium is bound at run time from an absolute path, only inside
 # the PDF worker process. Never enable image_*, pdfium_enable_v8,
 # pdfium_enable_xfa, pdfium_use_skia, pdfium_use_win32, static or bindings.

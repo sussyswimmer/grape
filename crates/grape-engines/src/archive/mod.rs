@@ -1,6 +1,8 @@
-//! Grape's archive engine, slice 1 (DECISIONS D27): ZIP, TAR and GZIP
-//! conversions among each other, and Extract Archive, in pure Rust (`zip`,
-//! `tar`, `flate2` on miniz_oxide). RAR comes in a later slice.
+//! Grape's archive engine (DECISIONS D27): ZIP, TAR and GZIP conversions
+//! among each other, and Extract Archive, in pure Rust (`zip`, `tar`,
+//! `flate2` on miniz_oxide). RAR is read through Grape's own bsdtar
+//! sidecar ([`rar`]): a Rust preflight of the RAR's headers, then bsdtar's
+//! tar stream through the same checks and writers as any tar.
 //!
 //! - **Container by content.** [`sniff`] reads the first bytes: a `.tar`
 //!   that is really gzip is read through gzip, and so on. A gzip file is a
@@ -25,6 +27,7 @@ pub(crate) mod folder;
 pub(crate) mod gz;
 pub(crate) mod motw;
 pub(crate) mod names;
+pub(crate) mod rar;
 pub(crate) mod sink;
 pub(crate) mod sniff;
 pub(crate) mod source;
@@ -49,6 +52,7 @@ use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome};
 use folder::TempDir;
 use gz::{GzInfo, GzMembers};
 use motw::Mark;
+use rar::{Launch, RarFailure, RarPaths};
 use sink::{finish_out, FolderSink, Out, Sink, TarSink, ZipSink, LEVEL};
 use sniff::{is_empty_tar, sniff, Container, EMPTY_TAR_MAX};
 use source::{drain, walk_tar, walk_zip, Kind, Mode, Opened, Raw, RawKind, Walk};
@@ -119,6 +123,9 @@ pub(crate) struct LeftOut {
     pub(crate) specials: u32,
     /// Files under `__MACOSX/` and AppleDouble `._` files.
     pub(crate) mac_metadata: u32,
+    /// RAR5 file-copy references (WinRAR's "store identical files as
+    /// references").
+    pub(crate) copies: u32,
 }
 
 /// What a successful archive job wrote, and what it left out.
@@ -139,14 +146,14 @@ pub(crate) enum Failure {
     #[error("cancelled")]
     Cancelled,
     /// The bytes match no archive Grape reads.
-    #[error("no ZIP, gzip or tar signature at the start")]
+    #[error("no ZIP, gzip, tar or RAR signature at the start")]
     NotArchive,
     /// The archive is damaged (a bad checksum, truncated data, a broken
     /// header); the detail says where.
     #[error("damaged archive: {0}")]
     Corrupt(String),
-    /// A ZIP entry is encrypted.
-    #[error("an encrypted ZIP entry")]
+    /// An entry (or a RAR's headers) is encrypted.
+    #[error("an encrypted entry")]
     Encrypted,
     /// A ZIP entry uses a compression method this build can't read (its
     /// name, if Grape knows it).
@@ -170,9 +177,28 @@ pub(crate) enum Failure {
     /// A failure already in Grape's words (from publishing).
     #[error("publishing failed: {:?}", .0.kind)]
     Grape(GrapeError),
+    /// A RAR this build won't read, or bsdtar failed.
+    #[error("{0}")]
+    Rar(RarFailure),
 }
 
 impl Failure {
+    /// True for a refusal of Grape's own (a cancel, a bound, a name, the
+    /// output): bsdtar is killed at once, and its own failure never
+    /// replaces one of these. Anything else is a broken stream.
+    pub(crate) fn is_policy(&self) -> bool {
+        matches!(
+            self,
+            Failure::Cancelled
+                | Failure::TooBig(_)
+                | Failure::UnsafeName(_)
+                | Failure::Duplicate(_)
+                | Failure::Write(_)
+                | Failure::Grape(_)
+                | Failure::Rar(RarFailure::Names(_))
+        )
+    }
+
     /// The error in Grape's words; the log detail is the failure's own
     /// `Display`, which never names a file.
     fn into_error(self, src: &Path, names: &Names, limits: &Limits) -> GrapeError {
@@ -208,6 +234,7 @@ impl Failure {
             Failure::Read(_) => names.read_failed(detail),
             Failure::Write(_) => names.write_failed(detail),
             Failure::Grape(error) => error,
+            Failure::Rar(rar) => rar.into_error(source, detail),
         }
     }
 }
@@ -235,24 +262,28 @@ fn bytes(n: u64) -> String {
     format!("{} bytes", thousands(n))
 }
 
-/// True for the six v1 pairs: ZIP → TAR or GZIP, TAR → ZIP or GZIP, GZIP →
-/// ZIP or TAR.
-pub(crate) fn supports(from: Format, to: Format) -> bool {
+/// True for the six v1 pairs (ZIP → TAR or GZIP, TAR → ZIP or GZIP, GZIP →
+/// ZIP or TAR), and RAR → ZIP, TAR or GZIP when this install has bsdtar
+/// (`has_bsdtar`: the app found `SidecarPaths::bsdtar`).
+pub(crate) fn supports(from: Format, to: Format, has_bsdtar: bool) -> bool {
     matches!(
         (from, to),
         (Format::Zip, Format::Tar | Format::Gz)
             | (Format::Tar, Format::Zip | Format::Gz)
             | (Format::Gz, Format::Zip | Format::Tar)
-    )
+    ) || (has_bsdtar && from == Format::Rar && matches!(to, Format::Zip | Format::Tar | Format::Gz))
 }
 
-/// True when Extract Archive runs on `from` in this build: ZIP, TAR, GZIP.
-pub(crate) fn extracts(from: Format) -> bool {
-    matches!(from, Format::Zip | Format::Tar | Format::Gz)
+/// True when Extract Archive runs on `from` in this build: ZIP, TAR, GZIP,
+/// and RAR when this install has bsdtar.
+pub(crate) fn extracts(from: Format, has_bsdtar: bool) -> bool {
+    matches!(from, Format::Zip | Format::Tar | Format::Gz) || (has_bsdtar && from == Format::Rar)
 }
 
 /// Converts the archive `src` (of format `from`, by its name) to `to` at
-/// `dest`, the path the plan reserved.
+/// `dest`, the path the plan reserved. `rar` says where bsdtar is, if this
+/// install has it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn convert(
     job: &Job,
     src: &Path,
@@ -261,11 +292,23 @@ pub(crate) fn convert(
     to: Format,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
+    rar: Option<&RarPaths>,
 ) -> Result<ArchiveOutcome, GrapeError> {
-    convert_with(job, src, dest, from, to, ctx, progress, Limits::default())
+    let launch = rar.map(Launch::bsdtar);
+    convert_with(
+        job,
+        src,
+        dest,
+        from,
+        to,
+        ctx,
+        progress,
+        Limits::default(),
+        launch.as_ref(),
+    )
 }
 
-/// [`convert`] under `limits`.
+/// [`convert`] under `limits`, starting bsdtar as `rar` says.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn convert_with(
     job: &Job,
@@ -276,17 +319,21 @@ pub(crate) fn convert_with(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
     limits: Limits,
+    rar: Option<&Launch>,
 ) -> Result<ArchiveOutcome, GrapeError> {
     let names = Names::new(src, dest, from, to);
     let report = |failure: Failure| failure.into_error(src, &names, &limits);
     let dir = publish::dest_dir(dest, &names)?;
-    if !supports(from, to) {
+    if !supports(from, to, rar.is_some()) {
         return Err(crate::not_yet_supported(job, Some(from)));
     }
     if ctx.cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let (file, len, container) = open_source(src).map_err(report)?;
+    let (file, len, container) = open_source(src, from).map_err(report)?;
+    if container == Container::Rar && rar.is_none() {
+        return Err(report(Failure::Rar(RarFailure::NoHelper)));
+    }
 
     publish::ensure_dir(job, ctx, dir, &names)?;
     // From here on, `temp` removes the temp file on every return path.
@@ -294,7 +341,18 @@ pub(crate) fn convert_with(
         .map_err(|e| names.write_failed(format!("creating the temp file: {:?}", e.kind())))?;
     let left_out = {
         let run = Run::new(&ctx.cancel, limits, len, &mut *progress);
-        convert_into(&run, file, container, src, to, out)
+        convert_into(
+            &run,
+            Input {
+                file,
+                len,
+                container,
+            },
+            src,
+            to,
+            out,
+            rar,
+        )
     }
     .map_err(report)?;
     let mark = Mark::of(src);
@@ -331,6 +389,7 @@ fn finalize_marked(
 
 /// Extracts the archive `src` (of format `from`, by its name) into a new
 /// folder at `dest_folder`, the path the plan reserved (`{stem} Extracted`).
+/// `rar` says where bsdtar is, if this install has it.
 pub(crate) fn extract(
     job: &Job,
     src: &Path,
@@ -338,7 +397,9 @@ pub(crate) fn extract(
     from: Format,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
+    rar: Option<&RarPaths>,
 ) -> Result<ArchiveOutcome, GrapeError> {
+    let launch = rar.map(Launch::bsdtar);
     extract_with(
         job,
         src,
@@ -347,10 +408,12 @@ pub(crate) fn extract(
         ctx,
         progress,
         Limits::default(),
+        launch.as_ref(),
     )
 }
 
-/// [`extract`] under `limits`.
+/// [`extract`] under `limits`, starting bsdtar as `rar` says.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_with(
     job: &Job,
     src: &Path,
@@ -359,17 +422,21 @@ pub(crate) fn extract_with(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
     limits: Limits,
+    rar: Option<&Launch>,
 ) -> Result<ArchiveOutcome, GrapeError> {
     let names = Names::new(src, dest_folder, from, from);
     let report = |failure: Failure| failure.into_error(src, &names, &limits);
     let dir = publish::dest_dir(dest_folder, &names)?;
-    if !extracts(from) {
+    if !extracts(from, rar.is_some()) {
         return Err(crate::not_yet_supported(job, Some(from)));
     }
     if ctx.cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let (file, len, container) = open_source(src).map_err(report)?;
+    let (file, len, container) = open_source(src, from).map_err(report)?;
+    if container == Container::Rar && rar.is_none() {
+        return Err(report(Failure::Rar(RarFailure::NoHelper)));
+    }
 
     publish::ensure_dir(job, ctx, dir, &names)?;
     // From here on, `temp` removes the temp folder on every return path.
@@ -377,7 +444,17 @@ pub(crate) fn extract_with(
         .map_err(|e| names.write_failed(format!("creating the temp folder: {:?}", e.kind())))?;
     let left_out = {
         let run = Run::new(&ctx.cancel, limits, len, &mut *progress);
-        extract_into(&run, file, container, src, temp.path())
+        extract_into(
+            &run,
+            Input {
+                file,
+                len,
+                container,
+            },
+            src,
+            temp.path(),
+            rar,
+        )
     }
     .map_err(report)?;
 
@@ -392,7 +469,9 @@ pub(crate) fn extract_with(
 
 /// Opens `src` read-only and sniffs it: the file (back at its start), its
 /// size and its real container. A file of only zero blocks is an empty tar.
-fn open_source(src: &Path) -> Result<(File, u64, Container), Failure> {
+/// For anything else, `from` (the format by the name) decides between a
+/// self-extracting RAR and no archive at all ([`rar::header::foreign`]).
+fn open_source(src: &Path, from: Format) -> Result<(File, u64, Container), Failure> {
     let read = |what: &str, e: std::io::Error| Failure::Read(format!("{what}: {:?}", e.kind()));
     let mut file = File::open(src).map_err(|e| read("opening the source", e))?;
     let len = file
@@ -403,26 +482,53 @@ fn open_source(src: &Path) -> Result<(File, u64, Container), Failure> {
         read_prefix(&mut file, EMPTY_TAR_MAX + 1).map_err(|e| read("reading the source", e))?;
     file.seek(SeekFrom::Start(0))
         .map_err(|e| read("reading the source", e))?;
-    let container = sniff(&head)
-        .or_else(|| is_empty_tar(&head).then_some(Container::Tar))
-        .ok_or(Failure::NotArchive)?;
-    Ok((file, len, container))
+    match sniff(&head).or_else(|| is_empty_tar(&head).then_some(Container::Tar)) {
+        Some(container) => Ok((file, len, container)),
+        None => Err(rar::header::foreign(&mut file, &head, from)),
+    }
 }
 
-/// Writes `to` into `out` from the source `file`, a `container`.
+/// The opened source: the file (at its start), its size and its container.
+struct Input {
+    file: File,
+    len: u64,
+    container: Container,
+}
+
+/// bsdtar's launch, for a RAR (the callers checked it is there).
+fn helper(rar: Option<&Launch>) -> Result<&Launch, Failure> {
+    rar.ok_or(Failure::Rar(RarFailure::NoHelper))
+}
+
+/// Writes `to` into `out` from the source.
 fn convert_into(
     run: &Run<'_>,
-    file: File,
-    container: Container,
+    input: Input,
     src: &Path,
     to: Format,
     out: File,
+    rar: Option<&Launch>,
 ) -> Result<LeftOut, Failure> {
+    let Input {
+        file,
+        len,
+        container,
+    } = input;
     let out: Out = std::io::BufWriter::with_capacity(
         256 * KIB as usize,
         crate::cancel::Cancellable::new(out, run.token()),
     );
     let mut walk = Walk::new(Mode::Repack, &run.limits);
+    if container == Container::Rar {
+        // Always re-packed, never kept: bsdtar's PAX records don't reach
+        // the user.
+        let launch = helper(rar)?;
+        let out = to_target(run, to, out, |sink| {
+            rar::walk(run, file, len, launch, &mut walk, sink)
+        })?;
+        drop(finish_out(run, out)?);
+        return Ok(walk.left_out);
+    }
     let out = match source::open(run, file, container)? {
         Opened::Zip(file) => to_target(run, to, out, |sink| {
             walk_zip(run, file, src, &mut walk, sink)
@@ -551,16 +657,26 @@ fn plain_into(
     sink.file(run, &entry, Some(size), &mut data)
 }
 
-/// Extracts the source `file`, a `container`, into the folder `root`.
+/// Extracts the source into the folder `root`.
 fn extract_into(
     run: &Run<'_>,
-    file: File,
-    container: Container,
+    input: Input,
     src: &Path,
     root: &Path,
+    rar: Option<&Launch>,
 ) -> Result<LeftOut, Failure> {
+    let Input {
+        file,
+        len,
+        container,
+    } = input;
     let mut sink = FolderSink::new(root, Mark::of(src));
     let mut walk = Walk::new(Mode::Extract, &run.limits);
+    if container == Container::Rar {
+        rar::walk(run, file, len, helper(rar)?, &mut walk, &mut sink)?;
+        sink.finish(run)?;
+        return Ok(walk.left_out);
+    }
     match source::open(run, file, container)? {
         Opened::Zip(file) => walk_zip(run, file, src, &mut walk, &mut sink)?,
         Opened::Tar(stream) => {

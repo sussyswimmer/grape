@@ -1658,6 +1658,7 @@ dependencies = [
 name = "grape-engines"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
  "flate2",
  "grape-core",
  "image",
@@ -1667,6 +1668,7 @@ dependencies = [
  "serde_json",
  "tar",
  "thiserror 2.0.21",
+ "unicode-normalization",
  "zip",
  "zune-jpeg",
 ]
