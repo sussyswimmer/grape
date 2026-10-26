@@ -9,9 +9,10 @@
 //!
 //! - **Video targets** (MP4, MOV, MKV, WebM, AVI, WMV) keep `0:V:0` and
 //!   `0:a:0?`: the first video that isn't cover art and the first audio, if
-//!   any. MKV, MP4 and MOV copy what fits ([`copy_plan`]); everything
-//!   re-encoded is scaled to even dimensions of at least 2×2, which
-//!   yuv420p needs. FFmpeg turns a rotated source upright as it decodes.
+//!   any. MKV, MP4 and MOV copy what fits ([`copy_plan`]) as it is;
+//!   everything re-encoded is scaled to even dimensions of at least 2×2,
+//!   which yuv420p needs, and for AVI to at most 8190 px a side. FFmpeg
+//!   turns a rotated source upright as it decodes.
 //! - **GIF** takes two passes: a palette from the whole clip, then the GIF
 //!   drawn with it, both at 12 fps and at most 720 px wide.
 //! - **Audio targets** (and video to MP3) keep `0:a:0`. Lossless targets
@@ -40,6 +41,12 @@ pub(crate) const DEMUXERS: &str = "mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gi
 /// Rounds the frame down to even dimensions, at least 2×2. Commas inside
 /// an expression are escaped for the filtergraph.
 const EVEN_SIZE: &str = r"scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'";
+
+/// [`EVEN_SIZE`] for AVI's MPEG-4 Part 2, whose encoder refuses a frame
+/// 8192 px or more on either side (`mpeg4videoenc.c`): a larger frame is
+/// first scaled down to fit 8190×8190, keeping its aspect. Smaller frames
+/// come out exactly as with [`EVEN_SIZE`].
+const EVEN_SIZE_MPEG4: &str = r"scale='max(2\,trunc(min(iw\,iw*8190/max(iw\,ih))/2)*2)':'max(2\,trunc(min(ih\,ih*8190/max(iw\,ih))/2)*2)'";
 
 /// A GIF's frames: 12 per second, at most 720 px wide. `eof_action=pass`
 /// keeps the last frame of a clip shorter than one GIF frame (1/12 s),
@@ -245,7 +252,12 @@ fn build(
                     push(&mut args, &["-c:v", "copy"]);
                 } else {
                     push(&mut args, video_codec);
-                    push(&mut args, &["-vf", EVEN_SIZE]);
+                    let size = if to == Format::Avi {
+                        EVEN_SIZE_MPEG4
+                    } else {
+                        EVEN_SIZE
+                    };
+                    push(&mut args, &["-vf", size]);
                 }
                 if copy.audio {
                     push(&mut args, &["-c:a", "copy"]);
@@ -453,6 +465,9 @@ mod tests {
 
     /// The even-size filter, spelled out so a change to it shows here.
     const EVEN: &str = r"scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'";
+
+    /// The even-size filter of AVI, capped at 8190 px a side.
+    const EVEN_MPEG4: &str = r"scale='max(2\,trunc(min(iw\,iw*8190/max(iw\,ih))/2)*2)':'max(2\,trunc(min(ih\,ih*8190/max(iw\,ih))/2)*2)'";
 
     /// The layout filter of Opus and Vorbis, spelled out.
     const LAYOUTS: &str = "aformat=channel_layouts=mono|stereo|3.0|quad|5.0|5.1|6.1|7.1";
@@ -691,7 +706,7 @@ mod tests {
                 "-tag:v",
                 "XVID",
                 "-vf",
-                EVEN,
+                EVEN_MPEG4,
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
@@ -1301,12 +1316,15 @@ mod tests {
             Format::Mov,
             Format::Mkv,
             Format::Webm,
-            Format::Avi,
             Format::Wmv,
         ] {
             let args = &passes_for(&odd, to).unwrap()[0].args;
             assert!(has(args, ["-vf", EVEN]), "{to:?}");
         }
+        // AVI's filter also caps the size; it gives the same even size
+        // below the cap (checked with FFmpeg by the engines-it tests).
+        let args = &passes_for(&odd, Format::Avi).unwrap()[0].args;
+        assert!(has(args, ["-vf", EVEN_MPEG4]));
     }
 
     #[test]

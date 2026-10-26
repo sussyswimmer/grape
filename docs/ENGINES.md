@@ -59,7 +59,7 @@ Every video target except GIF scales to even dimensions, at least 2×2: `scale='
 | mov | same as mp4 | same as mp4 | same as mp4 |
 | mkv | copy H.264/HEVC/VP8/VP9/AV1 that isn't rotated or from an AVI or WMV, else as mp4 | copy AAC/MP3/Opus/Vorbis/FLAC/AC-3/E-AC-3, else `aac -b:a 192k` | each stream decided on its own; rotated video is re-encoded upright |
 | webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -pix_fmt yuv420p` | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | the layout filter as for opus |
-| avi | `mpeg4 -q:v 3 -tag:v XVID` | `libmp3lame -b:a 192k` (constant bitrate stays in sync in AVI) | |
+| avi | `mpeg4 -q:v 3 -tag:v XVID` | `libmp3lame -b:a 192k` (constant bitrate stays in sync in AVI) | MPEG-4 Part 2 refuses 8192 px or more on a side, so the even-size filter also scales a larger frame down to fit 8190×8190, keeping its aspect: `scale='max(2\,trunc(min(iw\,iw*8190/max(iw\,ih))/2)*2)':'max(2\,trunc(min(ih\,ih*8190/max(iw\,ih))/2)*2)'` |
 | wmv | `wmv2 -q:v 3` | `wmav2 -b:a 192k`, `-ac 2` above stereo, `-ar 48000` above 48 kHz | wmav2 refuses more |
 | gif | pass 1: `fps=12:eof_action=pass,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff`, one PNG via `image2pipe`, with `-abort_on empty_output`; pass 2: the same frames `paletteuse`d with that palette | — | two passes, so a long clip isn't held in memory; `image2pipe` because `image2` expands `%` in paths; `eof_action=pass` keeps the frame of a clip shorter than 1/12 s, and a palette pass that writes nothing fails as "couldn't write a GIF file". Long inputs aren't warned about yet |
 | mp3 | — | `libmp3lame -q:a 2 -id3v2_version 3` | ID3v2.3 is what Explorer and Windows Media Player read best |

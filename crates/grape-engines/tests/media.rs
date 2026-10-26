@@ -374,6 +374,31 @@ fn odd_sizes_come_out_even_and_rotation_is_applied() {
 }
 
 #[test]
+fn video_too_large_for_avi_is_scaled_to_fit() {
+    let dir = TestDir::new("media-avi-size");
+    // MPEG-4 Part 2 refuses 8192 px or more on either side. A panorama and
+    // a tall strip, one frame each; odd sizes, to check the even rounding.
+    for (size, expected) in [("9001x101", ("8190", "90")), ("101x9001", ("90", "8190"))] {
+        let src = dir.join(&format!("{size}.mkv"));
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={size}:rate=1:duration=1"),
+            "-c:v",
+            "ffv1",
+            src.to_str().unwrap(),
+        ]);
+        let (outcome, _) = convert_file(&dir, &src, Format::Avi)
+            .unwrap_or_else(|e| panic!("{size}: {e} ({})", e.detail));
+        let info = probe(&outcome.outputs[0]);
+        let width = field(&info, "video", "width").unwrap();
+        let height = field(&info, "video", "height").unwrap();
+        assert_eq!((width.as_str(), height.as_str()), expected, "{size}");
+    }
+}
+
+#[test]
 fn audio_depth_channels_and_rate_follow_the_target() {
     let dir = TestDir::new("media-audio");
     // 24-bit, 96 kHz, 5.1 FLAC.
