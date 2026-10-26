@@ -1661,6 +1661,7 @@ dependencies = [
  "crc32fast",
  "flate2",
  "grape-core",
+ "grape-heif-proto",
  "image",
  "lopdf",
  "pdfium-render",

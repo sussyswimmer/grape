@@ -15,6 +15,11 @@ pdf-it = []
 # The RAR tests that run the real bsdtar: GRAPE_TEST_BSDTAR names it (the tests
 # fail, not skip, without it). Unit tests in src/archive/rar/it.rs (D27).
 rar-it = []
+# The HEIC tests that run the real helper (tests/heif.rs, D33): GRAPE_TEST_HEIF
+# names it (grape-heif.exe on Windows, grape-platform's grape-heif-worker on
+# macOS) and GRAPE_TEST_HEIF_FIXTURES the folder CI's grape-heif job made. The
+# tests fail, not skip, without them.
+heif-it = []
 
 [dependencies]
 grape-core.workspace = true
@@ -35,6 +40,8 @@ pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdf
 lopdf = { version = "=0.45.0", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+# HEIC (D33): the protocol with Grape's HEIC helper, a separate process.
+grape-heif-proto.workspace = true
 
 [[bin]]
 # The PDF worker on its own, for the `pdf-it` tests. The app runs the same
@@ -46,6 +53,10 @@ required-features = ["pdf-it"]
 [[test]]
 name = "pdf"
 required-features = ["pdf-it"]
+
+[[test]]
+name = "heif"
+required-features = ["heif-it"]
 
 [lints]
 workspace = true

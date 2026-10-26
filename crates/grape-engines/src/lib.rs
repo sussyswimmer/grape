@@ -17,6 +17,8 @@
 mod archive;
 mod cancel;
 mod headers;
+mod heif;
+mod helper;
 mod image;
 mod output;
 #[doc(hidden)] // Public only for the worker entry, `pdf::worker_main` (D29).
@@ -26,6 +28,7 @@ mod selection;
 mod subtitle;
 
 pub use archive::LeftOut;
+pub use helper::{set_contain, Contain, Contained};
 pub use selection::build_selection;
 
 use std::path::{Path, PathBuf};
@@ -55,8 +58,10 @@ pub struct SidecarPaths {
     /// The program started as `<worker> --grape-pdf-worker` (D29): Grape's
     /// own executable.
     pub pdf_worker: Option<PathBuf>,
-    /// The HEIC helper: on Windows the `grape-heif` sidecar; on macOS
-    /// Grape's own executable, started as `<helper> --grape-heif-worker`.
+    /// The HEIC helper (D33), started as `<helper> --grape-heif-worker` on
+    /// both systems: `grape-heif.exe` next to Grape's executable on
+    /// Windows (Grape's own sidecar, on libheif), Grape's own executable on
+    /// macOS (ImageIO).
     pub heif: Option<PathBuf>,
     /// The `bsdtar` sidecar that reads RAR archives (D27): `bsdtar.exe` next
     /// to Grape's executable on Windows, `Contents/MacOS/bsdtar` on macOS.
@@ -208,7 +213,8 @@ impl GrapeError {
 }
 
 /// Can this build execute `op` for an input of format `from`, with no
-/// sidecars? The app asks [`supports_with`], with the sidecars it found.
+/// sidecars? So never for RAR, PDF or HEIC, which need theirs. The app asks
+/// [`supports_with`], with the sidecars it found.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
     supports_with(op, std::slice::from_ref(&from), &SidecarPaths::default())
 }
@@ -221,7 +227,8 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// In this build: raster images among JPG, PNG, WebP, TIFF and BMP (20
 /// pairs); SRT to VTT or TXT and VTT to SRT or TXT (4); ZIP, TAR and GZIP
 /// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
-/// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4). Tools: Extract
+/// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); HEIC to and from
+/// JPG, PNG, WebP, TIFF and BMP with `heif` (10). Tools: Extract
 /// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
 /// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
@@ -246,6 +253,8 @@ enum Engine {
     Archive,
     /// PDF, in a worker process ([`pdf`]).
     Pdf,
+    /// HEIC, in a helper process ([`heif`]).
+    Heif,
 }
 
 /// The engine that converts `from` to `to` with these sidecars, if this
@@ -260,6 +269,8 @@ fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engin
         Some(Engine::Archive)
     } else if pdf::supports(from, to) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         Some(Engine::Pdf)
+    } else if heif::supports(from, to) && sidecars.heif.is_some() {
+        Some(Engine::Heif)
     } else {
         None
     }
@@ -318,6 +329,7 @@ pub fn run_job(
                 }
                 // PDF → TXT or MD.
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
+                Some(Engine::Heif) => heif::convert(job, src, dest, from, to, ctx, progress),
                 None => Err(not_yet_supported(job, Some(from))),
             }
         }
