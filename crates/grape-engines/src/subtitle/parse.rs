@@ -1784,12 +1784,20 @@ mod tests {
         assert_eq!(doc.cues[0].lines.len(), 10_000);
         vtt.push('\n');
         assert_eq!(parse(&vtt, &mut || false), Err(ParseError::TooLarge));
+        // The same line after a blank line, where it continues the cue
+        // before it, counts the same: six lines read, 10,000 more made.
+        let mut vtt = format!("WEBVTT\n\n00:01.000 --> 00:02.000\nHi\n\n{broken}\n");
+        vtt.push_str(&"\n".repeat(MAX_LINES - 6 - 10_000));
+        let doc = parsed(&vtt);
+        assert_eq!(doc.cues[0].lines.len(), 1 + 10_000);
+        vtt.push('\n');
+        assert_eq!(parse(&vtt, &mut || false), Err(ParseError::TooLarge));
         // In SRT the reference is text: the line is one line.
         let mut srt = format!("1\n00:00:01,000 --> 00:00:02,000\n{broken}\n");
         srt.push_str(&"\n".repeat(MAX_LINES - 3));
         assert_eq!(parsed(&srt).cues[0].lines.len(), 1);
-        // push_lines counts them, for a cue's first block of text and for
-        // text after a blank line alike.
+        // push_lines itself adds the extra cue lines to the count it is
+        // given, and fails once that is past the limit.
         let mut lines = 0;
         let mut never = || false;
         let mut ticker = Ticker::new(&mut never);
