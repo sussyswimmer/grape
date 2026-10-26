@@ -922,6 +922,25 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_cancel_while_reading_what_an_exited_child_left_still_cancels() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let mut first = true;
+        let result = transcode_command(fake("progress"), &token, &mut |time| {
+            // The child prints the rest and exits meanwhile, so the later
+            // times are only read once it is gone.
+            if first {
+                first = false;
+                thread::sleep(Duration::from_millis(500));
+            }
+            if time == Duration::from_secs(2) {
+                token.cancel();
+            }
+        });
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
     fn a_cancelled_token_starts_nothing() {
         let token = CancelToken::new();
         token.cancel();
