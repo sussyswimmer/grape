@@ -31,33 +31,49 @@
 
 ## FFmpeg build
 
-- Pin one version for both OSes (e.g. 7.1.x) and record it in DECISIONS.
-- Build flags: `--enable-gpl --enable-version3 --enable-libx264 --enable-libmp3lame --enable-libopus --enable-libvorbis --enable-libvpx --enable-libdav1d --enable-libsvtav1`, plus platform hardware encoders: `--enable-videotoolbox` (mac); `--enable-mediafoundation --enable-nvenc --enable-amf --enable-libvpl` (win). GPL is fine under rule 2.
-- Use a reputable static build (e.g. BtbN for Windows, evermeet/martin-riedl style for macOS) or our own CI build. Record the source and checksum.
-- Ship as a Tauri sidecar via `bundle.externalBin` with target-triple suffixes (`ffmpeg-aarch64-apple-darwin`, `ffmpeg-x86_64-pc-windows-msvc.exe`, …). Also ship `ffprobe`.
+- **Pinned: FFmpeg 9.0.2** (released 2026-09-18) on both OSes, recorded with its sources and SHA-256s in DECISIONS D22.
+  - Windows x64: a BtbN month-end GPL build (`autobuild-2026-09-30-13-08`, `n9.0.2-17`); month-end builds stay downloadable for about two years.
+  - macOS: martin-riedl.de 9.0.2 for arm64 and amd64, joined with `lipo` into one universal file and re-signed.
+  - Later (M7): our own trimmed CI build, for much smaller executables and a source bundle on Grape's own release.
 - **The pinned builds are in `scripts/sidecars.lock`** (the pin is D22): each archive's URL, SHA-256 and size, and each file's path inside it. `scripts/fetch-sidecars.ps1` (Windows) and `scripts/fetch-sidecars.sh` (macOS) download and check them into `apps/desktop/src-tauri/binaries/` (D25; `PLATFORM_WINDOWS.md` and `PLATFORM_MACOS.md` → "Sidecars"). Change a pin in the lock, never in the scripts. No bundle carries them until `licenses/ffmpeg/` and the notices entry exist (rule 3).
+- What the build must have: `--enable-gpl --enable-version3` with `libx264`, `libmp3lame`, `libopus`, `libvorbis`, `libvpx` (VP9), `libdav1d`, plus the native `aac`, `flac`, `pcm_*`, `mpeg4`, `wmv2`, `wmav2`, `gif` and `png` encoders and the `palettegen`/`paletteuse` filters; hardware encoders (`--enable-mediafoundation --enable-nvenc --enable-amf --enable-libvpl` on Windows, `--enable-videotoolbox` on macOS) for a later slice. Never `--enable-nonfree`, which can't be redistributed. The `engines-it` test `the_sidecar_has_everything_grape_uses_and_is_redistributable` checks the encoders, muxers and demuxers Grape uses. GPL is fine under rule 2.
+- Ship as a Tauri sidecar via `bundle.externalBin` with target-triple suffixes (`ffmpeg-x86_64-pc-windows-msvc.exe`, `ffmpeg-universal-apple-darwin`, …), plus `ffprobe`. The app finds them next to its own executable and passes them in `SidecarPaths`; the engine never looks on `PATH`.
 
-### Target arguments (starting points; tune in M3)
+### How Grape runs FFmpeg (`grape-engines/src/media/`)
+
+- **Offline and contained.** `ffprobe` and `ffmpeg` both get `-protocol_whitelist file` and `-format_whitelist mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif`, and every path is a `file:` URL. So no source can reach the network or open other files: an HLS, DASH or `ffconcat` playlist renamed `.mp4` is refused before it reads anything, and no file name is ever taken for an option or a protocol (`pipe:1.ogg`, `-v error.wav`).
+- **Probe first.** `ffprobe -of flat` gives the container, the duration, and for the first video stream that isn't cover art (`0:V:0`) and the first audio stream (`0:a:0`) their codec, size, pixel format, rotation, rate, channels and bit depth. Tags are never read. A source without the stream the target needs is refused before anything is written ("… has no sound to save as MP3", "… has no video to convert").
+- **Only what the user sees.** The output keeps that video and that audio stream. Subtitles, data streams, further audio tracks and cover art are dropped.
+- **Writing:** into a temp file next to the planned name (`-y` is safe: the temp name is new), with the output format forced by `-f`; the planned name never appears in the argv. Then `ffprobe` checks the output has the target's stream, the file is synced (reopened for writing: Windows only flushes a writable handle), and it's published no-clobber like every engine's.
+- **Progress** comes from `-progress pipe:1`'s `out_time_us` against the source's duration (none when the duration is unknown), up to 99 % until the file is published. **Cancel** kills the child within about 50 ms and waits for it, then the temp files go. At most **two FFmpeg jobs** run at once.
+- **Process hygiene:** absolute program paths only, stdin empty, `FFREPORT` removed, and on Windows `CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS` (no console window flashes; encoding doesn't starve the desktop). `ffprobe` has 60 s.
+- **Errors:** a source FFmpeg can't read, or one the whitelist refuses → "… isn't a readable MP4 video"; a sidecar that won't start → "Grape's media converter is missing. Reinstall Grape."; FFmpeg's own failures are judged by the end of its stderr ("No space left", "Permission denied" → couldn't save; "Invalid data found" → not readable; else couldn't write the format).
+
+### Target arguments
+
+Every video target except GIF scales to even dimensions, at least 2×2: `scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'` (yuv420p needs them).
 
 | Target | Video | Audio | Notes |
 |---|---|---|---|
-| mp4 | `h264_videotoolbox` (mac) / hw or `libx264 -crf 20 -preset medium` | `aac -b:a 192k` | `-movflags +faststart -pix_fmt yuv420p` |
-| mov | same as mp4 | `aac` | |
-| mkv | `-c copy` when the codecs fit, else as mp4 | | try remux first |
-| webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1` | `libopus 128k` | |
-| avi | `mpeg4 -q:v 3` | `libmp3lame` | |
-| wmv | `wmv2 -q:v 3` | `wmav2` | |
-| gif | `fps=12,scale=min(iw\,720):-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse` | — | cap long inputs: warn above 30 s |
-| mp3 | — | `libmp3lame -q:a 2` | from video: `-vn` |
-| m4a | — | `aac 256k` | |
-| wav | — | `pcm_s16le` (keep 24-bit if the source is) | |
-| flac | — | `flac -compression_level 8` | compress(wav) → flac |
+| mp4 | `libx264 -crf 20 -preset medium -pix_fmt yuv420p` | `aac -b:a 192k` | `-movflags +faststart`. **Copied** (`-c copy`) when the source is H.264 yuv420p, not rotated, with no audio or AAC/MP3 |
+| mov | same as mp4 | same as mp4 | same as mp4 |
+| mkv | copy H.264/HEVC/VP8/VP9/AV1 that isn't rotated, else as mp4 | copy AAC/MP3/Opus/Vorbis/FLAC/AC-3/E-AC-3, else `aac -b:a 192k` | each stream decided on its own; rotated video is re-encoded upright |
+| webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -pix_fmt yuv420p` | `libopus -b:a 128k` | |
+| avi | `mpeg4 -q:v 3 -tag:v XVID` | `libmp3lame -b:a 192k` (constant bitrate stays in sync in AVI) | |
+| wmv | `wmv2 -q:v 3` | `wmav2 -b:a 192k`, `-ac 2` above stereo, `-ar 48000` above 48 kHz | wmav2 refuses more |
+| gif | pass 1: `fps=12,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff`, one PNG via `image2pipe`; pass 2: the same frames `paletteuse`d with that palette | — | two passes, so a long clip isn't held in memory; `image2pipe` because `image2` expands `%` in paths. Long inputs aren't warned about yet |
+| mp3 | — | `libmp3lame -q:a 2 -id3v2_version 3` | ID3v2.3 is what Explorer and Windows Media Player read best |
+| m4a | — | `aac -b:a 256k` | `-f ipod -movflags +faststart` |
+| wav | — | `pcm_s16le`, or `pcm_s24le` from a lossless source over 16 bits | `-rf64 auto` for files over 4 GiB |
+| flac | — | `flac -compression_level 8`, `-sample_fmt s16` or `s32` (24-bit) by the source's depth | a lossy source counts as 16-bit |
 | ogg | — | `libvorbis -q:a 6` | |
-| opus | — | `libopus 128k` | |
-| aiff | — | `pcm_s16be` | |
-| wma | — | `wmav2 192k` | |
+| opus | — | `libopus -b:a 128k` | |
+| aiff | — | `pcm_s16be` or `pcm_s24be`, as wav | |
+| wma | — | `wmav2 -b:a 192k`, with wmv's limits | |
 
-Run FFmpeg with `-nostdin -hide_banner -y`, write to a temp name, parse `-progress pipe:1` for the progress bar, and kill the child process on cancel.
+A copied conversion that FFmpeg rejects (a stream can fit by its codec and still not mux) is retried once, re-encoding everything.
+
+**Known limits** (later slices): only the first audio track is kept; HDR or 10-bit video comes out washed out in yuv420p without tone mapping; GIFs over 30 s aren't warned about; hardware encoders (Media Foundation, NVENC, AMF, QSV, VideoToolbox) aren't used yet.
 
 ## Subtitles
 

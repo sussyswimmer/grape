@@ -5,10 +5,14 @@
 | Layer | Where | Runs in CI | What |
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
-| Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
+| Engine integration | `grape-engines/tests` | macOS + Windows jobs | convert generated sources through each v1 pair, then validate the output. Image and subtitle tests always run; audio and video need feature `engines-it` and the FFmpeg sidecars (below) |
 | Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS. Tests never open a dialog, AirDrop or the share sheet, and never start a real drag: on Windows a test only reaches code that returns before `ShowShareUIForWindow` or `SHDoDragDrop` |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
+
+## Running the FFmpeg tests (`engines-it`)
+- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. In CI they point at the pinned 9.0.2 sidecars (D22); any FFmpeg with the encoders `ENGINES.md` lists works locally.
+- They make their own sources with FFmpeg's `lavfi` (`testsrc`, `sine`) in a temp folder, convert every audio and video pair, and check each output with `ffprobe`: container, codec, duration within max(0.25 s, 5 %), even dimensions, audio kept. Plus: odd sizes, rotation, 24-bit and 5.1 audio, sources without the needed stream, playlists renamed `.mp4`, cancel mid-run, a name taken mid-run, awkward file names, and that the build has every encoder Grape uses and isn't `nonfree`.
 
 ## Fixtures
 - `fixtures/` holds one small, license-free file per input format (≤ 200 KB each; generate media with FFmpeg's `testsrc`/`sine`). Add a `fixtures/README.md` listing each file's origin.
@@ -92,6 +96,15 @@ Subtitles, M3 (D20; win; use scratch copies of files)
 - [ ] win: drop an SRT or VTT on TXT → the `.txt` holds only the spoken lines, no numbers or times, and no line twice in a row.
 - [ ] win: an old SRT saved in Notepad as "ANSI" with accented letters → its VTT shows them correctly.
 - [ ] win: a `.srt` that isn't a subtitle file (rename any `.txt`) → the toast says it has no subtitles in it, and nothing is written.
+
+Audio and video, M3 (D22; win; needs a build with the FFmpeg sidecars; use scratch copies of files)
+- [ ] win: Shift-drop an MP3 on M4A, FLAC and WAV → each plays in Media Player and sounds the same; the MP3 is unchanged (`Get-FileHash`).
+- [ ] win: Shift-drop a phone video (MOV) on MP4 → it plays upright in Media Player and Photos; the toast's bar moves while it converts.
+- [ ] win: an MKV with H.264 video on MP4 → done in seconds (copied, not re-encoded), and it plays.
+- [ ] win: a video on GIF → the GIF animates in a browser; a video on MP3 → only the sound.
+- [ ] win: no black console window flashes during any conversion.
+- [ ] win: start converting a long video to WEBM, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
+- [ ] win: with Windows Security → Ransomware protection → Controlled folder access on, convert a video in Documents → either it works or the toast says Grape couldn't save; never a half-written file.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

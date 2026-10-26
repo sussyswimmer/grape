@@ -20,7 +20,7 @@ src/
   image.rs          image crate (raster); later ravif, resvg; HEIC via cfg(target_os)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
-  media.rs          FFmpeg arg builders (pure fns, unit-tested) + runner
+  media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22)
   pdf.rs            pdfium-render, lopdf
   archive.rs        zip/tar/flate2, libarchive for RAR; zip-slip guard
   docs.rs           v2, behind feature "v2"
@@ -29,7 +29,7 @@ tests/              real conversions on fixtures generated in each test (no fixt
 ```
 
 ## FFmpeg argument builders
-Pure functions: `fn args(job: &Job, caps: &EncoderCaps) -> Vec<OsString>`. Unit-test the exact argv. `EncoderCaps` comes from probing `ffmpeg -hide_banner -encoders` once at startup, which is how hardware encoders get picked. Starting arguments are in `docs/ENGINES.md`.
+Pure functions in `media/args.rs`: `passes(src, to, &Probe, out, palette) -> Result<Vec<Pass>, Missing>`, from what `ffprobe` said (`media/probe.rs`). Unit-test the exact argv, and keep the invariants: both whitelists, `file:` URLs, a forced `-f`, and only the temp path as output. The arguments are in `docs/ENGINES.md`. Hardware encoders come later: then an `EncoderCaps`, probed once with a test encode, picks them, with x264 as the fallback.
 
 ## Gotchas
 - Apply EXIF orientation before re-encoding images. Removing metadata must not rotate photos.
