@@ -55,6 +55,12 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 /// up to here ([`Bar`]).
 const PASSES_SHARE: f32 = 0.98;
 
+/// How far a run that copies streams fills the bar: half of
+/// [`PASSES_SHARE`], so a re-encode after a refused copy, however late it
+/// was refused, always has the other half. A copy that works is fast, and
+/// the bar goes from here to [`CHECKED`].
+const COPY_SHARE: f32 = PASSES_SHARE / 2.0;
+
 /// Where the progress bar is once the output is checked and synced; it
 /// reaches 1.0 only once the output is published.
 const CHECKED: f32 = 0.99;
@@ -146,20 +152,22 @@ pub(crate) fn convert(
     source_is_a_file(&src_abs, src, &names)?;
     let first = args::passes(&src_abs, to, &info, &out, &palette_path)
         .map_err(|missing| no_stream(&names, missing, src))?;
-    let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, &mut bar) {
+    let copies = args::copy_plan(to, &info).any();
+    let share = if copies { COPY_SHARE } else { PASSES_SHARE };
+    let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, &mut bar, share) {
         Ok(warnings) => warnings,
         Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
         Err(e) => {
             let refused = matches!(e, RunError::Exit { .. });
             let failure = or_cancelled(ffmpeg_failed(&names, e, src));
-            if !(refused && args::copy_plan(to, &info).any() && worth_a_retry(&failure)) {
+            if !(refused && copies && worth_a_retry(&failure)) {
                 return Err(failure);
             }
             // A copied stream can fit by its codec and still not mux: one
             // retry re-encoding everything, filling what's left of the bar.
             let again = args::reencode_passes(&src_abs, to, &info, &out, &palette_path)
                 .map_err(|missing| no_stream(&names, missing, src))?;
-            run_passes(ffmpeg, &again, info.duration, ctx, &mut bar)
+            run_passes(ffmpeg, &again, info.duration, ctx, &mut bar, PASSES_SHARE)
                 .map_err(|e| or_cancelled(ffmpeg_failed(&names, e, src)))?
         }
     };
@@ -323,22 +331,24 @@ fn probe_source(
     probe::parse(&flat).map_err(|e| names.decode_failed(format!("probe {}: {e}", src.display())))
 }
 
-/// Runs `passes` in order, moving the bar from where it is to
-/// [`PASSES_SHARE`] by each pass's output time against the source's
-/// duration (only at the end of each pass when the duration is unknown),
-/// so a retry fills what's left. The GIF palette pass reports no output
-/// time until it ends. Returns what the last pass wrote to stderr:
-/// FFmpeg's warnings, for the detail of a failed check.
+/// Runs `passes` in order, moving the bar from where it is to `end`
+/// ([`COPY_SHARE`] for a run that copies streams, else [`PASSES_SHARE`])
+/// by each pass's weight and output time against the source's duration
+/// (only at the end of each pass when the duration is unknown), so a
+/// retry fills what's left. The GIF palette pass reports no output time
+/// until it ends. Returns what the last pass wrote to stderr: FFmpeg's
+/// warnings, for the detail of a failed check.
 fn run_passes(
     ffmpeg: &Path,
     passes: &[Pass],
     duration: Option<Duration>,
     ctx: &EngineCtx,
     bar: &mut Bar,
+    end: f32,
 ) -> Result<String, RunError> {
     let total = duration.filter(|d| !d.is_zero());
-    let start = bar.shown.min(PASSES_SHARE);
-    let span = PASSES_SHARE - start;
+    let start = bar.shown.min(end);
+    let span = end - start;
     let mut done = 0.0f32;
     let mut warnings = String::new();
     for pass in passes {
@@ -1002,18 +1012,21 @@ mod tests {
         let (result, seen) = case.run_seeing_progress();
         result.unwrap();
         assert_eq!(ran().len(), 4);
-        // The copy gets halfway, to 49 %; the re-encode goes on from
-        // there, filling what's left by its own output time.
+        // The copy fills half of the passes' 98 % by its output time and
+        // gets halfway, to 24.5 %; the re-encode goes on from there,
+        // filling what's left by its own output time.
         let want = [
-            0.1225, 0.245, 0.3675, 0.49, 0.55125, 0.6125, 0.67375, 0.735, 0.98, CHECKED, 1.0,
+            0.06125, 0.1225, 0.18375, 0.245, 0.336875, 0.42875, 0.520625, 0.6125, 0.98, CHECKED,
+            1.0,
         ];
         assert_progress(&seen, &want);
     }
 
     #[test]
-    fn a_retry_moves_the_bar_on_from_where_the_copy_left_it() {
+    fn a_copy_refused_at_its_end_leaves_the_re_encode_half_of_the_bar() {
         let case = Case::new("clip.mkv", Format::Mp4);
-        // The copy gets to the end (2 s of 2 s), then the muxer refuses.
+        // The copy gets to the end (2 s of 2 s), then the muxer refuses
+        // its trailer.
         let refused = "[out#0/mp4 @ 0x1] Error writing trailer: Invalid argument";
         script([
             mkv_h264_aac(),
@@ -1025,8 +1038,35 @@ mod tests {
         result.unwrap();
         assert_eq!(ran().len(), 4);
         assert_forward_to_done(&seen);
-        // The copy filled the passes' share; the retry adds nothing below.
-        assert!(seen.contains(&PASSES_SHARE), "{seen:?}");
+        // The copy stops at 49 %, and the re-encode moves the bar on from
+        // there instead of sitting at its end.
+        let want = [
+            0.1225,
+            0.245,
+            0.3675,
+            COPY_SHARE,
+            0.6125,
+            0.735,
+            0.8575,
+            PASSES_SHARE,
+            CHECKED,
+            1.0,
+        ];
+        assert_progress(&seen, &want);
+    }
+
+    #[test]
+    fn a_copy_that_works_goes_from_half_of_the_bar_to_the_check() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        script([
+            mkv_h264_aac(),
+            Fake::Child("write", "copied".to_string()),
+            mp4_h264_aac(),
+        ]);
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        assert!(has(&ran()[1], ["-c", "copy"]));
+        assert_progress(&seen, &[0.1225, 0.245, 0.3675, COPY_SHARE, CHECKED, 1.0]);
     }
 
     #[test]
