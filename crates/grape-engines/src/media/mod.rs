@@ -1127,6 +1127,30 @@ mod tests {
         case.assert_clean();
     }
 
+    #[test]
+    fn a_copy_ffmpeg_cant_decode_is_retried_re_encoding_everything() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        // Data FFmpeg finds invalid is its own refusal, judged not
+        // readable, so the copy gets the retry as a muxer's refusal does.
+        let unreadable =
+            "[in#0 @ 0x1] Error during demuxing: Invalid data found when processing input";
+        assert_eq!(failed(unreadable), ErrorKind::DecodeFailed);
+        script([
+            mkv_h264_aac(),
+            Fake::Child("error", unreadable.to_string()),
+            Fake::Child("write", "re-encoded".to_string()),
+            mp4_h264_aac(),
+        ]);
+        let outcome = case.run().unwrap();
+        assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), b"re-encoded");
+        // The probe, the copy, the re-encode and the check.
+        let ran = ran();
+        assert_eq!(ran.len(), 4);
+        assert!(has(&ran[1], ["-c", "copy"]));
+        assert!(has(&ran[2], ["-c:v", "libx264"]) && has(&ran[2], ["-c:a", "aac"]));
+        case.assert_clean();
+    }
+
     /// The kind of error a failed `ffmpeg` run that wrote `stderr` maps to.
     fn failed(stderr: &str) -> ErrorKind {
         let names = Names::new(
