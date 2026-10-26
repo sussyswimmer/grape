@@ -57,7 +57,7 @@ const MIB: u64 = 1024 * 1024;
 const GIB: u64 = 1024 * MIB;
 
 /// The work folder's name starts with this (J4).
-const WORK_PREFIX: &str = "grape-heif-";
+pub(crate) const WORK_PREFIX: &str = "grape-heif-";
 
 /// How often the job checks for a cancel and the deadline.
 const POLL: Duration = Duration::from_millis(100);

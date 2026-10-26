@@ -146,6 +146,7 @@ HEIC, D33 (use scratch copies of files; nothing here has run on the PC or a Mac 
 - [ ] win: rename `grape-heif.exe` in `%LOCALAPPDATA%\Grape` and restart Grape → a HEIC drop says "Grape's HEIC helper is missing" / "Reinstall Grape to convert HEIC files.", the drag is unaffected, and the log's `sidecars:` line says `grape-heif` is missing. Rename it back.
 - [ ] win: what Defender and SmartScreen make of `grape-heif.exe` the first time a HEIC converts (note how long the first conversion takes).
 - [ ] win: quit during a big HEIC (tray → Quit while the toast says "Making …"; that's how a running conversion is cancelled) → `grape-heif.exe` is gone from Task Manager within 2 s, and nothing is left in the folder or in `%TEMP%\grape-heif-*`.
+- [ ] win: during a big HEIC → PNG, end `Grape.exe` in Task Manager (End task) → `grape-heif.exe` is gone at once, and a `%TEMP%\grape-heif-…` folder may be left. Start Grape again → within a few seconds that folder is gone, and the log says `contain: removed 1 work folder(s) an earlier run left`. The HEIC is unchanged (`Get-FileHash`).
 - [ ] win: a PNG renamed to `.heic` converts to JPG; an AVIF renamed to `.heic` says "… is a kind of HEIF image Grape can't read yet."
 - [ ] win and mac: a camera `.HIF` (Canon, Sony or Fujifilm, 10-bit 4:2:2) → JPG, once grape-core takes `.hif` and `.heif` as HEIC (lane B).
 - [ ] mac (DMG): a portrait iPhone HEIC → JPG is upright and matches the PC's output of the same file. Activity Monitor shows a second `Grape` process only during the job.

@@ -17,6 +17,23 @@
 //! (Grape itself) ends on its own once Grape is gone, and a memory cap
 //! there is a follow-up (D33).
 
+/// Removes, off the calling thread, the HEIC work folders a Grape that
+/// crashed or was killed left in the OS temp folder (D33), raw pixels
+/// included. Called once in setup, on every OS. Logs only the count.
+pub fn remove_leftovers() {
+    let spawned = std::thread::Builder::new()
+        .name("grape-leftovers".to_owned())
+        .spawn(|| {
+            let removed = grape_engines::remove_stale_work_dirs();
+            if removed > 0 {
+                log::info!("contain: removed {removed} work folder(s) an earlier run left");
+            }
+        });
+    if let Err(err) = spawned {
+        log::warn!("contain: no thread to remove earlier work folders: {err}");
+    }
+}
+
 /// Sets the engines' containment hook, once, in setup. Does nothing off
 /// Windows.
 pub fn install() {

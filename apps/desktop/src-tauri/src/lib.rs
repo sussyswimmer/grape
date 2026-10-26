@@ -134,6 +134,8 @@ pub fn run() -> anyhow::Result<()> {
             // Before any drop runs: the engines put each helper process
             // they start into a Job Object on Windows (D33).
             contain::install();
+            // What a crash or a kill left in the temp folder (D33).
+            contain::remove_leftovers();
             // Once, next to Grape's executable; every drop gets a copy.
             app.manage(sidecars::Sidecars::find());
             // Before the wheel, which starts with the user's keys, sounds

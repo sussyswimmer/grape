@@ -28,7 +28,7 @@ mod selection;
 mod subtitle;
 
 pub use archive::LeftOut;
-pub use helper::{set_contain, Contain, Contained};
+pub use helper::{remove_stale_work_dirs, set_contain, Contain, Contained};
 pub use selection::build_selection;
 
 use std::path::{Path, PathBuf};

@@ -5,7 +5,9 @@
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
 //!   with whatever is in it when dropped, so large intermediate files never
-//!   land in the user's folder or on a network share.
+//!   land in the user's folder or on a network share. What a crash, a kill
+//!   or a power cut leaves behind, [`remove_stale_work_dirs`] removes at
+//!   the next start.
 //! - [`start`]: spawns the helper with stdin and stdout piped and stderr
 //!   discarded, no console at all on Windows, the named variables removed
 //!   from its environment and its working folder set. It puts the helper
@@ -67,6 +69,57 @@ pub trait Contained: Send {
     /// reports it. The engine reads it after a crash, to tell "needs too
     /// much memory" from other failures.
     fn peak_memory(&self) -> Option<u64>;
+}
+
+/// Removes the HEIC work folders (`grape-heif-{pid}-…`, J4) that a Grape
+/// that crashed, was killed or lost power left in the OS temp folder, with
+/// the raw pixels of someone's photo in them. The app calls it once at
+/// startup, off its main thread: Grape runs once per user, so no other
+/// Grape's job can be using one then. This process's own folders are left
+/// alone. Returns how many were removed.
+pub fn remove_stale_work_dirs() -> usize {
+    remove_stale(
+        &std::env::temp_dir(),
+        crate::heif::WORK_PREFIX,
+        std::process::id(),
+    )
+}
+
+/// Removes every folder (never a link or a file) in `parent` named
+/// `{prefix}{pid}-{nanos}-{n}`, [`WorkDir::create`]'s pattern, whose pid
+/// isn't `own`. Returns how many were removed.
+fn remove_stale(parent: &Path, prefix: &str, own: u32) -> usize {
+    let Ok(entries) = fs::read_dir(parent) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(prefix))
+            .and_then(work_dir_pid)
+        else {
+            continue;
+        };
+        // `file_type` doesn't follow a link or a junction.
+        let is_dir = entry.file_type().is_ok_and(|kind| kind.is_dir());
+        if pid != own && is_dir && remove_tree(&entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// The pid in a work folder's `{pid}-{nanos}-{n}`, if `rest` is exactly
+/// that: three runs of ASCII digits.
+fn work_dir_pid(rest: &str) -> Option<u32> {
+    let parts: Vec<&str> = rest.split('-').collect();
+    let digits = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() != 3 || !parts.iter().all(digits) {
+        return None;
+    }
+    parts[0].parse().ok()
 }
 
 /// The app's hook, set once.
@@ -407,6 +460,74 @@ mod tests {
         assert!(!path.exists());
         assert_eq!(fs::read_dir(&parent).unwrap().count(), 0);
         fs::remove_dir(&parent).unwrap();
+    }
+
+    #[test]
+    fn only_other_processes_work_folders_are_removed() {
+        let parent = std::env::temp_dir().join(format!("grape-helper-sweep-{}", unique_suffix()));
+        fs::create_dir_all(&parent).unwrap();
+        let own = std::process::id();
+        let other = own.wrapping_add(1);
+        let stale = format!("grape-heif-{other}-1761500000000000000-0");
+        for name in [
+            stale.as_str(),
+            &format!("grape-heif-{own}-1761500000000000000-1"),
+            "grape-heif-job-test-12",
+            "grape-heif-12-x-3",
+            "grape-heif-1-2-3-4",
+            "grape-heif-1--3",
+            "grape-heifx-1-2-3",
+            "grape-bsdtar-1-2-3",
+        ] {
+            fs::create_dir(parent.join(name)).unwrap();
+        }
+        fs::write(parent.join(&stale).join("pixels.rgba"), b"raw pixels").unwrap();
+        fs::write(parent.join("grape-heif-7-8-9"), b"a file, not a folder").unwrap();
+        // A link to a folder elsewhere is never followed or removed.
+        let elsewhere = parent.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        fs::write(elsewhere.join("keep"), b"keep").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&elsewhere, parent.join("grape-heif-4-5-6")).unwrap();
+
+        assert_eq!(remove_stale(&parent, "grape-heif-", own), 1);
+        let mut left: Vec<String> = fs::read_dir(&parent)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let mut expected = vec![
+            format!("grape-heif-{own}-1761500000000000000-1"),
+            "elsewhere".to_owned(),
+            "grape-bsdtar-1-2-3".to_owned(),
+            "grape-heif-1--3".to_owned(),
+            "grape-heif-1-2-3-4".to_owned(),
+            "grape-heif-12-x-3".to_owned(),
+            "grape-heif-7-8-9".to_owned(),
+            "grape-heif-job-test-12".to_owned(),
+            "grape-heifx-1-2-3".to_owned(),
+        ];
+        if cfg!(unix) {
+            expected.push("grape-heif-4-5-6".to_owned());
+        }
+        expected.sort();
+        assert_eq!(left, expected);
+        assert!(elsewhere.join("keep").is_file());
+        // A folder WorkDir made matches the pattern.
+        let made = WorkDir::create(&parent, "grape-heif-").unwrap();
+        let name = made
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            work_dir_pid(name.strip_prefix("grape-heif-").unwrap()),
+            Some(own)
+        );
+        drop(made);
+        fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]
