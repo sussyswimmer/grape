@@ -9,7 +9,8 @@
 #
 # Every source is pinned in scripts/ffmpeg/sources.json. Each tarball is
 # downloaded into a new, empty folder, and its size and SHA-256 are checked
-# before anything reads it. Then its file list is checked (one top folder,
+# before anything reads it. (So is the mingw-w64 runtime's source, which
+# isn't built, only carried in the source bundle.) Then its file list is checked (one top folder,
 # no absolute paths, no "..", no link that leaves the folder) before it's
 # unpacked. The libraries are built as static libraries into a private
 # prefix, and FFmpeg is configured against that prefix only (pkg-config
@@ -18,7 +19,8 @@
 # Writes:
 #   dist/<target>/ffmpeg[.exe], ffprobe[.exe]
 #   dist/<target>/BUILDINFO.txt   versions, configure line, hashes, toolchain
-#   dist/grape-ffmpeg-sources.tar every tarball exactly as downloaded, plus
+#   dist/grape-ffmpeg-sources.tar every tarball exactly as downloaded (with
+#                                 the mingw-w64 runtime's), plus
 #                                 scripts/ffmpeg/ and licenses/ffmpeg/: the
 #                                 corresponding source the GPL asks for
 #
@@ -260,7 +262,9 @@ step_done() {
 # --- Sources ---------------------------------------------------------------
 
 # Checks sources.json and prints one tab-separated line per source:
-#   <name> <version or commit> <url> <file> <size> <sha256> <dir>
+#   <name> <version or commit> <url> <file> <size> <sha256> <dir> <use>
+# where <use> is "build", or "bundle" for a runtime_sources entry: a
+# toolchain runtime's source, checked and carried in the bundle, not built.
 read_sources() {
   python3 -I - "$sources_json" <<'PY'
 import json
@@ -268,6 +272,7 @@ import re
 import sys
 
 NAMES = ("zlib", "libogg", "libvorbis", "opus", "lame", "x264", "libvpx", "dav1d", "ffmpeg")
+RUNTIME_NAMES = ("mingw-w64",)
 
 
 def die(msg):
@@ -298,21 +303,32 @@ if not isinstance(sources, dict):
 names = [k for k in sources if not k.startswith("_")]
 if sorted(names) != sorted(NAMES):
     die("it must pin exactly these sources: %s." % ", ".join(NAMES))
+runtime = data.get("runtime_sources")
+if not isinstance(runtime, dict):
+    die("'runtime_sources' must be an object.")
+if sorted(k for k in runtime if not k.startswith("_")) != sorted(RUNTIME_NAMES):
+    die("runtime_sources must pin exactly: %s." % ", ".join(RUNTIME_NAMES))
+for key in data:
+    if not key.startswith("_") and key not in ("format", "sources", "runtime_sources"):
+        die("unknown key '%s'." % key)
 
 URL = re.compile(r"^https://[^\s\"'\\]+$")
 SHA = re.compile(r"^[0-9a-f]{64}$")
 PLAIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 REQUIRED = ("url", "file", "size", "sha256", "dir", "license", "license_files", "released")
 OPTIONAL = ("version", "commit")
+TARGETS = ("linux-x86_64", "windows-x86_64", "macos-arm64", "macos-x86_64")
 
-for name in NAMES:
-    s = sources[name]
-    where = "sources.%s" % name
+files_seen = set()
+for name, s, use in [(n, sources[n], "build") for n in NAMES] + [(n, runtime[n], "bundle") for n in RUNTIME_NAMES]:
+    where = "%s.%s" % ("sources" if use == "build" else "runtime_sources", name)
     if not isinstance(s, dict):
         die("%s must be an object." % where)
     for key in s:
-        if not key.startswith("_") and key not in REQUIRED + OPTIONAL:
+        if not key.startswith("_") and key not in REQUIRED + OPTIONAL + (("for",) if use == "bundle" else ()):
             die("%s has an unknown key '%s'." % (where, key))
+    if use == "bundle" and s.get("for") not in TARGETS:
+        die("%s.for must name the target whose programs link it." % where)
     for key in REQUIRED:
         if key not in s:
             die("%s is missing '%s'." % (where, key))
@@ -336,7 +352,10 @@ for name in NAMES:
     for p in files:
         if p.startswith("/") or "\\" in p or any(part in ("", ".", "..") for part in p.split("/")):
             die("%s.license_files has a bad path '%s'." % (where, p))
-    print("\t".join([name, pin, s["url"], s["file"], str(s["size"]), s["sha256"], s["dir"]]))
+    if s["file"] in files_seen:
+        die("%s.file is another source's file name too." % where)
+    files_seen.add(s["file"])
+    print("\t".join([name, pin, s["url"], s["file"], str(s["size"]), s["sha256"], s["dir"], use]))
 PY
 }
 plan=$(read_sources) || fail "sources.json has a problem (above)."
@@ -391,7 +410,7 @@ PY
 }
 
 note "Fetching and checking the sources for $target"
-while IFS=$'\t' read -r name pin url file want_size want_sha dir; do
+while IFS=$'\t' read -r name pin url file want_size want_sha dir use; do
   dest="$downloads/$file"
   if [ -n "$tarballs" ] && [ -f "$tarballs/$file" ]; then
     echo "  $name $pin: from $tarballs/$file"
@@ -416,6 +435,8 @@ while IFS=$'\t' read -r name pin url file want_size want_sha dir; do
     fail "$file has SHA-256 $got_sha, but sources.json says $want_sha. Deleted it; nothing was unpacked."
   fi
   check_tarball "$dest" "$dir" || fail "$file failed the file-list check (above); nothing was unpacked."
+  # A runtime's source only goes into the bundle.
+  [ "$use" = build ] || continue
   tar -xf "$dest" -C "$src" --no-same-owner || fail "couldn't unpack $file."
   [ -d "$src/$dir" ] || fail "$file didn't unpack to $dir/."
 done <<<"$plan"
@@ -813,9 +834,12 @@ first_line() { # command...; its first output line, or "?"
   echo "configuration: $configuration"
   echo
   echo "Sources (scripts/ffmpeg/sources.json), each checked before unpacking:"
-  while IFS=$'\t' read -r name pin url _ size sha _; do
+  while IFS=$'\t' read -r name pin url _ size sha _ use; do
     printf '  %-10s %-42s %s\n' "$name" "$pin" "$sha"
     printf '  %-10s %s (%s bytes)\n' "" "$url" "$size"
+    if [ "$use" != build ]; then
+      printf '  %-10s %s\n' "" "not built: the runtime's source, carried in the source bundle"
+    fi
   done <<<"$plan"
   echo
   echo "Toolchain:"
@@ -884,7 +908,10 @@ This archive is the complete source of the ffmpeg and ffprobe programs that
 Grape ships (DECISIONS D24 in Grape's repository):
 
   tarballs/          every source tarball, exactly as downloaded and checked
-                     against scripts/ffmpeg/sources.json
+                     against scripts/ffmpeg/sources.json, with the source
+                     of the mingw-w64 runtime that the Windows programs
+                     link (mingw-w64-v11.0.1.tar.bz2; build.sh doesn't
+                     build it, the toolchain brings it)
   scripts/ffmpeg/    the script that builds them, and the pins
   licenses/ffmpeg/   the license texts, and SOURCE.md with the configure line
 

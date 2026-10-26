@@ -2,7 +2,7 @@
 
 Grape builds its own FFmpeg (DECISIONS D24): `ffmpeg` and `ffprobe` with only what Grape uses, static, with networking compiled out, under GPL-2.0-or-later.
 
-- `sources.json` pins every source tarball: URL, size, SHA-256, license. Change a pin here, never in the script.
+- `sources.json` pins every source tarball: URL, size, SHA-256, license. Change a pin here, never in the script. Its `runtime_sources` pin the source of the mingw-w64 runtime that the Windows programs link: checked and carried in the source bundle, not built.
 - `build.sh <target>` downloads and checks the tarballs, builds the libraries and FFmpeg, checks the result and writes `dist/`.
 - `notices.py` reads every file the build compiled for license notices and checks them against `licenses/ffmpeg/ffmpeg-notices.txt` (below). `build.sh` runs it.
 
@@ -15,7 +15,7 @@ Grape builds its own FFmpeg (DECISIONS D24): `ffmpeg` and `ffprobe` with only wh
 | `macos-x86_64` | an Intel Mac, Xcode's clang | `dist/macos-x86_64/ffmpeg`, `ffprobe`: macOS 11.0 or later |
 | `linux-x86_64` | x86_64 Linux | `dist/linux-x86_64/ffmpeg`, `ffprobe`: for local testing only (the engine tests); Grape doesn't ship for Linux |
 
-Each run also writes `dist/<target>/BUILDINFO.txt` (the FFmpeg version, the configure line as `ffmpeg -version` prints it, every source's pin and SHA-256, the toolchain's versions and the outputs' SHA-256s) and `dist/grape-ffmpeg-sources.tar`: every tarball exactly as downloaded, this folder and `licenses/ffmpeg/`. That tar is the corresponding source the GPL asks for, and it goes on the GitHub Release with the binaries. It's the same for every target.
+Each run also writes `dist/<target>/BUILDINFO.txt` (the FFmpeg version, the configure line as `ffmpeg -version` prints it, every source's pin and SHA-256, the toolchain's versions and the outputs' SHA-256s) and `dist/grape-ffmpeg-sources.tar`: every tarball exactly as downloaded (with the mingw-w64 runtime's source), this folder and `licenses/ffmpeg/`. That tar is the corresponding source the GPL asks for, and it goes on the GitHub Release with the binaries. It's the same for every target.
 
 The macOS targets build natively, one per runner; the script doesn't cross-compile between Mac architectures. The two builds are joined with `lipo` into one universal file, as `scripts/fetch-sidecars.sh` does today.
 
@@ -52,7 +52,7 @@ sudo apt-get install --no-install-recommends gcc-mingw-w64-x86-64-win32 \
   binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
 ```
 
-The compiler must use the win32 thread model, which keeps winpthreads (and its DLL) out of the exe. The script checks. If `x86_64-w64-mingw32-gcc` points at the posix variant: `sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32`.
+The compiler must use the win32 thread model, which keeps winpthreads (and its DLL) out of the exe. The exe links parts of the mingw-w64 runtime (v11.0.1 in Ubuntu 24.04): if the image's version changes, change `runtime_sources` in `sources.json` to match, and `licenses/ffmpeg/mingw-w64-runtime.txt`. The script checks. If `x86_64-w64-mingw32-gcc` points at the posix variant: `sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32`.
 
 **macOS:** the Xcode Command Line Tools (`xcode-select --install`), then `brew install nasm meson ninja pkgconf python`. nasm is for `macos-x86_64` only; the rest for both. curl, tar and bzip2 come with macOS.
 
@@ -111,7 +111,7 @@ On a shared 4-core container (2026-10-26, Ubuntu 24.04, GCC 13.3, mingw-w64 GCC 
 | `linux-x86_64` | 524 s | 305 s | 27,975,184 bytes | 27,758,032 bytes |
 | `windows-x86_64` | 615 s | 386 s | 28,007,936 bytes (`ffmpeg.exe`) | 27,810,304 bytes (`ffprobe.exe`) |
 
-The Windows exes are PE32+ x86-64 and import only `KERNEL32.dll`, `SHELL32.dll`, `bcrypt.dll` and `msvcrt.dll`. They ran under wine 9.0 (`-version`, `-protocols`, MP4 to WebM, MP3 and GIF with Grape's own arguments), not yet on Windows itself. The source bundle is 34.9 MB.
+The Windows exes are PE32+ x86-64 and import only `KERNEL32.dll`, `SHELL32.dll`, `bcrypt.dll` and `msvcrt.dll`. They ran under wine 9.0 (`-version`, `-protocols`, MP4 to WebM, MP3 and GIF with Grape's own arguments), not yet on Windows itself. The source bundle is about 45 MB, 10 MB of it the mingw-w64 runtime's source.
 
 **Reproducible.** Two `windows-x86_64` builds of one commit, in different folders, come out byte for byte the same: the script sets `SOURCE_DATE_EPOCH=0` and links without a timestamp, and libvpx gets a prefix that names no folder. A `linux-x86_64` build from the unpacked source bundle, in another folder and with nothing downloaded, matched the repo's build except its 20-byte GNU build ID, which hashes the unstripped symbol table and its folder names (Linux isn't shipped). The source bundle is the same from every target's run.
 

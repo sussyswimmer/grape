@@ -6,7 +6,7 @@ Grape runs `ffmpeg` and `ffprobe` as separate programs. Grape builds them itself
 |---|---|
 | Programs | `ffmpeg` and `ffprobe` (`ffmpeg.exe` and `ffprobe.exe` on Windows) |
 | Version | FFmpeg 9.0.2. `ffmpeg -version` says `9.0.2-grape`: `--extra-version=grape` marks Grape's build |
-| License | GNU General Public License, version 2 or later (GPL-2.0-or-later): FFmpeg with `--enable-gpl`, for x264. Not `--enable-version3`, not `--enable-nonfree` |
+| License | GNU General Public License, version 2 or later (GPL-2.0-or-later): FFmpeg with `--enable-gpl`, for x264. Not `--enable-version3`, not `--enable-nonfree`. On Windows, the few `libgcc` helpers in the exe come under the GCC Runtime Library Exception, which leaves that license as it is |
 | Built by | `scripts/ffmpeg/build.sh <target>` in Grape's repository, from the tarballs pinned in `scripts/ffmpeg/sources.json`, each checked by size and SHA-256 before it's unpacked |
 | Targets | `windows-x86_64`: cross-compiled on Linux with mingw-w64 (GCC, win32 threads), static, only Windows' own DLLs. `macos-arm64` and `macos-x86_64`: Xcode's clang, macOS 11.0 or later, joined into one universal file |
 | Source | `grape-ffmpeg-sources.tar`, on the same GitHub Release as Grape's installers. See "The source" below |
@@ -18,6 +18,7 @@ FFmpeg itself is LGPL-2.1-or-later with optional GPL parts (`ffmpeg-LICENSE.md`)
 | File | What it is |
 |---|---|
 | `LICENSE.txt` | The GPL, version 2: FFmpeg 9.0.2's `COPYING.GPLv2`, the license of the programs |
+| `LICENSE-GPLv3.txt` | The GPL, version 3: FFmpeg 9.0.2's `COPYING.GPLv3`. The programs are under version 2 or later, so this is a version they can also be taken under; and on Windows it's the license of the `libgcc` helpers in the exe, with the exception in `gcc-runtime-exception.txt` |
 | `ffmpeg-LICENSE.md` | FFmpeg 9.0.2's `LICENSE.md`: which parts of FFmpeg are under which license |
 | `ffmpeg-notices.txt` | Every license notice in the source files the builds compile, and the headers those include, that isn't already word for word in a library's license text here: BSD, MIT, ISC, zlib, IJG and Boost notices in FFmpeg's own files (MIPS's fixed-point code, WebRTC's iLBC, musl's `sscanf`, the IJG's DCT, the Ogg demuxer, x86inc.asm and more), Opus's and dav1d's notices file by file, x86inc.asm's in x264, dav1d and libvpx, libvorbis's LPC code and zlib's own. Each verbatim, with the files it's in and the builds that compile them. Then the other things those files say about licenses (code from the public domain, a license named without its text). `scripts/ffmpeg/build.sh` checks it against every build: see "License notices" below |
 | `x264.txt` | x264's `COPYING` (GPL-2.0) |
@@ -28,8 +29,8 @@ FFmpeg itself is LGPL-2.1-or-later with optional GPL parts (`ffmpeg-LICENSE.md`)
 | `libvpx-x86inc.txt` | libvpx's `third_party/x86inc/LICENSE` (ISC) |
 | `dav1d.txt`, `dav1d-PATENTS.txt` | dav1d's `COPYING` (BSD-2-Clause) and `doc/PATENTS` (the Alliance for Open Media patent license) |
 | `zlib.txt` | zlib's `LICENSE` |
-| `mingw-w64-runtime.txt` | Windows only. `COPYING.MinGW-w64-runtime.txt` from mingw-w64 v11.0.1, the runtime of the Ubuntu 24.04 toolchain that built the exe. The exe links parts of that runtime statically: its startup code (`libmingw32`) and from `libmingwex` math functions, `gdtoa` (reading and printing numbers) and its `printf`. This file holds the notices those parts ask binaries to carry |
-| `gcc-runtime-exception.txt` | Windows only. The GCC Runtime Library Exception 3.1, GCC 13.2.0's `COPYING.RUNTIME`. The exe links a few helpers from GCC's `libgcc` statically (stack probing, 64-bit division, popcount), which is GPL-3.0-or-later WITH GCC-exception-3.1. The exception lets the result be distributed under any terms, so it doesn't change the programs' license and asks nothing more; the text is here so that can be checked |
+| `mingw-w64-runtime.txt` | Windows only. `COPYING.MinGW-w64-runtime.txt` from mingw-w64 v11.0.1, the runtime of the Ubuntu 24.04 toolchain that built the exe. The exe links parts of that runtime statically: its startup code (`libmingw32`) and from `libmingwex` math functions, `gdtoa` (reading and printing numbers) and its `printf`. This file holds the notices those parts ask binaries to carry. The runtime's source is in the source bundle: see "The source" |
+| `gcc-runtime-exception.txt` | Windows only. The GCC Runtime Library Exception 3.1, GCC 13.2.0's `COPYING.RUNTIME`. The exe links a few helpers from GCC's `libgcc` statically (stack probing, 64-bit division, popcount), which is GPL-3.0-or-later WITH GCC-exception-3.1 (the GPLv3 is `LICENSE-GPLv3.txt`). The exception lets the result be distributed under any terms, so it doesn't change the programs' license and asks nothing more; the texts are here so that can be checked |
 
 Every text is byte for byte the file from the pinned tarball (or, for the last two, from mingw-w64 v11.0.1 and GCC 13.2.0), except `ffmpeg-notices.txt`, whose excerpts are each verbatim from the file named.
 
@@ -50,6 +51,7 @@ Windows: `ffmpeg.exe` and `ffprobe.exe` import only `KERNEL32.dll`, `SHELL32.dll
 | libvpx | 1.17.0 (tag `v1.17.0`, commit `6df3ec34557879fff673706f4a1d9fbd0f3a6f0e`) | BSD-3-Clause | https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz | `1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a` | `libvpx.txt`, `libvpx-PATENTS.txt`, `libvpx-x86inc.txt` |
 | dav1d | 1.5.4 | BSD-2-Clause | https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` | `dav1d.txt`, `dav1d-PATENTS.txt` |
 | zlib | 1.3.2 | Zlib | https://zlib.net/fossils/zlib-1.3.2.tar.gz | `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16` | `zlib.txt` |
+| mingw-w64 runtime (Windows; not built by the script, see "The source") | 11.0.1 | ZPL-2.1 and the notices in its text | https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v11.0.1.tar.bz2 | `3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10` | `mingw-w64-runtime.txt` |
 
 `scripts/ffmpeg/sources.json` has the same pins with their sizes, and notes how each download was checked. `ffmpeg-notices.txt` has the notices inside all of them.
 
@@ -91,13 +93,18 @@ macOS (`macos-arm64` and `macos-x86_64`; not built yet, so this is what the scri
 
 `grape-ffmpeg-sources.tar` is the complete corresponding source of these programs, as the GPL asks. It goes on the same GitHub Release as the installers that carry them, so it's always next to the binaries it belongs to. It holds:
 
-- `tarballs/`: every tarball in the table above, exactly as downloaded and checked;
+- `tarballs/`: every tarball in the table above, exactly as downloaded and checked, with mingw-w64's;
 - `scripts/ffmpeg/`: the build script, the pins and their README;
 - `licenses/ffmpeg/`: this folder.
 
 To build the programs again from it: unpack it, and in its folder run `GRAPE_FFMPEG_TARBALLS=$PWD/tarballs scripts/ffmpeg/build.sh <target>` on the OS that `scripts/ffmpeg/README.md` names, with the tools it lists. Nothing is downloaded. On Windows the result is byte for byte the programs on the release: two builds of one commit in different folders come out the same (`SOURCE_DATE_EPOCH=0`, no link timestamp, no build folder in the binaries), so anyone can check the binaries against this source.
 
-The compilers aren't in the archive, and neither are their runtimes. On Windows, parts of two runtimes end up in the exe: mingw-w64's C runtime, v11.0.1 (https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v11.0.1.tar.bz2, SHA-256 `3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10`), and GCC 13.2.0's `libgcc` (https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/), both as Ubuntu 24.04 packages them (`mingw-w64-x86-64-dev` 11.0.1-3build1, `gcc-mingw-w64-x86-64-win32` 13.2.0-6ubuntu1+26.1). They're the compiler's own runtime: system libraries in the GPL's sense, which the corresponding source doesn't include (GPLv3 section 1; the programs are GPL-2.0-or-later). Their notices are in this folder, and each build's `BUILDINFO.txt` names the toolchain it used.
+The compilers aren't in the archive. On Windows, parts of two of their runtimes end up in the exe, both as Ubuntu 24.04 packages them:
+
+- **mingw-w64's C runtime, v11.0.1** (`mingw-w64-x86-64-dev` 11.0.1-3build1): its startup code and parts of `libmingwex`. Its source is in the archive, `tarballs/mingw-w64-v11.0.1.tar.bz2`: the upstream tarball, pinned in `sources.json` and checked like the others, but not built by the script, since the toolchain brings the runtime. It's byte for byte the `orig` tarball of Ubuntu's package (the same size and SHA-256 in its `.dsc`), and Ubuntu's patches change only build files and the tools, not the runtime's source. Its notices are `mingw-w64-runtime.txt`.
+- **GCC 13.2.0's `libgcc`** (`gcc-mingw-w64-x86-64-win32` 13.2.0-6ubuntu1+26.1): a few helpers (stack probing, 64-bit division, popcount). They're GPL-3.0-or-later with the GCC Runtime Library Exception 3.1 (`gcc-runtime-exception.txt`, GCC's `COPYING.RUNTIME`; the GPLv3 is `LICENSE-GPLv3.txt`). The exception lets what GCC compiles, with them in it, be distributed under any terms, so the programs stay GPL-2.0-or-later and the helpers ask nothing more. Their source is GCC 13.2.0's: https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/.
+
+Each build's `BUILDINFO.txt` names the toolchain it used.
 
 ## Not tested yet
 

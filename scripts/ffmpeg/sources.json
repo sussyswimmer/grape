@@ -112,5 +112,21 @@
       "license": "Zlib",
       "license_files": ["LICENSE"]
     }
+  },
+  "runtime_sources": {
+    "_comment": "Not built by build.sh: the source of a toolchain runtime that ends up in the programs, so the source bundle carries it too. build.sh downloads and checks it like the others for every target (the bundle is the same for all), and doesn't unpack it.",
+    "mingw-w64": {
+      "version": "11.0.1",
+      "released": "2023-04-29",
+      "_comment": "The Windows exe links parts of the mingw-w64 C runtime statically (startup code, libmingwex's math, gdtoa and printf). They come with Ubuntu 24.04's mingw-w64-x86-64-dev 11.0.1-3build1, whose orig tarball is this file byte for byte (same size and SHA-256 in its .dsc on Launchpad); Ubuntu's patches change only build files and the tools, not the runtime's source. Downloaded from this URL on 2026-10-26; the SHA-256 matches the .dsc.",
+      "url": "https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v11.0.1.tar.bz2",
+      "file": "mingw-w64-v11.0.1.tar.bz2",
+      "size": 10057401,
+      "sha256": "3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10",
+      "dir": "mingw-w64-v11.0.1",
+      "license": "ZPL-2.1 AND other notices (COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt)",
+      "license_files": ["COPYING.MinGW-w64-runtime/COPYING.MinGW-w64-runtime.txt"],
+      "for": "windows-x86_64"
+    }
   }
 }
