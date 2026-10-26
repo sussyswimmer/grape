@@ -5,7 +5,7 @@
 | Layer | Where | Runs in CI | What |
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
-| Engine integration | `grape-engines/tests` | macOS + Windows jobs | convert generated sources through each v1 pair, then validate the output. Image and subtitle tests always run; audio and video need feature `engines-it` and the FFmpeg sidecars (below) |
+| Engine integration | `grape-engines/tests` | macOS + Windows jobs | convert generated sources through each v1 pair, then validate the output. Image and subtitle tests always run; audio and video need feature `engines-it` and the FFmpeg sidecars (below), and CI only compiles those so far |
 | Dispatch | `grape-engines/tests/{dispatch,archive}.rs` | always | which pairs and tools run with which sidecars; archives through `run_job` |
 | PDF, real PDFium | `grape-engines` unit tests (`pdf::it`) and `tests/pdf.rs`, feature `pdf-it` (`GRAPE_TEST_PDFIUM`) | Windows + macOS Rust jobs | the worker and PDFium, through `pdf::it` and through `run_job` |
 | RAR, real bsdtar | `grape-engines` unit tests, feature `rar-it` (`GRAPE_TEST_BSDTAR`) | Windows + macOS `rar-it` jobs | libarchive's own RAR files and the writer's cases through the bsdtar CI just built, and `run_job` with `SidecarPaths::bsdtar` |
@@ -14,7 +14,7 @@
 | Manual QA | checklist below | before every release | real drags on real OSes |
 
 ## Running the FFmpeg tests (`engines-it`)
-- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. In CI they point at the pinned 9.0.2 sidecars (D22); any FFmpeg with the encoders `ENGINES.md` lists, and `lavfi`, works locally. On Linux, `scripts/ffmpeg/build.sh linux-x86_64` builds Grape's own (D24), which has all of it.
+- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. CI compiles and lints them but doesn't run them yet: that waits on CI building Grape's own FFmpeg (D24; lane A's engines-it jobs). Locally any FFmpeg with the encoders `ENGINES.md` lists, and `lavfi`, works; on Linux, `scripts/ffmpeg/build.sh linux-x86_64` builds Grape's own (D24), which has all of it.
 - They make their own sources with FFmpeg's `lavfi` (`testsrc`, `sine`) in a temp folder, convert every audio and video pair, and check each output with `ffprobe`: container, codec, duration within max(0.25 s, 5 %), even dimensions, audio kept. Plus: odd sizes, rotation, 24-bit and 5.1 audio, sources without the needed stream, playlists renamed `.mp4`, cancel mid-run, a name taken mid-run, awkward file names, and that the build has every encoder Grape uses and isn't `nonfree`.
 
 ## Fixtures

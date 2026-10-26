@@ -1,8 +1,9 @@
 //! Audio and video conversions end to end, through a real FFmpeg: plan with
 //! `grape_core`, run with `run_job`, check the output with `ffprobe` and
 //! that the source never changed. Needs `--features engines-it` and
-//! `GRAPE_TEST_FFMPEG` / `GRAPE_TEST_FFPROBE` set to absolute paths (CI
-//! uses the pinned sidecars); the tests fail, not skip, without them.
+//! `GRAPE_TEST_FFMPEG` / `GRAPE_TEST_FFPROBE` set to absolute paths; the
+//! tests fail, not skip, without them. CI only compiles and lints them so
+//! far; running them there waits on CI building Grape's own FFmpeg (D24).
 #![cfg(feature = "engines-it")]
 #![allow(clippy::unwrap_used)]
 
