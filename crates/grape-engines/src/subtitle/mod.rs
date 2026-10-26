@@ -118,7 +118,7 @@ pub(crate) fn convert(
     }
     let mut is_cancelled = || cancel.is_cancelled();
     let bytes = read(src, &names, cancel).map_err(or_cancelled)?;
-    let Some((text, encoding)) = decode::decode(&bytes, cancel) else {
+    let Some((text, encoding)) = decode::decode(&bytes, &mut is_cancelled) else {
         return Err(crate::cancelled(src));
     };
     drop(bytes);

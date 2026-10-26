@@ -252,7 +252,6 @@ mod tests {
     use super::super::parse::{parse, Newline};
     use super::super::CHECK_EVERY;
     use super::*;
-    use crate::CancelToken;
 
     fn text(s: &str) -> Span {
         Span::Text(s.to_owned())
@@ -297,7 +296,7 @@ mod tests {
 
     /// Decodes and parses `source`, as the convert step will.
     fn read(source: &[u8]) -> Document {
-        let (text, _) = decode(source, &CancelToken::new()).unwrap();
+        let (text, _) = decode(source, &mut || false).unwrap();
         parse(&text, &mut || false).unwrap()
     }
 
