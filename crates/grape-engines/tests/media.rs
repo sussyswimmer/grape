@@ -1487,7 +1487,8 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         );
     }
     // The filters Grape names, and the ones FFmpeg inserts for them: format
-    // and rate conversion, and turning rotated video upright.
+    // and rate conversion, turning rotated video upright, and (9.0) the
+    // trim behind `-ss`.
     let filters = run(&["-hide_banner", "-filters"]);
     for filter in [
         "scale",
@@ -1495,6 +1496,7 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         "palettegen",
         "paletteuse",
         "aformat",
+        "pan",
         "aresample",
         "format",
         "null",
@@ -1502,6 +1504,7 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
         "transpose",
         "hflip",
         "vflip",
+        "trim",
     ] {
         assert!(
             filters
