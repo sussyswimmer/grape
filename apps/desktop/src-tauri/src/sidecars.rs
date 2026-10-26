@@ -156,6 +156,7 @@ fn resolve(
         ffmpeg: find(FFMPEG),
         ffprobe: find(FFPROBE),
         heif_enc: if with_heif_enc { find(HEIF_ENC) } else { None },
+        ..SidecarPaths::default()
     }
 }
 
@@ -452,6 +453,7 @@ mod tests {
             ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
             ffprobe: Some(PathBuf::from("ffprobe.exe")),
             heif_enc: None,
+            ..SidecarPaths::default()
         };
         let found = PdfSidecars {
             pdfium: Some(PathBuf::from("pdfium.dll")),

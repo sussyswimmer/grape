@@ -36,8 +36,10 @@ use std::sync::{
 
 use grape_core::{Format, Job, JobOutput, Operation};
 
-/// Sidecar locations injected by the app. All `None` in this slice: the
-/// image and subtitle engines need no sidecar. Engines never look sidecars up on `PATH`.
+/// Sidecar locations injected by the app, which finds them next to its own
+/// executable at startup (`apps/desktop/src-tauri/src/sidecars.rs`). One
+/// that isn't there is `None`. The image and subtitle engines need none.
+/// Engines never look sidecars up on `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarPaths {
     /// The bundled `ffmpeg` executable.
@@ -46,6 +48,19 @@ pub struct SidecarPaths {
     pub ffprobe: Option<PathBuf>,
     /// The bundled `heif-enc` executable (Windows HEIC output).
     pub heif_enc: Option<PathBuf>,
+    /// The PDFium library the PDF worker loads (D29): `pdfium.dll` next to
+    /// Grape's executable on Windows, `libpdfium.dylib` in the app's
+    /// `Frameworks` folder on macOS.
+    pub pdfium: Option<PathBuf>,
+    /// The program started as `<worker> --grape-pdf-worker` (D29): Grape's
+    /// own executable.
+    pub pdf_worker: Option<PathBuf>,
+    /// The HEIC helper: on Windows the `grape-heif` sidecar; on macOS
+    /// Grape's own executable, started as `<helper> --grape-heif-worker`.
+    pub heif: Option<PathBuf>,
+    /// The `bsdtar` sidecar that reads RAR archives (D27): `bsdtar.exe` next
+    /// to Grape's executable on Windows, `Contents/MacOS/bsdtar` on macOS.
+    pub bsdtar: Option<PathBuf>,
 }
 
 /// A shared cancel flag. Clones share the flag, so the app keeps one clone
