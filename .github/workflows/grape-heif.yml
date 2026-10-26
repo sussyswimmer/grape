@@ -64,20 +64,39 @@ jobs:
         run: |
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg"
           Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKGRS_TRIPLET=x64-windows-static"
+      # The C++ compiler is in vcpkg's ABI hash and in what cargo linked, so
+      # it's in both cache keys: when the runner image updates Visual
+      # Studio, both caches start over and are saved again, instead of
+      # restoring archives vcpkg can't use (it would rebuild everything on
+      # every run, since an exact key hit is never saved again) and a cargo
+      # target that wouldn't relink against the new libraries.
+      - id: msvc
+        name: The C++ compiler (for the cache keys)
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $ask = @('-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property')
+          $vs = @(& $vswhere @ask installationVersion) | Select-Object -First 1
+          $root = @(& $vswhere @ask installationPath) | Select-Object -First 1
+          if (-not $vs -or -not $root) { Write-Output '::error::vswhere found no Visual Studio with the C++ tools.'; exit 1 }
+          $default = Join-Path $root 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          if (-not (Test-Path -LiteralPath $default -PathType Leaf)) { Write-Output "::error::$default is missing."; exit 1 }
+          $tools = (Get-Content -Raw -LiteralPath $default).Trim()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "key=vs$vs-msvc$tools"
+          Write-Output "Visual Studio $vs, MSVC $tools"
       # vcpkg's binary cache: the built libheif, libde265 and x265.
       - if: inputs.cache
         uses: actions/cache@v6
         with:
           path: ${{ runner.temp }}\vcpkg-archives
-          key: grape-heif-vcpkg-v1-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**') }}
-      # Keyed on the vcpkg inputs too: cargo doesn't relink when only the
-      # static libraries change (heic-spec J33).
+          key: grape-heif-vcpkg-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**') }}
+      # Keyed on the compiler and the vcpkg inputs too: cargo doesn't relink
+      # when only the static libraries change (heic-spec J33).
       - if: inputs.cache
         uses: actions/cache@v6
         with:
           path: tools/grape-heif/target
-          key: grape-heif-cargo-v1-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-${{ hashFiles('tools/grape-heif/src/**', 'crates/grape-heif-proto/**') }}
-          restore-keys: grape-heif-cargo-v1-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-
+          key: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-${{ hashFiles('tools/grape-heif/src/**', 'crates/grape-heif-proto/**') }}
+          restore-keys: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-
       # The PC's own shell: build.ps1's checks must work in Windows PowerShell
       # 5.1 too. Dot-sourcing only defines its functions.
       - name: build.ps1's checks work in Windows PowerShell 5.1
@@ -92,10 +111,12 @@ jobs:
       - name: Build (vcpkg at the pin, sources checked first, then cargo)
         env:
           USE_CACHE: ${{ inputs.cache }}
+        # A hashtable binds by name; an array splat binds by position, so
+        # '-BinaryCache' would be taken as a value, not a parameter.
         run: |
-          $cache = @()
-          if ($env:USE_CACHE -eq 'true') { $cache = @('-BinaryCache', (Join-Path $env:RUNNER_TEMP 'vcpkg-archives')) }
-          ./tools/grape-heif/build.ps1 -VcpkgRoot $env:VCPKG_ROOT @cache
+          $build = @{ VcpkgRoot = $env:VCPKG_ROOT }
+          if ($env:USE_CACHE -eq 'true') { $build.BinaryCache = Join-Path $env:RUNNER_TEMP 'vcpkg-archives' }
+          ./tools/grape-heif/build.ps1 @build
           exit $LASTEXITCODE
       # tools/grape-heif is its own workspace, so ci.yml's fmt and clippy
       # never see it. One command per step, so no failure is masked.
@@ -221,13 +242,25 @@ jobs:
         run: |
           tmp=$(cygpath -u "$RUNNER_TEMP")
           tools/grape-heif/source-bundle.sh "$tmp/vcpkg" "$tmp/grape-heif-source" tools/grape-heif/target/out/BUILDINFO.txt
+      # The exe is GPL-3.0-or-later, so its artifact carries the license
+      # texts and SOURCE.md, which says the complete source is this run's
+      # grape-heif-source artifact. Staged in a folder of its own, so the
+      # exe stays at the artifact's top level for ci.yml and release.yml.
+      - name: Stage the artifact with its licenses
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'grape-heif-artifact'
+          $licenses = Join-Path (Join-Path $stage 'licenses') 'grape-heif'
+          New-Item -ItemType Directory -Force -Path $licenses | Out-Null
+          foreach ($f in 'grape-heif.exe', 'BUILDINFO.txt', 'SHA256SUMS') {
+            Copy-Item -LiteralPath (Join-Path 'tools/grape-heif/target/out' $f) -Destination $stage
+          }
+          Copy-Item -Path licenses/grape-heif/* -Destination $licenses
+          if (-not (Test-Path -LiteralPath (Join-Path $licenses 'LICENSE.txt') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $licenses 'SOURCE.md') -PathType Leaf)) { Write-Output '::error::The artifact has no LICENSE.txt or SOURCE.md.'; exit 1 }
+          Get-ChildItem -Recurse -File -LiteralPath $stage | ForEach-Object { Write-Output "  $($_.FullName.Substring($stage.Length + 1))" }
       - uses: actions/upload-artifact@v7
         with:
           name: grape-heif-x86_64-pc-windows-msvc
-          path: |
-            tools/grape-heif/target/out/grape-heif.exe
-            tools/grape-heif/target/out/BUILDINFO.txt
-            tools/grape-heif/target/out/SHA256SUMS
+          path: ${{ runner.temp }}/grape-heif-artifact
           if-no-files-found: error
       - uses: actions/upload-artifact@v7
         with:

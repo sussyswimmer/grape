@@ -342,6 +342,22 @@ function Get-Cl {
     return $found[$found.Count - 1]
 }
 
+# The Visual Studio whose C++ tools built this, as vswhere names it
+# ("Visual Studio Enterprise 2026 18.11.12315.225"), or 'unknown'. vcpkg and
+# cargo both take the newest one with the C++ tools, which vswhere -latest
+# finds too.
+function Get-VsLine {
+    $base = ${env:ProgramFiles(x86)}
+    if ([string]::IsNullOrEmpty($base)) { return 'unknown' }
+    $vswhere = Join-Path $base 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) { return 'unknown' }
+    $ask = @('-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property')
+    $name = Invoke-Captured $vswhere ($ask + 'displayName')
+    $version = Invoke-Captured $vswhere ($ask + 'installationVersion')
+    if ($name.Code -ne 0 -or $version.Code -ne 0 -or @($name.Lines).Count -lt 1 -or @($version.Lines).Count -lt 1) { return 'unknown' }
+    return "$(@($name.Lines)[0].Trim()) $(@($version.Lines)[0].Trim())"
+}
+
 function Write-BuildInfo($Lock, [string]$Root, [string]$Vcpkg, [string[]]$Ports, [string]$Repo, [string]$Out) {
     $banner = Invoke-Captured (Join-Path $Out 'grape-heif.exe') @('-hide_banner', '-version')
     if ($banner.Code -ne 0 -or @($banner.Lines).Count -lt 1 -or $banner.Lines[0] -cnotmatch '^grape-heif version \S+-grape\.\d+ ') {
@@ -371,6 +387,7 @@ function Write-BuildInfo($Lock, [string]$Root, [string]$Vcpkg, [string[]]$Ports,
     $info.Add('Tools:')
     foreach ($l in $rustc.Lines) { if ($l -match '^(rustc|host|release|commit-hash|LLVM)') { $info.Add("  $l") } }
     $info.Add("  cargo: $(Get-VersionLine 'cargo' @('-V') '^cargo ')")
+    $info.Add("  Visual Studio: $(Get-VsLine)")
     $info.Add("  cl.exe: $(Get-VersionLine $cl @() 'Version')")
     $info.Add("  cmake: $(Get-VersionLine (Get-VcpkgTool $Vcpkg $Root 'cmake') @('--version') 'version')")
     $info.Add("  nasm: $(Get-VersionLine (Get-VcpkgTool $Vcpkg $Root 'nasm') @('-v') 'version')")

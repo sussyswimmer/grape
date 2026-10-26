@@ -32,7 +32,7 @@ Every build comes with its complete corresponding source, `grape-heif-1.23.7-gra
 - `vendor/`: every Rust crate in `tools/grape-heif/Cargo.lock` (`cargo vendor`);
 - `vcpkg-downloads/`: the three source archives below, with `SHA512SUMS`;
 - `vcpkg-ports/`: vcpkg's `libde265`, `x265`, `vcpkg-cmake` and `vcpkg-cmake-config` ports and the `x64-windows-static` triplet at the pinned commit, and Grape's libheif overlay port;
-- `BUILD.md`: the commands, the compiler, CMake, NASM and Rust versions of the run, and the SHA-256 of the `grape-heif.exe` it made.
+- `BUILD.md`: the commands, the Visual Studio, compiler, CMake, NASM and Rust versions of the run, and the SHA-256 of the `grape-heif.exe` it made.
 
 ### The libraries
 
@@ -55,7 +55,7 @@ The four patches and `cmake-project-include.cmake` are the commit's, byte for by
 
 ### How it's built
 
-On Windows, with Visual Studio 2022's C++ tools, git and Rust 1.99:
+On Windows, with Visual Studio's C++ tools, git and Rust 1.99. CI builds on GitHub's `windows-latest` image, which has Visual Studio 2026; each build's `BUILDINFO.txt`, and the source bundle's `BUILD.md`, name the Visual Studio and `cl.exe` it used:
 
 ```
 .\tools\grape-heif\build.ps1 -VcpkgRoot <an empty folder>

@@ -105,7 +105,7 @@ fi
     echo
     echo "## Build it again"
     echo
-    echo "On Windows, with Visual Studio 2022's C++ tools, git and Rust (the version below):"
+    echo "On Windows, with Visual Studio's C++ tools (the build's own record below names the Visual Studio and cl.exe it used; CI builds on GitHub's windows-latest image, which has Visual Studio 2026), git and Rust (the version below):"
     echo
     echo '1. Clone vcpkg at the commit above into an empty folder (`git init`, `git fetch --depth 1 <repo> <commit>`, `git checkout --detach FETCH_HEAD`) and run `bootstrap-vcpkg.bat -disableMetrics`.'
     echo '2. Copy vcpkg-downloads/* into its downloads\ folder, so nothing is fetched (vcpkg checks each SHA-512).'
