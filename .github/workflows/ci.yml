@@ -51,7 +51,7 @@ jobs:
       # The default clippy run doesn't enable pdf-it or engines-it, so
       # tests/pdf.rs and tests/media.rs aren't linted there. engines-it
       # needs no FFmpeg to compile: its tests read GRAPE_TEST_FFMPEG only
-      # when they run, and nothing here runs them yet.
+      # when they run, which the engines-it job does with this run's build.
       - name: Clippy (pdf-it, engines-it)
         run: cargo clippy -p grape-engines --features pdf-it,engines-it --all-targets --locked -- -D warnings
       # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
@@ -262,6 +262,64 @@ jobs:
           GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
         run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast
+
+  # Grape's own FFmpeg (DECISIONS D24), built in this run: the Windows exes
+  # cross-built on Linux, the two Mac halves on their own runners joined with
+  # lipo, and the GPL source bundle, the same from every target.
+  ffmpeg:
+    name: ffmpeg
+    uses: ./.github/workflows/ffmpeg.yml
+
+  # The FFmpeg engine (D22) against the ffmpeg and ffprobe just built, the
+  # ones the bundles carry (feature engines-it: every audio and video pair,
+  # the hostile inputs, cancel, the names, and that the build has everything
+  # Grape uses). On the Mac the universal files run their arm64 half; the
+  # merge job ran the x86_64 one.
+  engines-it:
+    name: FFmpeg tests (${{ matrix.name }})
+    needs: ffmpeg
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: ffmpeg-x86_64-pc-windows-msvc
+            suffix: x86_64-pc-windows-msvc.exe
+          - name: macOS
+            os: macos-latest
+            artifact: ffmpeg-apple-darwin
+            suffix: universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The tests run programs built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/ffmpeg
+      # Artifacts lose the executable bit.
+      - name: Make them executable
+        if: runner.os == 'macOS'
+        run: chmod +x "$RUNNER_TEMP"/ffmpeg/ffmpeg-*-apple-darwin "$RUNNER_TEMP"/ffmpeg/ffprobe-*-apple-darwin
+      # rust-windows lints engines-it on Windows; rust-macos doesn't.
+      - name: Clippy (engines-it)
+        if: runner.os == 'macOS'
+        run: cargo clippy -p grape-engines --features engines-it --all-targets --locked -- -D warnings
+      # The engines-it tests fail, not skip, without both variables.
+      - name: FFmpeg tests (Grape's own FFmpeg)
+        env:
+          GRAPE_TEST_FFMPEG: ${{ runner.temp }}/ffmpeg/ffmpeg-${{ matrix.suffix }}
+          GRAPE_TEST_FFPROBE: ${{ runner.temp }}/ffmpeg/ffprobe-${{ matrix.suffix }}
+        run: cargo test -p grape-engines --features engines-it --locked --test media --no-fail-fast
 
   # A Windows build anyone can download from the run's Artifacts: the
   # per-user NSIS installer (no admin needed), with PDFium (D29) and
