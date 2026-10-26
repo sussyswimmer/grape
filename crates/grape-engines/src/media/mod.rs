@@ -97,11 +97,7 @@ pub(crate) fn convert(
     // FFmpeg gets absolute `file:` URLs, so nothing depends on its working
     // folder.
     let src_abs = absolute(src).map_err(|e| names.read_failed(e))?;
-    match std::fs::metadata(&src_abs) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Err(names.read_failed(format!("not a file: {}", src.display()))),
-        Err(e) => return Err(names.read_failed(format!("open {}: {e}", src.display()))),
-    }
+    source_is_a_file(&src_abs, src, &names)?;
     let info = probe_source(ffprobe, &src_abs, src, &names, ctx).map_err(or_cancelled)?;
     // Refuse a source without the stream the target needs before anything
     // is created.
@@ -138,6 +134,9 @@ pub(crate) fn convert(
     let Some(_slot) = run::acquire(cancel) else {
         return Err(crate::cancelled(src));
     };
+    // The wait can be as long as two other encodes: a source moved or
+    // deleted meanwhile can't be read.
+    source_is_a_file(&src_abs, src, &names)?;
     let first = args::passes(&src_abs, to, &info, &out, &palette_path)
         .map_err(|missing| no_stream(&names, missing, src))?;
     let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, progress) {
@@ -182,6 +181,16 @@ pub(crate) fn convert(
     drop(temp);
     progress(1.0);
     Ok(outcome)
+}
+
+/// Checks that the source is still a file: a folder or a pipe named like
+/// media isn't read, and FFmpeg would wait on a pipe.
+fn source_is_a_file(src_abs: &Path, src: &Path, names: &Names) -> Result<(), GrapeError> {
+    match std::fs::metadata(src_abs) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err(names.read_failed(format!("not a file: {}", src.display()))),
+        Err(e) => Err(names.read_failed(format!("open {}: {e}", src.display()))),
+    }
 }
 
 /// Whether a copy that FFmpeg refused with `failure` is worth one retry
@@ -550,6 +559,27 @@ mod tests {
             }
             assert_eq!(fs::read(&self.job.inputs[0]).unwrap(), b"source");
         }
+    }
+
+    #[test]
+    fn a_source_gone_before_ffmpeg_starts_isnt_read() {
+        let case = Case::new("song.wav", Format::Mp3);
+        let src = case.job.inputs[0].clone();
+        // The source goes while the job waits for a slot, after the probe.
+        script([
+            Fake::Runs(Box::new(move || {
+                fs::remove_file(&src).unwrap();
+                flat("wav", false, "pcm_s16le")
+            })),
+            Fake::Child("write", "mp3".to_string()),
+            Fake::Prints(flat("mp3", false, "mp3")),
+        ]);
+        let err = case.run().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ReadFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "Grape couldn't read song.wav.");
+        // Only the probe ran.
+        assert_eq!(ran().len(), 1);
+        assert!(!case.dir.0.join("converted.mp3").exists());
     }
 
     #[test]

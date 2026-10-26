@@ -503,12 +503,14 @@ pub(super) mod tests {
 
     /// A sidecar run that a test scripts with [`script`], in place of
     /// `ffmpeg` or `ffprobe`.
-    #[derive(Debug)]
     pub(crate) enum Fake {
         /// `ffprobe` printing this. No child runs: the test harness prints
         /// its own lines around a fake child's output, which `probe::parse`
         /// would refuse.
         Prints(String),
+        /// `ffprobe` printing what this returns, after doing what it does:
+        /// how a test acts between two steps of a job.
+        Runs(Box<dyn FnOnce() -> String>),
         /// [`fake_child`] in this mode, with [`FAKE_TEXT`] set to the text
         /// and [`FAKE_OUT`] to the run's output path (its last argument,
         /// without `file:`).
@@ -530,7 +532,7 @@ pub(super) mod tests {
                     command.env(FAKE_TEXT, text).env(FAKE_OUT, self.out);
                     command
                 }
-                Fake::Prints(_) => panic!("ffmpeg was scripted to print a probe"),
+                Fake::Prints(_) | Fake::Runs(_) => panic!("ffmpeg was scripted as ffprobe"),
             }
         }
 
@@ -542,6 +544,7 @@ pub(super) mod tests {
         ) -> Result<String, RunError> {
             match self.fake {
                 Fake::Prints(text) => Ok(text),
+                Fake::Runs(run) => Ok(run()),
                 Fake::Child(..) => probe_command(self.command(), cancel, timeout),
             }
         }
