@@ -35,8 +35,9 @@
 //!   PNG keeps the color type (float becomes 16-bit); WebP is lossless
 //!   (`image` has no lossy WebP encoder); BMP is 8-bit RGB or RGBA; TIFF
 //!   keeps 8- and 16-bit gray/RGB/RGBA and maps the rest to RGB(A).
-//! - **Writing** goes through [`crate::output`]: a temp file next to the
-//!   final name, then a no-clobber finalize that re-plans the name with
+//! - **Writing** goes through [`crate::output`] and [`crate::publish`], as
+//!   for every engine: a temp file next to the final name, then a
+//!   no-clobber finalize that re-plans the name with
 //!   [`grape_core::output_name`] if it was taken meanwhile.
 //! - **Cancellation** is checked between steps; the source reader and the
 //!   temp file's writer fail once the job is cancelled, which stops a
@@ -45,8 +46,7 @@
 //!   file before decoding, so a JPEG decode (like the `image` crate's own
 //!   pixel conversions and rotations) runs to its end once started.
 
-use std::collections::HashSet;
-use std::fs::{self, File};
+use std::fs::File;
 use std::io::{self, BufReader, BufWriter};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
@@ -65,8 +65,9 @@ use grape_core::{Format, Job};
 
 use crate::cancel::Cancellable;
 use crate::headers::{self, JpegLayout, WebpLayout};
-use crate::output::{place_no_clobber, TempFile};
-use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome};
+use crate::output::TempFile;
+use crate::publish::{self, Names};
+use crate::{CancelToken, EngineCtx, GrapeError, JobOutcome};
 
 /// The formats this engine reads and writes. Every ordered pair of two
 /// different members is supported: 20 pairs.
@@ -77,9 +78,6 @@ pub(crate) const RASTER: [Format; 5] = [
     Format::Tiff,
     Format::Bmp,
 ];
-
-/// How many times a taken output name is re-planned before giving up.
-const MAX_REPLANS: usize = 3;
 
 /// JPEG output quality.
 const JPEG_QUALITY: u8 = 90;
@@ -149,23 +147,9 @@ pub(crate) fn convert(
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
     let names = Names::new(src, dest, from, to);
-    let dir = dest
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-        .ok_or_else(|| {
-            names.write_failed(format!("output path has no folder: {}", dest.display()))
-        })?;
-
+    let dir = publish::dest_dir(dest, &names)?;
     let cancel = &ctx.cancel;
-    // Whatever failed, a cancelled job reports that it was cancelled: the
-    // failure may just be the cancelled reader or writer.
-    let or_cancelled = |e: GrapeError| {
-        if cancel.is_cancelled() {
-            crate::cancelled(src)
-        } else {
-            e
-        }
-    };
+    let or_cancelled = |e| publish::or_cancelled(cancel, src, e);
 
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
@@ -182,14 +166,7 @@ pub(crate) fn convert(
     };
     let icc = icc.filter(|profile| icc_fits(profile, &img));
 
-    // Grape's own fallback folder (Downloads\Grape) is created on first
-    // use: by a job that falls back, or one whose output setting names that
-    // same folder. Any other folder must still be there; one that vanished
-    // since planning is a write error, not something to bring back.
-    if job.used_fallback || ctx.fallback_dir.as_deref() == Some(dir) {
-        fs::create_dir_all(dir)
-            .map_err(|e| names.write_failed(format!("create {}: {e}", dir.display())))?;
-    }
+    publish::ensure_dir(job, ctx, dir, &names)?;
     // From here on, `temp` removes the temp file on every return path.
     let (temp, file) = TempFile::create(dir, to.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
@@ -199,7 +176,7 @@ pub(crate) fn convert(
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let outcome = finalize(&temp, job, src, dest, dir, &names)?;
+    let outcome = publish::finalize(&temp, job, src, dest, dir, &names)?;
     drop(temp);
     progress(1.0);
     Ok(outcome)
@@ -674,145 +651,11 @@ fn write(
     img.write_with_encoder(encoder)
 }
 
-/// Gives the temp file its final name without replacing anything. If the
-/// planned name was taken meanwhile, re-plans it against a fresh listing of
-/// the folder plus every name tried so far, up to [`MAX_REPLANS`] times.
-fn finalize(
-    temp: &TempFile,
-    job: &Job,
-    src: &Path,
-    dest: &Path,
-    dir: &Path,
-    names: &Names,
-) -> Result<JobOutcome, GrapeError> {
-    let source_name = file_name(src);
-    let mut target = dest.to_path_buf();
-    let mut attempted: HashSet<String> = HashSet::from([file_name(dest)]);
-    for replans in 0..=MAX_REPLANS {
-        match place_no_clobber(temp.path(), &target) {
-            Ok(()) => {
-                return Ok(JobOutcome {
-                    outputs: vec![target],
-                    renamed: replans > 0,
-                })
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                if replans == MAX_REPLANS {
-                    break;
-                }
-                let mut taken = dir_names(dir);
-                taken.extend(attempted.iter().cloned());
-                let name = grape_core::output_name(&source_name, &job.op, &taken);
-                attempted.insert(name.clone());
-                target = dir.join(name);
-            }
-            Err(e) => {
-                return Err(names.write_failed(format!(
-                    "finalize {} as {}: {e}",
-                    temp.path().display(),
-                    target.display()
-                )))
-            }
-        }
-    }
-    Err(GrapeError::new(
-        ErrorKind::NameTaken,
-        format!("A file named {} keeps appearing; try again.", names.planned),
-        format!(
-            "every name tried in {} was taken: {}",
-            dir.display(),
-            sorted(&attempted).join(", ")
-        ),
-    ))
-}
-
-/// The names in `dir` right now; empty if it can't be listed.
-fn dir_names(dir: &Path) -> HashSet<String> {
-    fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn sorted(set: &HashSet<String>) -> Vec<String> {
-    let mut list: Vec<String> = set.iter().cloned().collect();
-    list.sort();
-    list
-}
-
-/// A path's file name as text, or the whole path if it has none.
-fn file_name(path: &Path) -> String {
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
-}
-
-/// The names that go into user messages.
-struct Names {
-    /// The source's file name.
-    source: String,
-    /// The source format's display name.
-    from: &'static str,
-    /// The target format's display name.
-    to: &'static str,
-    /// The destination folder's name.
-    folder: String,
-    /// The planned output file name.
-    planned: String,
-}
-
-impl Names {
-    fn new(src: &Path, dest: &Path, from: Format, to: Format) -> Names {
-        let folder = dest
-            .parent()
-            .map(|dir| match dir.file_name() {
-                Some(name) => name.to_string_lossy().into_owned(),
-                None => dir.display().to_string(),
-            })
-            .unwrap_or_default();
-        Names {
-            source: file_name(src),
-            from: from.display_name(),
-            to: to.display_name(),
-            folder,
-            planned: file_name(dest),
-        }
-    }
-
-    fn read_failed(&self, detail: String) -> GrapeError {
-        let message = format!("Grape couldn't read {}.", self.source);
-        GrapeError::new(ErrorKind::ReadFailed, message, detail)
-    }
-
-    fn decode_failed(&self, detail: String) -> GrapeError {
-        let message = format!("{} isn't a readable {} image.", self.source, self.from);
-        GrapeError::new(ErrorKind::DecodeFailed, message, detail)
-    }
-
-    /// Converting the image would need more memory than Grape allows.
-    fn too_large(&self, detail: String) -> GrapeError {
-        let message = format!("{} is too large to convert.", self.source);
-        GrapeError::new(ErrorKind::DecodeFailed, message, detail)
-    }
-
-    fn encode_failed(&self, detail: String) -> GrapeError {
-        let message = format!("Grape couldn't write a {} file.", self.to);
-        GrapeError::new(ErrorKind::EncodeFailed, message, detail)
-    }
-
-    fn write_failed(&self, detail: String) -> GrapeError {
-        let message = format!("Grape couldn't save into {}.", self.folder);
-        GrapeError::new(ErrorKind::WriteFailed, message, detail)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
+
+    use std::fs;
 
     use super::*;
 

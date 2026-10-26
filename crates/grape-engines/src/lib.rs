@@ -17,6 +17,7 @@ mod cancel;
 mod headers;
 mod image;
 mod output;
+mod publish;
 mod selection;
 
 pub use selection::build_selection;
