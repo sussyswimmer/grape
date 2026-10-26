@@ -161,3 +161,77 @@ jobs:
             echo "::error file=THIRD_PARTY_NOTICES.md::THIRD_PARTY_NOTICES.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs"
             exit 1
           fi
+
+  # Sidecars (DECISIONS D25): fetch FFmpeg and ffprobe as pinned in
+  # scripts/sidecars.lock, check them, and list them. Nothing is built with
+  # them: no installer or DMG carries FFmpeg until the media engine uses it
+  # and licenses/ffmpeg and its notices entry exist (golden rule 6).
+  sidecars:
+    name: Sidecars (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The job runs the downloaded programs, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Saved only by a run that fetched and checked everything. The script
+      # checks a restored folder against its stamp and fetches again if
+      # anything differs. The key has the scripts too: a restored folder
+      # skips the download, extraction and -version checks, so a changed
+      # script must miss the cache to be tested here.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      # Windows PowerShell 5.1, which every PC has.
+      - name: Fetch and check (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1
+      - name: Run again in PowerShell 7 (must find them current)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = ./scripts/fetch-sidecars.ps1 6>&1 | Out-String
+          Write-Output $out
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($out -notmatch 'already current') {
+            Write-Output "::error::A second run fetched the sidecars again instead of finding them current."
+            exit 1
+          }
+      - name: List the sidecars
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -File -LiteralPath apps/desktop/src-tauri/binaries | Format-Table -AutoSize Name, Length
+          Get-Content -LiteralPath apps/desktop/src-tauri/binaries/sidecars.stamp
+      # /bin/bash is macOS's own bash 3.2; the runner's bash on PATH is newer.
+      - name: Fetch and check (macOS)
+        if: runner.os == 'macOS'
+        run: /bin/bash ./scripts/fetch-sidecars.sh
+      - name: Run again (must find them current)
+        if: runner.os == 'macOS'
+        run: |
+          out=$(/bin/bash ./scripts/fetch-sidecars.sh)
+          echo "$out"
+          case "$out" in
+            *"already current"*) ;;
+            *)
+              echo "::error::A second run fetched the sidecars again instead of finding them current."
+              exit 1
+              ;;
+          esac
+      - name: List the sidecars
+        if: runner.os == 'macOS'
+        run: |
+          ls -l apps/desktop/src-tauri/binaries
+          lipo -info apps/desktop/src-tauri/binaries/*-universal-apple-darwin
+          cat apps/desktop/src-tauri/binaries/sidecars.stamp

@@ -191,9 +191,9 @@ pub fn toast_clicked(id: u64, toaster: State<'_, Toaster>) {
     match grape_platform::file_actions::reveal(&path) {
         Ok(()) => {}
         Err(PlatformError::Unsupported) => {
-            log::info!("reveal {} (not wired on this OS)", path.display());
+            log::info!("reveal: not wired on this OS");
         }
-        Err(err) => log::error!("could not reveal {}: {err}", path.display()),
+        Err(err) => log::error!("could not reveal the output: {err}"),
     }
 }
 

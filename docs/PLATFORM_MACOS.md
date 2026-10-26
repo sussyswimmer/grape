@@ -52,6 +52,31 @@ If the drag pasteboard has no file URL type (text, browser images, promised file
 - **v2 documents:** `NSAttributedString` reads and writes `docx`, `rtf`, `rtfd`, `html` and `odt` natively. **[inferred]** This is a plausible route for Tangerine's DOCX/RTF/RTFD support. Text clippings are `.textClipping` resource-fork-style plists; read the `utf8` / `public.utf8-plain-text` data.
 - **Pages:** no public API. `NSAttributedString` can't read `.pages`. See `DECISIONS.md` O2.
 
+## Sidecars
+
+FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They aren't in the repo. A script fetches the builds pinned in `scripts/sidecars.lock` (D25; the pin itself is D22). Run it from the repo root:
+
+```bash
+./scripts/fetch-sidecars.sh           # fetch, unless they're already current
+./scripts/fetch-sidecars.sh --force   # fetch again anyway
+```
+
+- It needs `curl`, `shasum`, `unzip`, `lipo`, `codesign`, `arch` and `python3`, which reads the lock. `lipo` and `python3` come with the Xcode Command Line Tools (`xcode-select --install`), which Rust needs anyway. It runs in macOS's own bash 3.2.
+- **What lands where.** `apps/desktop/src-tauri/binaries/`, which git ignores, gets:
+  - `ffmpeg-aarch64-apple-darwin` and `ffmpeg-x86_64-apple-darwin`, and the same two for `ffprobe`: Martin Riedl's release builds, one zip each (28 to 34 MB). tauri-build looks for these while a universal build compiles each arch.
+  - `ffmpeg-universal-apple-darwin` and `ffprobe-universal-apple-darwin`: each pair merged with `lipo -create`, then signed ad hoc (`codesign --force --sign -`), because lipo breaks Riedl's own signature. These are the ones the bundler puts in Grape.app.
+  - `sidecars.stamp`, written last: the lock's SHA-256, the target, and each file's SHA-256.
+  - No license text: the Riedl zips carry none, so the Mac bundle will take its texts from `licenses/ffmpeg/`.
+- **The checks.** Each zip downloads into a new temp folder with `curl --fail --location --proto =https`, and redirects must stay on HTTPS too. Its size and SHA-256 must match the lock before anything is extracted. On a mismatch it's deleted and nothing changes. Only the file the lock names is extracted. `lipo -archs` must show arm64 and x86_64 in the right files and both in the universal one, and `codesign --verify --strict` must pass. The universal file then runs with `-hide_banner -version`: the first line must name the lock's version, and the configuration line must not have `--enable-nonfree`. On Apple silicon with Rosetta the Intel half runs too; otherwise the script says only this Mac's half ran. Only after every check passes do the files replace the ones in `binaries/`. The temp folder is always deleted.
+- **A second run** reads the stamp. If the lock, the target and every file still match, it says the sidecars are already current and stops. If anything differs, it fetches again.
+- It doesn't change `PATH` or install anything. This script is the only download, at build time. Grape itself never downloads anything (golden rule 3).
+- **CI** runs it in the Sidecars job on `macos-latest` with `/bin/bash`, then again (it must find them current), and lists the files and `lipo -info`. `binaries/` is cached by the hashes of the lock and both fetch scripts, so a changed script runs in full. The job builds nothing.
+- **Not in the DMG yet.** `apps/desktop/src-tauri/tauri.sidecars.conf.json` adds both to `bundle.externalBin` for a build that passes it (from `apps/desktop`): `pnpm tauri build --target universal-apple-darwin --bundles app,dmg --config src-tauri/tauri.sidecars.conf.json`. It also bundles `licenses/ffmpeg/`, so a build or `tauri dev` that passes it fails until that folder exists. No build passes it yet. The DMG carries FFmpeg only once the media engine uses it and `licenses/ffmpeg/` (the license texts, and `SOURCE.md` with the source link) and its `THIRD_PARTY_NOTICES.md` entry exist (D25).
+- **In dev**, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` makes tauri-build copy this Mac's per-arch files into `target/debug` as `ffmpeg` and `ffprobe`, next to Grape's executable.
+- **Installed**, they lose the suffix: `Grape.app/Contents/MacOS/ffmpeg` and `ffprobe`, next to Grape's executable. That's where `src/sidecars.rs` looks, never on `PATH`. The bundler signs them again with the app's identity (ad hoc for now). Notarization (M9) needs each signed with the Developer ID and the hardened runtime (Distribution, below).
+- **Intel:** Riedl's Intel release builds stop in January 2027. A pin after that needs another Intel source (D22).
+- `GRAPE_SIDECARS_NO_RUN=1` skips lipo, codesign and the `-version` run, places only the per-arch files, and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
+
 ## Running a CI build
 
 Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silicon + Intel) Grape.app. It's ad-hoc signed but not notarized (D18; notarization comes with M9), so macOS will refuse to open it at first.

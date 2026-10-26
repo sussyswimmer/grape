@@ -108,6 +108,29 @@ No haptics on Windows. The tick plays via WebAudio in the overlay or `PlaySoundW
 - **HEIC encode:** bundled `heif-enc` sidecar built with x265. That makes the sidecar GPL, which is fine because Grape is free and open source and it's a separate executable (`ENGINES.md` licensing rules).
 - **H.264 encode:** the FFmpeg sidecar with libx264, allowed under the same rules. Prefer `h264_mf` / `h264_nvenc` / `h264_qsv` / `h264_amf` hardware encoders when present, with x264 as the fallback.
 
+## Sidecars
+
+FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They aren't in the repo. A script fetches the builds pinned in `scripts/sidecars.lock` (D25; the pin itself is D22). Run it from the repo root:
+
+```powershell
+.\scripts\fetch-sidecars.ps1          # fetch, unless they're already current
+.\scripts\fetch-sidecars.ps1 -Force   # fetch again anyway
+```
+
+- It works in Windows PowerShell 5.1 and PowerShell 7. If PowerShell says running scripts is disabled on this system, run `powershell -ExecutionPolicy Bypass -File .\scripts\fetch-sidecars.ps1` instead. That changes no setting.
+- **What lands where.** `apps/desktop/src-tauri/binaries/`, which git ignores, gets:
+  - `ffmpeg-x86_64-pc-windows-msvc.exe` and `ffprobe-x86_64-pc-windows-msvc.exe`, the target-triple names Tauri's `bundle.externalBin` looks for. Both come from one BtbN zip (194 MB).
+  - `ffmpeg-LICENSE.txt`, the build's GPLv3 text from that zip, kept for the bundle step. The script never writes into `licenses/`, which is committed and written by hand (`licenses/README.md`).
+  - `sidecars.stamp`, written last: the lock's SHA-256, the target, and each file's SHA-256.
+- **The checks.** The zip downloads into a new temp folder over HTTPS (TLS 1.2 or later). Its size and SHA-256 must match the lock before anything is extracted. On a mismatch it's deleted and nothing changes. Only the files the lock names are extracted. Each program then runs with `-hide_banner -version`: the first line must name the lock's version, and the configuration line must not have `--enable-nonfree`. Only after every check passes do the files replace the ones in `binaries/`. The temp folder is always deleted.
+- **A second run** reads the stamp. If the lock, the target and every file still match, it says the sidecars are already current and stops. If anything differs (a new lock, a changed or missing file), it fetches again.
+- It doesn't change `PATH` or install anything. This script is the only download, at build time. Grape itself never downloads anything (golden rule 3).
+- **CI** runs it in the Sidecars job: in Windows PowerShell 5.1, then again in PowerShell 7, which must find them current. `binaries/` is cached by the hashes of the lock and both fetch scripts, so a changed script runs in full. The job lists the files and their sizes, and builds nothing.
+- **Not in the installer yet.** `apps/desktop/src-tauri/tauri.sidecars.conf.json` adds both to `bundle.externalBin` for a build that passes it (from `apps/desktop`): `pnpm tauri build --bundles nsis --config src-tauri/tauri.sidecars.conf.json`. It also bundles `licenses/ffmpeg/`, so a build or `tauri dev` that passes it fails until that folder exists. No build passes it yet. The installer carries FFmpeg only once the media engine uses it and `licenses/ffmpeg/` (the license texts, and `SOURCE.md` with the source link) and its `THIRD_PARTY_NOTICES.md` entry exist (D25).
+- **In dev**, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` makes tauri-build copy them into `target\debug` as `ffmpeg.exe` and `ffprobe.exe`, next to Grape's executable. Without the overlay they aren't copied there.
+- **Installed**, they lose the suffix: the installer puts `ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` in `%LOCALAPPDATA%\Grape`. That's where `src/sidecars.rs` looks, never on `PATH`.
+- `GRAPE_SIDECARS_NO_RUN=1` skips the `-version` runs and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
+
 ## Distribution
 - Installer: Tauri **NSIS** bundle (per-user install, no admin needed) plus a portable `.zip`. Keep MSI for later.
 - Code signing: unsigned builds trigger SmartScreen ("Windows protected your PC"). Free option for open source: **SignPath Foundation** (free signing for OSS projects that meet its criteria). Alternatives: Azure Trusted Signing (paid, identity checks). Log in DECISIONS when chosen.

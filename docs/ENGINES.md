@@ -35,6 +35,7 @@
 - Build flags: `--enable-gpl --enable-version3 --enable-libx264 --enable-libmp3lame --enable-libopus --enable-libvorbis --enable-libvpx --enable-libdav1d --enable-libsvtav1`, plus platform hardware encoders: `--enable-videotoolbox` (mac); `--enable-mediafoundation --enable-nvenc --enable-amf --enable-libvpl` (win). GPL is fine under rule 2.
 - Use a reputable static build (e.g. BtbN for Windows, evermeet/martin-riedl style for macOS) or our own CI build. Record the source and checksum.
 - Ship as a Tauri sidecar via `bundle.externalBin` with target-triple suffixes (`ffmpeg-aarch64-apple-darwin`, `ffmpeg-x86_64-pc-windows-msvc.exe`, …). Also ship `ffprobe`.
+- **The pinned builds are in `scripts/sidecars.lock`** (the pin is D22): each archive's URL, SHA-256 and size, and each file's path inside it. `scripts/fetch-sidecars.ps1` (Windows) and `scripts/fetch-sidecars.sh` (macOS) download and check them into `apps/desktop/src-tauri/binaries/` (D25; `PLATFORM_WINDOWS.md` and `PLATFORM_MACOS.md` → "Sidecars"). Change a pin in the lock, never in the scripts. No bundle carries them until `licenses/ffmpeg/` and the notices entry exist (rule 3).
 
 ### Target arguments (starting points; tune in M3)
 

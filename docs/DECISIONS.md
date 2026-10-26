@@ -308,6 +308,42 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - To install them locally: `cargo install --locked --features cli cargo-about@0.9.2` (the binary needs the `cli` feature) and `cargo install --locked cargo-deny@0.20.2`.
 - **Revisit if:** Maxwell decides O6 another way (then drop the MPL exceptions and the dependency with them), a clarified crate's file changes (its checksum fails), a sidecar ships (D22), or the UI gets a runtime dependency.
 
+## D25: Fetching and bundling sidecars (2026-10-26, proposed, confirm)
+- **Decision:** the sidecar builds are pinned in one file, `scripts/sidecars.lock`, and two scripts fetch them from it: `scripts/fetch-sidecars.ps1` on Windows and `scripts/fetch-sidecars.sh` on macOS. Only the lock is committed. The binaries land in `apps/desktop/src-tauri/binaries/`, which git ignores. The pin itself (FFmpeg 9.0.2: BtbN's build for Windows, martin-riedl.de's for macOS) is D22, lane B.
+- **The lock** is JSON (`format` 1, with `_comment` keys for notes):
+  - `archives`: each download by id, with its https URL, its SHA-256 and its size in bytes.
+  - `sidecars`: each program's version and, per target triple, the archive it comes from and its path inside it, plus a `license` path where the archive has one (BtbN's `LICENSE.txt`). One archive can supply several files: BtbN's zip has both programs.
+  - heif-enc goes in the same way once lane B pins it, with a Windows target only. The scripts' version check is FFmpeg's (`-hide_banner -version`, first line `<name> version …`), which heif-enc doesn't answer, so `fetch-sidecars.ps1` needs a check for it first.
+- **The checks**, in this order:
+  - Downloads use HTTPS only (curl `--proto =https --proto-redir =https`; Invoke-WebRequest with TLS 1.2 or later), into a new, empty temp folder that's always deleted at the end.
+  - The archive's size and SHA-256 must match the lock before anything is extracted. A mismatch deletes it and changes nothing.
+  - Only the paths the lock names are extracted. Both scripts check every field of the lock by the same rules first: a path may not have wildcards, backslashes, `.` or `..` parts, or start with `/`. The macOS script also rejects a key that appears twice.
+  - macOS: the two per-arch files must be arm64 and x86_64. `lipo -create` merges them into `<name>-universal-apple-darwin`, which is signed ad hoc (lipo breaks the build's own signature) and must pass `codesign --verify --strict`. The per-arch files stay too, because tauri-build looks for them while a universal build compiles each arch (tauri-cli 2.12.1 `desktop.rs`, tauri-build 2.7.1).
+  - Each program runs with `-hide_banner -version`, on its own OS only. The first line must start with `<name> version` and name the lock's version as a whole token (BtbN prints `n9.0.2-17-g2a571b6068-20260930`, Riedl `9.0.2-https://www.martin-riedl.de`). The configuration line must not have `--enable-nonfree`.
+  - Only then do the files replace the old ones in `binaries/`, and the stamp, `binaries/sidecars.stamp`, is written last: the lock's SHA-256, the target, and each file's SHA-256. A run that finds all of them matching says the sidecars are already current and changes nothing. `-Force` / `--force` fetches again.
+- The scripts never change `PATH` and install nothing. This is the only download, at build time. Grape itself never downloads anything (golden rule 3).
+- `binaries/ffmpeg-LICENSE.txt` is the BtbN archive's GPLv3 text, kept for the bundle step. The scripts never write into `licenses/`, which is committed and written by hand (`licenses/README.md`). The Riedl zips carry no license file.
+- **Bundling** uses a config overlay, `apps/desktop/src-tauri/tauri.sidecars.conf.json`, which sets `bundle.externalBin` to `["binaries/ffmpeg", "binaries/ffprobe"]` and adds `licenses/ffmpeg/` to `bundle.resources`. So any build (or `tauri dev`) that passes it fails until that folder exists: the GPL gate below is a check, not just a rule.
+  - A build passes it as `--config src-tauri/tauri.sidecars.conf.json` (from `apps/desktop`). The CLI merges it into `tauri.conf.json` as a JSON merge patch (RFC 7396: objects merge, arrays and values replace) and hands it to tauri-build as `TAURI_CONFIG` (tauri-cli 2.12.1 `helpers/config.rs`).
+  - Tauri never picks it up by itself (it reads only `tauri.<platform>.conf.json` on its own), so `cargo` builds and today's CI builds don't need the binaries.
+  - Installed, the files lose their suffix: `ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` on Windows, `ffmpeg` and `ffprobe` in `Grape.app/Contents/MacOS` on macOS.
+- **The gate:** no build passes the overlay yet, so no installer or DMG carries FFmpeg. It goes on only once all of these exist:
+  - lane B's media engine uses the sidecars;
+  - `licenses/ffmpeg/` with the license texts and `SOURCE.md` (the exact source link and the configure line). BtbN's build is `n9.0.2-17-g2a571b6068`: 17 commits past the `n9.0.2` tag on FFmpeg's `release/9.0` branch, so its source link is that commit, not the tag;
+  - the FFmpeg entry in `about.hbs`, and so in `THIRD_PARTY_NOTICES.md` (golden rule 6, ENGINES rule 3).
+  - Then the build jobs in `ci.yml` and `release.yml` get a fetch step and `--config src-tauri/tauri.sidecars.conf.json`.
+- **CI:** a `Sidecars` job on `windows-latest` and `macos-latest`.
+  - It restores `binaries/` from a cache keyed on the OS and the hashes of the lock and both fetch scripts (a restored folder skips the download and the checks, so a changed script must miss the cache), `actions/cache@v6` (v6.1.0 is from 2026-06-23, D9). Only a run that fetched and checked everything saves one, and the script checks a restored folder against its stamp.
+  - It runs the fetch script, then runs it again, which must find the sidecars current: Windows PowerShell 5.1 and then PowerShell 7 on Windows, macOS's `/bin/bash` 3.2 on the Mac.
+  - It lists the files with their sizes (and `lipo -info` on the Mac), builds nothing, keeps no git credentials, and has the workflow's read-only token.
+- **Testing:** `GRAPE_SIDECARS_NO_RUN=1` skips the `-version` runs (and lipo and codesign on the Mac) and writes no stamp, so the download can be tested on another OS. The next normal run checks everything again. It's for testing only.
+- **Tested** on Linux, 2026-10-26:
+  - The `.sh`: the lock checks, and the download, hash check and extraction of the four Riedl zips (Mach-O arm64 and x86_64). With stand-ins for `uname`, `lipo`, `codesign` and `arch`, its whole real path: the stamp, a second run, `--force`, a changed or deleted file, Rosetta or not.
+  - Its failures, each leaving `binaries/` unchanged and no temp folder: version 9.0.21 or 19.0.2, `--enable-nonfree`, no configuration line, another program's banner, a universal file missing an arch, a wrong SHA-256, a wrong size, a flipped byte in the download, and Ctrl+C.
+  - The `.ps1` in PowerShell 7.6.6: the BtbN download, hash check and extraction (PE32+ x86-64, and the GPLv3 text), the stamp, `-Force`, a changed file, a wrong SHA-256, and the `-version` checks against stand-in programs.
+  - Neither script has run on a Mac or the PC yet. Windows PowerShell 5.1 and macOS's bash 3.2 first run in CI.
+- **Revisit if:** heif-enc is pinned (a Windows-only sidecar needs its own overlay or a `tauri.windows.conf.json`, since tauri-build wants every `externalBin` for the target it builds), Grape ships for Windows ARM64 (`aarch64-pc-windows-msvc`), the Windows sidecars get signed in M7 (the bundler signs them in place in `binaries/`, which changes their hashes, so the next run fetches again), or Riedl's Intel builds end (January 2027).
+
 ---
 
 ## Open questions

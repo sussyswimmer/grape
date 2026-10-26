@@ -1401,13 +1401,10 @@ pub async fn settings_pick_folder(
         }
     };
     if !usable_folder(&folder) {
-        log::warn!(
-            "settings: the picker returned {}, which isn't a folder Grape can use",
-            folder.display()
-        );
+        log::warn!("settings: the picker returned a path that isn't a folder Grape can use");
         return Err(NOT_A_FOLDER.to_owned());
     }
-    log::info!("settings: {target:?} folder is {}", folder.display());
+    log::info!("settings: {target:?} folder chosen");
     state.change(&app, |old| {
         let mut new = old.clone();
         match target {
