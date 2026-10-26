@@ -820,10 +820,55 @@ pub(super) mod tests {
         let result = transcode_command(fake("sleep"), &token, &mut |_| {});
         let returned = Instant::now();
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
-        // Returning at all means `wait` returned after the kill, and that
-        // both readers saw their pipe close: the child is gone.
+        // Returning means both readers saw their pipe close, which the kill
+        // does; `a_cancelled_child_is_reaped` checks it was waited for.
         let cancelled = canceller.join().unwrap();
         assert!(returned.duration_since(cancelled) < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_cancelled_child_is_reaped() {
+        let held = Held::new();
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        // It reports progress once it holds the file.
+        let result = transcode_command(holding(&held.file), &token, &mut |_| token.cancel());
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        held.assert_gone();
+
+        // The same for a probe, cancelled once the child holds the file.
+        let held = Held::new();
+        let token = CancelToken::new();
+        let canceller = {
+            let (token, file) = (token.clone(), held.file.clone());
+            thread::spawn(move || {
+                let started = Instant::now();
+                while !file.exists() && started.elapsed() < Duration::from_secs(10) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                token.cancel();
+            })
+        };
+        let result = probe_command(holding(&held.file), &token, Duration::from_secs(20));
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        canceller.join().unwrap();
+        held.assert_gone();
+    }
+
+    #[test]
+    fn a_child_past_its_timeout_is_reaped() {
+        let held = Held::new();
+        let result = probe_command(
+            holding(&held.file),
+            &CancelToken::new(),
+            Duration::from_secs(1),
+        );
+        assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
+        assert!(
+            held.file.exists(),
+            "the child didn't start within its timeout"
+        );
+        held.assert_gone();
     }
 
     #[test]
