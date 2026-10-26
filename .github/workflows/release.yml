@@ -33,21 +33,12 @@ env:
   TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  # grape-heif.exe (D33), built clean from the tag: no vcpkg or cargo cache,
-  # as PDFium is fetched fresh below. Its GPL source bundle goes on the draft.
-  grape-heif:
-    name: grape-heif
-    uses: ./.github/workflows/grape-heif.yml
-    with:
-      cache: false
-      ref: refs/tags/${{ inputs.tag || github.ref_name }}
-
-  # The same build as ci.yml's build-windows job, from the tag. It has a
-  # read-only token: the build runs third-party build scripts.
-  build:
-    name: Build (Windows installer)
-    needs: grape-heif
-    runs-on: windows-latest
+  # Fails in seconds, before anything builds (grape-heif's clean build takes
+  # about an hour), unless the tag, minus the v, is the version in all four
+  # files and in Cargo.lock.
+  version:
+    name: Check the tag matches the version
+    runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -55,10 +46,9 @@ jobs:
         with:
           ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
-      # Fails before anything builds unless the tag, minus the v, is the
-      # version in all four files and in Cargo.lock.
       - name: Check the tag matches the version
         id: version
+        shell: pwsh
         run: |
           if ($env:TAG -notmatch '^v(\d+\.\d+\.\d+)$') {
             Write-Output "::error::Release tags look like v1.2.3. '$env:TAG' doesn't."
@@ -84,6 +74,9 @@ jobs:
             exit 1
           }
           foreach ($crate in $crates) {
+            # grape-heif-proto's version follows its protocol, not Grape's
+            # releases (heic-spec J2), and tools/grape-heif/Cargo.lock pins it.
+            if ($crate.Groups[1].Value -eq 'grape-heif-proto') { continue }
             $found["Cargo.lock ($($crate.Groups[1].Value))"] = $crate.Groups[2].Value
           }
           $wrong = 0
@@ -100,6 +93,28 @@ jobs:
             exit 1
           }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$want"
+
+  # grape-heif.exe (D33), built clean from the tag: no vcpkg or cargo cache,
+  # as PDFium is fetched fresh below. Its GPL source bundle goes on the draft.
+  grape-heif:
+    name: grape-heif
+    needs: version
+    uses: ./.github/workflows/grape-heif.yml
+    with:
+      cache: false
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+  # The same build as ci.yml's build-windows job, from the tag. It has a
+  # read-only token: the build runs third-party build scripts.
+  build:
+    name: Build (Windows installer)
+    needs: [version, grape-heif]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -179,12 +194,12 @@ jobs:
   # build code.
   release:
     name: Draft the GitHub Release
-    needs: [build, grape-heif]
+    needs: [version, build, grape-heif]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
-      VERSION: ${{ needs.build.outputs.version }}
+      VERSION: ${{ needs.version.outputs.version }}
       HEIF_VERSION: ${{ needs.grape-heif.outputs.version }}
     steps:
       # Only for the notes template, as it was at the tag.

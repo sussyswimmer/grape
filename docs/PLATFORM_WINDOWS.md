@@ -208,10 +208,10 @@ A version tag makes a draft release. `.github/workflows/release.yml` builds the 
 
 1. Pick the version: plain `X.Y.Z`, with no `-beta` or other suffix (the workflow refuses those tags). Set it in all four places:
    - `apps/desktop/src-tauri/tauri.conf.json` → `"version"` (the installer's version)
-   - `Cargo.toml` → `[workspace.package]` → `version` (every crate inherits it)
+   - `Cargo.toml` → `[workspace.package]` → `version` (Grape's crates inherit it, except `grape-heif-proto`, whose version follows its protocol and stays as it is)
    - `apps/desktop/package.json` → `"version"`
    - `apps/desktop/ui/package.json` → `"version"`
-2. Run `cargo update --workspace`. It moves Grape's own four crates to the new version in `Cargo.lock` and leaves every other crate alone.
+2. Run `cargo update --workspace`. It moves Grape's own crates that inherit the version (`grape`, `grape-core`, `grape-engines`, `grape-platform`) to the new version in `Cargo.lock` and leaves every other crate alone, `grape-heif-proto` included.
 3. Commit the five files (`git commit -am "Release X.Y.Z"`) and push. Wait for CI to pass on that commit.
 4. Tag the commit and push that one tag:
 
@@ -222,7 +222,7 @@ A version tag makes a draft release. `.github/workflows/release.yml` builds the 
 
    Push it by name, not with `git push --tags`. GitHub starts no workflow when more than three tags arrive in one push.
 
-5. Open Actions → Release → the run for the tag, and wait for both jobs to finish. CI runs on the tag too.
+5. Open Actions → Release → the run for the tag, and wait for its jobs to finish (the version check, grape-heif, the installer, the draft). CI runs on the tag too.
 6. Check the draft (Releases → "Grape X.Y.Z", marked Draft), following `TESTING.md` → "Release, M7":
    - Download `Grape-Setup-x64.exe` and `SHA256SUMS.txt` from the draft, and check the hash with the PowerShell line in the notes.
    - Install it on a clean standard user account (no admin rights), go through SmartScreen, and convert a file.
@@ -232,7 +232,7 @@ A version tag makes a draft release. `.github/workflows/release.yml` builds the 
 If the version check fails, nothing was built or released. Delete the tag (`git tag -d vX.Y.Z`, then `git push --delete origin vX.Y.Z`), fix the versions, commit and tag again. To run a tag again after a runner or network failure, use Actions → Release → Run workflow and type the tag. That button shows only once `release.yml` is on the repo's default branch. Before that, open the failed run and click **Re-run failed jobs**. A fix in the code needs a new version, because a tag stays where it is.
 
 **What the workflow checks**
-- The tag is `v` and then `X.Y.Z`, and `X.Y.Z` is the version in the four files and in `Cargo.lock`'s entries for Grape's own crates. It prints each one and names the ones that differ, before anything builds.
+- The tag is `v` and then `X.Y.Z`, and `X.Y.Z` is the version in the four files and in `Cargo.lock`'s entries for Grape's own crates, all but `grape-heif-proto` (its version follows its protocol, and `tools/grape-heif/Cargo.lock` pins it). It prints each one and names the ones that differ. It's a job of its own that grape-heif and the installer wait for, so a wrong tag fails in seconds, before anything builds.
 - The build is the CI job's (`ci.yml` → `build-windows`): the same actions, Node 22, Rust 1.99, `pnpm install --frozen-lockfile` and `pnpm tauri build --bundles nsis --ci`.
 - The NSIS bundler made exactly one `*-setup.exe`. It's copied to `Grape-Setup-x64.exe`, the same name in every release, and hashed into `SHA256SUMS.txt` as `<hash>  Grape-Setup-x64.exe`, in lower-case hex (the `sha256sum` format). Both files are also the run's `Grape-Setup-x64` artifact.
 - The release job checks the downloaded installer against `SHA256SUMS.txt`, fills in `{{VERSION}}` in `.github/release-notes.md`, and makes the draft with `gh release create --draft --verify-tag`.
