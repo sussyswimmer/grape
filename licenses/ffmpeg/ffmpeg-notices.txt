@@ -5046,7 +5046,7 @@ Files:
   ffmpeg-9.0.2/libavcodec/dsd.c     linux-x86_64, windows-x86_64
   ffmpeg-9.0.2/libavcodec/dsd.h     linux-x86_64, windows-x86_64
   ffmpeg-9.0.2/libavcodec/dsddec.c  linux-x86_64, windows-x86_64
-Upstream license: dsd2pcm.txt, dsd2pcm's license (BSD-2-Clause), from
+Upstream license: dsd2pcm.txt, dsd2pcm's license (BSD-2-Clause-Views), from
   Sebastian Gesemann's own release.
 Text:
 

@@ -665,7 +665,7 @@ STATEMENTS = (
     ("ffmpeg", "dfpwm codec from https://github.com/chenthread/dfpwm",
      (), "public domain, as each file of that DFPWM code also says."),
     ("ffmpeg", "based on bsd licensed dsd2pcm by sebastian gesemann",
-     ("dsd2pcm.txt",), "dsd2pcm's license (BSD-2-Clause), from Sebastian Gesemann's own release."),
+     ("dsd2pcm.txt",), "dsd2pcm's license (BSD-2-Clause-Views), from Sebastian Gesemann's own release."),
     ("ffmpeg", "the 3 alphanumeric copyright notices are md5summed",
      (), "it explains the names in these files' MIT notice, which is in Part 1."),
     ("ffmpeg", "based on public domain decoder at http://www.honeypot.net/audio",
