@@ -6,7 +6,8 @@
 //! - **Timestamps** are `HH:MM:SS.mmm` (WebVTT) or `HH:MM:SS,mmm` (SRT),
 //!   with more hour digits when needed.
 //! - **Tags:** only `<i>`, `<b>` and `<u>` are written, balanced per cue:
-//!   see [`tagged_lines`].
+//!   see [`tagged_lines`]. Each line is written as soon as it is rendered,
+//!   so a cue is never held whole as text.
 //! - **Text that would read back as structure** is made safe: WebVTT
 //!   escapes `&`, `<` and `>`, and SRT writes a `-->` in text as `->`, so
 //!   a text line can never become a timing line.
@@ -41,9 +42,7 @@ pub(crate) fn write_vtt(
         }
         let (start, end) = (timestamp(cue.start_ms, '.'), timestamp(cue.end_ms, '.'));
         write!(out, "{nl}{}{nl}{start} --> {end}{nl}", i + 1)?;
-        for line in tagged_lines(cue, escape_vtt) {
-            write!(out, "{line}{nl}")?;
-        }
+        tagged_lines(cue, escape_vtt, |line| write!(out, "{line}{nl}"))?;
     }
     Ok(())
 }
@@ -70,9 +69,9 @@ pub(crate) fn write_srt(
         }
         let (start, end) = (timestamp(cue.start_ms, ','), timestamp(cue.end_ms, ','));
         write!(out, "{}{nl}{start} --> {end}{nl}", i + 1)?;
-        for line in tagged_lines(cue, String::push_str) {
-            write!(out, "{}{nl}", defuse_arrows(&line))?;
-        }
+        tagged_lines(cue, String::push_str, |line| {
+            write!(out, "{}{nl}", defuse_arrows(line))
+        })?;
     }
     Ok(())
 }
@@ -88,24 +87,25 @@ pub(crate) fn write_txt(
     let nl = doc.newline.as_str();
     check(cancel)?;
     let mut previous = String::new();
+    let mut text = String::new();
     for (i, cue) in doc.cues.iter().enumerate() {
         if i.is_multiple_of(CHECK_EVERY) {
             check(cancel)?;
         }
         for line in &cue.lines {
-            let text: String = line
-                .iter()
-                .filter_map(|span| match span {
-                    Span::Text(text) => Some(text.as_str()),
-                    Span::Open(_) | Span::Close(_) => None,
-                })
-                .collect();
+            text.clear();
+            for span in line {
+                if let Span::Text(t) = span {
+                    text.push_str(t);
+                }
+            }
             let trimmed = text.trim();
             if trimmed.is_empty() || trimmed == previous {
                 continue;
             }
             write!(out, "{text}{nl}")?;
-            previous = trimmed.to_owned();
+            previous.clear();
+            previous.push_str(trimmed);
         }
     }
     Ok(())
@@ -139,19 +139,30 @@ fn timestamp(ms: u64, separator: char) -> String {
     )
 }
 
-/// The cue's lines with visible text, rendered with `text` writing each
-/// text span and `<i>`, `<b>` and `<u>` tags balanced across the cue:
+/// Renders the cue's lines with visible text one at a time and hands each
+/// to `emit`: `text` writes each text span, and `<i>`, `<b>` and `<u>`
+/// tags are balanced across the cue:
 /// - opening a style that is already open, or closing one that isn't,
 ///   writes nothing;
 /// - closing a style that isn't the innermost closes the inner ones, then
 ///   it, then reopens the inner ones;
 /// - styles still open at the end are closed, innermost first, at the end
 ///   of the last line.
-fn tagged_lines(cue: &Cue, text: fn(&mut String, &str)) -> Vec<String> {
+fn tagged_lines(
+    cue: &Cue,
+    text: fn(&mut String, &str),
+    mut emit: impl FnMut(&str) -> io::Result<()>,
+) -> io::Result<()> {
+    let Some(last) = cue.lines.iter().rposition(|line| has_text(line)) else {
+        return Ok(());
+    };
     let mut open: Vec<Style> = Vec::new();
-    let mut lines: Vec<String> = Vec::with_capacity(cue.lines.len());
-    for line in cue.lines.iter().filter(|line| has_text(line)) {
-        let mut rendered = String::new();
+    let mut rendered = String::new();
+    for (i, line) in cue.lines.iter().enumerate() {
+        if !has_text(line) {
+            continue;
+        }
+        rendered.clear();
         for span in line {
             match span {
                 Span::Text(t) => text(&mut rendered, t),
@@ -174,14 +185,14 @@ fn tagged_lines(cue: &Cue, text: fn(&mut String, &str)) -> Vec<String> {
                 }
             }
         }
-        lines.push(rendered);
-    }
-    if let Some(last) = lines.last_mut() {
-        for style in open.iter().rev() {
-            last.push_str(close_tag(*style));
+        if i == last {
+            for style in open.iter().rev() {
+                rendered.push_str(close_tag(*style));
+            }
         }
+        emit(&rendered)?;
     }
-    lines
+    Ok(())
 }
 
 fn open_tag(style: Style) -> &'static str {
