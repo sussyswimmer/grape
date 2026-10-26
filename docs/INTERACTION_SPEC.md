@@ -17,6 +17,7 @@ WheelOpen(mode)
  ├─(a different single modifier)──────▶ WheelOpen(new mode)   wheel re-renders in place
  ├─(cursor over a segment)────────────▶ highlight segment + play tick
  ├─(drop on a segment)────────────────▶ Running(job) ─▶ Idle
+ ├─(drop on a panel tool)─────────────▶ Idle            (the wheel is done; the tool's panel opens, §11)
  ├─(drop off-ring / on empty wheel)───▶ Idle            (cancel, nothing happens)
  └─(Esc)──────────────────────────────▶ Idle            (overlay hides; on Windows and macOS the source cancels the drag)
 ```
@@ -109,3 +110,24 @@ The demo also supports Enter-to-open, arrow keys, Home/End and Space/Enter-to-ap
 - **[Grape]** **Dragging out:** press an item, or "Drag all" from two items, and move. The drag is always a copy, or a shortcut where the target makes one, never a move, whatever keys are held. The files stay where they are, and the items stay on the shelf. An item that's gone shows "Missing" and can't be dragged. Esc during the drag cancels it. Double-click or Enter shows an item in Explorer; on an item that's gone it does nothing.
 - **[Grape]** A drag out of the shelf never opens the wheel: Grape only watches drags that start in Explorer or on the Desktop (`DECISIONS.md` D14). Dropping anything onto the shelf does nothing.
 - **[Grape]** On macOS FLOAT says "Not in this build yet" for now (D21).
+
+## 11. Tool panels
+
+- **[observed]** Some tools open a panel before they run (`REA_FINDINGS.md` I2; an inference from the demo's "opens UI first" set).
+- **[Grape]** **Which tools:** a drop on Compress, Audio Channels, Normalize Volume or Merge PDFs opens a small panel; its Run starts the job with the chosen options. Remove Metadata, Mute, Split PDF, Create PDF and Extract Archive run at once, and conversions and file actions are unchanged (`TOOLS_AND_ACTIONS.md`, D31).
+- **[Grape]** **A tool this build can't run opens no panel:** it shows the usual info toast instead ("Tools arrive in a later build."). Until the tool engines are wired that's every tool, so no panel opens in a normal run. For QA only, starting Grape with the environment variable `GRAPE_PREVIEW_PANELS=1` (exactly `1`) opens the four panels anyway; their Run then meets the same check and shows the same toast, and nothing is written.
+- **[Grape]** **Placement:** beside where the wheel was, on the same display, vertically centered on the wheel's center: right of the wheel's glass (142 logical px from its center), or left of it when there's no room on the right, or over it when the screen is too narrow for either; always inside the work area. 352 logical px wide, 224 to 430 tall. The drop point and the files around it stay uncovered.
+- **[Grape]** **One at a time:** a new panel request replaces the open panel, which counts as cancelled. Losing the focus keeps it open: on Windows it starts unfocused, and a glance at Explorer or Finder must not lose a merge order. Run, Cancel, ×, Esc, Alt+F4, a new panel, Pause and Quit close it. Closing without Run runs nothing.
+- **[Grape]** **Focus on Windows:** the panel opens without taking the keyboard; Explorer keeps it (Enter there still opens the dropped files), and the panel says "Click here to use the keyboard." The first click activates it. Until then, Esc closes it although Explorer has the keyboard, unless a mouse button is down or was just before (that Esc belongs to a drag). After that click Esc is the panel's own, while it has the keyboard: an Esc in another app (cancelling a rename in Explorer, closing a menu) is that app's, and the panel stays. Enter works only after the click. On close, an active panel hands the keyboard back to the window that was in front when it opened.
+- **[Grape]** **Focus on macOS:** the panel comes to the front, becomes key, and Grape asks to be activated. If macOS grants it, Enter and Esc work at once; if not, the first click activates Grape and also reaches the control under it. Esc and Enter work only while the panel is key (D7: no key monitors); × and Cancel always work. An Esc the panel gets while a mouse button is down belongs to a drag (a file dragged out of a Finder window behind the panel can leave Grape active), so the panel stays open. On close, the app that was in front gets activation back, if the panel was key.
+- **[Grape]** **Keys in the panel:** Enter runs (on a button, the button does its own thing: Enter on Cancel cancels); Esc cancels (during a pointer reorder it only aborts the reorder, and while a mouse button is down Rust refuses it, so the panel stays and takes keys again); Tab and Shift+Tab cycle inside the panel: × → the main control → Move up → Move down (Merge) → Cancel → Run.
+- **[Grape]** **A drag while a panel is open:** the next drag still opens the wheel, on top of the panel (on Windows the overlay is lifted to the top of the topmost windows on every show; on macOS the panel's level is under the toast's and the overlay's). The panel stays open; a new panel-tool drop replaces it. Pause closes it and nothing runs; while paused no wheel opens, so no panel does. Quit forgets it, so a late Run is ignored.
+- **[Grape]** **Contents** (Grape's own words; the page has the exact copy):
+  - **Compress:** a three-way segmented control, Small / Balanced / High, with a note on what the selected one means. It starts at the last preset that ran (Balanced at first).
+  - **Audio Channels:** Mono / Stereo, starting at Mono every time (the right choice depends on the file).
+  - **Normalize Volume:** a target loudness slider from −24 to −10 LUFS in steps of 1, starting at the last target that ran (−16 LUFS at first).
+  - **Merge PDFs:** the files in a reorderable list (pointer drag, Alt+↑/↓ on the selected row, Move up and Move down), with "Saves as {name}" for the merged file.
+  - Compress and Normalize remember a choice only when its Run is accepted (`tools.compress`, `tools.normalize_lufs`, `ARCHITECTURE.md` → Settings).
+- **[Grape]** **Merge order:** the list starts in the drag's order, which Explorer and Finder don't document. The first file in the list names the merged PDF ("{first} Merged.pdf") and picks its folder. The panel shows the plain name even when the output will get " 2".
+- **[Grape]** **Drops on the panel do nothing:** on Windows it refuses them (D13); on macOS a file dropped on it is accepted as a copy and ignored (D18). It's never moved.
+- **[Grape]** The page only ever sees a request number, item ids and display names, never a path (`ARCHITECTURE.md`).

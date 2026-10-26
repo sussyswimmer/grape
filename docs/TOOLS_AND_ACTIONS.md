@@ -43,7 +43,12 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 
 26 tools ✓. This matches Tangerine's advertised count.
 
-**[Grape] v1 panels are minimal.** Compress gets a quality slider with Small / Balanced / High presets and remembers the last choice. Merge PDFs gets a drag-to-reorder list. Audio Channels gets a Mono/Stereo toggle. Normalize gets one target loudness (−16 LUFS default). Remove Metadata runs instantly in v1 and shows a toast listing what was stripped.
+**[Grape] v1 panels.** Four tools open a small panel before they run; the rest run at once (`INTERACTION_SPEC.md` §11, `DECISIONS.md` D31):
+- **Compress** is a three-way segmented control, Small / Balanced / High, not a slider: three named choices, all visible, one click each. It remembers the last preset that ran (`tools.compress`, Balanced at first). What each preset means per media is Grape's own choice (REA U6); lane B records the numbers in `ENGINES.md`.
+- **Audio Channels** is Mono / Stereo, starting at Mono every time.
+- **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
+- **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder.
+- **Remove Metadata** runs at once (although the table marks it Panel) and its toast lists what was stripped once the engine reports it.
 
 ## File actions
 

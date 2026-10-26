@@ -166,6 +166,34 @@ Settings, M6 (D19; use scratch copies of files)
 - [ ] win: Terminal set to PowerShell → Alt-drop on TERMINAL opens PowerShell in the folder, not Windows Terminal. Set back to Windows Terminal → Windows Terminal opens.
 - [ ] mac: Terminal set to iTerm2 with iTerm2 installed → Control-drop on TERMINAL opens iTerm2 in the folder. Uninstall iTerm2 (or pick it without it installed) → Terminal opens, and the log says why.
 
+Tool panels, M4 (D31; nothing here has run on the PC or a Mac yet. No panel opens until lane B wires the tool engines, so quit Grape and start it with GRAPE_PREVIEW_PANELS=1 set: in PowerShell $env:GRAPE_PREVIEW_PANELS = "1" and then start Grape or pnpm tauri dev from that window; on a Mac run the Grape executable in Grape.app/Contents/MacOS/ from Terminal with GRAPE_PREVIEW_PANELS=1 in front. Run then shows "Tools arrive in a later build." Use scratch copies.)
+- [ ] win: Ctrl-drop two JPGs on COMPRESS → the panel appears right of where the wheel was (left of it near the screen's right edge), on that monitor, inside the work area, with "Click here to use the keyboard." Explorer keeps the keyboard: arrow keys still move its selection.
+- [ ] win: click the panel once → the hint turns into "Enter runs · Esc cancels", and the log says `panel: focused true`. Note whether that first click also picked the segment under it.
+- [ ] win: click Run (or Enter after the click) → the panel hides, the toast says "Tools arrive in a later build.", and Explorer is active again: arrow keys work without a click.
+- [ ] win: Esc before clicking the panel → it closes. Esc while dragging a file with a panel open → the drag cancels and the panel stays; also when you let go of the button the moment you press Esc.
+- [ ] win: Merge on eight PDFs, click the panel and reorder a few rows, then click the Explorer window → the panel stays. In Explorer press F2 and then Esc to cancel the rename (or Esc to close a context menu or the search box) → the panel stays with its order, and the log has no `cancelled (esc)`. Click the panel again and press Esc → it closes.
+- [ ] win: with a panel open, drag another file over it and tap Shift → the wheel opens over the panel, the segments under the panel highlight, and the drop works. Do the same over an open float shelf.
+- [ ] win: choose Small, Run, then Compress again → Small is selected, also after restarting Grape. Cancel after choosing High → the next panel still shows Small.
+- [ ] win: Normalize on two MP3s → the slider reads "−16 LUFS"; arrow keys step by 1; Home and End reach −24 and −10. The next panel starts at the last value run.
+- [ ] win: Audio Channels on one WAV → Mono is selected; arrow keys switch to Stereo.
+- [ ] win: Merge on three PDFs → the list is in Explorer's order (note what order Explorer gave). Drag a row to the top with the mouse; select one and use Alt+↑ and Alt+↓; use Move up and Move down. "Saves as" follows the first file. With 8 files the list scrolls and a drag near its edge scrolls it. Hover a row other than the selected one → only the selected row has the accent bar; after Alt+↑ or Alt+↓ the row that slid under the pointer doesn't look selected.
+- [ ] win (touchscreen, if one is at hand): drag a merge row with a finger, and with a pen → the row lifts and moves, as with the mouse; the list doesn't pan instead.
+- [ ] win: a second tool drop while a panel is open → the new panel replaces the old one.
+- [ ] win: Remove Metadata → no panel, only the usual toast.
+- [ ] win: drop a file on the open panel → nothing happens, and the file stays where it was.
+- [ ] win: Alt+F4 on the active panel → it closes like Cancel. Tray → Pause with a panel open → it closes.
+- [ ] win: two monitors at different scales → the panel opens on the drop's monitor at the right size.
+- [ ] win: a contrast theme on → the panel uses the system colors, and the checked segment, the selected row and focus are clear: click the panel and Tab to the Compress or Audio Channels radios → the checked segment shows a ring inside it; the same for the selected merge row. Dark mode → dark glass.
+- [ ] win: Narrator reads the panel's title and count, the radio group and its checked option, the slider's "−16 LUFS" once per arrow key (not twice), and "cover.pdf moved to 1 of 3."
+- [ ] mac: Command-drop two images on COMPRESS → the panel comes to the front beside the wheel's spot. Note whether Enter and Esc work without a click (activation granted) or need one.
+- [ ] mac: if it needed a click, that first click also picked the segment under it.
+- [ ] mac: after Run or Esc, Finder is active again: arrow keys move its selection without a click.
+- [ ] mac: with a key panel open (Enter and Esc work in it), drag a file out of a Finder window behind it. Note whether Finder came to the front. Tap Shift, then press Esc → note whether the drag and the wheel end; the panel stays open either way, and the log may say `cancel for panel N refused: a mouse button is down`. Let go, then Esc in the panel → it closes.
+- [ ] mac: with a panel open, start another drag and tap Shift → the wheel covers the panel. A toast from another job shows over it.
+- [ ] mac: a full-screen app's Space → the panel appears over it.
+- [ ] mac: drop a file on the panel → nothing happens, and the file stays.
+- [ ] mac: VoiceOver reads the same as Narrator above. Reduce Motion → nothing animates. Dark mode → dark glass.
+
 macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: Grape shows only in the menu bar: no Dock icon, no Cmd-Tab entry. Opening Grape.app again from Applications opens Settings.
 - [ ] mac: no permission prompt appears at launch or during a drag (no Accessibility, Input Monitoring, Screen Recording or "paste from" prompt). Note any "access files in your Desktop/Documents folder" prompt and what triggered it.

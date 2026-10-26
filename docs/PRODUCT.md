@@ -35,7 +35,7 @@ Full behavior is in `INTERACTION_SPEC.md`. Formats are in `FORMAT_MATRIX.md`, an
 
 **v1 ("core")**
 - Conversions: images, audio, video (+ GIF, + MP3 extraction), subtitles, archives (ZIP/TAR/GZIP, RAR input), PDF → JPG/PNG/TXT/MD, images → PDF.
-- Tools: Compress, Remove Metadata, Mute (remove audio), Normalize Volume, Audio Channels (mono), Extract Archive, Split PDF, Merge PDFs, Create PDF.
+- Tools: Compress, Remove Metadata, Mute (remove audio), Normalize Volume, Audio Channels (mono or stereo), Extract Archive, Split PDF, Merge PDFs, Create PDF.
 - All 6 file actions.
 - Settings: key remapping, output location, launch at login, sounds on/off.
 

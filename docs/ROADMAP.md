@@ -68,7 +68,9 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 ## M4: v1 tools (lane B engines, lane A panels)
 - [ ] compress (image/audio/video), removeMetadata, muteVideo, normalizeAudio, audioChannels, extractArchive, splitPDF, mergePDF, createPDF.
-- [ ] Panels: compress presets, merge reorder list, channels toggle.
+- [ ] Panels: compress presets, merge reorder list, channels toggle, normalize target.
+
+*Status 2026-10-26:* the four panels are built (D31): the window, the IPC with golden fixtures, the order list, and remembered presets. No panel opens in a normal build until lane B wires the tool engines; `GRAPE_PREVIEW_PANELS=1` opens them for QA. CI checks the model, the contract and the page; nothing has run on the PC or a Mac yet (`TESTING.md` → "Tool panels, M4").
 
 ## M5: File actions on Windows (lane A)
 - [ ] copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.
