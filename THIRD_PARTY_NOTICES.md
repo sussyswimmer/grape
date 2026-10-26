@@ -4,7 +4,7 @@ Grape is free and open source, under the MIT License in `LICENSE`. It's built wi
 
 - **262 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
-- **FFmpeg and ffprobe**, the helper programs that ship next to Grape as separate files, and the libraries built into them. Their full license texts are in the `licenses` folder.
+- **FFmpeg and ffprobe**, the helper programs that builds of Grape with audio and video conversion ship next to it as separate files, and the libraries built into them. Those builds carry their full license texts in a `licenses` folder.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
 
@@ -104,9 +104,9 @@ SOFTWARE.
 
 ## FFmpeg and ffprobe
 
-Grape converts audio and video with FFmpeg and reads media details with ffprobe. They aren't compiled into Grape. They're separate programs that ship next to it, and Grape starts them when it needs them. Grape builds them itself from FFmpeg 9.0.2 with only the parts it uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
+Builds of Grape that include audio and video conversion ship FFmpeg, which converts the audio and video, and ffprobe, which reads media details. They aren't compiled into Grape: they're separate programs next to it, and Grape starts them when it needs them. Grape builds them itself from FFmpeg 9.0.2 with only the parts it uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
 
-Their license texts are in the `licenses/ffmpeg` folder: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the same GitHub Release as Grape.
+Those builds carry their license texts in a `licenses/ffmpeg` folder next to Grape: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the same GitHub Release as those builds.
 
 MP3 encoding uses LAME: https://lame.sourceforge.io/
 
