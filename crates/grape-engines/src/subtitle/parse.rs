@@ -113,12 +113,6 @@ pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseE
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let newline = newline(text);
     let webvtt = is_webvtt(text);
-    let lines: Vec<&str> = split_lines(text).map(str::trim_end).collect();
-    let body = if webvtt {
-        &lines[header_len(&lines)..]
-    } else {
-        &lines[..]
-    };
 
     let mut ticker = Ticker { cancel, count: 0 };
     let mut reader = Reader {
@@ -126,13 +120,33 @@ pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseE
         cues: Vec::new(),
         continues: false,
     };
-    for block in body.split(|line| line.is_empty()) {
-        if !block.is_empty() {
+    // The lines since the last blank line. It is reused, so only the
+    // longest block is ever held as lines.
+    let mut block: Vec<&str> = Vec::new();
+    // A WebVTT header runs to the first blank line, or to a line with
+    // `-->`, which starts the first cue.
+    let mut in_header = webvtt;
+    for line in split_lines(text).map(str::trim_end) {
+        if in_header {
+            if line.is_empty() || line.contains(ARROW) {
+                in_header = false;
+            } else {
+                continue;
+            }
+        }
+        if !line.is_empty() {
+            block.push(line);
+        } else if !block.is_empty() {
             ticker.tick()?;
-            reader.block(block, &mut ticker)?;
+            reader.block(&block, &mut ticker)?;
+            block.clear();
         }
     }
-    let cues = normalize(reader.cues, webvtt, &mut ticker)?;
+    if !block.is_empty() {
+        ticker.tick()?;
+        reader.block(&block, &mut ticker)?;
+    }
+    let cues = normalize(reader.cues, &mut ticker)?;
     Ok(Document {
         cues,
         newline,
@@ -168,15 +182,6 @@ fn is_webvtt(text: &str) -> bool {
         .is_some_and(|rest| matches!(rest.chars().next(), None | Some(' ' | '\t' | '\r' | '\n')))
 }
 
-/// How many lines a WebVTT header takes: those before the first blank
-/// line, or before a line with `-->`, which starts the first cue.
-fn header_len(lines: &[&str]) -> usize {
-    lines
-        .iter()
-        .position(|line| line.is_empty() || line.contains(ARROW))
-        .unwrap_or(lines.len())
-}
-
 /// Checks the cancel token every [`CHECK_EVERY`] ticks, from the first.
 struct Ticker<'a> {
     cancel: &'a CancelToken,
@@ -196,25 +201,19 @@ impl Ticker<'_> {
     }
 }
 
-/// A cue as read: its timing and its raw text lines.
-struct RawCue<'a> {
-    start_ms: u64,
-    end_ms: u64,
-    lines: Vec<&'a str>,
-}
-
-/// Reads blocks (runs of non-blank lines) into cues.
-struct Reader<'a> {
+/// Reads blocks (runs of non-blank lines) into cues, their text already
+/// in spans and without lines that have no visible text.
+struct Reader {
     webvtt: bool,
-    cues: Vec<RawCue<'a>>,
+    cues: Vec<Cue>,
     /// True when a block without a timing line continues the last cue:
     /// false before the first cue and after a dropped one, whose text that
     /// block would be.
     continues: bool,
 }
 
-impl<'a> Reader<'a> {
-    fn block(&mut self, block: &[&'a str], ticker: &mut Ticker) -> Result<(), ParseError> {
+impl Reader {
+    fn block(&mut self, block: &[&str], ticker: &mut Ticker) -> Result<(), ParseError> {
         if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
             return Ok(());
         }
@@ -223,7 +222,7 @@ impl<'a> Reader<'a> {
             // blank line cut off from its cue.
             if !block.iter().all(|line| is_digits(line)) && self.continues {
                 if let Some(cue) = self.cues.last_mut() {
-                    cue.lines.extend_from_slice(block);
+                    push_lines(&mut cue.lines, block, self.webvtt);
                 }
             }
             return Ok(());
@@ -247,10 +246,12 @@ impl<'a> Reader<'a> {
             }
             match timing_line(timing) {
                 Some((start_ms, end_ms)) => {
-                    self.cues.push(RawCue {
+                    let mut lines = Vec::new();
+                    push_lines(&mut lines, text, self.webvtt);
+                    self.cues.push(Cue {
                         start_ms,
                         end_ms,
-                        lines: text.to_vec(),
+                        lines,
                     });
                     self.continues = true;
                 }
@@ -260,6 +261,20 @@ impl<'a> Reader<'a> {
         }
         Ok(())
     }
+}
+
+/// Appends `text`'s lines to a cue's `lines` as spans, leaving out those
+/// without visible text. Each is shrunk to fit, as most hold one span.
+fn push_lines(lines: &mut Vec<Vec<Span>>, text: &[&str], webvtt: bool) {
+    lines.extend(
+        text.iter()
+            .map(|line| spans(line, webvtt))
+            .filter(|line| has_text(line))
+            .map(|mut line| {
+                line.shrink_to_fit();
+                line
+            }),
+    );
 }
 
 /// True for the first line of a WebVTT comment, style or region block:
@@ -351,33 +366,17 @@ fn millis(digits: &str) -> Option<u64> {
     }))
 }
 
-/// Turns the raw cues into spans and normalizes them: sorted by start
-/// (stable), each lasting at least 1 ms, without lines that have no
-/// visible text, and without cues left with no lines.
-fn normalize(raw: Vec<RawCue>, webvtt: bool, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseError> {
-    let mut cues = Vec::with_capacity(raw.len());
-    for cue in raw {
+/// Normalizes the cues as read: sorted by start (stable), each lasting at
+/// least 1 ms, and without cues that have no line of visible text.
+fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseError> {
+    for cue in &mut cues {
         ticker.tick()?;
-        let lines: Vec<Vec<Span>> = cue
-            .lines
-            .iter()
-            .map(|line| spans(line, webvtt))
-            .filter(|line| has_text(line))
-            .collect();
-        if lines.is_empty() {
-            continue;
+        if cue.end_ms <= cue.start_ms {
+            cue.end_ms = cue.start_ms.saturating_add(1);
         }
-        let end_ms = if cue.end_ms <= cue.start_ms {
-            cue.start_ms.saturating_add(1)
-        } else {
-            cue.end_ms
-        };
-        cues.push(Cue {
-            start_ms: cue.start_ms,
-            end_ms,
-            lines,
-        });
+        cue.lines.shrink_to_fit();
     }
+    cues.retain(|cue| !cue.lines.is_empty());
     cues.sort_by_key(|cue| cue.start_ms);
     if cues.is_empty() {
         Err(ParseError::NoCues)
@@ -1135,17 +1134,17 @@ mod tests {
             [cue(2000, 2001, &["Backwards"]), cue(3000, 3001, &["Zero"])]
         );
         let max = u64::MAX;
-        let raw = vec![RawCue {
+        let raw = vec![Cue {
             start_ms: max,
             end_ms: max,
-            lines: vec!["End of time"],
+            lines: vec![vec![text("End of time")]],
         }];
         let token = CancelToken::new();
         let mut ticker = Ticker {
             cancel: &token,
             count: 0,
         };
-        let cues = normalize(raw, false, &mut ticker).unwrap();
+        let cues = normalize(raw, &mut ticker).unwrap();
         assert_eq!((cues[0].start_ms, cues[0].end_ms), (max, max));
     }
 
