@@ -112,10 +112,10 @@ pub struct JobOutcome {
     pub outputs: Vec<PathBuf>,
     /// True when the planned name was taken at finalize time and a " N" name was used.
     pub renamed: bool,
-    /// What the toast may add besides the outputs: what was left out or
-    /// removed. Facts, never words; the app words them. Empty for most jobs.
-    /// In the order the engine found them, and at most one
-    /// [`Note::MetadataRemoved`] per job.
+    /// What the toast may add besides the outputs: what was left out,
+    /// removed or saved. Facts, never words; the app words them. Empty for
+    /// most jobs. In the order the engine found them, and at most one
+    /// [`Note::MetadataRemoved`] or [`Note::Compressed`] per job.
     pub notes: Vec<Note>,
 }
 
@@ -134,37 +134,66 @@ pub enum Note {
     /// without repeats. Empty when the file had none (the output is still
     /// written).
     MetadataRemoved(Vec<MetaField>),
+    /// Compress: the source's and the output's sizes in bytes (D26).
+    Compressed {
+        /// The source's size.
+        before: u64,
+        /// The output's size.
+        after: u64,
+    },
 }
 
 /// A kind of metadata Remove Metadata reports. In the order the toast
-/// names them.
+/// names them (D26). PDFs report only their Info keys (Author, Title,
+/// Subject, Keywords, Creator, Producer and the two dates), Xmp and Other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum MetaField {
-    /// A document's author (PDF Info `/Author`).
+    /// Where it was made: GPS, ©xyz, ISO 6709, telemetry tracks.
+    Location,
+    /// The camera: make, model, lens, serials, firmware, MakerNote.
+    Camera,
+    /// An author (PDF Info `/Author`; artist, composer, EXIF Artist).
     Author,
-    /// Its title (`/Title`).
+    /// A title (`/Title`; a file's or a track's title).
     Title,
-    /// Its subject (`/Subject`).
+    /// A subject (`/Subject`).
     Subject,
-    /// Its keywords (`/Keywords`).
+    /// Keywords (`/Keywords`).
     Keywords,
+    /// Comments, descriptions, synopsis, lyrics, UserComment.
+    Comment,
+    /// A copyright notice.
+    Copyright,
     /// The app that made it (`/Creator`).
     Creator,
     /// The tool that wrote the PDF (`/Producer`).
     Producer,
-    /// When it was made (`/CreationDate`).
+    /// The software that wrote it: encoder, Software tag, writing app.
+    Software,
+    /// When it was made (`/CreationDate`; recording dates, timecode).
     CreationDate,
     /// When it was last changed (`/ModDate`).
     ModDate,
     /// An XMP metadata packet (the PDF catalog's `/Metadata`).
     Xmp,
+    /// An IPTC-IIM/Photoshop block.
+    Iptc,
+    /// A thumbnail: EXIF IFD1, JFXX, Photoshop thumbnail.
+    Thumbnail,
+    /// An attached picture or MKV image attachment.
+    CoverArt,
+    /// Chapters.
+    Chapters,
+    /// Extra images or video after a JPEG's end, MPF.
+    Embedded,
     /// Any other entry.
     Other,
 }
 
 /// Why a job failed, for the app's toast logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ErrorKind {
     /// This build can't run the operation (format pair, tool or output shape).
     NotYetSupported,
@@ -180,6 +209,10 @@ pub enum ErrorKind {
     NameTaken,
     /// The job was cancelled; nothing was written.
     Cancelled,
+    /// The tool would change nothing worth a new file (already compact,
+    /// already mono, no sound to remove, already at the target loudness,
+    /// too quiet to measure). Nothing was written (D26).
+    NoChange,
 }
 
 /// A job failure. `Display` is [`GrapeError::user_message`], ready for a
@@ -408,4 +441,41 @@ fn cancelled(src: &Path) -> GrapeError {
         "Cancelled. Nothing was saved.",
         format!("cancelled while converting {}", src.display()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metadata_fields_sort_in_the_toasts_order() {
+        use MetaField::*;
+        // D26's order, which the toast names them in.
+        let order = [
+            Location,
+            Camera,
+            Author,
+            Title,
+            Subject,
+            Keywords,
+            Comment,
+            Copyright,
+            Creator,
+            Producer,
+            Software,
+            CreationDate,
+            ModDate,
+            Xmp,
+            Iptc,
+            Thumbnail,
+            CoverArt,
+            Chapters,
+            Embedded,
+            Other,
+        ];
+        let mut sorted = order;
+        sorted.reverse();
+        sorted.sort();
+        assert_eq!(sorted, order);
+    }
 }
