@@ -112,20 +112,20 @@ impl Over {
     }
 }
 
-/// What an archive job left out, for the app to word ("2 links were left
-/// out"). [`JobOutcome`] itself is unchanged.
+/// What an archive job left out, counted, for the app to word ("2 links
+/// left out"). It reaches the app as [`crate::Note::LeftOut`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct LeftOut {
+pub struct LeftOut {
     /// Symbolic links (all of them when extracting; escaping ones when
     /// converting) and tar hard links.
-    pub(crate) links: u32,
+    pub links: u32,
     /// Devices, FIFOs, sockets and tar entry types Grape doesn't know.
-    pub(crate) specials: u32,
+    pub specials: u32,
     /// Files under `__MACOSX/` and AppleDouble `._` files.
-    pub(crate) mac_metadata: u32,
+    pub mac_metadata: u32,
     /// RAR5 file-copy references (WinRAR's "store identical files as
     /// references").
-    pub(crate) copies: u32,
+    pub copies: u32,
 }
 
 /// What a successful archive job wrote, and what it left out.

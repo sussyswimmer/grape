@@ -322,7 +322,8 @@ fn a_name_taken_after_planning_gets_the_next_number() {
         outcome,
         JobOutcome {
             outputs: vec![dir.join("subs 2.vtt")],
-            renamed: true
+            renamed: true,
+            notes: Vec::new(),
         }
     );
     assert_eq!(fs::read(&planned).unwrap(), b"not ours");

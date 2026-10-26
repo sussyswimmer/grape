@@ -72,6 +72,7 @@ pub(crate) fn finalize(
                 return Ok(JobOutcome {
                     outputs: vec![target],
                     renamed: replans > 0,
+                    notes: Vec::new(),
                 })
             }
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {

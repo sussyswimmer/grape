@@ -237,6 +237,7 @@ pub(crate) fn publish_folder(
     Ok(JobOutcome {
         outputs: vec![reserved.path.clone()],
         renamed: replans > 0,
+        notes: Vec::new(),
     })
 }
 

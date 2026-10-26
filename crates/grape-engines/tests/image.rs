@@ -92,7 +92,8 @@ fn all_twenty_raster_pairs_convert_next_to_the_source() {
                 outcome,
                 JobOutcome {
                     outputs: vec![planned.clone()],
-                    renamed: false
+                    renamed: false,
+                    notes: Vec::new(),
                 },
                 "{from:?} -> {to:?}"
             );
@@ -151,7 +152,8 @@ fn a_name_taken_after_planning_gets_the_next_number() {
         outcome,
         JobOutcome {
             outputs: vec![dir.join("photo 2.jpg")],
-            renamed: true
+            renamed: true,
+            notes: Vec::new(),
         }
     );
     assert_eq!(fs::read(&planned).unwrap(), b"not ours");

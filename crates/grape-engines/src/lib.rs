@@ -26,6 +26,7 @@ mod publish;
 mod selection;
 mod subtitle;
 
+pub use archive::LeftOut;
 pub use selection::build_selection;
 
 use std::path::{Path, PathBuf};
@@ -103,12 +104,61 @@ pub struct EngineCtx {
 }
 
 /// What a successful job wrote.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct JobOutcome {
     /// Files/folders actually written (final paths).
     pub outputs: Vec<PathBuf>,
     /// True when the planned name was taken at finalize time and a " N" name was used.
     pub renamed: bool,
+    /// What the toast may add besides the outputs: what was left out or
+    /// removed. Facts, never words; the app words them. Empty for most jobs.
+    /// In the order the engine found them, and at most one
+    /// [`Note::MetadataRemoved`] per job.
+    pub notes: Vec<Note>,
+}
+
+/// A fact about a finished job for the toast. Counts and kinds only:
+/// never a name, a path or file contents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Note {
+    /// Archive items that weren't carried over (D27). At least one count
+    /// is above zero.
+    LeftOut(LeftOut),
+    /// PDF → images: this many pages were drawn below 300 DPI because they
+    /// were too large (D29).
+    PagesScaled(u32),
+    /// Remove Metadata: what it found with a value and removed, sorted and
+    /// without repeats. Empty when the file had none (the output is still
+    /// written).
+    MetadataRemoved(Vec<MetaField>),
+}
+
+/// A kind of metadata Remove Metadata reports. In the order the toast
+/// names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum MetaField {
+    /// A document's author (PDF Info `/Author`).
+    Author,
+    /// Its title (`/Title`).
+    Title,
+    /// Its subject (`/Subject`).
+    Subject,
+    /// Its keywords (`/Keywords`).
+    Keywords,
+    /// The app that made it (`/Creator`).
+    Creator,
+    /// The tool that wrote the PDF (`/Producer`).
+    Producer,
+    /// When it was made (`/CreationDate`).
+    CreationDate,
+    /// When it was last changed (`/ModDate`).
+    ModDate,
+    /// An XMP metadata packet (the PDF catalog's `/Metadata`).
+    Xmp,
+    /// Any other entry.
+    Other,
 }
 
 /// Why a job failed, for the app's toast logic.

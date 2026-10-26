@@ -521,6 +521,7 @@ mod tests {
         Ok(JobOutcome {
             outputs: vec![PathBuf::from(path)],
             renamed: false,
+            notes: Vec::new(),
         })
     }
 
