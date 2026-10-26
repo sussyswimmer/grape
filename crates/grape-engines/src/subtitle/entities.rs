@@ -1,11 +1,14 @@
 //! The character references WebVTT text may use by name: all 252 names of
-//! HTML 4.01, plus `&apos;` and the uppercase `&AMP;`, `&LT;`, `&GT;` and
-//! `&QUOT;` that HTML also accepts. Names are case-sensitive (`&eacute;` is
-//! é, `&Eacute;` is É). HTML5 adds about two thousand more, which subtitle
-//! files don't use.
+//! HTML 4.01, plus `&apos;` and the uppercase `&AMP;`, `&COPY;`, `&GT;`,
+//! `&LT;`, `&QUOT;` and `&REG;` that HTML also accepts. Names are
+//! case-sensitive (`&eacute;` is é, `&Eacute;` is É). HTML5 adds about two
+//! thousand more, which subtitle files don't use.
+//!
+//! HTML also reads some of these without their `;`, for pages written
+//! before it was required: see [`legacy`].
 
 /// Every name with its character, sorted by name for a binary search.
-pub(super) const NAMED: [(&str, char); 257] = [
+pub(super) const NAMED: [(&str, char); 259] = [
     ("AElig", 'Æ'),
     ("AMP", '&'),
     ("Aacute", 'Á'),
@@ -16,6 +19,7 @@ pub(super) const NAMED: [(&str, char); 257] = [
     ("Atilde", 'Ã'),
     ("Auml", 'Ä'),
     ("Beta", 'Β'),
+    ("COPY", '©'),
     ("Ccedil", 'Ç'),
     ("Chi", 'Χ'),
     ("Dagger", '‡'),
@@ -54,6 +58,7 @@ pub(super) const NAMED: [(&str, char); 257] = [
     ("Prime", '″'),
     ("Psi", 'Ψ'),
     ("QUOT", '"'),
+    ("REG", '®'),
     ("Rho", 'Ρ'),
     ("Scaron", 'Š'),
     ("Sigma", 'Σ'),
@@ -271,4 +276,13 @@ pub(super) fn named(name: &str) -> Option<char> {
         .binary_search_by_key(&name, |&(name, _)| name)
         .ok()
         .map(|at| NAMED[at].1)
+}
+
+/// The character `name` stands for when it comes without its `;`: only
+/// the 106 names HTML reads that way, those of HTML 3.2. They are the
+/// names of U+00A0 to U+00FF (`&nbsp` to `&yuml`, `&copy`, `&eacute`) and
+/// `&amp`, `&lt`, `&gt`, `&quot`, `&AMP`, `&LT`, `&GT`, `&QUOT`, `&COPY` and
+/// `&REG`: exactly the names whose character is one of those.
+pub(super) fn legacy(name: &str) -> Option<char> {
+    named(name).filter(|c| matches!(c, '&' | '<' | '>' | '"' | '\u{A0}'..='\u{FF}'))
 }

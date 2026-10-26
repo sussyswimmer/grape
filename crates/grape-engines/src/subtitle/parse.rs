@@ -546,8 +546,11 @@ fn sort_by_start(cues: &mut [Cue], ticker: &mut Ticker) -> Result<(), Cancelled>
 ///   gets its ")".
 /// - In WebVTT only, character references: by name from [`entities`]
 ///   (case-sensitive, so `&Eacute;` is É and `&EACUTE;` stays text), or by
-///   number (`&#233;`, `&#xE9;`). `&#10;` and `&#13;` break the line, as a
-///   line of cue text can't hold one; `&#0;` stays text.
+///   number (`&#233;`, `&#xE9;`). As in HTML, a name of HTML 3.2 (see
+///   [`entities::legacy`]) needs no `;` when what follows it isn't a letter
+///   or digit: `&copy 2024` is "© 2024", `&copy2024` stays text. `&#10;`
+///   and `&#13;` break the line, as a line of cue text can't hold one;
+///   `&#0;` stays text.
 fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
     let mut out = Spans::new();
     let mut rest = line;
@@ -739,28 +742,38 @@ enum Reference {
     LineBreak,
 }
 
-/// The WebVTT character reference at the start of `rest`: its length and
-/// what it stands for, or `None` if it isn't one Grape decodes.
+/// The WebVTT character reference at the start of `rest` (at its `&`):
+/// its length and what it stands for, or `None` if it isn't one Grape
+/// decodes.
 fn reference(rest: &str) -> Option<(usize, Reference)> {
     let body = &rest[1..];
-    let len = body
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
-        .unwrap_or(body.len());
-    if !body[len..].starts_with(';') {
-        return None;
-    }
-    let name = &body[..len];
-    let reference = match entities::named(name) {
-        Some(c) => Reference::Char(c),
-        None => numeric(name)?,
+    let (number, body) = match body.strip_prefix('#') {
+        Some(digits) => (true, digits),
+        None => (false, body),
     };
-    Some((len + 2, reference))
+    let len = body
+        .find(|c: char| !c.is_ascii_alphanumeric())
+        .unwrap_or(body.len());
+    let (name, semicolon) = (&body[..len], body[len..].starts_with(';'));
+    if number {
+        if !semicolon {
+            return None;
+        }
+        // `&`, `#`, the digits and `;`.
+        return Some((len + 3, numeric(name)?));
+    }
+    if semicolon {
+        Some((len + 2, Reference::Char(entities::named(name)?)))
+    } else {
+        // What follows the name isn't a letter or digit, or it would be
+        // part of the name.
+        Some((len + 1, Reference::Char(entities::legacy(name)?)))
+    }
 }
 
-/// What a numeric reference (`#65`, `#x41` or `#X41`) stands for. `None`
-/// for a number that isn't a Unicode scalar value, and for NUL.
-fn numeric(name: &str) -> Option<Reference> {
-    let digits = name.strip_prefix('#')?;
+/// What the digits of a numeric reference (`65`, `x41` or `X41`) stand
+/// for. `None` for a number that isn't a Unicode scalar value, and for NUL.
+fn numeric(digits: &str) -> Option<Reference> {
     let code = match digits.strip_prefix(['x', 'X']) {
         Some(hex) => in_radix(hex, 16),
         None => in_radix(digits, 10),
@@ -1410,7 +1423,7 @@ mod tests {
 
     #[test]
     fn the_named_references_are_the_html4_set_sorted_for_lookup() {
-        assert_eq!(entities::NAMED.len(), 252 + 5);
+        assert_eq!(entities::NAMED.len(), 252 + 7);
         assert!(entities::NAMED.windows(2).all(|w| w[0].0 < w[1].0));
         for (name, c) in entities::NAMED {
             assert_eq!(entities::named(name), Some(c), "{name}");
@@ -1423,9 +1436,61 @@ mod tests {
     }
 
     #[test]
+    fn the_legacy_names_are_html_3_2s() {
+        let legacy: Vec<&str> = entities::NAMED
+            .iter()
+            .map(|&(name, _)| name)
+            .filter(|name| entities::legacy(name).is_some())
+            .collect();
+        assert_eq!(legacy.len(), 106);
+        for name in [
+            "amp", "AMP", "lt", "LT", "gt", "GT", "quot", "QUOT", "copy", "COPY",
+        ] {
+            assert!(legacy.contains(&name), "{name}");
+        }
+        for name in [
+            "reg", "REG", "nbsp", "iexcl", "AElig", "eacute", "yuml", "uml", "shy",
+        ] {
+            assert!(legacy.contains(&name), "{name}");
+        }
+        for name in ["apos", "euro", "hellip", "OElig", "Yuml", "trade", "fnof"] {
+            assert_eq!(entities::legacy(name), None, "{name}");
+        }
+        assert_eq!(entities::legacy("Yacute"), Some('Ý'));
+        // Computed apart from this code, from Python's table of HTML's
+        // names: sum((i + 1) * ord(html5[k]) for i, k in enumerate(the
+        // names without ';', sorted bytewise)).
+        let checksum: u64 = legacy
+            .iter()
+            .zip(1..)
+            .map(|(name, i)| i * u64::from(entities::legacy(name).unwrap()))
+            .sum();
+        assert_eq!(checksum, 1_128_350);
+    }
+
+    #[test]
+    fn legacy_names_need_no_semicolon_before_a_non_alphanumeric() {
+        assert_eq!(
+            spans(
+                "&amp &lt;b&gt &copy 2024 caf&eacute, &Eacute.t&eacute &nbsp|&AMP&LT&GT&QUOT &COPY&REG",
+                true
+            ),
+            [text("& <b> © 2024 café, É.té \u{A0}|&<>\" ©®")]
+        );
+        // At the end of the line, and before `#` or another reference.
+        assert_eq!(spans("&amp#38; &reg&copy;&amp", true), [text("&#38; ®©&")]);
+        // HTML 4 names that HTML 3.2 didn't have need their `;`.
+        assert_eq!(
+            spans("&euro &hellip &apos &mdash; &COPY;&REG;", true),
+            [text("&euro &hellip &apos — ©®")]
+        );
+    }
+
+    #[test]
     fn invalid_or_unknown_references_stay_literal() {
         let literal = "&#xD800; &#1114112; &#99999999999; &#; &#x; &#xZZ; &#0; &#x0; \
-                       &bogus; &Amp; &EACUTE; &Quot; &amp &copy &;";
+                       &bogus; &Amp; &EACUTE; &Quot; &; & &#65 &#x41 &ampx &copy2024 &Amp &notin \
+                       &#&amp1;";
         assert_eq!(spans(literal, true), [text(literal)]);
     }
 
