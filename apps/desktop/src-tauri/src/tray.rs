@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::controller::Input;
 use crate::wheel::WheelInputs;
-use crate::{ui_windows, GrapeState};
+use crate::{jobs, ui_windows, GrapeState};
 
 type PauseItem = CheckMenuItem<Wry>;
 
@@ -53,6 +53,9 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent, pause: &PauseItem) {
         ITEM_PAUSE => toggle_pause(app, pause),
         ITEM_QUIT => {
             log::info!("quit from the tray");
+            // At once, so a long job starts stopping before the exit
+            // request goes round the event loop. `RunEvent::Exit` waits.
+            jobs::cancel_all(app);
             app.exit(0);
         }
         #[cfg(debug_assertions)]

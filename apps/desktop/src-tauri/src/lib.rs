@@ -12,6 +12,7 @@ pub mod events;
 mod float;
 mod jobs;
 mod settings;
+mod sidecars;
 mod toast;
 mod tray;
 mod ui_windows;
@@ -77,6 +78,8 @@ pub fn run() -> anyhow::Result<()> {
         ))
         .manage(GrapeState::default())
         .manage(toast::Toaster::default())
+        // One cancel token per running drop, so quitting can stop them.
+        .manage(jobs::Running::default())
         // Empty, and only ever filled on Windows; the commands work on it
         // everywhere.
         .manage(float::Shelf::default())
@@ -115,6 +118,8 @@ pub fn run() -> anyhow::Result<()> {
             if let Err(err) = ui_windows::prepare_toast(app.handle()) {
                 log::error!("could not prepare the toast window: {err:#}");
             }
+            // Once, next to Grape's executable; every drop gets a copy.
+            app.manage(sidecars::Sidecars::find());
             // Before the wheel, which starts with the user's keys, sounds
             // and haptics.
             app.manage(SettingsState::load(app.handle()));
@@ -146,8 +151,17 @@ pub fn run() -> anyhow::Result<()> {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
-        // Unhook the mouse before the process goes.
-        RunEvent::Exit => wheel::stop(app),
+        // Grape is going (tray → Quit, or a restart): stop every job now.
+        RunEvent::ExitRequested { code: Some(_), .. } => jobs::cancel_all(app),
+        // Unhook the mouse before the process goes, and give the cancelled
+        // jobs a moment to kill their children and delete their temp
+        // files, so none outlives Grape. Cancelling again covers an exit
+        // that skipped the request.
+        RunEvent::Exit => {
+            jobs::cancel_all(app);
+            wheel::stop(app);
+            jobs::wait_for_all(app);
+        }
         // Opening Grape again while it runs (Finder, Launchpad, Spotlight)
         // opens Settings, like a second launch does on Windows.
         #[cfg(target_os = "macos")]

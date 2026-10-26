@@ -41,7 +41,7 @@ The overlay's full spec is in `docs/ARCHITECTURE.md` → "The overlay window". `
 ## Rules
 - The app crate is the only place `anyhow` is allowed.
 - The settings store is `tauri-plugin-store`. Keep keys exactly as in `docs/ARCHITECTURE.md` → Settings.
-- Sidecars go in `bundle.externalBin` with target-triple suffixes. Resolve them through Tauri's sidecar API and pass them to engines as `SidecarPaths`.
-- Plugins allowed so far: store, autostart, log, single-instance, shell (sidecars only), updater (opt-in, M7). Adding others needs a DECISIONS entry.
+- Sidecars go in `bundle.externalBin` with target-triple suffixes, set only by the overlay `tauri.sidecars.conf.json` that a build passes with `--config` (D25; no build passes it yet; it also bundles `licenses/ffmpeg/`, so it fails until that folder exists), and the bundle puts them next to Grape's executable without the suffix (with the overlay, `tauri dev` has tauri-build copy them into `target/debug`). `scripts/fetch-sidecars.ps1` and `.sh` fill `binaries/` from `scripts/sidecars.lock`. `src/sidecars.rs` finds them once in setup, only there (`{name}{EXE_SUFFIX}` in `current_exe()`'s folder; `heif-enc` on Windows only), never on `PATH` and never through the shell plugin, and every drop's `EngineCtx` gets a copy as `SidecarPaths`. The log names the ones found, never their paths. Each drop's `CancelToken` stays in `jobs::Running` until its thread ends: tray → Quit, `ExitRequested` with a code and `RunEvent::Exit` cancel them all (and any drop that starts after), and `Exit` waits up to 2 s for them to end, so no job outlives Grape.
+- Plugins allowed so far: store, autostart, log, single-instance, shell (allowed for sidecars, though they don't need it), updater (opt-in, M7). Adding others needs a DECISIONS entry.
 - Mac: `ActivationPolicy::Accessory`. Windows: no main window, tray only.
 - **Never request network access** except the updater (golden rule 3).
