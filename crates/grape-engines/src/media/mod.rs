@@ -824,6 +824,46 @@ mod tests {
     }
 
     #[test]
+    fn a_source_without_the_needed_stream_is_refused_before_anything_else() {
+        let _serial = one_at_a_time();
+        // Both slots are busy: a refusal that waited for one wouldn't come.
+        let token = crate::CancelToken::new();
+        let busy = (run::acquire(&token).unwrap(), run::acquire(&token).unwrap());
+        let case = Case::new("silent.mp4", Format::Mp3);
+        // It falls back to Grape's folder, which isn't there yet.
+        let fallback = case.dir.0.join("fallback");
+        let job = Job {
+            output: JobOutput::File(fallback.join("silent.mp3")),
+            used_fallback: true,
+            ..case.job.clone()
+        };
+        script([Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, ""))]);
+        let ctx = ctx();
+        // Ends a job that waits for a slot after 2 s.
+        let (finished, watching) = std::sync::mpsc::channel::<()>();
+        let watchdog = {
+            let cancel = ctx.cancel.clone();
+            std::thread::spawn(move || {
+                if watching.recv_timeout(Duration::from_secs(2)).is_err() {
+                    cancel.cancel();
+                }
+            })
+        };
+        let started = std::time::Instant::now();
+        let err = crate::run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+        let took = started.elapsed();
+        drop(finished);
+        watchdog.join().unwrap();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "silent.mp4 has no sound to save as MP3.");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+        assert!(!fallback.exists());
+        assert_eq!(ran().len(), 1);
+        drop(busy);
+        case.assert_clean();
+    }
+
+    #[test]
     fn a_job_holds_an_ffmpeg_slot_while_it_runs() {
         let _serial = one_at_a_time();
         let case = Case::new("song.wav", Format::Flac);
