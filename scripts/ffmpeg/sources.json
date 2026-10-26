@@ -1,0 +1,115 @@
+{
+  "_comment": [
+    "The source tarballs of Grape's own FFmpeg build (DECISIONS D24), pinned. scripts/ffmpeg/build.sh reads this file; change a pin here, never in the script.",
+    "Each source: its version (x264: a commit on its stable branch), when it was released, an official https URL, the file name it's saved as, its size in bytes and SHA-256 (checked before anything is extracted), the one folder the tarball unpacks to, its SPDX license and the license files inside that folder.",
+    "Each is the newest release at least 14 days old on 2026-10-26 (D9).",
+    "Checked byte for byte from this machine on 2026-10-26: ffmpeg (and its GPG signature, key FCF986EA15E6E293A5644F10B4322F04D67658D8), x264 (downloaded twice, same bytes), lame, libogg, libvorbis, dav1d (matches VideoLAN's .sha256 file) and zlib, each from the URL below.",
+    "Not reachable from that machine: downloads.xiph.org (it redirects to ftp.osuosl.org, whose TLS failed through the proxy) and codeload.github.com (403). So the opus and libvpx bytes came from copies, and the hashes below are those copies' hashes, which other people's records of the official files confirm. See each one's _comment.",
+    "libogg and libvorbis are the Xiph release files as Xiph also attached them to its GitHub releases. Those are the same bytes as on downloads.xiph.org: libogg's .tar.xz matches Debian's libogg_1.3.6.orig.tar.xz and its .tar.gz matches Alpine's SHA-512 for downloads.xiph.org's; libvorbis's matches Alpine's SHA-512 for downloads.xiph.org's .tar.xz."
+  ],
+  "format": 1,
+  "sources": {
+    "ffmpeg": {
+      "version": "9.0.2",
+      "released": "2026-09-18",
+      "url": "https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz",
+      "file": "ffmpeg-9.0.2.tar.xz",
+      "size": 12040788,
+      "sha256": "8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e",
+      "dir": "ffmpeg-9.0.2",
+      "license": "GPL-2.0-or-later",
+      "license_files": ["COPYING.GPLv2", "LICENSE.md"]
+    },
+    "x264": {
+      "commit": "b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "_comment": "The head of x264's stable branch, committed 2025-06-08 (X264_BUILD 165). x264 publishes no release tarballs; this is VideoLAN GitLab's archive of that commit.",
+      "released": "2025-06-08",
+      "url": "https://code.videolan.org/videolan/x264/-/archive/b35605ace3ddf7c1a5d67a2eb553f034aef41d55/x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2",
+      "file": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55.tar.bz2",
+      "size": 848719,
+      "sha256": "6eeb82934e69fd51e043bd8c5b0d152839638d1ce7aa4eea65a3fedcf83ff224",
+      "dir": "x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55",
+      "license": "GPL-2.0-or-later",
+      "license_files": ["COPYING", "common/x86/x86inc.asm"]
+    },
+    "lame": {
+      "version": "4.0",
+      "released": "2026-07-11",
+      "url": "https://downloads.sourceforge.net/project/lame/lame/4.0/lame-4.0.tar.gz",
+      "file": "lame-4.0.tar.gz",
+      "size": 1496810,
+      "sha256": "3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb",
+      "dir": "lame-4.0",
+      "license": "LGPL-2.0-or-later",
+      "license_files": ["COPYING", "LICENSE"]
+    },
+    "opus": {
+      "version": "1.6.1",
+      "released": "2026-01-13",
+      "_comment": "Xiph's own release file. Its bytes came from Alpine's copy (distfiles.alpinelinux.org/distfiles/edge/opus-1.6.1.tar.gz), which matches Arch Linux's SHA-256 taken from downloads.xiph.org/releases/opus/SHA256SUMS.txt, Arch's BLAKE2b and Alpine's SHA-512. Opus 1.6.1 has no GitHub release file.",
+      "url": "https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz",
+      "file": "opus-1.6.1.tar.gz",
+      "size": 10472813,
+      "sha256": "6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1",
+      "dir": "opus-1.6.1",
+      "license": "BSD-3-Clause",
+      "license_files": ["COPYING"]
+    },
+    "libogg": {
+      "version": "1.3.6",
+      "released": "2025-06-16",
+      "url": "https://github.com/xiph/ogg/releases/download/v1.3.6/libogg-1.3.6.tar.xz",
+      "file": "libogg-1.3.6.tar.xz",
+      "size": 439952,
+      "sha256": "5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061",
+      "dir": "libogg-1.3.6",
+      "license": "BSD-3-Clause",
+      "license_files": ["COPYING"]
+    },
+    "libvorbis": {
+      "version": "1.3.7",
+      "released": "2020-07-04",
+      "url": "https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.xz",
+      "file": "libvorbis-1.3.7.tar.xz",
+      "size": 1203792,
+      "sha256": "b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b",
+      "dir": "libvorbis-1.3.7",
+      "license": "BSD-3-Clause",
+      "license_files": ["COPYING"]
+    },
+    "libvpx": {
+      "version": "1.17.0",
+      "released": "2026-08-07",
+      "_comment": "libvpx publishes no release tarballs, so this is GitHub's archive of tag v1.17.0 (commit 6df3ec34557879fff673706f4a1d9fbd0f3a6f0e, named in the archive's pax header). Its bytes came from Fedora's copy (src.fedoraproject.org lookaside, v1.17.0.tar.gz), which matches Fedora's and Alpine's SHA-512 for github.com/webmproject/libvpx/archive/v1.17.0.tar.gz.",
+      "url": "https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz",
+      "file": "libvpx-1.17.0.tar.gz",
+      "size": 5670546,
+      "sha256": "1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a",
+      "dir": "libvpx-1.17.0",
+      "license": "BSD-3-Clause",
+      "license_files": ["LICENSE", "PATENTS", "third_party/x86inc/LICENSE"]
+    },
+    "dav1d": {
+      "version": "1.5.4",
+      "released": "2026-07-14",
+      "url": "https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz",
+      "file": "dav1d-1.5.4.tar.xz",
+      "size": 1038852,
+      "sha256": "686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5",
+      "dir": "dav1d-1.5.4",
+      "license": "BSD-2-Clause",
+      "license_files": ["COPYING", "doc/PATENTS", "src/ext/x86/x86inc.asm"]
+    },
+    "zlib": {
+      "version": "1.3.2",
+      "released": "2026-02-17",
+      "url": "https://zlib.net/fossils/zlib-1.3.2.tar.gz",
+      "file": "zlib-1.3.2.tar.gz",
+      "size": 1502830,
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "dir": "zlib-1.3.2",
+      "license": "Zlib",
+      "license_files": ["LICENSE"]
+    }
+  }
+}
