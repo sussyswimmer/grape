@@ -260,9 +260,14 @@ fn check_output(
     src: &Path,
 ) -> Result<(), GrapeError> {
     let wrote = |detail: String| names.encode_failed(format!("check {}: {detail}", out.display()));
-    let len = std::fs::metadata(out)
-        .map_err(|e| wrote(e.to_string()))?
-        .len();
+    let len = match std::fs::metadata(out) {
+        Ok(meta) => meta.len(),
+        // FFmpeg wrote into a folder that was removed meanwhile.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(names.write_failed(format!("check {}: {e}", out.display())))
+        }
+        Err(e) => return Err(wrote(e.to_string())),
+    };
     if len == 0 {
         return Err(wrote("FFmpeg wrote nothing".to_string()));
     }
@@ -334,8 +339,39 @@ fn missing_sidecar(detail: String) -> GrapeError {
     )
 }
 
+/// How FFmpeg (through `strerror`) words the OS errors of a file it can't
+/// open, read or write, lowercased.
+const FILE_ERRORS: [&str; 4] = [
+    "no such file or directory",
+    "permission denied",
+    "access is denied",
+    "input/output error",
+];
+
+/// What FFmpeg says when the output can't be written: the disk is full, the
+/// folder or drive is read-only, unplugged or gone.
+const WRITE_ERRORS: [&str; 7] = [
+    "no space left",
+    "disk full",
+    "read-only file system",
+    "no such file or directory",
+    "permission denied",
+    "access is denied",
+    "input/output error",
+];
+
+/// What FFmpeg says about a source it can't decode.
+const DECODE_ERRORS: [&str; 3] = [
+    "invalid data found",
+    "error while decoding",
+    "could not find codec",
+];
+
 /// Maps a failed `ffmpeg` run to the job's error, judging a failure by the
-/// end of what FFmpeg wrote to stderr.
+/// end of what FFmpeg wrote to stderr: a source it couldn't open (moved or
+/// deleted while the job waited, its drive gone) couldn't be read; one of
+/// [`WRITE_ERRORS`] couldn't be saved; [`DECODE_ERRORS`] isn't readable;
+/// anything else, a muxer refusing a stream included, couldn't be written.
 fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
     match e {
         RunError::Cancelled => crate::cancelled(src),
@@ -347,24 +383,12 @@ fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
         } => {
             let detail = format!("convert {}: {e}: {}", src.display(), stderr_tail.trim());
             let tail = stderr_tail.to_ascii_lowercase();
-            if [
-                "no space left",
-                "permission denied",
-                "access is denied",
-                "disk full",
-            ]
-            .iter()
-            .any(|needle| tail.contains(needle))
-            {
+            let says = |needles: &[&str]| needles.iter().any(|needle| tail.contains(needle));
+            if tail.contains("error opening input") && says(&FILE_ERRORS) {
+                names.read_failed(detail)
+            } else if says(&WRITE_ERRORS) {
                 names.write_failed(detail)
-            } else if [
-                "invalid data found",
-                "error while decoding",
-                "could not find codec",
-            ]
-            .iter()
-            .any(|needle| tail.contains(needle))
-            {
+            } else if says(&DECODE_ERRORS) {
                 names.decode_failed(detail)
             } else {
                 names.encode_failed(detail)
@@ -376,38 +400,142 @@ fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
     }
 }
 
-// Sparse files, which the size test needs, are cheap on Unix only.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
-
-    use std::fs;
 
     use super::*;
     use crate::output::unique_suffix;
 
     /// A fresh folder under the system temp folder, removed on drop.
+    #[cfg(unix)]
     struct TestDir(PathBuf);
 
+    #[cfg(unix)]
     impl TestDir {
         fn new() -> TestDir {
             let path = std::env::temp_dir().join(format!("grape-media-unit-{}", unique_suffix()));
-            fs::create_dir_all(&path).unwrap();
+            std::fs::create_dir_all(&path).unwrap();
             TestDir(path)
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TestDir {
         fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
     /// An absolute path to a program that isn't there.
+    #[cfg(unix)]
     fn no_program() -> PathBuf {
         std::env::temp_dir().join(format!("grape-no-sidecar-{}", unique_suffix()))
     }
 
+    /// The kind of error a failed `ffmpeg` run that wrote `stderr` maps to.
+    fn failed(stderr: &str) -> ErrorKind {
+        let names = Names::new(
+            Path::new("/in/clip.mkv"),
+            Path::new("/out/clip.mp4"),
+            Format::Mkv,
+            Format::Mp4,
+        );
+        let e = RunError::Exit {
+            code: Some(1),
+            stderr_tail: stderr.to_string(),
+        };
+        ffmpeg_failed(&names, e, Path::new("/in/clip.mkv")).kind
+    }
+
+    #[test]
+    fn ffmpeg_failures_are_judged_by_their_stderr() {
+        use ErrorKind::*;
+        // Lines as FFmpeg 6.1 and 9.0 print them.
+        let cases = [
+            // The output can't be written.
+            ("[out#0/mp3 @ 0x1] Error writing trailer: No space left on device", WriteFailed),
+            ("[out#0/mp4 @ 0x1] Error submitting a packet to the muxer: Disk full", WriteFailed),
+            ("av_interleaved_write_frame(): Permission denied", WriteFailed),
+            ("[out#0/wav @ 0x1] Error opening output file:/o/x.wav: Access is denied", WriteFailed),
+            ("[out#0/mkv @ 0x1] Error writing trailer: Read-only file system", WriteFailed),
+            ("[out#0/webm @ 0x1] Error submitting a packet to the muxer: Input/output error", WriteFailed),
+            (
+                "[out#0/wav @ 0x1] Error opening output file:/gone/.grape-tmp-1.wav: \
+                 No such file or directory\nError opening output file file:/gone/.grape-tmp-1.wav.\n\
+                 Error opening output files: No such file or directory",
+                WriteFailed,
+            ),
+            // The source can't be opened any more.
+            (
+                "[in#0 @ 0x1] Error opening input: No such file or directory\n\
+                 Error opening input file file:/in/clip.mkv.\n\
+                 Error opening input files: No such file or directory",
+                ReadFailed,
+            ),
+            ("[in#0 @ 0x1] Error opening input: Permission denied", ReadFailed),
+            ("[in#0 @ 0x1] Error opening input: Input/output error", ReadFailed),
+            // It opens but isn't what its name says.
+            ("[in#0 @ 0x1] Error opening input: Invalid data found when processing input", DecodeFailed),
+            ("[h264 @ 0x1] Error while decoding stream #0:0: Invalid data found", DecodeFailed),
+            ("Could not find codec parameters for stream 0", DecodeFailed),
+            // A muxer refusing a copied stream: the copy is worth a retry.
+            (
+                "[mp4 @ 0x1] track 1: muxing mp3 at 8000hz is not standard, to mux anyway set \
+                 strict to -1\n[out#0/mp4 @ 0x1] Could not write header (incorrect codec \
+                 parameters ?): Invalid argument\nError opening output file file:/o/x.mp4.\n\
+                 Error opening output files: Invalid argument",
+                EncodeFailed,
+            ),
+            ("[matroska @ 0x1] Can't write packet with unknown timestamp", EncodeFailed),
+            ("Unknown encoder 'libx264'", EncodeFailed),
+            ("", EncodeFailed),
+        ];
+        for (stderr, kind) in cases {
+            assert_eq!(failed(stderr), kind, "{stderr}");
+        }
+        // A sidecar that won't start, and a cancel.
+        let names = Names::new(
+            Path::new("a.wav"),
+            Path::new("o/a.mp3"),
+            Format::Wav,
+            Format::Mp3,
+        );
+        let spawn = RunError::Spawn(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(
+            ffmpeg_failed(&names, spawn, Path::new("a.wav")).user_message,
+            "Grape's media converter is missing. Reinstall Grape."
+        );
+        let cancelled = ffmpeg_failed(&names, RunError::Cancelled, Path::new("a.wav"));
+        assert_eq!(cancelled.kind, Cancelled);
+    }
+
+    #[test]
+    fn an_output_whose_folder_was_removed_couldnt_be_saved() {
+        // FFmpeg writes on into a removed folder (macOS, Linux); the check
+        // then finds no file.
+        let gone = std::env::temp_dir().join(format!("grape-gone-{}", unique_suffix()));
+        let out = gone.join(".grape-tmp-1.webm");
+        let src = Path::new("clip.mp4");
+        let names = Names::new(src, &gone.join("clip.webm"), Format::Mp4, Format::Webm);
+        let err = check_output(
+            Path::new("/x"),
+            &out,
+            Format::Webm,
+            &names,
+            &EngineCtx::default(),
+            src,
+        )
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::WriteFailed);
+        let folder = gone.file_name().unwrap().to_string_lossy();
+        assert_eq!(
+            err.user_message,
+            format!("Grape couldn't save into {folder}.")
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn an_aiff_past_4_gib_fails_its_check() {
         let dir = TestDir::new();
@@ -415,7 +543,7 @@ mod tests {
         let out = dir.0.join(".grape-tmp-1.aiff");
         let names = Names::new(&src, &dir.0.join("long.aiff"), Format::Flac, Format::Aiff);
         let ctx = EngineCtx::default();
-        let file = fs::File::create(&out).unwrap();
+        let file = std::fs::File::create(&out).unwrap();
         // Sparse: nothing is written.
         file.set_len(args::AIFF_MAX_LEN + 1).unwrap();
         let err = check_output(&no_program(), &out, Format::Aiff, &names, &ctx, &src).unwrap_err();
