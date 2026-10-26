@@ -231,6 +231,15 @@ fn a_file_at_the_size_limit_is_read() {
 }
 
 #[test]
+fn a_file_over_the_line_limit_is_refused_before_anything_is_written() {
+    let dir = TestDir::new("too-many-lines");
+    let bytes = vec![b'\n'; 1_000_001];
+    let err = fail(&dir, "lines.srt", &bytes, Format::Vtt);
+    assert_eq!(err.kind, ErrorKind::DecodeFailed);
+    assert_eq!(err.user_message, "lines.srt is too large to convert.");
+}
+
+#[test]
 fn a_name_taken_after_planning_gets_the_next_number() {
     let dir = TestDir::new("collision");
     let (src, job) = plan_one(

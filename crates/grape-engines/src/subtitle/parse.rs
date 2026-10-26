@@ -3,6 +3,7 @@
 //!
 //! - **Lines** split at `\r\n`, `\n` or a lone `\r`, and lose their
 //!   trailing whitespace. The output keeps the first line break's kind.
+//!   A text of more than [`MAX_LINES`] lines is too large.
 //! - **WebVTT** is recognized by content: the text starts with `WEBVTT`
 //!   alone or followed by whitespace. Its header (up to the first blank
 //!   line, or up to a line with `-->`) is skipped, and so are its `NOTE`,
@@ -26,6 +27,11 @@ use crate::CancelToken;
 
 /// How many blocks and cues are read between cancel checks.
 const CHECK_EVERY: usize = 256;
+
+/// The most lines a subtitle text may have. Real files have tens of
+/// thousands; this bounds the memory and time parsing takes, whatever the
+/// lines hold.
+pub(crate) const MAX_LINES: usize = 1_000_000;
 
 /// What separates the two timestamps of a timing line.
 const ARROW: &str = "-->";
@@ -100,6 +106,8 @@ pub(crate) enum ParseError {
     Cancelled,
     /// Not one cue had a valid timing line and visible text.
     NoCues,
+    /// The text has more than [`MAX_LINES`] lines.
+    TooLarge,
 }
 
 /// Reads `text` (SRT or WebVTT) into a normalized [`Document`], as the
@@ -126,7 +134,11 @@ pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseE
     // A WebVTT header runs to the first blank line, or to a line with
     // `-->`, which starts the first cue.
     let mut in_header = webvtt;
-    for line in split_lines(text).map(str::trim_end) {
+    for (n, line) in split_lines(text).enumerate() {
+        if n == MAX_LINES {
+            return Err(ParseError::TooLarge);
+        }
+        let line = line.trim_end();
         if in_header {
             if line.is_empty() || line.contains(ARROW) {
                 in_header = false;
@@ -169,9 +181,10 @@ fn newline(text: &str) -> Newline {
     }
 }
 
-/// The lines of `text`, split at `\r\n`, `\n` or a lone `\r`.
+/// The lines of `text`, split at `\r\n`, `\n` or a lone `\r`. A line
+/// break at the very end ends the last line; it doesn't start another.
 fn split_lines(text: &str) -> impl Iterator<Item = &str> {
-    text.split('\n')
+    text.split_terminator('\n')
         .flat_map(|line| line.strip_suffix('\r').unwrap_or(line).split('\r'))
 }
 
@@ -1193,6 +1206,22 @@ mod tests {
         ] {
             assert_eq!(parse(text, &token), Err(ParseError::NoCues), "{text:?}");
         }
+    }
+
+    #[test]
+    fn a_text_over_the_line_limit_is_too_large() {
+        let token = CancelToken::new();
+        // Three lines of cue, then blank lines up to exactly the limit.
+        let mut srt = "1\n00:00:01,000 --> 00:00:02,000\nHi\n".to_owned();
+        srt.push_str(&"\n".repeat(MAX_LINES - 3));
+        assert_eq!(split_lines(&srt).count(), MAX_LINES);
+        assert_eq!(plain(&parsed(&srt)), [cue(1000, 2000, &["Hi"])]);
+        srt.push('\n');
+        assert_eq!(parse(&srt, &token), Err(ParseError::TooLarge));
+        // A line without a line break after it counts too.
+        srt.pop();
+        srt.push('x');
+        assert_eq!(parse(&srt, &token), Err(ParseError::TooLarge));
     }
 
     #[test]
