@@ -2,7 +2,7 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
-- **312 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **313 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **libarchive**, whose `bsdtar` program Grape will read RAR archives with. It will ship as a separate program, with its license texts in the `licenses/libarchive` folder. Today's installer and DMG don't carry it yet.
@@ -3245,7 +3245,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4)
+Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4)
 
 *The standard text, because these crates don't ship it. The copyright holders are the authors named on each crate's page.*
 
