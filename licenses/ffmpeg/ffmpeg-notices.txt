@@ -28,8 +28,10 @@ from Grape, and they're here so that each has been read.
 Each entry: the source, the license the text reads as (a guide only: the
 text is what counts) and who holds it; the files that carry it, each with
 the builds that compile it; then the text, verbatim from the first of those
-files, comment marks and all. Paths start with the folder the source's
-tarball unpacks to (build-<source>/ is that source's own build folder).
+files, comment marks and all: a notice from its copyright lines to the end of
+its comment, or to where the library's own license starts in that comment.
+Paths start with the folder the source's tarball unpacks to (build-<source>/
+is that source's own build folder).
 
 ==============================================================================
 Part 1: notices
@@ -101,8 +103,6 @@ Text:
 [3] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
   ffmpeg-9.0.2/libavcodec/ac3dec_fixed.c  linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavutil/fixed_dsp.c      linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavutil/fixed_dsp.h      linux-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012
@@ -131,6 +131,10 @@ Text:
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
+ *
+ * Author:  Stanislav Ocovaj (socovaj@mips.com)
+ *
+ * AC3 fixed-point decoder for MIPS platforms
 
 ==============================================================================
 [4] FFmpeg 9.0.2, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
@@ -286,6 +290,30 @@ Text:
  * We specifically permit and encourage the use of this software as the basis
  * of commercial products, provided that all warranty or liability claims are
  * assumed by the product vendor.
+ *
+ * This file contains a fast, not so accurate integer implementation of the
+ * forward DCT (Discrete Cosine Transform).
+ *
+ * A 2-D DCT can be done by 1-D DCT on each row followed by 1-D DCT
+ * on each column.  Direct algorithms are also available, but they are
+ * much more complex and seem not to be any faster when reduced to code.
+ *
+ * This implementation is based on Arai, Agui, and Nakajima's algorithm for
+ * scaled DCT.  Their original paper (Trans. IEICE E-71(11):1095) is in
+ * Japanese, but the algorithm is described in the Pennebaker & Mitchell
+ * JPEG textbook (see REFERENCES section in file README).  The following code
+ * is based directly on figure 4-8 in P&M.
+ * While an 8-point DCT cannot be done in less than 11 multiplies, it is
+ * possible to arrange the computation so that many of the multiplies are
+ * simple scalings of the final outputs.  These multiplies can then be
+ * folded into the multiplications or divisions by the JPEG quantization
+ * table entries.  The AA&N method leaves only 5 multiplies and 29 adds
+ * to be done in the DCT itself.
+ * The primary disadvantage of this method is that with fixed-point math,
+ * accuracy is lost due to imprecise representation of the scaled
+ * quantization values.  The smaller the quantization table entry, the less
+ * precise the scaled value, so this implementation does worse with high-
+ * quality-setting files than with low-quality ones.
 
 ==============================================================================
 [9] FFmpeg 9.0.2, IJG
@@ -329,6 +357,23 @@ Text:
  * We specifically permit and encourage the use of this software as the basis
  * of commercial products, provided that all warranty or liability claims are
  * assumed by the product vendor.
+ *
+ * This file contains a slow-but-accurate integer implementation of the
+ * forward DCT (Discrete Cosine Transform).
+ *
+ * A 2-D DCT can be done by 1-D DCT on each row followed by 1-D DCT
+ * on each column.  Direct algorithms are also available, but they are
+ * much more complex and seem not to be any faster when reduced to code.
+ *
+ * This implementation is based on an algorithm described in
+ *   C. Loeffler, A. Ligtenberg and G. Moschytz, "Practical Fast 1-D DCT
+ *   Algorithms with 11 Multiplications", Proc. Int'l. Conf. on Acoustics,
+ *   Speech, and Signal Processing 1989 (ICASSP '89), pp. 988-991.
+ * The primary algorithm described there uses 11 multiplies and 29 adds.
+ * We use their alternate method with 12 multiplies and 32 adds.
+ * The advantage of this method is that no data path contains more than one
+ * multiplication; this allows a very simple and accurate implementation in
+ * scaled fixed-point arithmetic, with a minimal number of shifts.
 
 ==============================================================================
 [10] FFmpeg 9.0.2, BSD-3-Clause: Osamu Watanabe
@@ -405,6 +450,26 @@ Text:
  * We specifically permit and encourage the use of this software as the basis
  * of commercial products, provided that all warranty or liability claims are
  * assumed by the product vendor.
+ *
+ * This file contains the basic inverse-DCT transformation subroutine.
+ *
+ * This implementation is based on an algorithm described in
+ *   C. Loeffler, A. Ligtenberg and G. Moschytz, "Practical Fast 1-D DCT
+ *   Algorithms with 11 Multiplications", Proc. Int'l. Conf. on Acoustics,
+ *   Speech, and Signal Processing 1989 (ICASSP '89), pp. 988-991.
+ * The primary algorithm described there uses 11 multiplies and 29 adds.
+ * We use their alternate method with 12 multiplies and 32 adds.
+ * The advantage of this method is that no data path contains more than one
+ * multiplication; this allows a very simple and accurate implementation in
+ * scaled fixed-point arithmetic, with a minimal number of shifts.
+ *
+ * I've made lots of modifications to attempt to take advantage of the
+ * sparse nature of the DCT matrices we're getting.  Although the logic
+ * is cumbersome, it's straightforward and the resulting code is much
+ * faster.
+ *
+ * A better way to do this would be to pass in the DCT block as a sparse
+ * matrix, perhaps with the difference cases encoded.
 
 ==============================================================================
 [12] FFmpeg 9.0.2, MIT: a840bda5870ba11f19698ff6eb9581dfb0f95fa5; Loic Minier <lool at dooz.org>
@@ -767,7 +832,77 @@ Text:
  * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-[24] FFmpeg 9.0.2, BSL-1.0
+[24] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
+Files:
+  ffmpeg-9.0.2/libavutil/fixed_dsp.c  linux-x86_64, windows-x86_64
+Text:
+
+ * Copyright (c) 2012
+ *      MIPS Technologies, Inc., California.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the MIPS Technologies, Inc., nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE MIPS TECHNOLOGIES, INC. ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE MIPS TECHNOLOGIES, INC. BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Author:  Nedeljko Babic (nedeljko.babic imgtec com)
+
+==============================================================================
+[25] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
+Files:
+  ffmpeg-9.0.2/libavutil/fixed_dsp.h  linux-x86_64, windows-x86_64
+Text:
+
+ * Copyright (c) 2012
+ *      MIPS Technologies, Inc., California.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the MIPS Technologies, Inc., nor the names of its
+ *    contributors may be used to endorse or promote products derived from
+ *    this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE MIPS TECHNOLOGIES, INC. ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE MIPS TECHNOLOGIES, INC. BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Author:  Nedeljko Babic (nbabic@mips.com)
+
+==============================================================================
+[26] FFmpeg 9.0.2, BSL-1.0
 Files:
   ffmpeg-9.0.2/libavutil/libm.h  linux-x86_64, windows-x86_64
 Text:
@@ -801,7 +936,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-[25] FFmpeg 9.0.2, BSL-1.0
+[27] FFmpeg 9.0.2, BSL-1.0
 Files:
   ffmpeg-9.0.2/libavutil/mathematics.c  linux-x86_64, windows-x86_64
 Text:
@@ -835,7 +970,7 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 
 ==============================================================================
-[26] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
+[28] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
   ffmpeg-9.0.2/libavutil/softfloat_tables.h  linux-x86_64, windows-x86_64
 Text:
@@ -866,9 +1001,11 @@ Text:
  * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
+ *
+ * Author:  Stanislav Ocovaj (stanislav.ocovaj imgtec com)
 
 ==============================================================================
-[27] FFmpeg 9.0.2, BSD-3-Clause: Theodore Ts'o
+[29] FFmpeg 9.0.2, BSD-3-Clause: Theodore Ts'o
 Files:
   ffmpeg-9.0.2/libavutil/uuid.c  linux-x86_64, windows-x86_64
 Text:
@@ -902,7 +1039,7 @@ Text:
  * DAMAGE.
 
 ==============================================================================
-[28] FFmpeg 9.0.2, ISC: x264 project
+[30] FFmpeg 9.0.2, ISC: x264 project
 Files:
   ffmpeg-9.0.2/libavutil/x86/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -927,7 +1064,7 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[29] x264 b35605ac, ISC: x264 project
+[31] x264 b35605ac, ISC: x264 project
 Files:
   x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -952,7 +1089,7 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[30] Opus 1.6.1, BSD-2-Clause: Mark Borgerding
+[32] Opus 1.6.1, BSD-2-Clause: Mark Borgerding
 Files:
   opus-1.6.1/celt/_kiss_fft_guts.h  linux-x86_64, windows-x86_64
 Text:
@@ -983,7 +1120,7 @@ Text:
   POSSIBILITY OF SUCH DAMAGE.*/
 
 ==============================================================================
-[31] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation
+[33] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/arch.h  linux-x86_64, windows-x86_64
 Text:
@@ -1021,7 +1158,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[32] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot; Arm Limited
+[34] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot; Arm Limited
 Files:
   opus-1.6.1/celt/arm/arm_celt_map.c  macos-arm64 (read, not built yet)
 Text:
@@ -1054,7 +1191,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[33] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot
+[35] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot
 Files:
   opus-1.6.1/celt/arm/armcpu.c     macos-arm64 (read, not built yet)
   opus-1.6.1/celt/arm/armcpu.h     macos-arm64 (read, not built yet)
@@ -1089,7 +1226,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[34] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[36] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/arm/celt_fft_ne10.c  macos-arm64 (read, not built yet)
 Text:
@@ -1126,7 +1263,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[35] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[37] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/arm/celt_mdct_ne10.c  macos-arm64 (read, not built yet)
 Text:
@@ -1163,7 +1300,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[36] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Arm Limited
+[38] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Arm Limited
 Files:
   opus-1.6.1/celt/arm/celt_neon_intr.c  macos-arm64 (read, not built yet)
 Text:
@@ -1201,7 +1338,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[37] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[39] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/arm/fft_arm.h  macos-arm64 (read, not built yet)
 Text:
@@ -1238,7 +1375,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[38] Opus 1.6.1, BSD-2-Clause: Vidyo
+[40] Opus 1.6.1, BSD-2-Clause: Vidyo
 Files:
   opus-1.6.1/celt/arm/fixed_arm64.h  macos-arm64 (read, not built yet)
 Text:
@@ -1269,7 +1406,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[39] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
+[41] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
 Files:
   opus-1.6.1/celt/arm/fixed_armv4.h  macos-arm64 (read, not built yet)
 Text:
@@ -1300,7 +1437,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[40] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Jean-Marc Valin; CSIRO; Parrot
+[42] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Jean-Marc Valin; CSIRO; Parrot
 Files:
   opus-1.6.1/celt/arm/fixed_armv5e.h  macos-arm64 (read, not built yet)
 Text:
@@ -1334,7 +1471,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[41] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
+[43] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
 Files:
   opus-1.6.1/celt/arm/kiss_fft_armv4.h   macos-arm64 (read, not built yet)
   opus-1.6.1/celt/arm/kiss_fft_armv5e.h  macos-arm64 (read, not built yet)
@@ -1366,7 +1503,7 @@ Text:
   POSSIBILITY OF SUCH DAMAGE.*/
 
 ==============================================================================
-[42] Opus 1.6.1, BSD-2-Clause: Arm Limited
+[44] Opus 1.6.1, BSD-2-Clause: Arm Limited
 Files:
   opus-1.6.1/celt/arm/mathops_arm.h  macos-arm64 (read, not built yet)
 Text:
@@ -1397,7 +1534,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[43] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[45] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/arm/mdct_arm.h  macos-arm64 (read, not built yet)
 Text:
@@ -1434,7 +1571,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[44] Opus 1.6.1, BSD-3-Clause: Google Inc
+[46] Opus 1.6.1, BSD-3-Clause: Google Inc
 Files:
   opus-1.6.1/celt/arm/pitch_neon_intr.c              macos-arm64 (read, not built yet)
   opus-1.6.1/silk/arm/LPC_inv_pred_gain_arm.h        macos-arm64 (read, not built yet)
@@ -1471,7 +1608,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[45] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[47] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
   opus-1.6.1/celt/bands.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/bands.h  linux-x86_64, windows-x86_64
@@ -1506,7 +1643,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[46] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[48] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
   opus-1.6.1/celt/celt.c          linux-x86_64, windows-x86_64
   opus-1.6.1/celt/celt_decoder.c  linux-x86_64, windows-x86_64
@@ -1542,7 +1679,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[47] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[49] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
   opus-1.6.1/celt/celt.h  linux-x86_64, windows-x86_64
 Text:
@@ -1581,7 +1718,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[48] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[50] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/celt_lpc.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/celt_lpc.h  linux-x86_64, windows-x86_64
@@ -1614,7 +1751,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[49] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Timothy B. Terriberry
+[51] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Timothy B. Terriberry
 Files:
   opus-1.6.1/celt/cwrs.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/cwrs.h  linux-x86_64, windows-x86_64
@@ -1649,7 +1786,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[50] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[52] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/ecintrin.h  linux-x86_64, windows-x86_64
 Text:
@@ -1681,7 +1818,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[51] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry
+[53] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry
 Files:
   opus-1.6.1/celt/entcode.c  linux-x86_64, windows-x86_64
 Text:
@@ -1713,7 +1850,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[52] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[54] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/entcode.h  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/entdec.c   linux-x86_64, windows-x86_64
@@ -1749,7 +1886,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[53] Opus 1.6.1, BSD-2-Clause: Erik de Castro Lopo <erikd AT mega-nerd DOT com>
+[55] Opus 1.6.1, BSD-2-Clause: Erik de Castro Lopo <erikd AT mega-nerd DOT com>
 Files:
   opus-1.6.1/celt/float_cast.h  linux-x86_64, windows-x86_64
 Text:
@@ -1780,7 +1917,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[54] Opus 1.6.1, BSD-2-Clause: Mark Borgerding; Xiph.Org Foundation; Xiph.Org Foundation, CSIRO
+[56] Opus 1.6.1, BSD-2-Clause: Mark Borgerding; Xiph.Org Foundation; Xiph.Org Foundation, CSIRO
 Files:
   opus-1.6.1/celt/kiss_fft.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/kiss_fft.h  linux-x86_64, windows-x86_64
@@ -1815,7 +1952,7 @@ Text:
   POSSIBILITY OF SUCH DAMAGE.*/
 
 ==============================================================================
-[55] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[57] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/laplace.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/laplace.h  linux-x86_64, windows-x86_64
@@ -1849,7 +1986,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[56] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
+[58] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
 Files:
   opus-1.6.1/celt/mathops.c  linux-x86_64, windows-x86_64
 Text:
@@ -1888,7 +2025,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[57] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
+[59] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
 Files:
   opus-1.6.1/celt/mathops.h  linux-x86_64, windows-x86_64
 Text:
@@ -1927,7 +2064,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[58] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[60] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/mdct.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/mdct.h  linux-x86_64, windows-x86_64
@@ -1961,7 +2098,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[59] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[61] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/mfrngcod.h  linux-x86_64, windows-x86_64
 Text:
@@ -1993,7 +2130,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[60] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[62] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
   opus-1.6.1/celt/modes.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/modes.h  linux-x86_64, windows-x86_64
@@ -2028,7 +2165,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[61] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[63] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
   opus-1.6.1/celt/os_support.h  linux-x86_64, windows-x86_64
 Text:
@@ -2063,7 +2200,7 @@ Text:
    POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[62] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[64] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/pitch.c  linux-x86_64, windows-x86_64
 Text:
@@ -2101,7 +2238,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[63] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[65] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/pitch.h  linux-x86_64, windows-x86_64
 Text:
@@ -2139,7 +2276,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[64] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[66] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/quant_bands.c  linux-x86_64, windows-x86_64
   opus-1.6.1/celt/quant_bands.h  linux-x86_64, windows-x86_64
@@ -2176,7 +2313,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[65] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; Xiph.Org Foundation
+[67] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/stack_alloc.h  linux-x86_64, windows-x86_64
 Text:
@@ -2212,7 +2349,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[66] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[68] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
   opus-1.6.1/celt/vq.h  linux-x86_64, windows-x86_64
 Text:
@@ -2249,7 +2386,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[67] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
+[69] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
 Files:
   opus-1.6.1/celt/x86/celt_lpc_sse.h     linux-x86_64, windows-x86_64
   opus-1.6.1/celt/x86/celt_lpc_sse4_1.c  linux-x86_64, windows-x86_64
@@ -2291,7 +2428,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[68] Opus 1.6.1, BSD-2-Clause: Amazon
+[70] Opus 1.6.1, BSD-2-Clause: Amazon
 Files:
   opus-1.6.1/celt/x86/pitch_avx.c  linux-x86_64, windows-x86_64
 Text:
@@ -2322,7 +2459,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[69] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin and John Ridges; Cisco Systems, INC MingXiang WeiZhou MinPeng YanWang
+[71] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin and John Ridges; Cisco Systems, INC MingXiang WeiZhou MinPeng YanWang
 Files:
   opus-1.6.1/celt/x86/pitch_sse.h  linux-x86_64, windows-x86_64
 Text:
@@ -2359,7 +2496,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[70] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[72] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
   opus-1.6.1/celt/x86/vq_sse.h  linux-x86_64, windows-x86_64
 Text:
@@ -2390,7 +2527,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[71] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Jean-Marc Valin
+[73] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Jean-Marc Valin
 Files:
   opus-1.6.1/celt/x86/vq_sse2.c  linux-x86_64, windows-x86_64
 Text:
@@ -2423,7 +2560,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[72] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited
+[74] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited
 Files:
   opus-1.6.1/include/opus.h          linux-x86_64, windows-x86_64
   opus-1.6.1/include/opus_defines.h  linux-x86_64, windows-x86_64
@@ -2457,7 +2594,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[73] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[75] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
   opus-1.6.1/include/opus_custom.h  linux-x86_64, windows-x86_64
 Text:
@@ -2491,7 +2628,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[74] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[76] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/include/opus_multistream.h      linux-x86_64, windows-x86_64
   opus-1.6.1/src/opus_multistream.c          linux-x86_64, windows-x86_64
@@ -2527,7 +2664,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[75] Opus 1.6.1, BSD-2-Clause: Google Inc
+[77] Opus 1.6.1, BSD-2-Clause: Google Inc
 Files:
   opus-1.6.1/include/opus_projection.h      linux-x86_64, windows-x86_64
   opus-1.6.1/src/mapping_matrix.c           linux-x86_64, windows-x86_64
@@ -2563,7 +2700,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[76] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[78] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/include/opus_types.h  linux-x86_64, windows-x86_64
 Text:
@@ -2595,7 +2732,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[77] Opus 1.6.1, BSD-3-Clause: Skype Limited
+[79] Opus 1.6.1, BSD-3-Clause: Skype Limited
 Files:
   opus-1.6.1/silk/A2NLSF.c                             linux-x86_64, windows-x86_64
   opus-1.6.1/silk/API.h                                linux-x86_64, windows-x86_64
@@ -2751,7 +2888,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[78] Opus 1.6.1, BSD-3-Clause: Koen Vos
+[80] Opus 1.6.1, BSD-3-Clause: Koen Vos
 Files:
   opus-1.6.1/silk/LPC_fit.c  linux-x86_64, windows-x86_64
 Text:
@@ -2782,7 +2919,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[79] Opus 1.6.1, BSD-3-Clause: Skype Limited; Xiph.Org Foundation
+[81] Opus 1.6.1, BSD-3-Clause: Skype Limited; Xiph.Org Foundation
 Files:
   opus-1.6.1/silk/MacroDebug.h  linux-x86_64, windows-x86_64
 Text:
@@ -2814,7 +2951,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[80] Opus 1.6.1, BSD-3-Clause: Vidyo; Skype Limited
+[82] Opus 1.6.1, BSD-3-Clause: Vidyo; Skype Limited
 Files:
   opus-1.6.1/silk/NSQ.h  linux-x86_64, windows-x86_64
 Text:
@@ -2846,7 +2983,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[81] Opus 1.6.1, BSD-3-Clause: Vidyo
+[83] Opus 1.6.1, BSD-3-Clause: Vidyo
 Files:
   opus-1.6.1/silk/arm/NSQ_neon.c      macos-arm64 (read, not built yet)
   opus-1.6.1/silk/arm/NSQ_neon.h      macos-arm64 (read, not built yet)
@@ -2879,7 +3016,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[82] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors; Parrot
+[84] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors; Parrot
 Files:
   opus-1.6.1/silk/arm/SigProc_FIX_armv4.h  macos-arm64 (read, not built yet)
 Text:
@@ -2911,7 +3048,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[83] Opus 1.6.1, BSD-3-Clause: Skype Limited; Parrot
+[85] Opus 1.6.1, BSD-3-Clause: Skype Limited; Parrot
 Files:
   opus-1.6.1/silk/arm/SigProc_FIX_armv5e.h  macos-arm64 (read, not built yet)
   opus-1.6.1/silk/arm/macros_armv5e.h       macos-arm64 (read, not built yet)
@@ -2944,7 +3081,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[84] Opus 1.6.1, BSD-3-Clause: Vidyo
+[86] Opus 1.6.1, BSD-3-Clause: Vidyo
 Files:
   opus-1.6.1/silk/arm/macros_arm64.h  macos-arm64 (read, not built yet)
 Text:
@@ -2975,7 +3112,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[85] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors
+[87] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors
 Files:
   opus-1.6.1/silk/arm/macros_armv4.h  macos-arm64 (read, not built yet)
 Text:
@@ -3006,7 +3143,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[86] Opus 1.6.1, BSD-3-Clause: Skype Limited
+[88] Opus 1.6.1, BSD-3-Clause: Skype Limited
 Files:
   opus-1.6.1/silk/float/x86/inner_product_FLP_avx2.c  linux-x86_64, windows-x86_64
 Text:
@@ -3038,7 +3175,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[87] Opus 1.6.1, BSD-3-Clause: Google Inc
+[89] Opus 1.6.1, BSD-3-Clause: Google Inc
 Files:
   opus-1.6.1/silk/x86/NSQ_del_dec_avx2.c  linux-x86_64, windows-x86_64
 Text:
@@ -3069,7 +3206,7 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[88] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
+[90] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
 Files:
   opus-1.6.1/silk/x86/NSQ_del_dec_sse4_1.c  linux-x86_64, windows-x86_64
   opus-1.6.1/silk/x86/NSQ_sse4_1.c          linux-x86_64, windows-x86_64
@@ -3104,7 +3241,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[89] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[91] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/src/analysis.c  linux-x86_64, windows-x86_64
   opus-1.6.1/src/analysis.h  linux-x86_64, windows-x86_64
@@ -3137,7 +3274,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[90] Opus 1.6.1, BSD-2-Clause: Amazon
+[92] Opus 1.6.1, BSD-2-Clause: Amazon
 Files:
   opus-1.6.1/src/extensions.c  linux-x86_64, windows-x86_64
 Text:
@@ -3168,7 +3305,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[91] Opus 1.6.1, BSD-2-Clause: Octasic Inc
+[93] Opus 1.6.1, BSD-2-Clause: Octasic Inc
 Files:
   opus-1.6.1/src/mlp.c  linux-x86_64, windows-x86_64
 Text:
@@ -3200,7 +3337,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[92] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[94] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
   opus-1.6.1/src/mlp.h  linux-x86_64, windows-x86_64
 Text:
@@ -3231,7 +3368,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[93] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
+[95] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
 Files:
   opus-1.6.1/src/opus.c  linux-x86_64, windows-x86_64
 Text:
@@ -3264,7 +3401,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[94] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
+[96] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
 Files:
   opus-1.6.1/src/opus_decoder.c  linux-x86_64, windows-x86_64
 Text:
@@ -3297,7 +3434,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[95] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[97] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
   opus-1.6.1/src/opus_private.h  linux-x86_64, windows-x86_64
 Text:
@@ -3329,7 +3466,7 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[96] libvorbis 1.3.7, permissive: Jutta Degener and Carsten Bormann
+[98] libvorbis 1.3.7, permissive: Jutta Degener and Carsten Bormann
 Files:
   libvorbis-1.3.7/lib/lpc.c  linux-x86_64, windows-x86_64
 Text:
@@ -3356,8 +3493,12 @@ As a matter of courtesy, the authors request to be informed about uses
 this software has found, about bugs in this software, and about any
 improvements that may be of general interest.
 
+Berlin, 28.11.1994
+Jutta Degener
+Carsten Bormann
+
 ==============================================================================
-[97] libvpx 1.17.0, ISC: x264 project
+[99] libvpx 1.17.0, ISC: x264 project
 Files:
   libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -3382,7 +3523,7 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[98] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[100] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/include/common/attributes.h       linux-x86_64, windows-x86_64
   dav1d-1.5.4/include/common/bitdepth.h         linux-x86_64, windows-x86_64
@@ -3475,7 +3616,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[99] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[101] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
   dav1d-1.5.4/include/common/frame.h  linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/arm/asm-offsets.h   macos-arm64 (read, not built yet)
@@ -3506,7 +3647,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[100] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[102] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/include/dav1d/dav1d.h        linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/cdf.c                    linux-x86_64, windows-x86_64
@@ -3565,7 +3706,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[101] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[103] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/include/dav1d/headers.h  linux-x86_64, windows-x86_64
   dav1d-1.5.4/include/dav1d/picture.h  linux-x86_64, windows-x86_64
@@ -3597,7 +3738,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[102] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[104] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
   dav1d-1.5.4/include/dav1d/version.h  linux-x86_64, windows-x86_64
 Text:
@@ -3627,7 +3768,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[103] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[105] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/cdef.S        macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/64/ipred.S       macos-arm64 (read, not built yet)
@@ -3663,7 +3804,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[104] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[106] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/cdef16.S             macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/64/cdef_tmpl.S          macos-arm64 (read, not built yet)
@@ -3698,7 +3839,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[105] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[107] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/filmgrain.S    macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/64/filmgrain16.S  macos-arm64 (read, not built yet)
@@ -3731,7 +3872,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[106] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[108] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/looprestoration.S         macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/64/looprestoration_common.S  macos-arm64 (read, not built yet)
@@ -3764,7 +3905,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[107] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
+[109] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/mc.S  macos-arm64 (read, not built yet)
 Text:
@@ -3796,7 +3937,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[108] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
+[110] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/mc16.S  macos-arm64 (read, not built yet)
 Text:
@@ -3828,7 +3969,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[109] dav1d 1.5.4, BSD-2-Clause: Arm Limited
+[111] dav1d 1.5.4, BSD-2-Clause: Arm Limited
 Files:
   dav1d-1.5.4/src/arm/64/mc16_sve.S  macos-arm64 (read, not built yet)
 Text:
@@ -3858,7 +3999,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[110] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo; Arm Limited
+[112] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo; Arm Limited
 Files:
   dav1d-1.5.4/src/arm/64/mc_dotprod.S  macos-arm64 (read, not built yet)
 Text:
@@ -3891,7 +4032,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[111] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[113] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/64/msac.S  macos-arm64 (read, not built yet)
 Text:
@@ -3922,7 +4063,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[112] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo; Janne Grunau
+[114] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo; Janne Grunau
 Files:
   dav1d-1.5.4/src/arm/64/util.S  macos-arm64 (read, not built yet)
 Text:
@@ -3954,7 +4095,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[113] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[115] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
   dav1d-1.5.4/src/arm/arm-arch.h  macos-arm64 (read, not built yet)
 Text:
@@ -3984,7 +4125,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[114] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[116] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
   dav1d-1.5.4/src/arm/cdef.h   macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/ipred.h  macos-arm64 (read, not built yet)
@@ -4017,7 +4158,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[115] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau
+[117] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau
 Files:
   dav1d-1.5.4/src/arm/cpu.c  macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/cpu.h  macos-arm64 (read, not built yet)
@@ -4049,7 +4190,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[116] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC; Martin Storsjo
+[118] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC; Martin Storsjo
 Files:
   dav1d-1.5.4/src/arm/filmgrain.h  macos-arm64 (read, not built yet)
 Text:
@@ -4082,7 +4223,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[117] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[119] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/arm/msac.h    macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/x86/msac.asm  linux-x86_64, windows-x86_64
@@ -4115,7 +4256,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[118] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[120] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/arm/refmvs.h                      macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/x86/cdef16_avx2.asm               linux-x86_64, windows-x86_64
@@ -4160,7 +4301,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[119] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[121] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/cpu.h            linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/x86/filmgrain.h  linux-x86_64, windows-x86_64
@@ -4192,7 +4333,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[120] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[122] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/ctx.c  linux-x86_64, windows-x86_64
 Text:
@@ -4223,7 +4364,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[121] dav1d 1.5.4, ISC: x264 project
+[123] dav1d 1.5.4, ISC: x264 project
 Files:
   dav1d-1.5.4/src/ext/x86/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4248,7 +4389,7 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[122] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
+[124] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/fg_apply_tmpl.c   linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/filmgrain_tmpl.c  linux-x86_64, windows-x86_64
@@ -4281,7 +4422,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[123] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[125] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/intra_edge.c  linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/intra_edge.h  linux-x86_64, windows-x86_64
@@ -4314,7 +4455,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[124] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[126] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/itx_1d.c    linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/itx_1d.h    linux-x86_64, windows-x86_64
@@ -4347,7 +4488,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[125] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[127] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/mem.c                 linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/refmvs.c              linux-x86_64, windows-x86_64
@@ -4384,7 +4525,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[126] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[128] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/pal.c        linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/pal.h        linux-x86_64, windows-x86_64
@@ -4418,7 +4559,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[127] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[129] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/cdef16_avx512.asm        linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/x86/filmgrain16_avx512.asm   linux-x86_64, windows-x86_64
@@ -4452,7 +4593,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[128] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge
+[130] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge
 Files:
   dav1d-1.5.4/src/x86/cdef16_sse.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4485,7 +4626,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[129] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
+[131] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
 Files:
   dav1d-1.5.4/src/x86/cdef_sse.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4517,7 +4658,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[130] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[132] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/filmgrain16_avx2.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4548,7 +4689,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[131] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[133] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/filmgrain_avx2.asm    linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/x86/filmgrain_common.asm  linux-x86_64, windows-x86_64
@@ -4580,7 +4721,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[132] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[134] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/filmgrain_sse.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4611,7 +4752,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[133] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[135] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/ipred16_avx512.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4642,7 +4783,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[134] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; Matthias Dressel
+[136] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; Matthias Dressel
 Files:
   dav1d-1.5.4/src/x86/itx16_avx2.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4674,7 +4815,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[135] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[137] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/itx16_avx512.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4705,7 +4846,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[136] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge; Matt...
+[138] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge; Matt...
 Files:
   dav1d-1.5.4/src/x86/itx16_sse.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4739,7 +4880,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[137] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[139] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/itx_avx512.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4770,7 +4911,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[138] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
+[140] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
 Files:
   dav1d-1.5.4/src/x86/looprestoration_sse.asm  linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/x86/mc_sse.asm               linux-x86_64, windows-x86_64
@@ -4803,7 +4944,7 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[139] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[141] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
   dav1d-1.5.4/src/x86/mc.h         linux-x86_64, windows-x86_64
   dav1d-1.5.4/src/x86/mc_avx2.asm  linux-x86_64, windows-x86_64
@@ -4835,7 +4976,7 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[140] zlib 1.3.2, Zlib: Jean-loup Gailly and Mark Adler
+[142] zlib 1.3.2, Zlib: Jean-loup Gailly and Mark Adler
 Files:
   zlib-1.3.2/zlib.h  linux-x86_64, windows-x86_64
 Text:
@@ -4858,10 +4999,18 @@ Text:
      misrepresented as being the original software.
   3. This notice may not be removed or altered from any source distribution.
 
+  Jean-loup Gailly        Mark Adler
+  jloup@gzip.org          madler@alumni.caltech.edu
+
+
+  The data format used by the zlib library is described by RFCs (Request for
+  Comments) 1950 to 1952 at https://datatracker.ietf.org/doc/html/rfc1950
+  (zlib format), rfc1951 (deflate format) and rfc1952 (gzip format).
+
 ==============================================================================
 Part 2: other statements about licenses
 ==============================================================================
-[141] FFmpeg 9.0.2
+[143] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/bsf/mjpeg2jpeg.c  linux-x86_64, windows-x86_64
 Text:
@@ -4870,7 +5019,7 @@ Text:
  * Paris 2010 Adrian Daerr, public domain
 
 ==============================================================================
-[142] FFmpeg 9.0.2
+[144] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/dfpwmdec.c  linux-x86_64, windows-x86_64
 Text:
@@ -4879,7 +5028,7 @@ Text:
 // Licensed in the public domain
 
 ==============================================================================
-[143] FFmpeg 9.0.2
+[145] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/dsd.c     linux-x86_64, windows-x86_64
   ffmpeg-9.0.2/libavcodec/dsd.h     linux-x86_64, windows-x86_64
@@ -4892,7 +5041,7 @@ Text:
  * Copyright (c) 2014 Peter Ross
 
 ==============================================================================
-[144] FFmpeg 9.0.2
+[146] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/nellymoser.c     linux-x86_64, windows-x86_64
   ffmpeg-9.0.2/libavcodec/nellymoser.h     linux-x86_64, windows-x86_64
@@ -4904,7 +5053,7 @@ Text:
  * implementers. The original code is available from http://code.google.com/p/nelly2pcm/
 
 ==============================================================================
-[145] FFmpeg 9.0.2
+[147] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/ra144dec.c  linux-x86_64, windows-x86_64
 Text:
@@ -4914,7 +5063,7 @@ Text:
  *     Based on public domain decoder at http://www.honeypot.net/audio
 
 ==============================================================================
-[146] FFmpeg 9.0.2
+[148] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/truemotion1data.h  linux-x86_64, windows-x86_64
 Text:
@@ -4925,7 +5074,7 @@ Text:
  * for decoding algorithms are not necessarily copyrightable.
 
 ==============================================================================
-[147] FFmpeg 9.0.2
+[149] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavcodec/x86/vvc/mc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -4935,7 +5084,7 @@ Text:
 ; * All rights reserved.
 
 ==============================================================================
-[148] FFmpeg 9.0.2
+[150] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavformat/mpegtsenc.c  linux-x86_64, windows-x86_64
 Text:
@@ -4945,7 +5094,7 @@ Text:
  * Vincent Penquerc'h <vincent.penquerch@collabora.co.uk>
 
 ==============================================================================
-[149] FFmpeg 9.0.2
+[151] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavutil/sha.c  linux-x86_64, windows-x86_64
 Text:
@@ -4956,7 +5105,7 @@ Text:
  * and on BSD-licensed SHA-2 code by Aaron D. Gifford
 
 ==============================================================================
-[150] FFmpeg 9.0.2
+[152] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libavutil/sha512.c  linux-x86_64, windows-x86_64
 Text:
@@ -4967,7 +5116,7 @@ Text:
  * based on BSD-licensed SHA-2 code by Aaron D. Gifford
 
 ==============================================================================
-[151] FFmpeg 9.0.2
+[153] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, windows-x86_64
 Text:
@@ -4978,7 +5127,7 @@ Text:
  * (https://github.com/glumpy/glumpy/blob/master/glumpy/library/build-spatial-filters.py)
 
 ==============================================================================
-[152] FFmpeg 9.0.2
+[154] FFmpeg 9.0.2
 Files:
   ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, windows-x86_64
 Text:
@@ -4996,7 +5145,7 @@ Text:
  * - https://github.com/AviSynth/jinc-resize (only used to verify the math)
 
 ==============================================================================
-[153] x264 b35605ac
+[155] x264 b35605ac
 Files:
   x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -5009,7 +5158,7 @@ Text:
 ; to x264-devel@videolan.org .
 
 ==============================================================================
-[154] LAME 4.0
+[156] LAME 4.0
 Files:
   lame-4.0/libmp3lame/fft.c  linux-x86_64, windows-x86_64
 Text:
@@ -5047,7 +5196,7 @@ Text:
 **           Takehiro  - some dirty hack for speed up
 
 ==============================================================================
-[155] libogg 1.3.6
+[157] libogg 1.3.6
 Files:
   libogg-1.3.6/src/framing.c  linux-x86_64, windows-x86_64
 Text:
@@ -5057,7 +5206,7 @@ Text:
  for details.
 
 ==============================================================================
-[156] libvpx 1.17.0
+[158] libvpx 1.17.0
 Files:
   libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, windows-x86_64
 Text:
@@ -5070,7 +5219,7 @@ Text:
 ; to x264-devel@videolan.org .
 
 ==============================================================================
-[157] libvpx 1.17.0
+[159] libvpx 1.17.0
 Files:
   libvpx-1.17.0/vpx_util/vpx_pthread.h  linux-x86_64, windows-x86_64
 Text:
@@ -5085,7 +5234,7 @@ Text:
 // -----------------------------------------------------------------------------
 
 ==============================================================================
-[158] libvpx 1.17.0
+[160] libvpx 1.17.0
 Files:
   libvpx-1.17.0/vpx_util/vpx_thread.c  linux-x86_64, windows-x86_64
   libvpx-1.17.0/vpx_util/vpx_thread.h  linux-x86_64, windows-x86_64

@@ -24,7 +24,9 @@ licenses/ffmpeg/ffmpeg-notices.txt has every notice in them.
 
 What counts, in each file's comments:
   - a notice: a permissive license's grant, conditions or disclaimer
-    (GRANTS below), with the copyright lines just before it;
+    (GRANTS below), with the copyright lines just before it, on to the end
+    of its comment (so the names and date signed under it come too) or to
+    where the library's own license starts in that comment;
   - a statement: anything else that talks about licenses (LICENSEISH), like
     "based on public domain code" or "BSD licensed", with the copyright
     lines just before it. They're listed too, so that each one has been read.
@@ -173,7 +175,7 @@ GRANTS = (
     "notice is not removed",
     "spdx-license-identifier",
 )
-# Words that carry a notice on into the next paragraph.
+# Words that tie the paragraphs before a grant to it (see back() in scan_text).
 CONTINUES = (
     "warrant", "liabl", "liabilit", "as is", "as-is", "disclaim", "endorse",
     "damages", "redistribut", "conditions", "notice", "neither the name",
@@ -187,6 +189,8 @@ OWN_LICENSE = (
     re.compile(r"governed by a bsd-style source license included with this source in 'copying'"),
     re.compile(r"for conditions of distribution and use, see copyright notice in zlib\.h"),
 )
+# "This file is part of FFmpeg.", which goes with the GNU boilerplate after it.
+PART_OF = re.compile(r"^this file is part of [a-z0-9 ._-]+$")
 # The rest of the GNU boilerplate, and x264's note on its other license.
 KNOWN = (
     re.compile(r"is distributed in the hope that it will be useful, but without any warranty; without even the implied warranty of merchantability or fitness for a particular purpose\. see the gnu (?:lesser |library )?general public license for more details"),
@@ -223,10 +227,14 @@ def scan_text(text, nasm):
         paras = [p for _, p in block]
         low = [norm(" ".join(s for _, s in p)).lower() for p in paras]
         own = [any(r.search(t) for r in OWN_LICENSE) for t in low]
+        for k in range(len(low) - 2, -1, -1):
+            # "This file is part of FFmpeg." starts the GNU boilerplate.
+            if own[k + 1] and PART_OF.match(low[k]):
+                own[k] = True
         used = [o or any(r.search(t) for r in KNOWN) for o, t in zip(own, low)]
         for k, t in enumerate(low):
             # The copyright lines right before or after the library's own
-            # license (libvpx's before, Xiph's after) go with it.
+            # license (libvpx's and FFmpeg's before, Xiph's after) go with it.
             if not own[k] and COPYRIGHT.search(t) and not has_any(t, GRANTS) \
                     and all(RESERVED_ONLY.match(h.group(0)) for h in LICENSEISH.finditer(t)) \
                     and ((k > 0 and own[k - 1]) or (k + 1 < len(low) and own[k + 1])):
@@ -271,10 +279,13 @@ def scan_text(text, nasm):
                 continue
             start = back(i)
             end = i
-            # On to the end of the conditions and the disclaimer, in this comment.
+            # On to the end of this comment: the conditions, the disclaimer
+            # and whatever follows them there, like the authors' names and a
+            # date under the text (libvorbis's lpc.c, zlib.h). Only the
+            # library's own license (with its copyright lines) and the GNU
+            # boilerplate stop it short.
             while end + 1 < len(paras) and not used[end + 1] and not opens[end + 1] \
-                    and not GNU.search(low[end + 1]) and not COPYRIGHT.match(low[end + 1]) \
-                    and (has_any(low[end + 1], GRANTS) or has_any(low[end + 1], CONTINUES)):
+                    and not GNU.search(low[end + 1]):
                 end += 1
             if mine and mine[-1][1] + 1 == start:
                 mine[-1][1] = end  # one notice right after another: one text
@@ -667,8 +678,10 @@ from Grape, and they're here so that each has been read.
 Each entry: the source, the license the text reads as (a guide only: the
 text is what counts) and who holds it; the files that carry it, each with
 the builds that compile it; then the text, verbatim from the first of those
-files, comment marks and all. Paths start with the folder the source's
-tarball unpacks to (build-<source>/ is that source's own build folder).
+files, comment marks and all: a notice from its copyright lines to the end of
+its comment, or to where the library's own license starts in that comment.
+Paths start with the folder the source's tarball unpacks to (build-<source>/
+is that source's own build folder).
 """
 
 
