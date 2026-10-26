@@ -64,7 +64,7 @@ fn ffmpeg(args: &[&str]) {
 fn probe(path: &Path) -> HashMap<String, String> {
     let out = Command::new(tool("GRAPE_TEST_FFPROBE"))
         .args(["-v", "error", "-show_entries"])
-        .arg("format=format_name,duration:stream=index,codec_type,codec_name,width,height,channels,sample_rate:stream_side_data=rotation")
+        .arg("format=format_name,duration:stream=index,codec_type,codec_name,width,height,channels,channel_layout,sample_rate:stream_side_data=rotation")
         .args(["-of", "flat"])
         .arg(path)
         .output()
@@ -418,6 +418,73 @@ fn audio_depth_channels_and_rate_follow_the_target() {
         field(&info, "audio", "codec_name").as_deref(),
         Some("pcm_s16be")
     );
+}
+
+#[test]
+fn surround_becomes_a_layout_opus_and_vorbis_take() {
+    let dir = TestDir::new("media-layouts");
+    // Each source layout and what Opus, Vorbis and WebM's Opus make of it.
+    let layouts: [(&str, &[&str]); 7] = [
+        ("mono", &["mono"]),
+        ("stereo", &["stereo"]),
+        // The LFE is dropped, as in any downmix.
+        ("2.1", &["stereo"]),
+        ("4.0", &["5.0"]),
+        // FFmpeg 9 moves the side pair to the back; 6.1 (whose layout
+        // match tests the LFE by index) keeps it and adds two silent
+        // channels.
+        ("5.0(side)", &["5.0", "6.1"]),
+        // AC-3, E-AC-3, DTS and 6-channel FLAC decode to this one.
+        ("5.1(side)", &["5.1"]),
+        ("7.1", &["7.1"]),
+    ];
+    let mut failures = Vec::new();
+    for (layout, expected) in layouts {
+        let tone = format!("sine=frequency=440:duration=1,aformat=channel_layouts={layout}");
+        let name: String = layout.chars().filter(char::is_ascii_alphanumeric).collect();
+        // WAV and MOV keep the layout exactly.
+        let wav = dir.join(&format!("{name}.wav"));
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &tone,
+            "-c:a",
+            "pcm_s16le",
+            wav.to_str().unwrap(),
+        ]);
+        let mov = dir.join(&format!("{name}.mov"));
+        let mut args: Vec<&str> = TESTSRC.to_vec();
+        args.extend(["-f", "lavfi", "-i", &tone, "-shortest"]);
+        args.extend([
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "pcm_s16le",
+        ]);
+        args.push(mov.to_str().unwrap());
+        ffmpeg(&args);
+        for (src, to) in [
+            (&wav, Format::Opus),
+            (&wav, Format::Ogg),
+            (&mov, Format::Webm),
+        ] {
+            match convert_file(&dir, src, to) {
+                Ok((outcome, _)) => {
+                    let out = &outcome.outputs[0];
+                    let got = field(&probe(out), "audio", "channel_layout").unwrap_or_default();
+                    if !expected.contains(&got.as_str()) {
+                        failures.push(format!("{layout} to {to:?}: {got}"));
+                    }
+                    fs::remove_file(out).unwrap();
+                }
+                Err(e) => failures.push(format!("{layout} to {to:?}: {e} ({})", e.detail)),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

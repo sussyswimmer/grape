@@ -16,7 +16,9 @@
 //!   drawn with it, both at 12 fps and at most 720 px wide.
 //! - **Audio targets** (and video to MP3) keep `0:a:0`. Lossless targets
 //!   keep 24 bits when the source has more than 16
-//!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz.
+//!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
+//!   Opus and Vorbis (OPUS, OGG and WebM's audio) get a channel layout
+//!   they take ([`VORBIS_LAYOUTS`]).
 //!
 //! Only the mapped streams are written: subtitles, data streams, further
 //! audio tracks and cover art are dropped.
@@ -52,6 +54,14 @@ const AAC: &[&str] = &["-c:a", "aac", "-b:a", "192k"];
 
 /// WMA for WMV and WMA, before [`wma_limits`].
 const WMA: &[&str] = &["-c:a", "wmav2", "-b:a", "192k"];
+
+/// Remixes the audio to the nearest layout libopus and libvorbis take: the
+/// Vorbis ones, mono to 7.1 (`ff_vorbis_ch_layouts`). Neither encoder
+/// converts on its own: libopus refuses 5.1(side), the layout AC-3, DTS
+/// and 6-channel FLAC decode to, and every other layout (2.1, 4.0...),
+/// and libvorbis writes them with the wrong speaker positions. The only
+/// audio filter Grape uses, so it is the whole `-af` chain.
+const VORBIS_LAYOUTS: &str = "aformat=channel_layouts=mono|stereo|3.0|quad|5.0|5.1|6.1|7.1";
 
 /// One run of `ffmpeg`.
 #[derive(Debug, Clone, PartialEq)]
@@ -321,7 +331,7 @@ fn video_encoders(to: Format) -> Option<(&'static [&'static str], &'static [&'st
                 "-pix_fmt",
                 "yuv420p",
             ],
-            &["-c:a", "libopus", "-b:a", "128k"],
+            &["-c:a", "libopus", "-b:a", "128k", "-af", VORBIS_LAYOUTS],
         )),
         // XviD's tag, so players that pick a decoder by FourCC find one.
         Format::Avi => Some((
@@ -357,8 +367,8 @@ fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
                 samples,
             ]
         }
-        Format::Ogg => vec!["-c:a", "libvorbis", "-q:a", "6"],
-        Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k"],
+        Format::Ogg => vec!["-c:a", "libvorbis", "-q:a", "6", "-af", VORBIS_LAYOUTS],
+        Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k", "-af", VORBIS_LAYOUTS],
         Format::Wma => {
             let mut args = WMA.to_vec();
             args.extend(wma_limits(audio));
@@ -430,6 +440,9 @@ mod tests {
 
     /// The even-size filter, spelled out so a change to it shows here.
     const EVEN: &str = r"scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'";
+
+    /// The layout filter of Opus and Vorbis, spelled out.
+    const LAYOUTS: &str = "aformat=channel_layouts=mono|stereo|3.0|quad|5.0|5.1|6.1|7.1";
 
     /// The start of every argv, with `<src>` for the source's URL.
     const PREFIX: [&str; 12] = [
@@ -645,6 +658,8 @@ mod tests {
                 "libopus",
                 "-b:a",
                 "128k",
+                "-af",
+                LAYOUTS,
             ],
             "webm",
         );
@@ -773,13 +788,13 @@ mod tests {
             (
                 Format::Opus,
                 Format::Ogg,
-                &["-c:a", "libvorbis", "-q:a", "6"],
+                &["-c:a", "libvorbis", "-q:a", "6", "-af", LAYOUTS],
                 "ogg",
             ),
             (
                 Format::Ogg,
                 Format::Opus,
-                &["-c:a", "libopus", "-b:a", "128k"],
+                &["-c:a", "libopus", "-b:a", "128k", "-af", LAYOUTS],
                 "opus",
             ),
             (Format::Wav, Format::Aiff, &["-c:a", "pcm_s16be"], "aiff"),
@@ -853,6 +868,16 @@ mod tests {
                     "{to:?}: filter on a copy"
                 );
             }
+            // Opus and Vorbis always get the layout filter, as the only
+            // audio filter; nothing else gets one.
+            let vorbis_family = has(args, ["-c:a", "libopus"]) || has(args, ["-c:a", "libvorbis"]);
+            let filters: Vec<&OsString> = args
+                .windows(2)
+                .filter(|w| w[0] == "-af")
+                .map(|w| &w[1])
+                .collect();
+            let expected: &[&str] = if vorbis_family { &[LAYOUTS] } else { &[] };
+            assert_eq!(filters, expected, "{to:?}");
         }
     }
 
@@ -1169,6 +1194,37 @@ mod tests {
                 !args.iter().any(|arg| arg == "-ac" || arg == "-ar"),
                 "{to:?}"
             );
+        }
+    }
+
+    #[test]
+    fn opus_and_vorbis_get_a_vorbis_channel_layout() {
+        // 5.1(side), the layout AC-3 and 6-channel FLAC decode to; the
+        // probe doesn't read layouts, so the filter is always there.
+        let surround = probe(None, Some(audio("ac3", 48_000, 6, 16)));
+        for (to, codec) in [(Format::Opus, "libopus"), (Format::Ogg, "libvorbis")] {
+            let args = &passes_for(&surround, to).unwrap()[0].args;
+            assert!(
+                has(args, ["-c:a", codec]) && has(args, ["-af", LAYOUTS]),
+                "{to:?}"
+            );
+        }
+        let movie = probe(
+            Some(video("h264", "yuv420p", 0)),
+            Some(audio("ac3", 48_000, 6, 16)),
+        );
+        let args = &passes_for(&movie, Format::Webm).unwrap()[0].args;
+        assert!(has(args, ["-c:a", "libopus"]) && has(args, ["-af", LAYOUTS]));
+        // The other encoders take any layout, or are held to stereo.
+        for to in [
+            Format::M4a,
+            Format::Flac,
+            Format::Wav,
+            Format::Wma,
+            Format::Mp3,
+        ] {
+            let args = &passes_for(&surround, to).unwrap()[0].args;
+            assert!(!args.iter().any(|arg| arg == "-af"), "{to:?}");
         }
     }
 
