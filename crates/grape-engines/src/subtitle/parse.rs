@@ -132,8 +132,9 @@ impl From<Cancelled> for ParseError {
 
 /// Reads `text` (SRT or WebVTT) into a normalized [`Document`], as the
 /// module docs describe. `is_cancelled` is asked before the first line,
-/// as the work goes on (every line read, looked at or turned into spans,
-/// and every cue, counts) and after the sort.
+/// as the work goes on and after the sort. Every line read, looked at or
+/// turned into spans counts as work by its length (see [`Ticker::line`]),
+/// and so does every cue, and every extra cue line a line break makes.
 pub(crate) fn parse(
     text: &str,
     is_cancelled: &mut dyn FnMut() -> bool,
@@ -161,7 +162,7 @@ pub(crate) fn parse(
         if line.len() > MAX_LINE_BYTES {
             return Err(ParseError::TooLarge);
         }
-        ticker.tick()?;
+        ticker.line(line)?;
         let line = line.trim_end();
         if in_header {
             if line.is_empty() || line.contains(ARROW) {
@@ -250,7 +251,7 @@ struct Reader {
 
 impl Reader {
     /// Reads one block. Every line it looks at or turns into spans counts
-    /// as work for `ticker`.
+    /// as work for `ticker`, by its length.
     fn block(&mut self, mut block: &[&str], ticker: &mut Ticker) -> Result<(), ParseError> {
         let webvtt = self.webvtt;
         let is_timing = |line: &str| looks_like_timing(line, webvtt);
@@ -311,14 +312,14 @@ impl Reader {
 }
 
 /// The index of the first of `lines` that `pred` holds for; each line
-/// looked at counts as work.
+/// looked at counts as work, by its length.
 fn find(
     lines: &[&str],
     ticker: &mut Ticker,
     pred: impl Fn(&str) -> bool,
 ) -> Result<Option<usize>, Cancelled> {
     for (i, line) in lines.iter().enumerate() {
-        ticker.tick()?;
+        ticker.line(line)?;
         if pred(line) {
             return Ok(Some(i));
         }
@@ -328,7 +329,8 @@ fn find(
 
 /// Appends `text`'s lines to a cue's `lines` as spans, leaving out those
 /// without visible text. Each is shrunk to fit; most already are. A line
-/// that makes more than one cue line adds the extra ones to `counted`.
+/// that makes more than one cue line adds the extra ones to `counted`,
+/// and counts them as work.
 fn push_lines(
     lines: &mut Vec<Vec<Span>>,
     text: &[&str],
@@ -337,9 +339,11 @@ fn push_lines(
     ticker: &mut Ticker,
 ) -> Result<(), ParseError> {
     for line in text {
-        ticker.tick()?;
+        ticker.line(line)?;
         let parts = cue_lines(line, webvtt);
-        count_lines(counted, parts.len().saturating_sub(1))?;
+        let extra = parts.len().saturating_sub(1);
+        count_lines(counted, extra)?;
+        ticker.work(extra)?;
         for mut line in parts {
             if has_text(&line) {
                 line.shrink_to_fit();
@@ -1688,6 +1692,60 @@ mod tests {
             push_lines(&mut Vec::new(), &text, false, &mut 0, &mut ticker),
             Err(ParseError::Cancelled)
         );
+    }
+
+    /// How many times `f` asks its ticker's check, which never finds a
+    /// cancel.
+    fn checks(f: impl FnOnce(&mut Ticker)) -> usize {
+        let mut calls = 0;
+        let mut is_cancelled = || {
+            calls += 1;
+            false
+        };
+        f(&mut Ticker::new(&mut is_cancelled));
+        calls
+    }
+
+    #[test]
+    fn long_lines_count_as_work_by_their_length_in_every_step() {
+        // Four lines of 32 KiB are 4 * (1 + 4096) units, past CHECK_EVERY,
+        // so the piece of work after them is checked: two checks in all.
+        let long = "x".repeat(32 * 1024);
+        let lines = [long.as_str(); 4];
+        let found = checks(|ticker| {
+            assert_eq!(find(&lines, ticker, |_| false), Ok(None));
+            ticker.tick().unwrap();
+        });
+        assert_eq!(found, 2);
+        let pushed = checks(|ticker| {
+            push_lines(&mut Vec::new(), &lines, false, &mut 0, ticker).unwrap();
+            ticker.tick().unwrap();
+        });
+        assert_eq!(pushed, 2);
+        // A line that breaks into 10,001 cue lines is 1 + 60,000 / 8 units,
+        // and one more for each extra cue line.
+        let broken = "x&#10;".repeat(10_000);
+        let pushed = checks(|ticker| {
+            push_lines(&mut Vec::new(), &[&broken], true, &mut 0, ticker).unwrap();
+            ticker.tick().unwrap();
+        });
+        assert_eq!(pushed, 2);
+        // Lines read count by their length too: four blank lines of 32 KiB
+        // of spaces bring one more check than four short ones.
+        let srt = |blank: &str| {
+            format!("{blank}\n{blank}\n{blank}\n{blank}\n1\n00:00:01,000 --> 00:00:02,000\nHi\n")
+        };
+        let parsed_with = |text: &str| {
+            let mut calls = 0;
+            parse(text, &mut || {
+                calls += 1;
+                false
+            })
+            .unwrap();
+            calls
+        };
+        let spaces = " ".repeat(32 * 1024);
+        assert_eq!(parsed_with(&srt(&spaces)), parsed_with(&srt(" ")) + 1);
     }
 
     #[test]

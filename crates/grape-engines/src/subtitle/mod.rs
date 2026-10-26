@@ -44,39 +44,61 @@ use parse::{Document, ParseError};
 /// memory and time a conversion takes.
 pub(crate) const MAX_SOURCE: u64 = 16 * 1024 * 1024;
 
-/// How many units of work (lines read, looked at or written; cues) are
-/// done between cancel checks. A unit takes well under a microsecond, so a
-/// check comes every few milliseconds of work.
-pub(crate) const CHECK_EVERY: usize = 64 * 1024;
+/// How many units of work are done between cancel checks. A line read,
+/// looked at, turned into spans or written is a unit, and so is each
+/// [`BYTES_PER_UNIT`] of it; so are a cue and a span written. Each unit
+/// takes well under a microsecond (in a release build), so a check comes
+/// every millisecond or two of work, however long or dense the lines.
+pub(crate) const CHECK_EVERY: usize = 16 * 1024;
+
+/// How many bytes of a line count as one more unit of work. Turning dense
+/// markup into spans, the slowest work per byte, takes about this many
+/// bytes to cost what a short line does.
+pub(crate) const BYTES_PER_UNIT: usize = 8;
 
 /// What a step returns once the job is cancelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Cancelled;
 
-/// Counts units of work and asks `is_cancelled` at the first unit and
-/// every [`CHECK_EVERY`] after it.
+/// Counts units of work and asks `is_cancelled` before the first piece
+/// of work and before each piece that comes [`CHECK_EVERY`] or more units
+/// after the last check. One piece may be several units (a long line), so
+/// a check is never more than one piece late.
 pub(crate) struct Ticker<'a> {
     is_cancelled: &'a mut dyn FnMut() -> bool,
-    count: usize,
+    /// The units counted since the last check; [`CHECK_EVERY`] at first,
+    /// so the first piece of work is checked.
+    since_check: usize,
 }
 
 impl<'a> Ticker<'a> {
     pub(crate) fn new(is_cancelled: &'a mut dyn FnMut() -> bool) -> Self {
         Ticker {
             is_cancelled,
-            count: 0,
+            since_check: CHECK_EVERY,
         }
     }
 
-    /// Counts one unit of work, checking first when a check is due.
-    pub(crate) fn tick(&mut self) -> Result<(), Cancelled> {
-        let due = self.count.is_multiple_of(CHECK_EVERY);
-        self.count = self.count.wrapping_add(1);
-        if due {
-            self.check()
-        } else {
-            Ok(())
+    /// Counts a piece of work of `units`, checking first when a check is
+    /// due.
+    pub(crate) fn work(&mut self, units: usize) -> Result<(), Cancelled> {
+        if self.since_check >= CHECK_EVERY {
+            self.since_check = 0;
+            self.check()?;
         }
+        self.since_check = self.since_check.saturating_add(units);
+        Ok(())
+    }
+
+    /// Counts one unit of work.
+    pub(crate) fn tick(&mut self) -> Result<(), Cancelled> {
+        self.work(1)
+    }
+
+    /// Counts the work on one line of text: a unit, and one more for each
+    /// [`BYTES_PER_UNIT`] of it.
+    pub(crate) fn line(&mut self, line: &str) -> Result<(), Cancelled> {
+        self.work(1 + line.len() / BYTES_PER_UNIT)
     }
 
     /// Checks now, whatever the count.
@@ -359,6 +381,47 @@ mod tests {
         }
         // At units 0, CHECK_EVERY and 2 * CHECK_EVERY, then the check.
         assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn a_long_piece_of_work_brings_the_next_check_forward() {
+        let mut calls = 0;
+        let mut is_cancelled = || {
+            calls += 1;
+            false
+        };
+        {
+            let mut ticker = Ticker::new(&mut is_cancelled);
+            // Checked before it, and before the piece after it.
+            ticker.work(3 * CHECK_EVERY).unwrap();
+            ticker.tick().unwrap();
+            // Then not again for CHECK_EVERY units.
+            for _ in 0..CHECK_EVERY - 1 {
+                ticker.tick().unwrap();
+            }
+        }
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn a_line_is_a_unit_and_one_more_per_eight_bytes() {
+        // Fixed sizes, so a change to CHECK_EVERY or BYTES_PER_UNIT shows:
+        // 1 + 131,064 / 8 is 16,384 units, a check's worth; one less isn't.
+        let checks_after = |len: usize| {
+            let mut calls = 0;
+            let mut is_cancelled = || {
+                calls += 1;
+                false
+            };
+            {
+                let mut ticker = Ticker::new(&mut is_cancelled);
+                ticker.line(&"x".repeat(len)).unwrap();
+                ticker.tick().unwrap();
+            }
+            calls - 1
+        };
+        assert_eq!(checks_after(131_064), 1);
+        assert_eq!(checks_after(131_063), 0);
     }
 
     #[test]

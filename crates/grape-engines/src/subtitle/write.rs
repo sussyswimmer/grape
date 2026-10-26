@@ -15,8 +15,10 @@
 //!   the list of styles open in a cue (at most three), so its memory
 //!   doesn't grow with the document, a cue or a line.
 //! - **Cancellation:** `is_cancelled` is asked before anything is written
-//!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) units of work, a
-//!   cue or a line each; once it says so, the writer fails with an error.
+//!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) units of work: a
+//!   cue is a unit, and a line is one plus one per span and per
+//!   [`BYTES_PER_UNIT`](super::BYTES_PER_UNIT) of its text (see
+//!   [`line_work`]). Once it says so, the writer fails with an error.
 //!
 //! A line without visible text, and a cue without such lines, is left out,
 //! so even a document that wasn't normalized can't produce a blank line in
@@ -26,7 +28,7 @@ use std::fmt;
 use std::io::{self, Write};
 
 use super::parse::{has_text, Cue, Document, Span, Style};
-use super::{Cancelled, Ticker};
+use super::{Cancelled, Ticker, BYTES_PER_UNIT};
 
 impl From<Cancelled> for io::Error {
     fn from(_: Cancelled) -> Self {
@@ -99,7 +101,7 @@ pub(crate) fn write_txt(
     for cue in &doc.cues {
         ticker.tick()?;
         for line in &cue.lines {
-            ticker.tick()?;
+            ticker.work(line_work(line))?;
             if !has_text(line) || previous.is_some_and(|before| trimmed(before).eq(trimmed(line))) {
                 continue;
             }
@@ -118,6 +120,13 @@ fn visible_cues(doc: &Document) -> impl Iterator<Item = &Cue> {
     doc.cues
         .iter()
         .filter(|cue| cue.lines.iter().any(|line| has_text(line)))
+}
+
+/// The work of writing `line`: a unit, one per span, and one per
+/// [`BYTES_PER_UNIT`] of each span's text.
+fn line_work(line: &[Span]) -> usize {
+    let text: usize = texts(line).map(str::len).sum();
+    1 + line.len() + text / BYTES_PER_UNIT
 }
 
 /// The text spans of a line.
@@ -246,7 +255,7 @@ impl<W: Write> CueText for SrtText<'_, W> {
 }
 
 /// Writes the cue's lines with visible text to `out`, each ended by `nl`
-/// and counted as work for `ticker`. `<i>`, `<b>` and `<u>` tags are
+/// and counted as work for `ticker` (see [`line_work`]). `<i>`, `<b>` and `<u>` tags are
 /// balanced across the cue:
 /// - opening a style that is already open, or closing one that isn't,
 ///   writes nothing;
@@ -265,7 +274,7 @@ fn tagged_lines(
     };
     let mut open: Vec<Style> = Vec::new();
     for (i, line) in cue.lines.iter().enumerate() {
-        ticker.tick()?;
+        ticker.work(line_work(line))?;
         if !has_text(line) {
             continue;
         }
@@ -681,24 +690,37 @@ mod tests {
 
     #[test]
     fn a_cancel_while_writing_stops_at_the_next_check() {
-        let line = |i: usize| vec![text(&format!("line {i}"))];
-        let n = CHECK_EVERY + 10;
-        // Many lines in one cue, and as many one-line cues.
-        let one_cue = doc(
-            Newline::Lf,
-            vec![Cue {
-                start_ms: 0,
-                end_ms: 1,
-                lines: (0..n).map(line).collect(),
-            }],
-        );
+        // A line of one 7-byte span is two units of work (the line and its
+        // span); one of a 24-byte span between two tags is seven (the
+        // line, three spans and 24 / 8 for the text).
+        fn short(i: usize) -> Vec<Span> {
+            vec![text(&format!("t{i:06}"))]
+        }
+        fn wide(i: usize) -> Vec<Span> {
+            vec![
+                Span::Open(Style::Italic),
+                text(&format!("t{i:023}")),
+                Span::Close(Style::Italic),
+            ]
+        }
+        let n = CHECK_EVERY;
+        let one_cue = |line: fn(usize) -> Vec<Span>| {
+            doc(
+                Newline::Lf,
+                vec![Cue {
+                    start_ms: 0,
+                    end_ms: 1,
+                    lines: (0..n).map(line).collect(),
+                }],
+            )
+        };
         let many_cues = doc(
             Newline::Lf,
             (0..n)
                 .map(|i| Cue {
                     start_ms: i as u64,
                     end_ms: i as u64 + 1,
-                    lines: vec![line(i)],
+                    lines: vec![short(i)],
                 })
                 .collect(),
         );
@@ -708,11 +730,13 @@ mod tests {
             |doc, out, is_cancelled| write_srt(doc, out, false, is_cancelled),
             |doc, out, is_cancelled| write_txt(doc, out, is_cancelled),
         ];
-        // The first check counts as one unit, and so does each cue and
-        // each line: the check at unit CHECK_EVERY stops the writer.
-        for (doc, written_lines) in [
-            (&one_cue, CHECK_EVERY - 2),
-            (&many_cues, CHECK_EVERY / 2 - 1),
+        // The first check, before anything is written, counts as a unit,
+        // and so does each cue. The check due once CHECK_EVERY units are
+        // done stops the writer before the line or cue it comes before.
+        for (name, doc, written_lines) in [
+            ("one cue", one_cue(short), (CHECK_EVERY - 2).div_ceil(2)),
+            ("wide lines", one_cue(wide), (CHECK_EVERY - 2).div_ceil(7)),
+            ("many cues", many_cues, (CHECK_EVERY - 2).div_ceil(3)),
         ] {
             for (w, writer) in writers.iter().enumerate() {
                 // Not cancelled at the first check, before anything is
@@ -723,11 +747,14 @@ mod tests {
                     calls > 1
                 };
                 let mut out = Vec::new();
-                let err = writer(doc, &mut out, &mut is_cancelled).unwrap_err();
+                let err = writer(&doc, &mut out, &mut is_cancelled).unwrap_err();
                 assert_eq!(err.to_string(), "cancelled");
                 let written = String::from_utf8(out).unwrap();
-                let lines = written.lines().filter(|l| l.starts_with("line ")).count();
-                assert_eq!(lines, written_lines, "writer {w}");
+                let lines = written
+                    .lines()
+                    .filter(|l| l.trim_start_matches("<i>").starts_with('t'))
+                    .count();
+                assert_eq!(lines, written_lines, "{name}, writer {w}");
             }
         }
     }
