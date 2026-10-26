@@ -1158,10 +1158,14 @@ fn fake_bsdtar() {
             0
         }
         "slow" => {
+            // Echoes the whole input 1 KiB at a time, 50 ms apart: never
+            // stalled, however slow the machine. The time cap only stops a
+            // fake that's left running, so it's far above the ~1.2 s a
+            // 24 KiB input takes (a slow CI Mac once needed more than 1.5 s).
             let start = Instant::now();
             let mut stdin = io::stdin().lock();
             let mut buf = [0u8; 1024];
-            while start.elapsed() < Duration::from_millis(1500) {
+            while start.elapsed() < Duration::from_secs(30) {
                 let n = stdin.read(&mut buf).unwrap();
                 if n == 0 {
                     break;
