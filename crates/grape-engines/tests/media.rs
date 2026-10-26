@@ -487,6 +487,70 @@ fn surround_becomes_a_layout_opus_and_vorbis_take() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The presentation times of `path`'s video frames, in the order they're
+/// decoded and shown.
+fn frame_times(path: &Path) -> Vec<i64> {
+    let out = Command::new(tool("GRAPE_TEST_FFPROBE"))
+        .args(["-v", "error", "-select_streams", "v:0"])
+        .args(["-show_entries", "frame=pts", "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "ffprobe {}", path.display());
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| line.trim_end_matches(',').parse().unwrap())
+        .collect()
+}
+
+#[test]
+fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
+    let dir = TestDir::new("media-b-frames");
+    // AVI and ASF keep only decode times, so a copy would show these
+    // B-frames out of order.
+    for (name, muxer) in [("bframes.avi", "avi"), ("bframes.wmv", "asf")] {
+        let src = dir.join(name);
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30:duration=1",
+            SINE[0],
+            SINE[1],
+            SINE[2],
+            SINE[3],
+            "-shortest",
+            "-c:v",
+            "libx264",
+            "-bf",
+            "3",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "libmp3lame",
+            "-f",
+            muxer,
+            src.to_str().unwrap(),
+        ]);
+        let from = Format::from_file_name(name).unwrap();
+        for to in [Format::Mp4, Format::Mov, Format::Mkv] {
+            if !targets(from).contains(&to) {
+                continue;
+            }
+            let (outcome, _) = convert_file(&dir, &src, to)
+                .unwrap_or_else(|e| panic!("{name} to {to:?}: {e} ({})", e.detail));
+            let out = &outcome.outputs[0];
+            let times = frame_times(out);
+            assert!(times.len() >= 25, "{name} to {to:?}: {times:?}");
+            assert!(
+                times.windows(2).all(|w| w[0] < w[1]),
+                "{name} to {to:?}: frames out of order: {times:?}"
+            );
+            fs::remove_file(out).unwrap();
+        }
+    }
+}
+
 #[test]
 fn a_source_without_the_needed_stream_is_refused_before_writing() {
     let dir = TestDir::new("media-missing-stream");

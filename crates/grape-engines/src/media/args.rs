@@ -147,14 +147,20 @@ pub(crate) fn muxer(to: Format) -> Option<&'static str> {
 /// - **MP4 and MOV** copy both or neither: H.264 in yuv420p that isn't
 ///   rotated, with no audio or AAC or MP3, plays everywhere as it is.
 /// - Every other target re-encodes.
+///
+/// Video from an **AVI or ASF** (WMV) source is never copied: those
+/// containers store no presentation times, so copied B-frames would be
+/// shown in decode order, and FFmpeg writes that without an error.
 pub(crate) fn copy_plan(to: Format, probe: &Probe) -> CopyPlan {
     let Some(video) = &probe.video else {
         return CopyPlan::default();
     };
     let audio = probe.audio.as_ref();
+    let timed = !matches!(probe.format_name.as_str(), "avi" | "asf");
     match to {
         Format::Mkv => CopyPlan {
-            video: video.rotation == 0
+            video: timed
+                && video.rotation == 0
                 && matches!(
                     video.codec.as_str(),
                     "h264" | "hevc" | "vp8" | "vp9" | "av1"
@@ -167,7 +173,8 @@ pub(crate) fn copy_plan(to: Format, probe: &Probe) -> CopyPlan {
             }),
         },
         Format::Mp4 | Format::Mov => {
-            let fits = video.codec == "h264"
+            let fits = timed
+                && video.codec == "h264"
                 && video.pix_fmt == "yuv420p"
                 && video.rotation == 0
                 && audio.is_none_or(|a| matches!(a.codec.as_str(), "aac" | "mp3"));
@@ -993,6 +1000,47 @@ mod tests {
                 "matroska",
             );
         }
+    }
+
+    #[test]
+    fn video_from_avi_or_asf_is_never_copied() {
+        for format_name in ["avi", "asf"] {
+            let source = Probe {
+                format_name: format_name.into(),
+                ..probe(
+                    Some(video("h264", "yuv420p", 0)),
+                    Some(audio("mp3", 44_100, 2, 16)),
+                )
+            };
+            // MP4 and MOV copy both or neither.
+            for to in [Format::Mp4, Format::Mov] {
+                assert_eq!(copy_plan(to, &source), CopyPlan::default(), "{to:?}");
+                let args = &passes_for(&source, to).unwrap()[0].args;
+                assert!(
+                    has(args, ["-c:v", "libx264"]) && has(args, ["-c:a", "aac"]),
+                    "{format_name} to {to:?}"
+                );
+            }
+            // MKV still copies the audio.
+            assert_eq!(
+                copy_plan(Format::Mkv, &source),
+                CopyPlan {
+                    video: false,
+                    audio: true
+                }
+            );
+            let args = &passes_for(&source, Format::Mkv).unwrap()[0].args;
+            assert!(has(args, ["-c:v", "libx264"]) && has(args, ["-c:a", "copy"]));
+        }
+        // The same streams from a container with presentation times copy.
+        let mkv = Probe {
+            format_name: "matroska,webm".into(),
+            ..probe(
+                Some(video("h264", "yuv420p", 0)),
+                Some(audio("mp3", 44_100, 2, 16)),
+            )
+        };
+        assert!(copy_plan(Format::Mp4, &mkv).video && copy_plan(Format::Mkv, &mkv).video);
     }
 
     #[test]

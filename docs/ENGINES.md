@@ -55,9 +55,9 @@ Every video target except GIF scales to even dimensions, at least 2×2: `scale='
 
 | Target | Video | Audio | Notes |
 |---|---|---|---|
-| mp4 | `libx264 -crf 20 -preset medium -pix_fmt yuv420p` | `aac -b:a 192k` | `-movflags +faststart`. **Copied** (`-c copy`) when the source is H.264 yuv420p, not rotated, with no audio or AAC/MP3 |
+| mp4 | `libx264 -crf 20 -preset medium -pix_fmt yuv420p` | `aac -b:a 192k` | `-movflags +faststart`. **Copied** (`-c copy`) when the source is H.264 yuv420p, not rotated, not from an AVI or WMV, with no audio or AAC/MP3 |
 | mov | same as mp4 | same as mp4 | same as mp4 |
-| mkv | copy H.264/HEVC/VP8/VP9/AV1 that isn't rotated, else as mp4 | copy AAC/MP3/Opus/Vorbis/FLAC/AC-3/E-AC-3, else `aac -b:a 192k` | each stream decided on its own; rotated video is re-encoded upright |
+| mkv | copy H.264/HEVC/VP8/VP9/AV1 that isn't rotated or from an AVI or WMV, else as mp4 | copy AAC/MP3/Opus/Vorbis/FLAC/AC-3/E-AC-3, else `aac -b:a 192k` | each stream decided on its own; rotated video is re-encoded upright |
 | webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -pix_fmt yuv420p` | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | the layout filter as for opus |
 | avi | `mpeg4 -q:v 3 -tag:v XVID` | `libmp3lame -b:a 192k` (constant bitrate stays in sync in AVI) | |
 | wmv | `wmv2 -q:v 3` | `wmav2 -b:a 192k`, `-ac 2` above stereo, `-ar 48000` above 48 kHz | wmav2 refuses more |
@@ -70,6 +70,8 @@ Every video target except GIF scales to even dimensions, at least 2×2: `scale='
 | opus | — | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | libopus takes only these Vorbis-order layouts and doesn't convert on its own, so FFmpeg remixes to the nearest: 5.1(side) (AC-3, E-AC-3, DTS, 6-channel FLAC) → 5.1, 2.1 → stereo, 4.0 → 5.0, 5.0(side) → 5.0, more than 8 channels → at most 7.1 |
 | aiff | — | `pcm_s16be` or `pcm_s24be`, as wav | |
 | wma | — | `wmav2 -b:a 192k`, with wmv's limits | |
+
+Video from an AVI or WMV (ASF) source is never copied: those containers keep only decode times, so copied B-frames would play out of order, and FFmpeg writes that without an error. Their audio follows the rules above.
 
 A copied conversion that FFmpeg rejects (a stream can fit by its codec and still not mux) is retried once, re-encoding everything.
 
