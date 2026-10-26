@@ -416,6 +416,68 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - Neither script has run on a Mac or the PC yet. Windows PowerShell 5.1 and macOS's bash 3.2 first run in CI.
 - **Revisit if:** heif-enc is pinned (a Windows-only sidecar needs its own overlay or a `tauri.windows.conf.json`, since tauri-build wants every `externalBin` for the target it builds), Grape ships for Windows ARM64 (`aarch64-pc-windows-msvc`), the Windows sidecars get signed in M7 (the bundler signs them in place in `binaries/`, which changes their hashes, so the next run fetches again), or Riedl's Intel builds end (January 2027).
 
+## D26: Lane B's v1 tools: Compress, Remove Metadata, Normalize Volume, Audio Channels, Remove Audio (2026-10-26, proposed, confirm)
+- **Decision:** `run_job` runs five v1 tools on 31 more tool/format pairs (38 with every sidecar):
+  - Compress on JPG and PNG (image engine, no sidecar) and on MP3, M4A, WAV (→ FLAC), FLAC, MP4, MOV and MKV (FFmpeg);
+  - Remove Metadata on JPG, PNG, WebP and GIF (Grape's own container strip, no sidecar) and on MP3, M4A, WAV, FLAC, MP4, MOV and MKV (FFmpeg stream copy);
+  - Normalize Volume and Audio Channels on MP3, M4A, WAV and FLAC;
+  - Remove Audio on MP4, MOV and MKV.
+  WebP, TIFF and HEIC Compress, and TIFF and HEIC Remove Metadata, stay "coming". The numbers are in ENGINES.md → Tools. Lane B builds the slice in small commits; until a pair's commit lands, `run_job` refuses it and the app says "… is coming" (D35).
+- **Rules:**
+  - Only Remove Metadata removes metadata. The other tools keep tags, `creation_time` (FFmpeg drops it on every remux, `ffmpeg_mux_init.c:3034`), iPhone QuickTime keys, cover art, chapters, ICC and EXIF/XMP/IPTC.
+  - Tools keep every track except what they remove. They map streams by index, unlike conversions ("only what the user sees", D22).
+  - Compress output must be ≤90 % of the source (lossy) or ≤95 % (exact).
+  - A job that would change nothing (already compact, mono or stereo, at the target loudness, no sound to remove, too quiet to measure) writes nothing and fails with the new `ErrorKind::NoChange`.
+  - Remove Metadata and Remove Audio never re-encode. Normalize and Channels keep codec, depth and rate.
+- **Remove Metadata:**
+  - **Images:** a container-level strip (JPEG segments, PNG chunks, WebP chunks, GIF blocks). Image data stays byte for byte. ICC is kept. An EXIF holding only Orientation (and the DCF Adobe RGB tags when that's how the source signaled its color space) replaces the dropped EXIF when needed, so nothing rotates or shifts color. Data after a JPEG's end (gain maps, motion-photo video, MPF images) is dropped and reported.
+  - **Media:** `-c copy -map_metadata -1 -map_chapters -1 -fflags +bitexact`, with track languages and MKV fonts restored. Cover art, data tracks, image attachments, chapters and MP4/MOV timecode are dropped and reported. MP3 gets no ID3 at all. A second ffprobe of the output must find only structural keys, or nothing is published.
+  - The report (`Note::MetadataRemoved`) gains Location, Camera, Comment, Copyright, Software, Iptc, Thumbnail, CoverArt, Chapters and Embedded.
+  - This replaces ENGINES.md's "Images: decode and re-encode" (amends D16).
+- **Normalize Volume:**
+  - Measure with FFmpeg's `ebur128` (true peak; mono measured as dual mono).
+  - When the peaks allow it, a linear `volume` gain.
+  - Otherwise the gain plus a 4× (≤48 kHz) or 2× (≤96 kHz) oversampled `alimiter` at the ceiling −0.5 dB, re-measured and corrected at most twice.
+  - Ceiling −1 dBTP for WAV, FLAC and ALAC; −2 dBTP for MP3 and AAC.
+  - Target −24…−10 LUFS (default −16). Within 0.5 LU with the peaks under the ceiling is `NoChange`.
+  - ReplayGain, R128 and iTunNORM tags are removed.
+  - Not `loudnorm`: its dynamic mode rides the gain toward the running loudness (`af_loudnorm.c:477-488, 561-565`), resamples to 192 kHz, and would add libebur128's MIT notice. TOOLS_AND_ACTIONS.md's engine column changes with this.
+- **Audio Channels:**
+  - stereo → mono is (L+R)/2;
+  - mono → stereo duplicates at full level;
+  - 3 or more labeled channels use swresample's matrix normalized with `rematrix_maxval=1` (5.1 → stereo: FL 0.414, FC 0.293, SL 0.293, no LFE), the same for every codec;
+  - 3 or more unlabeled channels average to mono and are refused for stereo.
+- **Compress:** Small, Balanced and High per ENGINES.md → Tools.
+  - x264 CRF 28/23/20 at `medium`, short side ≤720/1080/2160, Small ≤30 fps; AAC 48/64/96 kb/s per channel; LAME V7/V5/V2.
+  - FLAC: 16-bit ≤48 kHz / ≤24-bit ≤48 kHz / lossless.
+  - JPEG: q70 ≤2048 px / q80 ≤4096 px / q85 with image's encoder, EXIF kept with the stored orientation.
+  - PNG: lossless at every preset.
+  - HLG video becomes 8-bit H.264 with its HLG tags. PQ video, CMYK JPEG, APNG, and WAV/FLAC deeper than 24-bit or float are refused.
+- **API:**
+  - grape-core: `ToolKey::has_v1_panel()` (D31's v1 rule) and `ToolParams::LUFS_MIN/MAX/STEP` with `lufs_ok` (D12 extension).
+  - grape-engines: `ErrorKind::NoChange` (`ErrorKind` becomes `#[non_exhaustive]`), `Note::Compressed { before, after }`, and the ten `MetaField`s.
+  - `png` 0.18.1 (MIT OR Apache-2.0, already in the lock through image) becomes a direct dependency, for PNG Compress.
+- **FFmpeg (amends D24):** + filters `ebur128`, `volume`, `alimiter`; + muxer `null`; + encoders `alac`, `pcm_s32le`, `pcm_f32le`. No new license notice (`notices.py scan`: 0). Linux and Windows are rebuilt here; the macOS universal build is CI's (lane A).
+- **Not chosen:**
+  - jpeg-encoder: IJG license, and its optimized tables are misdecoded by zune-jpeg 0.5.15.
+  - Palette PNG (`color_quant`), libwebp, and the TIFF IFD rewriter: later slices.
+  - The ITU-level downmix with a measured gain, and early stop for video Compress.
+- **Tested:** not yet; the slice's last commit records it (`cargo test --workspace`, engines-it against the rebuilt 9.0.2 and 6.1.1, clippy for Linux, Windows and both Macs). The design was checked on Linux, 2026-10-26, against the 9.0.2 source and Grape's 9.0.2 build, and FFmpeg 6.1.1 for the filters 9.0.2 lacked: the option names, `creation_time` dropped on every remux, the Dolby Vision boxes needing `-strict unofficial`, the downmix coefficients, cover art kept by a re-encode in MP3, M4A and FLAC, `-id3v2_version 0` writing no ID3, HLG through x264, Apple keys and `creation_time` kept by Remove Audio's argv, the Normalize plan on four sources (each within 0.1 LU of −16 LUFS, true peak at most −1.5 dBTP, with 15.6 dB of limiting on the hardest), and `notices.py scan` over the new components' files.
+- **Needs the PC** (`TESTING.md` → "Media tools, M4" and "Image tools, M4"):
+  - iPhone SDR and HDR (HLG/Dolby Vision) MOVs through Mute and Compress, imported into Photos (date, location, playback);
+  - a GoPro MP4;
+  - Android and Pixel Ultra HDR and motion-photo JPEGs through Remove Metadata (Explorer's Properties empty, still upright);
+  - a podcast MP3 normalized and checked in a meter;
+  - a 24/96 FLAC;
+  - a 32-bit float WAV;
+  - a 5.1 FLAC to stereo;
+  - a macOS screenshot PNG.
+- **Revisit if:**
+  - HLG H.264 looks wrong on the PC or in Photos (then refuse it or add tone mapping);
+  - limiting depth on real speech sounds bad (cap it);
+  - zune-jpeg 0.5.16 is stable and 14 days old (jpeg-encoder with optimized tables);
+  - users ask for album gain, palette PNG or WebP Compress.
+
 ## D27: Archives (2026-10-26, proposed, confirm)
 - **Decision:** `grape-engines` converts among ZIP, TAR and GZIP (the six v1 pairs: zip → tar or gz, tar → zip or gz, gz → zip or tar) and runs Extract Archive on all three, in pure Rust, in `src/archive/`. Lane A builds that module by agreement with lane B, who owns the crate. It is wired into `run_job` (`Engine::Archive` and its arms, D35). RAR is read through Grape's own bsdtar sidecar (below).
 - **Crates** (grape-engines only):

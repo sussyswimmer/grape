@@ -14,19 +14,19 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 
 | Key | Wheel title | Name | Panel | Combine | Multi-OK | Tier | Engine (see ENGINES.md) |
 |---|---|---|---|---|---|---|---|
-| compress | COMPRESS | Compress | ✓ |  | ✓ | v1 (img/audio/video), v2 (pdf) | image codecs / FFmpeg / lopdf |
-| removeMetadata | METADATA | Remove Metadata | ✓ |  | ✓ | v1 | image re-encode / FFmpeg `-map_metadata -1` / lopdf |
+| compress | COMPRESS | Compress | ✓ |  | ✓ | v1 (img/audio/video), v2 (pdf) | image (JPG, PNG) / FFmpeg (audio, video) / lopdf (v2) |
+| removeMetadata | METADATA | Remove Metadata | ✓ |  | ✓ | v1 | container strip (JPG PNG WebP GIF) / FFmpeg `-map_metadata -1 -c copy` / lopdf |
 | editImage | EDIT | Edit Photo | ✓ |  |  | v2 | image pipeline |
 | annotateImage | ANNOTATE | Annotate Photo | ✓ |  |  | v2 | canvas in UI → PNG |
 | frameImage | ADD BG | Add Background | ✓ |  |  | v2 | image pipeline |
 | cropImage | CROP | Crop Image | ✓ |  | ✓ | v2 | image pipeline |
 | redactImage | REDACT | Redact Photo | ✓ |  |  | v2 | image pipeline |
-| normalizeAudio | NORMALIZE | Normalize Volume | ✓ |  | ✓ | v1 | FFmpeg `loudnorm` (two-pass) |
+| normalizeAudio | NORMALIZE | Normalize Volume | ✓ |  | ✓ | v1 | FFmpeg `ebur128` + `volume` (+ oversampled `alimiter`) |
 | trimAudio | TRIM | Trim Audio | ✓ |  |  | v2 | FFmpeg |
-| audioChannels | CHANNELS | Audio Channels | ✓ |  |  | v1 | FFmpeg `-ac 1/2` |
+| audioChannels | CHANNELS | Audio Channels | ✓ |  |  | v1 | FFmpeg `pan` / `aresample` downmix |
 | audioToVideo | VISUALIZE | Audio Visualizer | ✓ |  |  | v2 | FFmpeg `showwaves`/`showfreqs` |
 | redactAudio | BLEEP | Bleep Audio | ✓ |  |  | v2 | FFmpeg `volume`+`sine` over ranges |
-| muteVideo | MUTE | Remove Audio |  |  | ✓ | v1 | FFmpeg `-an -c:v copy` |
+| muteVideo | MUTE | Remove Audio |  |  | ✓ | v1 | FFmpeg stream copy without the audio |
 | trimVideo | TRIM | Trim Video | ✓ |  |  | v2 | FFmpeg (stream copy when keyframe-aligned) |
 | cropVideo | CROP | Crop Video | ✓ |  |  | v2 | FFmpeg `crop` |
 | changeVideoSpeed | SPEED | Change Speed | ✓ |  |  | v2 | FFmpeg `setpts` + `atempo` |
@@ -48,7 +48,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 - **Audio Channels** is Mono / Stereo, starting at Mono every time.
 - **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
 - **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder. Its panel opens once Grape's PDF library is found (D35).
-- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); for now on PDFs only.
+- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); for now on PDFs only. D26 adds JPG, PNG, WebP, GIF, audio and video, which say "No metadata found" when they had none.
 
 ## File actions
 
