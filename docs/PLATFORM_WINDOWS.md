@@ -26,6 +26,7 @@ npm install -g pnpm@10
 - Keep the repo on a local drive, **not** inside OneDrive. OneDrive syncing `target/` and `node_modules/` makes builds slow and flaky.
 - The first `cargo build` takes several minutes, because Tauri has many dependencies. Later builds are incremental.
 - Windows Defender can slow builds a lot. Optionally add the repo folder as an exclusion in Windows Security → Virus & threat protection → Exclusions.
+- **HEIC needs `grape-heif.exe`** (D33). It isn't fetched: take it from a CI run (the `grape-heif-x86_64-pc-windows-msvc` artifact) or build it with `.\tools\grape-heif\build.ps1 -Install`, then pass its overlay. "grape-heif (HEIC)" below has both ways. Without it, a HEIC drop says the helper is missing; nothing else needs it.
 
 ## Running a CI build
 
@@ -111,8 +112,7 @@ No haptics on Windows. The tick plays via WebAudio in the overlay or `PlaySoundW
 - Terminal: with the default "Windows Terminal" setting, `wt.exe -d "<dir>"` if `wt` starts; otherwise, or when the user chose PowerShell in Settings, `powershell.exe -NoExit -Command "Set-Location -LiteralPath '<dir>'"` in a new console. PowerShell reads `'`, `‘`, `’`, `‚` and `‛` as the same quote, so each one in the path is doubled. wt splits its command line at `;`, so a path with `;` goes straight to PowerShell. Files open their parent folder.
 
 ## Conversions that use Windows components
-- **HEIC decode:** bundled libheif + libde265 (LGPL, as DLLs) so it works without the Store HEIF extension.
-- **HEIC encode:** bundled `heif-enc` sidecar built with x265. That makes the sidecar GPL, which is fine because Grape is free and open source and it's a separate executable (`ENGINES.md` licensing rules).
+- **HEIC, both ways:** `grape-heif.exe`, Grape's own helper (DECISIONS D33; "grape-heif (HEIC)" below). It links libheif and libde265 (decode) and x265 (encode) statically, so it needs no Store HEIF or HEVC extension. x265 makes it GPL-3.0-or-later as a whole, which is fine because Grape is free and open source and it's a separate executable (`ENGINES.md` licensing rules); its texts are in `licenses\grape-heif\` and every release carries its source bundle. Grape runs it in a Job Object (2 GiB, ended with Grape, one process), with no console and without `LIBHEIF_PLUGIN_PATH` or `LIBHEIF_SECURITY_LIMITS`.
 - **H.264 encode:** the FFmpeg sidecar with libx264, allowed under the same rules. Prefer `h264_mf` / `h264_nvenc` / `h264_qsv` / `h264_amf` hardware encoders when present, with x264 as the fallback.
 
 ## Sidecars
@@ -139,6 +139,7 @@ FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They a
 - **In dev**, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` makes tauri-build copy them into `target\debug` as `ffmpeg.exe` and `ffprobe.exe`, next to Grape's executable, with `bsdtar.exe`. tauri-build fails the build if any file the overlay lists is missing from `binaries\`, and this script brings only FFmpeg, so put a bsdtar there first, even to test only FFmpeg: `.\scripts\bsdtar\build.ps1 -Install` or CI's artifact ("bsdtar (RAR)", below). Without the overlay none of them are copied there.
 - **Installed**, they lose the suffix: the installer puts `ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` in `%LOCALAPPDATA%\Grape`. That's where `src/sidecars.rs` looks, never on `PATH`.
 - `GRAPE_SIDECARS_NO_RUN=1` skips the `-version` runs and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
+- **Not grape-heif.** HEIC's helper isn't in `sidecars.lock` and this script never fetches it: CI builds it from `tools\grape-heif` (D33, "grape-heif (HEIC)" below), until M7 publishes it with the releases.
 
 ## PDFium
 
@@ -173,6 +174,26 @@ Grape reads RAR archives with `bsdtar`, a separate program it builds from libarc
 - **How Grape runs it.** Only as `bsdtar -c -P -f - --format pax @-`: Grape writes the RAR into its stdin and reads a tar from its stdout; bsdtar never writes a file. It runs in a new, empty folder in `%TEMP%` (`grape-bsdtar-…`, removed afterwards), with a cleared environment (`PATH` set to that folder, `TZ=UTC0`, `TAR_READER_OPTIONS=rar:hdrcharset=UTF-8` and `SystemRoot`), and with `CREATE_NO_WINDOW`, so no console window opens.
 - **Defender** may look at an unsigned `bsdtar.exe` the first time it runs, which can make the first RAR slower. It's signed with the installer from M7. Manual QA checks it (`TESTING.md` → "RAR, M3").
 
+## grape-heif (HEIC)
+
+Grape converts HEIC to and from JPG, PNG, WEBP, TIFF and BMP with `grape-heif.exe`, a small program of its own in `tools\grape-heif` (DECISIONS D33). It's built on libheif 1.23.7, libde265 1.1.3 and x265 4.3, which vcpkg builds at a pinned commit and which are linked statically, with libheif's plugin loading compiled out. It isn't in `scripts/sidecars.lock`: CI builds it, or you build it on the PC, from the repo root:
+
+```powershell
+.\tools\grape-heif\build.ps1 -VcpkgRoot C:\gh-vcpkg -BinaryCache C:\gh-vcpkg-cache -Install
+```
+
+- **What it needs:** git, Rust (the Dev setup) and the Build Tools' C++ workload; vcpkg fetches its own CMake, NASM and pkgconf. The first build takes 30 minutes or more and about 3 GB, mostly x265; `-BinaryCache` makes later ones quick. Keep `-VcpkgRoot` short (vcpkg's build trees are deep); without it vcpkg goes in `target\grape-heif\vcpkg`. It works in Windows PowerShell 5.1 and PowerShell 7 (`powershell -ExecutionPolicy Bypass -File …` if scripts are disabled).
+- **What it does:** clones vcpkg at the commit in `tools\grape-heif\vcpkg.lock.json` (never a vcpkg already on the PC), downloads the three source archives first and checks each SHA-512 against the lock and the port, builds `libheif[core,hevc]:x64-windows-static` with Grape's overlay port, then `cargo build --release --locked` in `tools\grape-heif` with the static C runtime.
+- **What lands where.** `tools\grape-heif\target\out\grape-heif.exe`, with `BUILDINFO.txt` (the banner, the pins, the compiler, CMake, NASM and Rust versions) and `SHA256SUMS`; `-Install` copies it to `apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe`.
+- **Or take CI's build:** download the `grape-heif-x86_64-pc-windows-msvc` artifact from a CI run (the `grape-heif` workflow, which CI calls on every push) and save `grape-heif.exe` as `apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe`.
+- **Check it:** `.\tools\grape-heif\target\out\grape-heif.exe -hide_banner -version` prints `grape-heif version 1.23.7-grape.1 …`, then `configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1`.
+- **In dev**, `pnpm tauri dev --config src-tauri/tauri.heif.windows.conf.json` (from `apps\desktop`) makes tauri-build copy it to `target\debug\grape-heif.exe`, next to Grape's executable. Add `--config src-tauri/tauri.pdfium.windows.conf.json` before it for PDFs too. Never pass it with `tauri.sidecars.conf.json`: both set `bundle.externalBin`, and the second list replaces the first (#27 merges them into one Windows overlay).
+- **In the installer.** CI's installer job and `release.yml` take it from the `grape-heif` job of the same run, check its SHA-256 and build with `--config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.heif.windows.conf.json`. The HEIC overlay runs the gate first (`scripts/check-sidecars.mjs`, which reads the merged list from `TAURI_CONFIG`): it refuses anything but Grape's build (the banner's `-grape` marker) and needs `licenses\grape-heif\` with `SOURCE.md` and its `THIRD_PARTY_NOTICES.md` section. Installed, it's `grape-heif.exe` next to `Grape.exe`, where `src/sidecars.rs` looks for it, never on `PATH`. Without it a HEIC drop says "Grape's HEIC helper is missing" / "Reinstall Grape to convert HEIC files.", and the log's `sidecars:` line says it's missing.
+- **The source.** It's GPL-3.0-or-later as a whole (x265), so every build comes with its complete source: CI's `grape-heif-source` artifact, `grape-heif-<version>-source.tar.gz`, made by `tools\grape-heif\source-bundle.sh` (Grape's code, every crate, the three archives, vcpkg's ports and the overlay, and how to build it), and the same file on the GitHub Release. `licenses\grape-heif\SOURCE.md` says what's in it.
+- **Tests.** `cargo test --release --locked` in `tools\grape-heif` (with `VCPKG_ROOT` set to the vcpkg folder) runs its own tests: the banner, a round trip through libheif, plugin loading compiled out, and `LIBHEIF_SECURITY_LIMITS=off` ignored. With `$env:GRAPE_TEST_HEIF` set to the exe's full path, `cargo test -p grape-engines --features heif-it` converts real files through it (add `$env:GRAPE_TEST_HEIF_FIXTURES`, a folder of CI's `heif-fixtures` artifact), and `cargo test -p grape-platform --features heif-it --test job_object -- --nocapture` encodes a 35.6 MP image under the 2 GiB Job cap and prints the peak. All of them fail, not skip, without their variables. CI runs them against the exe it built in the same run (`heif-it-windows`).
+- **How Grape runs it.** As `grape-heif.exe --grape-heif-worker`, one image per run: one JSON request on stdin, JSON lines on stdout (`crates/grape-heif-proto`). Pixels go through a new, private `grape-heif-…` folder in `%TEMP%`, which is its working folder and is removed afterwards; only the finished file is written into the destination folder, with Grape's usual no-overwrite rule. It starts with `CREATE_NO_WINDOW`, without `LIBHEIF_PLUGIN_PATH` and `LIBHEIF_SECURITY_LIMITS`, and goes into a Job Object (`grape_platform::windows::job`) before it's given any work: 2 GiB of committed memory at most, ended when the job closes (when the conversion ends, is cancelled, or Grape exits or crashes), one process, no error dialogs, no clipboard, desktop or system settings. At start it loads DLLs from System32 only and turns off Windows' error boxes. Decoding stops at 134 MP and 512 MiB of file; encoding at 35.6 MP and 16,888 pixels a side ("…is too large to save as HEIC").
+- **Defender** may look at an unsigned `grape-heif.exe` the first time it runs, which can make the first HEIC slower. It's signed with the installer from M7. Manual QA checks it (`TESTING.md` → "HEIC, D33").
+
 ## Distribution
 - Installer: Tauri **NSIS** bundle (per-user install, no admin needed) plus a portable `.zip`. Keep MSI for later.
 - Code signing: unsigned builds trigger SmartScreen ("Windows protected your PC"). Free option for open source: **SignPath Foundation** (free signing for OSS projects that meet its criteria). Alternatives: Azure Trusted Signing (paid, identity checks). Log in DECISIONS when chosen.
@@ -181,7 +202,7 @@ Grape reads RAR archives with `bsdtar`, a separate program it builds from libarc
 
 ## Releasing
 
-A version tag makes a draft release. `.github/workflows/release.yml` builds the installer from the tag and drafts a GitHub Release with it. It never publishes: Maxwell checks the draft and publishes it by hand. So far it builds x64 only. It fetches PDFium fresh (`fetch-sidecars.ps1 -Only pdfium`, every hash checked), builds with the PDFium overlay and fails if `pdfium.dll` or `licenses\pdfium\` is missing (D29).
+A version tag makes a draft release. `.github/workflows/release.yml` builds the installer from the tag and drafts a GitHub Release with it. It never publishes: Maxwell checks the draft and publishes it by hand. So far it builds x64 only. It fetches PDFium fresh (`fetch-sidecars.ps1 -Only pdfium`, every hash checked), builds `grape-heif.exe` from the tag without any cache (the `grape-heif` workflow), builds with the PDFium and HEIC overlays, and fails if `pdfium.dll`, `grape-heif.exe`, `licenses\pdfium\` or `licenses\grape-heif\` is missing (D29, D33).
 
 **Cutting a release**
 
@@ -215,7 +236,8 @@ If the version check fails, nothing was built or released. Delete the tag (`git 
 - The build is the CI job's (`ci.yml` → `build-windows`): the same actions, Node 22, Rust 1.99, `pnpm install --frozen-lockfile` and `pnpm tauri build --bundles nsis --ci`.
 - The NSIS bundler made exactly one `*-setup.exe`. It's copied to `Grape-Setup-x64.exe`, the same name in every release, and hashed into `SHA256SUMS.txt` as `<hash>  Grape-Setup-x64.exe`, in lower-case hex (the `sha256sum` format). Both files are also the run's `Grape-Setup-x64` artifact.
 - The release job checks the downloaded installer against `SHA256SUMS.txt`, fills in `{{VERSION}}` in `.github/release-notes.md`, and makes the draft with `gh release create --draft --verify-tag`.
-- **Running it again.** If the draft exists, the run replaces its two files (`--clobber`) and keeps its notes, so "What's new" survives. If the release is already published, the run fails and changes nothing, so a published file always matches its hash.
+- **grape-heif's source.** The installer carries `grape-heif.exe`, which is GPL, so the draft also gets `grape-heif-<version>-source.tar.gz` from the same run: the release job checks it against its `.sha256` and adds its line to `SHA256SUMS.txt` (GPL-3.0 section 6; D33).
+- **Running it again.** If the draft exists, the run replaces its files (`--clobber`) and keeps its notes, so "What's new" survives. If the release is already published, the run fails and changes nothing, so a published file always matches its hash.
 - **Permissions.** The workflow's token is read-only. Only the release job can write (`contents: write`), and it runs no build code.
 - It doesn't sign anything or add an updater, and Grape itself still makes no network calls (golden rule 3).
 
@@ -227,7 +249,7 @@ If the version check fails, nothing was built or released. Delete the tag (`git 
 - That download is the installer's, not Grape's. Windows 11 and current Windows 10 already have WebView2, so it rarely happens.
 - A PC that is offline *and* has no WebView2 can't install Grape. The `offlineInstaller` mode would fix that, for about 127 MB more per download.
 
-**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23), and, in a build with the PDFium overlay (CI's installer and `release.yml`'s), `pdfium.dll` and `licenses\pdfium\` (D29). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
+**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23), and, in a build with the PDFium and HEIC overlays (CI's installer and `release.yml`'s), `pdfium.dll` and `licenses\pdfium\` (D29) and `grape-heif.exe` and `licenses\grape-heif\` (D33). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
 
 ## Windows QA must-checks
 - Drag from Explorer, the Desktop, Downloads, search results, OneDrive placeholders (cloud-only files: Grape must hydrate or skip them, not hang), and zip folders opened in Explorer (virtual paths, which v1 should skip).

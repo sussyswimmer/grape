@@ -118,7 +118,7 @@ Notes:
 - `gif → video` is offered, but `gif` gets no image targets **[observed]**.
 - PDF → images exports **every page at 300 DPI** **[observed: site copy]**. Multiple pages go into a new folder.
 - **[Grape]** A page over 100 megapixels, or over 65,535 px on a side, is drawn at the highest DPI that fits (only that page), and the toast says how many pages were (D29).
-- `heic` output needs an HEVC encoder. **[Grape]** On macOS use ImageIO. On Windows use the bundled `heif-enc` sidecar (libheif + x265). Because x265 is GPL, it stays a separate executable (ENGINES.md licensing rule 2).
+- `heic` output needs an HEVC encoder. **[Grape]** macOS: ImageIO in Grape's HEIC worker; a Mac without HEVC encoding says "This Mac can't write HEIC files." Windows: Grape's own `grape-heif.exe` (libheif + x265; GPL, so a separate executable under ENGINES.md licensing rule 2; D33). Only the primary image of a HEIC converts, and HEIC output is at most 35,651,584 pixels for now.
 - **[Grape]** `rar` (RAR 4 and 5) is read through Grape's own bsdtar (D27). Refused with a toast:
   - password-protected archives;
   - one part of a multi-part set;

@@ -17,6 +17,7 @@ src/
     display.rs        screen cache filled on the main thread (refresh_screens), CoreGraphics fallback
     window.rs         overlay/toast/panel NSWindow: level per WindowRole (overlay 101, toast 100, panel 99), collection behavior, frame + orderFrontRegardless; the panel's show_panel (key, activate) and hide_panel (hand back)
     actions.rs        pasteboard copy, open -a Terminal or -b iTerm2 (only if NSWorkspace finds it) / open -R, AirDrop, NSOpenPanel + NSFileManager move (per-item snapshot, volume roots stay, focus handed back), the same panel for pick_folder, haptics
+    heif.rs           ImageIo, the HEIC worker's codec (grape_heif_proto::Codec, D33): size from the properties before decoding, a full-size upright thumbnail drawn into RGBA8 and un-premultiplied, ICC kept; encode only when CGImageDestinationCopyTypeIdentifiers lists public.heic; CGImageSourceSetAllowableTypes through dlsym (14.2+)
   windows/
     hook.rs           WH_MOUSE_LL on a message-pumping thread
     drag.rs           the drag worker: allowlist, GetAsyncKeyState polling, DragTracker (its key_down also backs mod.rs's escape_down, the tool panel's Esc poll)
@@ -26,8 +27,14 @@ src/
     drag_out.rs       drag out of the shelf: SHDoDragDrop of Grape's own data object (CF_HDROP + Preferred DropEffect, never a shell ID list, only what callers stored besides), COPY | LINK never MOVE, button-up guard before and after the path check, Esc watchdog
     share.rs          the share sheet: files looked up as StorageFiles (MTA, 10 s), then the "grape-share" STA thread's invisible anchor window owns the sheet (30 s for DataRequested, Chromium's handler rules)
     actions.rs        CF_HDROP and text clipboard, IFileOpenDialog on an STA thread of its own (Move and pick_folder), IFileOperation move, wt/PowerShell, explorer /select
+    job.rs            JobGuard: the Job Object around one helper process (D33): memory cap, kill on close, die on unhandled exception, one active process, UI limits; peak_memory
   mock.rs             scripted DragSignal sequences for app-level tests
   unsupported.rs      every entry point returns Unsupported (Linux and other hosts)
+  bin/
+    grape-heif-worker.rs  heif-it only, never shipped: ImageIo behind worker_main, for grape-engines' Mac HEIC tests (GRAPE_TEST_HEIF); "macOS only" elsewhere
+tests/
+  heif_imageio.rs     macOS + heif-it: ImageIo against the libheif fixtures from CI's Windows job (GRAPE_TEST_HEIF_FIXTURES; fails without it)
+  job_object.rs       Windows: the Job Object's cap, kill on close and one-process limit; with heif-it, grape-heif.exe under the 2 GiB cap (GRAPE_TEST_HEIF)
 ```
 
 ## Hard rules
@@ -38,6 +45,7 @@ src/
 - **macOS drags.** A file drag session starts the drag at once (`DragTracker::start_now`): AppKit already applied its threshold. The keys held when the poller first sees that session are the baseline, as on Windows. The drag thread holds an `NSProcessInfo` activity for its whole life (App Nap) and waits with `park_timeout`, which `stop` cuts short.
 - **macOS Move.** A mounted volume's root (its own `lstat` device isn't its folder's) never moves and isn't counted as moved or unsure. Each item is judged (`mac_rules::judge_move`) from a snapshot taken right after its own move, before the next item moves. Grape activates itself for the panel and alert, then hands activation back to the app that was in front; never `NSApp.hide`. Share does the same through an AirDrop delegate (`ShareDone`), kept alive with its service until AirDrop reports back, and only once no AirDrop window is key. Settings' `pick_folder` shares Move's panel but neither activates nor hands back: the Settings window is already key.
 - **macOS threads.** `NSScreen`, `NSWindow`, `NSOpenPanel` and `NSAlert` are main-thread only (`MainThreadMarker`). Main-thread UI from a worker goes through `dispatch2::run_on_main`, which waits: never call it from a thread the main thread is waiting for. Tauri's `ns_window()` pointer is only good on the main thread until the autorelease pool drains, so retain it at once. Wrap AppKit work on Grape's own threads in `autoreleasepool`.
+- **The HEIC worker (D33).** `macos::heif` runs only in the worker process (`Grape --grape-heif-worker`, or the test bin), never in Grape's own: a crash in ImageIO must end one job, not the tray and the drag. `CGImageSourceSetAllowableTypes` restricts ImageIO for the whole process, so it's called only there, and only through `dlsym`: never the objc2-image-io binding, whose import would stop Grape from launching on macOS 13 (CI's DMG job checks `nm -um`). No failure detail holds a path, and the codec logs nothing.
 - Every `unsafe` block gets a `// SAFETY:` comment.
 - **Logging** (`log`) is only for saying why an action did something other than what was asked (Terminal opening another app than the one picked), and for the Windows share sheet's HRESULTs and the drag-out watchdog, which only a run on a real PC can check. Never log a path or a file name.
 - Gate code with `#[cfg(target_os = "macos")]` / `"windows"`. Both must compile in CI even if you only tested one. From Linux, check the Mac target with `CC_aarch64_apple_darwin=clang AR_aarch64_apple_darwin=llvm-ar-18 CFLAGS_aarch64_apple_darwin="--target=arm64-apple-macos11" cargo clippy -p grape-platform --all-targets --target aarch64-apple-darwin -- -D warnings`.

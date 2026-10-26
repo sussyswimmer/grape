@@ -22,7 +22,8 @@ src/
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media.rs          FFmpeg arg builders (pure fns, unit-tested) + runner
   pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement)
-  heif.rs           HEIC through a helper process (lane A's module by agreement; coming)
+  heif.rs           HEIC through a helper process (D33; lane A's module by agreement)
+  helper.rs         helper-process plumbing, WorkDir and the containment hook set_contain (lane A's)
   archive/          zip/tar/gz convert + extract (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link; RAR later via bsdtar
   docs.rs           v2, behind feature "v2"
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
