@@ -47,11 +47,11 @@ pub(crate) const MAX_SOURCE: u64 = 16 * 1024 * 1024;
 /// How many units of work are done between cancel checks. A line read,
 /// looked at, turned into spans or written is a unit, and so is each
 /// [`BYTES_PER_UNIT`] of it; so are a cue and a span written. A unit takes
-/// under a microsecond in a release build: measured, checks come 4 to 7 ms
-/// of work apart as a rule and about 13 ms at most, however long or dense
-/// the lines. The one longer gap is sorting the cue keys, which can't
-/// check inside (`sort_by_start` in [`parse`]): 19 to 27 ms for 500,000
-/// cues, the most a text can hold.
+/// under a microsecond in a release build: measured, checks usually come
+/// well under a millisecond apart (nine in ten within about 3 ms) and about
+/// 13 ms apart at most, however long or dense the lines. The one longer gap
+/// is sorting the cue keys, which can't check inside (`sort_by_start` in
+/// [`parse`]): 19 to 27 ms for 500,000 cues, the most a text can hold.
 pub(crate) const CHECK_EVERY: usize = 16 * 1024;
 
 /// How many bytes of a line count as one more unit of work. Turning dense

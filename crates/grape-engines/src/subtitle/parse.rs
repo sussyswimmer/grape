@@ -363,9 +363,10 @@ fn push_lines(
 /// an arrow in SRT text stays text, while a negative timing line (a
 /// shifted SRT has them) or one after a stray BOM is still a timing line,
 /// so its invalid timing drops its cue instead of joining the cue before.
-/// The cost: SRT text that starts with `-` and a digit and has an arrow
-/// (`-10 degrees --> brr`) is taken for an invalid timing line too, and
-/// dropped with the rest of its cue.
+/// The cost: SRT text with an arrow that starts with a digit, or with `-`
+/// and a digit (`10 degrees --> brr`, `-10 degrees --> brr`), is taken for
+/// an invalid timing line too, and dropped with the rest of its cue and a
+/// digits-only line just before it (taken for its cue number).
 fn looks_like_timing(line: &str, webvtt: bool) -> bool {
     line.split_once(ARROW).is_some_and(|(before, _)| {
         if webvtt {
@@ -1206,6 +1207,16 @@ mod tests {
         let srt = "1\n00:00:01,000 --> 00:00:02,000\nCold out\n-10 degrees --> brr\nso cold\n\n\
                    2\n00:00:03,000 --> 00:00:04,000\n-10 degrees --> brr\n\n\
                    3\n00:00:05,000 --> 00:00:06,000\nThird\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["Cold out"]), cue(5000, 6000, &["Third"])]
+        );
+        // A line of digits before it is taken for its cue number, and a
+        // digit without the `-` does the same.
+        let srt =
+            "1\n00:00:01,000 --> 00:00:02,000\nCold out\n2024\n-10 degrees --> brr\nso cold\n\n\
+                   2\n00:00:03,000 --> 00:00:04,000\n2024\n-10 degrees --> brr\n\n\
+                   3\n00:00:05,000 --> 00:00:06,000\nThird\n10 degrees --> brr\n";
         assert_eq!(
             plain(&parsed(srt)),
             [cue(1000, 2000, &["Cold out"]), cue(5000, 6000, &["Third"])]
