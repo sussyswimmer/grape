@@ -1082,6 +1082,51 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_copy_of_the_audio_alone_is_retried_on_the_other_half() {
+        // Rotated H.264 is re-encoded upright for MKV while its AAC is
+        // copied: the copy of the audio alone still gets the retry, and
+        // half of the bar.
+        let case = Case::new("phone.mov", Format::Mkv);
+        let rotated = flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac").replace(
+            "streams.stream.0.disposition.attached_pic=0\n",
+            "streams.stream.0.disposition.attached_pic=0\n\
+             streams.stream.0.side_data_list.side_data.0.rotation=-90\n",
+        );
+        let refused = "[out#0/matroska @ 0x1] Could not write header \
+                       (incorrect codec parameters ?): Invalid argument";
+        script([
+            Fake::Prints(rotated),
+            Fake::Child("error", refused.to_string()),
+            Fake::Child("write", "re-encoded".to_string()),
+            mkv_h264_aac(),
+        ]);
+        let (result, seen) = case.run_seeing_progress();
+        let outcome = result.unwrap();
+        assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), b"re-encoded");
+        let ran = ran();
+        assert_eq!(ran.len(), 4);
+        // The video re-encoded both times; the audio copied, then AAC.
+        assert!(has(&ran[1], ["-c:v", "libx264"]) && has(&ran[1], ["-c:a", "copy"]));
+        assert!(!has(&ran[1], ["-c", "copy"]));
+        assert!(has(&ran[2], ["-c:v", "libx264"]) && has(&ran[2], ["-c:a", "aac"]));
+        // The copy stops at 49 %, the re-encode fills the rest.
+        let want = [
+            0.1225,
+            0.245,
+            0.3675,
+            COPY_SHARE,
+            0.6125,
+            0.735,
+            0.8575,
+            PASSES_SHARE,
+            CHECKED,
+            1.0,
+        ];
+        assert_progress(&seen, &want);
+        case.assert_clean();
+    }
+
+    #[test]
     fn a_copy_that_works_goes_from_half_of_the_bar_to_the_check() {
         let case = Case::new("clip.mkv", Format::Mp4);
         script([
