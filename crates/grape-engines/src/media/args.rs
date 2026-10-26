@@ -1413,9 +1413,140 @@ mod tests {
             assert!(has(args, ["-vf", EVEN]), "{to:?}");
         }
         // AVI's filter also caps the size; it gives the same even size
-        // below the cap (checked with FFmpeg by the engines-it tests).
+        // below the cap (`the_size_filters_give_even_sizes_of_2_px_or_more`).
         let args = &passes_for(&odd, Format::Avi).unwrap()[0].args;
         assert!(has(args, ["-vf", EVEN_MPEG4]));
+    }
+
+    /// The width and height a `scale='W':'H'` filter of Grape's gives an
+    /// `iw`×`ih` frame, evaluated like FFmpeg's `scale`: the expressions
+    /// in doubles, then truncated to whole pixels.
+    fn scaled(filter: &str, iw: u32, ih: u32) -> (u32, u32) {
+        let sides = filter
+            .strip_prefix("scale='")
+            .unwrap()
+            .strip_suffix('\'')
+            .unwrap();
+        let (w, h) = sides.split_once("':'").unwrap();
+        let side = |expr: &str| {
+            let expr = expr.replace("\\,", ",");
+            let mut parser = Expr {
+                text: expr.as_bytes(),
+                at: 0,
+                iw: f64::from(iw),
+                ih: f64::from(ih),
+            };
+            let value = parser.sum();
+            assert_eq!(parser.at, expr.len(), "{expr}");
+            value as u32
+        };
+        (side(w), side(h))
+    }
+
+    /// A parser and evaluator for the part of FFmpeg's expression language
+    /// the size filters use: numbers, `iw`, `ih`, `+ - * /`, parentheses
+    /// and `max`, `min` and `trunc`.
+    struct Expr<'a> {
+        text: &'a [u8],
+        at: usize,
+        iw: f64,
+        ih: f64,
+    }
+
+    impl Expr<'_> {
+        fn peek(&self) -> Option<u8> {
+            self.text.get(self.at).copied()
+        }
+
+        fn eat(&mut self, byte: u8) -> bool {
+            let found = self.peek() == Some(byte);
+            self.at += usize::from(found);
+            found
+        }
+
+        fn sum(&mut self) -> f64 {
+            let mut value = self.product();
+            loop {
+                if self.eat(b'+') {
+                    value += self.product();
+                } else if self.eat(b'-') {
+                    value -= self.product();
+                } else {
+                    return value;
+                }
+            }
+        }
+
+        fn product(&mut self) -> f64 {
+            let mut value = self.factor();
+            loop {
+                if self.eat(b'*') {
+                    value *= self.factor();
+                } else if self.eat(b'/') {
+                    value /= self.factor();
+                } else {
+                    return value;
+                }
+            }
+        }
+
+        fn factor(&mut self) -> f64 {
+            if self.eat(b'(') {
+                let value = self.sum();
+                assert!(self.eat(b')'));
+                return value;
+            }
+            let start = self.at;
+            while self
+                .peek()
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'.')
+            {
+                self.at += 1;
+            }
+            let word = std::str::from_utf8(&self.text[start..self.at]).unwrap();
+            if !self.eat(b'(') {
+                return match word {
+                    "iw" => self.iw,
+                    "ih" => self.ih,
+                    number => number.parse().unwrap(),
+                };
+            }
+            let mut args = vec![self.sum()];
+            while self.eat(b',') {
+                args.push(self.sum());
+            }
+            assert!(self.eat(b')'));
+            match (word, args.as_slice()) {
+                ("max", [a, b]) => a.max(*b),
+                ("min", [a, b]) => a.min(*b),
+                ("trunc", [a]) => a.trunc(),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_size_filters_give_even_sizes_of_2_px_or_more() {
+        for filter in [EVEN_SIZE, EVEN_SIZE_MPEG4] {
+            // Odd sides round down; a 1 px side becomes 2.
+            assert_eq!(scaled(filter, 161, 121), (160, 120), "{filter}");
+            assert_eq!(scaled(filter, 1, 1), (2, 2), "{filter}");
+            assert_eq!(scaled(filter, 1, 101), (2, 100), "{filter}");
+            assert_eq!(scaled(filter, 3, 2), (2, 2), "{filter}");
+            assert_eq!(scaled(filter, 1920, 1080), (1920, 1080), "{filter}");
+        }
+        // AVI's fits 8190 px a side, keeping the aspect, and is the same
+        // as the other below that.
+        assert_eq!(scaled(EVEN_SIZE_MPEG4, 9001, 101), (8190, 90));
+        assert_eq!(scaled(EVEN_SIZE_MPEG4, 101, 9001), (90, 8190));
+        assert_eq!(scaled(EVEN_SIZE_MPEG4, 8192, 8192), (8190, 8190));
+        assert_eq!(scaled(EVEN_SIZE_MPEG4, 16384, 2), (8190, 2));
+        for (w, h) in [(8190, 8190), (8191, 4000), (2, 8191), (7680, 4320)] {
+            let capped = scaled(EVEN_SIZE_MPEG4, w, h);
+            assert!(capped.0 <= 8190 && capped.1 <= 8190, "{w}x{h}: {capped:?}");
+        }
+        assert_eq!(scaled(EVEN_SIZE_MPEG4, 8191, 4000), (8190, 3998));
+        assert_eq!(scaled(EVEN_SIZE, 9001, 101), (9000, 100));
     }
 
     #[test]

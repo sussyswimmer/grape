@@ -591,6 +591,54 @@ fn video_too_large_for_avi_is_scaled_to_fit() {
 }
 
 #[test]
+fn a_one_pixel_side_becomes_two_pixels() {
+    let dir = TestDir::new("media-one-pixel");
+    // yuv420p needs at least 2 px a side, which AVI's capped filter must
+    // keep too. PNG in MOV takes any size, and no target copies it (MOV
+    // itself isn't offered for a MOV).
+    for (size, expected, targets) in [
+        (
+            "1x101",
+            ("2", "100"),
+            &[
+                Format::Mp4,
+                Format::Mkv,
+                Format::Webm,
+                Format::Avi,
+                Format::Wmv,
+            ][..],
+        ),
+        ("1x1", ("2", "2"), &[Format::Avi][..]),
+    ] {
+        let src = dir.join(&format!("{size}.mov"));
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc=size={size}:rate=10:duration=0.5"),
+            "-c:v",
+            "png",
+            "-f",
+            "mov",
+            src.to_str().unwrap(),
+        ]);
+        for &to in targets {
+            let (outcome, _) = convert_file(&dir, &src, to)
+                .unwrap_or_else(|e| panic!("{size} to {to:?}: {e} ({})", e.detail));
+            let info = probe(&outcome.outputs[0]);
+            let width = field(&info, "video", "width").unwrap();
+            let height = field(&info, "video", "height").unwrap();
+            assert_eq!(
+                (width.as_str(), height.as_str()),
+                expected,
+                "{size} to {to:?}"
+            );
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        }
+    }
+}
+
+#[test]
 fn a_camera_timecode_doesnt_become_a_track() {
     let dir = TestDir::new("media-timecode");
     // Cameras write a timecode, which MOV keeps as a data (tmcd) track.
