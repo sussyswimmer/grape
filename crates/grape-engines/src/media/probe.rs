@@ -19,7 +19,7 @@ use super::args::{file_url, DEMUXERS};
 /// could contain anything, and the planner doesn't need them.
 const ENTRIES: &str = "format=format_name,duration\
     :stream=index,codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,\
-    sample_fmt,bits_per_sample,bits_per_raw_sample\
+    channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
     :stream_disposition=attached_pic\
     :stream_side_data=rotation";
 
@@ -85,6 +85,10 @@ pub(crate) struct Audio {
     pub(crate) sample_rate: u32,
     /// Channel count.
     pub(crate) channels: u32,
+    /// False when the stream has no channel layout, only a channel count
+    /// (`ffprobe` says `"unknown"`): a WAV without a channel mask, such as
+    /// a field recorder's polyphonic WAV or 4-channel ambisonics.
+    pub(crate) has_layout: bool,
     /// Bits per sample of a lossless source (PCM, FLAC, ALAC, WavPack, TTA,
     /// APE); 16 for everything else, whose decoded depth says nothing about
     /// the original.
@@ -144,6 +148,8 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
             codec: s.codec_name.clone(),
             sample_rate: s.sample_rate,
             channels: s.channels,
+            // ffprobe 6.1 and 9.0 print "unknown" for a stream without one.
+            has_layout: s.channel_layout.as_deref() != Some("unknown"),
             depth: depth(s),
         });
     Ok(Probe {
@@ -166,6 +172,7 @@ struct Stream {
     pix_fmt: String,
     sample_rate: u32,
     channels: u32,
+    channel_layout: Option<String>,
     bits_per_sample: u32,
     bits_per_raw_sample: u32,
     attached_pic: bool,
@@ -183,6 +190,7 @@ impl Stream {
             "pix_fmt" => self.pix_fmt = value,
             "sample_rate" => self.sample_rate = number(&value),
             "channels" => self.channels = number(&value),
+            "channel_layout" => self.channel_layout = Some(value),
             "bits_per_sample" => self.bits_per_sample = number(&value),
             "bits_per_raw_sample" => self.bits_per_raw_sample = number(&value),
             "disposition.attached_pic" => self.attached_pic = value == "1",
@@ -280,6 +288,7 @@ streams.stream.1.codec_type="audio"
 streams.stream.1.sample_fmt="fltp"
 streams.stream.1.sample_rate="44100"
 streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
 streams.stream.1.bits_per_sample=0
 streams.stream.1.bits_per_raw_sample="N/A"
 streams.stream.1.disposition.attached_pic=0
@@ -303,6 +312,7 @@ streams.stream.1.codec_type="audio"
 streams.stream.1.sample_fmt="fltp"
 streams.stream.1.sample_rate="44100"
 streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
 streams.stream.1.bits_per_sample=0
 streams.stream.1.bits_per_raw_sample="N/A"
 streams.stream.1.disposition.attached_pic=0
@@ -317,6 +327,7 @@ streams.stream.0.codec_type="audio"
 streams.stream.0.sample_fmt="fltp"
 streams.stream.0.sample_rate="44100"
 streams.stream.0.channels=1
+streams.stream.0.channel_layout="mono"
 streams.stream.0.bits_per_sample=0
 streams.stream.0.bits_per_raw_sample="N/A"
 streams.stream.0.disposition.attached_pic=0
@@ -339,10 +350,27 @@ streams.stream.0.codec_type="audio"
 streams.stream.0.sample_fmt="s32"
 streams.stream.0.sample_rate="44100"
 streams.stream.0.channels=1
+streams.stream.0.channel_layout="mono"
 streams.stream.0.bits_per_sample=0
 streams.stream.0.bits_per_raw_sample="24"
 streams.stream.0.disposition.attached_pic=0
 format.format_name="flac"
+format.duration="1.000000"
+"#;
+
+    /// A 4-channel WAV without a channel mask (a plain `WAVEFORMATEX`
+    /// header), as 6.1.1 and 9.0.2 print it.
+    const WAV_WITHOUT_LAYOUT: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_name="pcm_s16le"
+streams.stream.0.codec_type="audio"
+streams.stream.0.sample_fmt="s16"
+streams.stream.0.sample_rate="48000"
+streams.stream.0.channels=4
+streams.stream.0.channel_layout="unknown"
+streams.stream.0.bits_per_sample=16
+streams.stream.0.bits_per_raw_sample="N/A"
+streams.stream.0.disposition.attached_pic=0
+format.format_name="wav"
 format.duration="1.000000"
 "#;
 
@@ -377,7 +405,7 @@ format.duration="N/A"
             "-show_entries",
             "format=format_name,duration\
              :stream=index,codec_type,codec_name,width,height,pix_fmt,sample_rate,channels,\
-             sample_fmt,bits_per_sample,bits_per_raw_sample\
+             channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
              :stream_disposition=attached_pic\
              :stream_side_data=rotation",
             "-of",
@@ -414,6 +442,7 @@ format.duration="N/A"
                     codec: "aac".into(),
                     sample_rate: 44100,
                     channels: 1,
+                    has_layout: true,
                     depth: 16,
                 }),
             }
@@ -456,6 +485,17 @@ format.duration="N/A"
              streams.stream.2.disposition.attached_pic=0\n"
         );
         assert_eq!(parse(&with_video).unwrap().video.unwrap().codec, "h264");
+    }
+
+    #[test]
+    fn a_stream_without_a_channel_layout_is_told_apart() {
+        let audio = parse(WAV_WITHOUT_LAYOUT).unwrap().audio.unwrap();
+        assert_eq!((audio.channels, audio.has_layout), (4, false));
+        assert!(parse(FLAC_24).unwrap().audio.unwrap().has_layout);
+        // A layout ffprobe doesn't print isn't taken for a missing one.
+        let unprinted =
+            WAV_WITHOUT_LAYOUT.replace("streams.stream.0.channel_layout=\"unknown\"\n", "");
+        assert!(parse(&unprinted).unwrap().audio.unwrap().has_layout);
     }
 
     #[test]

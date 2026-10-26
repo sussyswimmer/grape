@@ -2,10 +2,10 @@
 //!
 //! Every argv has the same shape: the common prefix (no stdin, quiet,
 //! overwrite the temp output, the source as the first input, restricted
-//! to local files read by one of the [`DEMUXERS`]), then the stream maps,
-//! codecs and filters, then `-progress pipe:1`, `-f` and the muxer, and
-//! the output as the last argument. Options must exist in both FFmpeg 6.1
-//! and 9.0.
+//! to local files read by one of the [`DEMUXERS`], after the few options
+//! that apply to reading it), then the stream maps, codecs and filters,
+//! then `-progress pipe:1`, `-f` and the muxer, and the output as the
+//! last argument. Options must exist in both FFmpeg 6.1 and 9.0.
 //!
 //! - **Video targets** (MP4, MOV, MKV, WebM, AVI, WMV) keep `0:V:0` and
 //!   `0:a:0?`: the first video that isn't cover art and the first audio, if
@@ -19,7 +19,7 @@
 //!   keep 24 bits when the source has more than 16
 //!   ([`super::probe::Audio::depth`]); WMA is held to stereo at 48 kHz;
 //!   Opus and Vorbis (OPUS, OGG and WebM's audio) get a channel layout
-//!   they take ([`VORBIS_LAYOUTS`]), and Vorbis at most 192 kHz above its
+//!   they take ([`vorbis_layout`]), and Vorbis at most 192 kHz above its
 //!   200 kHz limit.
 //!
 //! Only the mapped streams are written: subtitles, data streams, further
@@ -70,9 +70,11 @@ const WMA: &[&str] = &["-c:a", "wmav2", "-b:a", "192k"];
 /// Vorbis ones, mono to 7.1 (`ff_vorbis_ch_layouts`). Neither encoder
 /// converts on its own: libopus refuses 5.1(side), the layout AC-3, DTS
 /// and 6-channel FLAC decode to, and every other layout (2.1, 4.0...),
-/// and libvorbis writes them with the wrong speaker positions. The only
-/// audio filter Grape uses, so it is the whole `-af` chain.
+/// and libvorbis writes them with the wrong speaker positions.
 const VORBIS_LAYOUTS: &str = "aformat=channel_layouts=mono|stereo|3.0|quad|5.0|5.1|6.1|7.1";
+
+/// The Vorbis layouts by channel count, 1 to 8.
+const VORBIS_ORDER: [&str; 8] = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
 
 /// One run of `ffmpeg`.
 #[derive(Debug, Clone, PartialEq)]
@@ -243,7 +245,11 @@ fn build(
         probe.video.as_ref().ok_or(Missing::Video)?;
         return Ok(gif_passes(src, out, palette));
     }
-    let mut args = prefix(src);
+    // Opus and Vorbis: OPUS, OGG and WebM's audio.
+    let layout = matches!(to, Format::Opus | Format::Ogg | Format::Webm)
+        .then(|| vorbis_layout(probe.audio.as_ref()));
+    let reading = layout.as_ref().map_or(&[][..], |(reading, _)| *reading);
+    let mut args = prefix(src, reading);
     match video_encoders(to) {
         Some((video_codec, audio_codec)) => {
             probe.video.as_ref().ok_or(Missing::Video)?;
@@ -270,6 +276,9 @@ fn build(
                     if let (Format::Wmv, Some(audio)) = (to, audio) {
                         push(&mut args, &wma_limits(audio));
                     }
+                    if let Some((_, filter)) = &layout {
+                        push(&mut args, &["-af", filter]);
+                    }
                 }
             }
             if matches!(to, Format::Mp4 | Format::Mov) {
@@ -280,8 +289,9 @@ fn build(
         }
         None => {
             let audio = probe.audio.as_ref().ok_or(Missing::Audio)?;
+            let filter = layout.as_ref().map_or("", |(_, filter)| filter.as_str());
             push(&mut args, &["-map", "0:a:0"]);
-            push(&mut args, &audio_encoder(to, audio));
+            push(&mut args, &audio_encoder(to, audio, filter));
         }
     }
     Ok(vec![Pass {
@@ -296,7 +306,7 @@ fn build(
 /// would report as an unreadable source; the second reads it back as a
 /// second input and draws the GIF with it.
 fn gif_passes(src: &Path, out: &Path, palette: &Path) -> Vec<Pass> {
-    let mut first = prefix(src);
+    let mut first = prefix(src, &[]);
     push(
         &mut first,
         &[
@@ -313,7 +323,7 @@ fn gif_passes(src: &Path, out: &Path, palette: &Path) -> Vec<Pass> {
         ],
     );
 
-    let mut second = prefix(src);
+    let mut second = prefix(src, &[]);
     push(
         &mut second,
         &["-f", "png_pipe", "-protocol_whitelist", "file", "-i"],
@@ -362,7 +372,7 @@ fn video_encoders(to: Format) -> Option<(&'static [&'static str], &'static [&'st
                 "-pix_fmt",
                 "yuv420p",
             ],
-            &["-c:a", "libopus", "-b:a", "128k", "-af", VORBIS_LAYOUTS],
+            &["-c:a", "libopus", "-b:a", "128k"],
         )),
         // XviD's tag, so players that pick a decoder by FourCC find one.
         Format::Avi => Some((
@@ -374,8 +384,38 @@ fn video_encoders(to: Format) -> Option<(&'static [&'static str], &'static [&'st
     }
 }
 
-/// The audio encoder of an audio target (`to` is one).
-fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
+/// How Opus and Vorbis get a layout they take: the options for reading the
+/// source and the `-af` filter.
+///
+/// - Audio with a channel layout is remixed to the nearest Vorbis one
+///   ([`VORBIS_LAYOUTS`]).
+/// - Audio without one keeps its 1 to 8 channels, unmixed, labelled with
+///   the Vorbis layout of that count by `pan`: FFmpeg mustn't guess a
+///   layout for it (`-guess_layout_max 0`), since its guesses for 3 and 4
+///   channels (2.1, 4.0) aren't Vorbis layouts and would be remixed. More
+///   channels are downmixed to 7.1 from the layout FFmpeg guesses, which
+///   9.0 has for 10, 12, 14, 16 and 24 channels; other counts fail.
+/// - With no audio (a silent WebM) the filter has nothing to do.
+fn vorbis_layout(audio: Option<&Audio>) -> (&'static [&'static str], String) {
+    match audio {
+        Some(audio) if !audio.has_layout && audio.channels > 8 => {
+            (&[], "aformat=channel_layouts=7.1".to_string())
+        }
+        Some(audio) if !audio.has_layout && audio.channels > 0 => {
+            let channels = audio.channels as usize;
+            let mut pan = format!("pan={}", VORBIS_ORDER[channels - 1]);
+            for channel in 0..channels {
+                pan.push_str(&format!("|c{channel}=c{channel}"));
+            }
+            (&["-guess_layout_max", "0"], pan)
+        }
+        _ => (&[], VORBIS_LAYOUTS.to_string()),
+    }
+}
+
+/// The audio encoder of an audio target (`to` is one); `layout` is the
+/// filter of [`vorbis_layout`], for Opus and Vorbis.
+fn audio_encoder<'a>(to: Format, audio: &Audio, layout: &'a str) -> Vec<&'a str> {
     let deep = audio.depth > 16;
     match to {
         Format::Mp3 => vec!["-c:a", "libmp3lame", "-q:a", "2", "-id3v2_version", "3"],
@@ -399,13 +439,13 @@ fn audio_encoder(to: Format, audio: &Audio) -> Vec<&'static str> {
             ]
         }
         Format::Ogg => {
-            let mut args = vec!["-c:a", "libvorbis", "-q:a", "6", "-af", VORBIS_LAYOUTS];
+            let mut args = vec!["-c:a", "libvorbis", "-q:a", "6", "-af", layout];
             if audio.sample_rate > VORBIS_MAX_RATE {
                 args.extend(["-ar", "192000"]);
             }
             args
         }
-        Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k", "-af", VORBIS_LAYOUTS],
+        Format::Opus => vec!["-c:a", "libopus", "-b:a", "128k", "-af", layout],
         Format::Wma => {
             let mut args = WMA.to_vec();
             args.extend(wma_limits(audio));
@@ -454,8 +494,8 @@ fn wma_limits(audio: &Audio) -> Vec<&'static str> {
 
 /// The start of every argv: no stdin, no banner or stats, errors only,
 /// overwrite the (temp) output, and the source as input 0, read only from a
-/// local file by one of the [`DEMUXERS`].
-fn prefix(src: &Path) -> Vec<OsString> {
+/// local file by one of the [`DEMUXERS`], with the options in `reading`.
+fn prefix(src: &Path, reading: &[&str]) -> Vec<OsString> {
     let mut args = Vec::new();
     push(
         &mut args,
@@ -470,9 +510,10 @@ fn prefix(src: &Path) -> Vec<OsString> {
             "file",
             "-format_whitelist",
             DEMUXERS,
-            "-i",
         ],
     );
+    push(&mut args, reading);
+    push(&mut args, &["-i"]);
     args.push(file_url(src));
     args
 }
@@ -607,7 +648,16 @@ mod tests {
             codec: codec.into(),
             sample_rate,
             channels,
+            has_layout: true,
             depth,
+        }
+    }
+
+    /// PCM audio of `channels` channels without a channel layout.
+    fn unlabeled(channels: u32) -> Audio {
+        Audio {
+            has_layout: false,
+            ..audio("pcm_s16le", 48_000, channels, 16)
         }
     }
 
@@ -885,13 +935,23 @@ mod tests {
         assert!(!passes.is_empty(), "{to:?}");
         let total: f32 = passes.iter().map(|pass| pass.weight).sum();
         assert!((total - 1.0).abs() < 1e-6, "{to:?}: weights sum to {total}");
-        let prefix = argv(&PREFIX);
+        // The prefix, maybe with options for reading the source before its
+        // `-i`.
+        let (opening, input) = PREFIX.split_at(PREFIX.len() - 2);
+        let (opening, input) = (argv(opening), argv(input));
         let (src, out) = (file_url(&src()), file_url(&out()));
         let dest = dest().into_os_string().into_string().unwrap();
         for (i, pass) in passes.iter().enumerate() {
             let args = &pass.args;
             let last = i + 1 == passes.len();
-            assert!(args.starts_with(&prefix), "{to:?}: {args:?}");
+            assert!(args.starts_with(&opening), "{to:?}: {args:?}");
+            let source = args.windows(2).position(|w| w == input).unwrap();
+            assert!(
+                args[opening.len()..source]
+                    .iter()
+                    .all(|arg| arg == "-guess_layout_max" || arg == "0"),
+                "{to:?}: {args:?}"
+            );
             let (muxer, output) = if last {
                 (muxer(to).unwrap(), out.clone())
             } else {
@@ -939,8 +999,9 @@ mod tests {
             // MP4 and MOV never write a timecode track.
             let tmcd = matches!(to, Format::Mp4 | Format::Mov) && last;
             assert_eq!(has(args, ["-write_tmcd", "0"]), tmcd, "{to:?}");
-            // Opus and Vorbis always get the layout filter, as the only
-            // audio filter; nothing else gets one.
+            // Opus and Vorbis always get the layout filter (these sources
+            // have layouts), as the only audio filter; nothing else gets
+            // one.
             let vorbis_family = has(args, ["-c:a", "libopus"]) || has(args, ["-c:a", "libvorbis"]);
             let filters: Vec<&OsString> = args
                 .windows(2)
@@ -1313,8 +1374,8 @@ mod tests {
 
     #[test]
     fn opus_and_vorbis_get_a_vorbis_channel_layout() {
-        // 5.1(side), the layout AC-3 and 6-channel FLAC decode to; the
-        // probe doesn't read layouts, so the filter is always there.
+        // 5.1(side), the layout AC-3 and 6-channel FLAC decode to, or any
+        // other with a layout: remixed to the nearest Vorbis one.
         let surround = probe(None, Some(audio("ac3", 48_000, 6, 16)));
         for (to, codec) in [(Format::Opus, "libopus"), (Format::Ogg, "libvorbis")] {
             let args = &passes_for(&surround, to).unwrap()[0].args;
@@ -1339,6 +1400,71 @@ mod tests {
         ] {
             let args = &passes_for(&surround, to).unwrap()[0].args;
             assert!(!args.iter().any(|arg| arg == "-af"), "{to:?}");
+        }
+    }
+
+    #[test]
+    fn audio_without_a_layout_keeps_its_channels_for_opus_and_vorbis() {
+        // Four channels, unmixed, as quad, with no guessed layout.
+        let reading = ["-guess_layout_max", "0", "-i", "<src>"];
+        let mut quad = PREFIX[..PREFIX.len() - 2].to_vec();
+        quad.extend_from_slice(&reading);
+        quad.extend_from_slice(&[
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "128k",
+            "-af",
+            "pan=quad|c0=c0|c1=c1|c2=c2|c3=c3",
+            "-progress",
+            "pipe:1",
+            "-f",
+            "opus",
+            "<out>",
+        ]);
+        let four = probe(None, Some(unlabeled(4)));
+        let passes = passes_for(&four, Format::Opus).unwrap();
+        assert_eq!(passes[0].args, argv(&quad));
+
+        // Each count from 1 to 8 gets its Vorbis layout, channel for
+        // channel; more are downmixed to 7.1 from FFmpeg's guess.
+        let layouts = ["mono", "stereo", "3.0", "quad", "5.0", "5.1", "6.1", "7.1"];
+        for channels in 1..=12 {
+            let pan = (1..=8).contains(&channels).then(|| {
+                let layout = layouts[channels as usize - 1];
+                let map: String = (0..channels).map(|c| format!("|c{c}=c{c}")).collect();
+                format!("pan={layout}{map}")
+            });
+            let filter = pan
+                .clone()
+                .unwrap_or_else(|| "aformat=channel_layouts=7.1".to_string());
+            let audio_only = probe(None, Some(unlabeled(channels)));
+            let movie = probe(Some(video("h264", "yuv420p", 0)), Some(unlabeled(channels)));
+            for (source, to) in [
+                (&audio_only, Format::Opus),
+                (&audio_only, Format::Ogg),
+                (&movie, Format::Webm),
+            ] {
+                let args = &passes_for(source, to).unwrap()[0].args;
+                assert!(
+                    has(args, ["-af", &filter]),
+                    "{channels} to {to:?}: {args:?}"
+                );
+                let guess_off = has(args, ["-guess_layout_max", "0"]);
+                assert_eq!(guess_off, pan.is_some(), "{channels} to {to:?}");
+                if guess_off {
+                    let at = |arg: &str| args.iter().position(|a| a == arg).unwrap();
+                    assert!(at("-guess_layout_max") < at("-i"), "{args:?}");
+                }
+            }
+            // The other targets take it as it is.
+            for to in [Format::Flac, Format::Wav, Format::M4a, Format::Mp3] {
+                let args = &passes_for(&audio_only, to).unwrap()[0].args;
+                let guess = args.iter().any(|arg| arg == "-guess_layout_max");
+                assert!(!guess && !args.iter().any(|arg| arg == "-af"), "{to:?}");
+            }
         }
     }
 

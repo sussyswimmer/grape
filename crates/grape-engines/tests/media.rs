@@ -812,6 +812,159 @@ fn surround_becomes_a_layout_opus_and_vorbis_take() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The tone of each channel of [`write_unlabeled_wav`]'s files, in Hz.
+const TONES: [f64; 10] = [
+    300.0, 500.0, 700.0, 100.0, 1100.0, 1300.0, 1500.0, 1700.0, 1900.0, 2100.0,
+];
+
+/// Writes a 1 s, 48 kHz, 16-bit WAV of `channels` channels, each a sine at
+/// its [`TONES`], with a plain `WAVEFORMATEX` header: no channel mask, so
+/// FFmpeg sees a channel count and no layout.
+fn write_unlabeled_wav(path: &Path, channels: usize) {
+    let rate = 48_000u32;
+    let mut data = Vec::new();
+    for n in 0..rate {
+        let t = f64::from(n) / f64::from(rate);
+        for tone in &TONES[..channels] {
+            let sample = (8000.0 * (std::f64::consts::TAU * tone * t).sin()) as i16;
+            data.extend_from_slice(&sample.to_le_bytes());
+        }
+    }
+    let block = u16::try_from(channels * 2).unwrap();
+    let data_len = u32::try_from(data.len()).unwrap();
+    let mut wav = Vec::new();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes());
+    // PCM, then channels, rate, bytes per second, block size and bits.
+    wav.extend_from_slice(&1u16.to_le_bytes());
+    wav.extend_from_slice(&(block / 2).to_le_bytes());
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * u32::from(block)).to_le_bytes());
+    wav.extend_from_slice(&block.to_le_bytes());
+    wav.extend_from_slice(&16u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&data_len.to_le_bytes());
+    wav.extend_from_slice(&data);
+    fs::write(path, wav).unwrap();
+}
+
+/// The samples of each channel of a 16-bit PCM WAV, and its sample rate.
+fn read_wav(path: &Path) -> (Vec<Vec<f64>>, f64) {
+    let bytes = fs::read(path).unwrap();
+    let (mut channels, mut rate, mut data) = (0, 0.0, &[][..]);
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &bytes[at + 8..(at + 8 + size).min(bytes.len())];
+        match &bytes[at..at + 4] {
+            b"fmt " => {
+                channels = usize::from(u16::from_le_bytes([body[2], body[3]]));
+                rate = f64::from(u32::from_le_bytes(body[4..8].try_into().unwrap()));
+            }
+            b"data" => data = body,
+            _ => {}
+        }
+        at += 8 + size + (size & 1);
+    }
+    let mut samples = vec![Vec::new(); channels];
+    for (i, sample) in data.as_chunks::<2>().0.iter().enumerate() {
+        samples[i % channels].push(f64::from(i16::from_le_bytes(*sample)));
+    }
+    (samples, rate)
+}
+
+/// How strong `tone` (Hz) is in `samples` (Goertzel, over half a second).
+fn tone_power(samples: &[f64], rate: f64, tone: f64) -> f64 {
+    let k = 2.0 * (std::f64::consts::TAU * tone / rate).cos();
+    let (mut s1, mut s2) = (0.0, 0.0);
+    for &x in samples.iter().take(24_000) {
+        let s0 = x + k * s1 - s2;
+        s2 = s1;
+        s1 = s0;
+    }
+    s1 * s1 + s2 * s2 - k * s1 * s2
+}
+
+#[test]
+fn audio_without_a_layout_keeps_its_channels() {
+    let dir = TestDir::new("media-unlabeled");
+    let mut failures = Vec::new();
+    // Field recorders' polyphonic WAVs and ambisonics have no channel mask.
+    // Up to 8 channels keep their count, each in its own output channel;
+    // more are downmixed to 7.1.
+    for (channels, expected) in [(3, "3.0"), (4, "quad"), (6, "5.1"), (10, "7.1")] {
+        let wav = dir.join(&format!("{channels}ch.wav"));
+        write_unlabeled_wav(&wav, channels);
+        // WebM needs video: the same audio, copied, next to some in MKV.
+        let mkv = dir.join(&format!("{channels}ch.mkv"));
+        let mut args: Vec<&str> = TESTSRC.to_vec();
+        args.extend(["-i", wav.to_str().unwrap(), "-map", "0:v", "-map", "1:a"]);
+        args.extend(["-c:v", "mpeg4", "-c:a", "copy", "-f", "matroska"]);
+        args.push(mkv.to_str().unwrap());
+        ffmpeg(&args);
+        for src in [&wav, &mkv] {
+            let layout = field(&probe(src), "audio", "channel_layout");
+            assert_eq!(layout.as_deref(), Some("unknown"), "{}", src.display());
+        }
+        for (src, to) in [
+            (&wav, Format::Ogg),
+            (&wav, Format::Opus),
+            (&mkv, Format::Webm),
+        ] {
+            let label = format!("{channels} channels to {to:?}");
+            let out = match convert_file(&dir, src, to) {
+                Ok((outcome, _)) => outcome.outputs[0].clone(),
+                Err(e) => {
+                    failures.push(format!("{label}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let layout = field(&probe(&out), "audio", "channel_layout").unwrap_or_default();
+            if layout != expected {
+                failures.push(format!("{label}: {layout}"));
+            }
+            if channels <= 8 {
+                // Each source channel's tone is in its own output channel,
+                // and only there.
+                let decoded = dir.join("decoded.wav");
+                let out_str = out.to_str().unwrap();
+                let dec_str = decoded.to_str().unwrap();
+                ffmpeg(&[
+                    "-i",
+                    out_str,
+                    "-map",
+                    "0:a:0",
+                    "-c:a",
+                    "pcm_s16le",
+                    "-f",
+                    "wav",
+                    dec_str,
+                ]);
+                let (samples, rate) = read_wav(&decoded);
+                for (c, channel) in samples.iter().enumerate() {
+                    let powers: Vec<f64> = TONES[..channels]
+                        .iter()
+                        .map(|&tone| tone_power(channel, rate, tone))
+                        .collect();
+                    let own = powers.get(c).copied().unwrap_or(0.0);
+                    let mixed = powers
+                        .iter()
+                        .enumerate()
+                        .any(|(i, &p)| i != c && p > own * 0.05);
+                    if own == 0.0 || mixed {
+                        failures.push(format!("{label}: channel {c} holds {powers:?}"));
+                    }
+                }
+                fs::remove_file(&decoded).unwrap();
+            }
+            fs::remove_file(&out).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// The presentation times of `path`'s video frames, in the order they're
 /// decoded and shown.
 fn frame_times(path: &Path) -> Vec<i64> {
