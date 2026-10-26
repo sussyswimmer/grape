@@ -39,7 +39,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 | mergePDF | MERGE PDF | Merge PDFs | ✓ | ✓ | ✓ | v1 | lopdf (panel = reorder list) |
 | createPDF | CREATE PDF | Create PDF |  | ✓ | ✓ | v1 | images → one page each (mixed formats OK) |
 | createCollage | COLLAGE | Create Collage | ✓ | ✓ | ✓ | v2 | image pipeline |
-| extractArchive | EXTRACT | Extract Archive |  |  | ✓ | v1 | zip / tar / flate2 / libarchive (RAR) |
+| extractArchive | EXTRACT | Extract Archive |  |  | ✓ | v1 | zip / tar / flate2; RAR through Grape's bsdtar (D27) |
 
 26 tools ✓. This matches Tangerine's advertised count.
 

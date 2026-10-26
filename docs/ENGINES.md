@@ -6,7 +6,7 @@
 2. **GPL/AGPL tools may ship only as separate sidecar executables** that Grape runs as a child process. Never link them into our binary.
 3. Every bundled third-party binary ships with its license text in `licenses/` and an entry in `THIRD_PARTY_NOTICES.md`. GPL sidecars also need the exact source version and a link to the source (or a source archive on the GitHub Release). `THIRD_PARTY_NOTICES.md` is generated, so the entry goes in its template, `about.hbs`. `licenses/README.md` has the steps.
 4. Record every new library or sidecar in `DECISIONS.md`: name, version, license and why it's needed.
-5. Skip anything with *restrictive non-OSS* terms, like the `unrar` freeware license. Use libarchive (BSD) for RAR reading instead.
+5. Skip anything with *restrictive non-OSS* terms, like the `unrar` freeware license. Use libarchive (BSD) for RAR reading instead, through Grape's own bsdtar build (D27).
 
 ## Engine map
 
@@ -22,7 +22,7 @@
 | **PDF split / merge / metadata** | `lopdf` 0.45.0 with Grape's own page copier, in the worker; PDFium's page import when lopdf can't open a file (D29) | Split and merge drop the outline, form fields and tags. Encrypted PDFs are refused |
 | **PDF compress** (v2) | Downsample embedded images via pdfium + lopdf rewrite | No Ghostscript |
 | **Subtitles** | Our own parser in `grape-engines` (srt ⇄ vtt ⇄ txt) | Tiny, fully tested. Rules in "Subtitles" below (D20) |
-| **Archives** | `zip`, `tar`, `flate2`; RAR read via `compress-tools` (libarchive) | Zip-slip guard on extract: reject `..` and absolute paths |
+| **Archives** | `zip`, `tar`, `flate2` (D27); RAR input through Grape's own `bsdtar` sidecar, built from libarchive 3.8.10 (BSD-2-Clause) with Grape's patches (D27; "bsdtar build" below) | Zip-slip guard on extract: reject `..` and absolute paths. RAR: a Rust header preflight refuses encrypted, multi-part, solid RAR4, big-dictionary and self-extracting archives before bsdtar runs |
 | **Documents** (v2) | `pandoc` sidecar (GPL, rule 2) for docx/md/html/epub/txt/rtf. macOS can also use `NSAttributedString` for docx/rtf/rtfd | → PDF: render HTML in the system webview and print to PDF (WKWebView `createPDF`, WebView2 `PrintToPdfAsync`). No LaTeX |
 | **Spreadsheets** (v2) | `calamine` (read xlsx/xls/ods), `rust_xlsxwriter` (xlsx), `spreadsheet-ods` (ods), `csv` | → PDF via HTML table + webview print |
 | **Slides** (v2) | LibreOffice headless sidecar (MPL) for ppt/pptx → pdf, then pdfium → images | Big download (~300 MB). Make it an **optional add-on download**, which needs a DECISIONS entry since it's a network call |
@@ -65,6 +65,17 @@ Run FFmpeg with `-nostdin -hide_banner -y`, write to a temp name, parse `-progre
 - It ships as a library, not a sidecar: `pdfium.dll` next to `Grape.exe`, `Grape.app/Contents/Frameworks/libpdfium.dylib`. A build adds it with `--config src-tauri/tauri.pdfium.windows.conf.json` or `tauri.pdfium.macos.conf.json`. Its texts are in `licenses/pdfium/` and its entry in `about.hbs`.
 - Only the PDF worker loads it: a separate process of Grape's own executable (`Grape --grape-pdf-worker`), one per job. It binds the library by absolute path, never from the system or `PATH`. The app's main process never loads it.
 - It has to export every function pdfium-render binds with `pdfium_7881`. Check the exports again when either one moves (D29 says how it was checked).
+
+## bsdtar build
+
+Grape reads RAR with libarchive's `bsdtar`, built by Grape (D27). Not the OS's bsdtar (too old on Windows 10 and macOS 13–15.3, and neither decodes filtered RAR4), and not libarchive linked into Grape (a crash in the C decoder must end only bsdtar).
+
+- **Source and patches:** `scripts/bsdtar/sources.json` pins libarchive 3.8.10's release tarball (URL, SHA-256, size) and the six patches in `scripts/bsdtar/patches/`, in order, each with its SHA-256: three upstream fixes (the NULL-name guard, Windows name conversions, the RAR4 symlink bound) and three of Grape's (a UTF-8 code page in the Windows manifest, `@archive` reading only RAR and RAR5, the version marker). **Change the pin in `sources.json`, never in the scripts**, and bump the marker with every change to the series.
+- **Build scripts:** `scripts/bsdtar/build.ps1` (Windows x64, MSVC, static CRT) and `build.sh` (macOS arm64 + x86_64, minimum macOS 13.0, merged with `lipo` and signed ad hoc; Linux for local tests). Every optional library is off, so bsdtar links nothing but the OS: KERNEL32, ADVAPI32 and bcrypt on Windows, libSystem on macOS. `-Install` / `--install` copies the result into `apps/desktop/src-tauri/binaries/` for `tauri dev`. `licenses/libarchive/SOURCE.md` has the exact CMake lines.
+- **The version line** is exactly `bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled ` (macOS adds `CommonCrypto/system` before `libb2/bundled`). The build checks it exactly; the bundling gate (`scripts/check-sidecars.mjs`) checks the `-grape` marker, `licenses/libarchive/` and a `## libarchive` section in the notices.
+- **CI:** `.github/workflows/bsdtar.yml`, a reusable workflow that `ci.yml` calls (and `release.yml` will). It builds per OS, checks the imports, the manifest or architectures, the version line and the copyright lines of the compiled sources, and runs `scripts/bsdtar/smoke.py`, a smoke test in Grape's exact environment on libarchive's own RAR test files. It's cached by the hash of `scripts/bsdtar/` and `licenses/libarchive/copyright-lines.txt` (a cache hit skips the copyright check, so a change to the file must miss) and uploads the binaries as artifacts for the same run. CI's `rar-it` jobs run the engine's RAR tests against them. No GitHub Release until M7, and `scripts/sidecars.lock` has no bsdtar.
+- **Shipping:** a sidecar in `tauri.sidecars.conf.json`'s `externalBin`, next to FFmpeg, with `licenses/libarchive/`. No installer or DMG carries it until CI builds FFmpeg too (D24); then per-OS sidecar overlays take over (D27).
+- **How Grape runs it** (`grape-engines` `archive/rar/`): only as `bsdtar -c -P -f - --format pax @-`, with the RAR written into a stdin pipe (never a file handle), in a new, empty, private folder, with only `PATH` (that folder), `TZ=UTC0`, `TAR_READER_OPTIONS=rar:hdrcharset=UTF-8`, plus `SystemRoot` (Windows) or `LC_ALL=en_US.UTF-8` (macOS), and `CREATE_NO_WINDOW` on Windows. A Rust preflight of the RAR's headers runs first. The output counts only with exit 0, an empty stderr, a tar end marker followed only by zeros, and entries matching the RAR's headers one to one by kind, size and CRC32. A 60 s stall watchdog, no total time cap.
 
 ## Subtitles
 

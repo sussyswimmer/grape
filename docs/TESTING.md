@@ -6,6 +6,7 @@
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
 | Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
+| RAR, real bsdtar | `grape-engines` unit tests, feature `rar-it` (`GRAPE_TEST_BSDTAR`) | Windows + macOS `rar-it` jobs | libarchive's own RAR files and the writer's cases through the bsdtar CI just built |
 | Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS. Tests never open a dialog, AirDrop or the share sheet, and never start a real drag: on Windows a test only reaches code that returns before `ShowShareUIForWindow` or `SHDoDragDrop` |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
@@ -78,7 +79,7 @@ Sidecars, M3 (D25; the fetch scripts and the app's lookup. No installer or DMG c
 - [ ] win: run it again in PowerShell 7 → "Sidecars are already current", and nothing downloads. `-Force` downloads and checks everything again, including the `-version` lines. After editing one byte of `ffmpeg-LICENSE.txt`, a plain run fetches again.
 - [ ] win: `git status` stays clean after a fetch (`binaries/` is ignored).
 - [ ] win: if scripts are disabled, `powershell -ExecutionPolicy Bypass -File .\scripts\fetch-sidecars.ps1` works the same.
-- [ ] win: after the fetch, from `apps\desktop`, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` → `target\debug` holds `ffmpeg.exe` and `ffprobe.exe`, and the log's `sidecars:` line says `found ffmpeg, ffprobe; missing heif-enc`. Plain `pnpm tauri dev` in a clone that never fetched says `none found (looked for ffmpeg, ffprobe, heif-enc)`.
+- [ ] win: after the fetch, and with Grape's bsdtar in `binaries\` too (`.\scripts\bsdtar\build.ps1 -Install` or CI's artifact, `PLATFORM_WINDOWS.md` → "bsdtar (RAR)": the overlay lists it, and tauri-build fails on any listed file that's missing), from `apps\desktop`, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` → `target\debug` holds `ffmpeg.exe`, `ffprobe.exe` and `bsdtar.exe`, and the log's `sidecars:` line says `found ffmpeg, ffprobe; missing heif-enc`. Plain `pnpm tauri dev` in a clone that never fetched says `none found (looked for ffmpeg, ffprobe, heif-enc)`. With the overlay but no bsdtar, the build stops at ``resource path `binaries/bsdtar-x86_64-pc-windows-msvc.exe` doesn't exist``.
 - [ ] win: the `sidecars:` line at startup never shows a path. Today's CI installer says `none found (looked for ffmpeg, ffprobe, heif-enc)`; once the installer carries FFmpeg it says `found ffmpeg, ffprobe; missing heif-enc`, and `found ffmpeg, ffprobe, heif-enc` once heif-enc ships too. Put another `ffmpeg.exe` on `PATH` (and, once bundled, remove the one next to `Grape.exe`) → the line still says ffmpeg is missing, and Grape never runs the one on `PATH`.
 - [ ] mac: `./scripts/fetch-sidecars.sh` prints the four downloads, "Made ffmpeg-universal-apple-darwin (arm64 + x86_64), signed ad hoc." with a `ffmpeg version 9.0.2-https://www.martin-riedl.de` line, the same for ffprobe, and "Sidecars are ready". `binaries/` holds the `-aarch64-apple-darwin`, `-x86_64-apple-darwin` and `-universal-apple-darwin` files for both programs, plus `sidecars.stamp`.
 - [ ] mac: `lipo -info apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin` (and ffprobe's) names both `x86_64` and `arm64`, and `codesign -dv` on each says `Signature=adhoc`.
@@ -92,6 +93,16 @@ Subtitles, M3 (D20; win; use scratch copies of files)
 - [ ] win: drop an SRT or VTT on TXT → the `.txt` holds only the spoken lines, no numbers or times, and no line twice in a row.
 - [ ] win: an old SRT saved in Notepad as "ANSI" with accented letters → its VTT shows them correctly.
 - [ ] win: a `.srt` that isn't a subtitle file (rename any `.txt`) → the toast says it has no subtitles in it, and nothing is written.
+
+RAR, M3 (D27; win; needs Grape's bsdtar on the PC: `PLATFORM_WINDOWS.md` → "bsdtar (RAR)"; use scratch copies of files)
+- [ ] win: a WinRAR RAR5 with Japanese and emoji names → zip, tar, gz and Extract: the names are right in Explorer, and the files open.
+- [ ] win: the same as RAR4 (WinRAR "RAR4" format) with a non-ACP name → right names.
+- [ ] win: a RAR whose last member is a stored `.docx` → the zip holds the docx as a file (not the docx's insides).
+- [ ] win: WinRAR with "store identical files as references" (`-oi`) and an NTFS junction (`-ol`) → converts; the toast says what was left out.
+- [ ] win: a password-protected RAR (`-hp` and `-p`) → "is password-protected."; `.part1.rar` of a split set → the multi-part toast; a solid RAR4 → the solid toast; a 128 MiB dictionary (`-md128m`) → the dictionary toast; an SFX `.exe` renamed `.rar` → the self-extracting toast.
+- [ ] win: a several-GB RAR → progress moves smoothly to the end; Pause/Quit mid-way → nothing left in the folder, and no `bsdtar.exe` left in Task Manager.
+- [ ] win: a RAR downloaded with a browser → the converted zip and the extracted files carry the Mark of the Web (file Properties → "Unblock").
+- [ ] win: Defender: no detection of `bsdtar.exe`, and the first conversion isn't noticeably slow.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

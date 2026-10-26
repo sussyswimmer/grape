@@ -17,9 +17,9 @@ Read this first in a fresh Claude Code session; the rest of the file is the orig
   - The fetch scripts: `scripts/fetch-sidecars.ps1` (Windows) and `scripts/fetch-sidecars.sh` (macOS) download the FFmpeg 9.0.2 builds pinned in `scripts/sidecars.lock` (lane B's D22), check them and place them in `apps/desktop/src-tauri/binaries/` (`PLATFORM_WINDOWS.md` and `PLATFORM_MACOS.md` → "Sidecars").
   - CI's new Sidecars job runs them on `windows-latest` (Windows PowerShell 5.1, then PowerShell 7) and `macos-latest` (`/bin/bash` 3.2). It builds nothing.
   - The app finds the sidecars next to its executable (`src/sidecars.rs`, never `PATH`), and quitting cancels running jobs and waits up to 2 s for them.
-  - No installer or DMG carries FFmpeg yet: `tauri.sidecars.conf.json` stays off until the gate below.
+  - No installer or DMG carries FFmpeg yet: `tauri.sidecars.conf.json` stays off until the gate below. It lists Grape's bsdtar too (D27), so `tauri dev` with it needs a bsdtar in `binaries/` as well as the fetch: `scripts/bsdtar/build.ps1 -Install` / `build.sh --install`, or CI's bsdtar artifact.
 - **Next for lane A** (unchecked in `ROADMAP.md`):
-  - M3: bundle FFmpeg once lane B's media engine lands, with `licenses/ffmpeg/`, its `SOURCE.md` (BtbN's build is commit `2a571b6068`, not the `n9.0.2` tag) and the FFmpeg entry in `about.hbs` (D25's gate). Then the build jobs in `ci.yml` and `release.yml` get a fetch step and `--config src-tauri/tauri.sidecars.conf.json`, and CI gets `engines-it` jobs that use the fetched sidecars. heif-enc waits for lane B's pin.
+  - M3: bundle FFmpeg once lane B's media engine lands, with `licenses/ffmpeg/`, its `SOURCE.md` (BtbN's build is commit `2a571b6068`, not the `n9.0.2` tag) and the FFmpeg entry in `about.hbs` (D25's gate). Then the build jobs in `ci.yml` and `release.yml` get a fetch step, CI's bsdtar artifact and the sidecars overlay (per-OS overlays by then, D27 → Bundling), and CI gets `engines-it` jobs that use the fetched sidecars. heif-enc waits for lane B's pin.
   - M7: code signing (SignPath; Maxwell applies first), and ARM64 and a portable zip if wanted. The opt-in updater needs Maxwell's decision and a DECISIONS entry first (golden rule 3).
   - M4: the tool panels, once lane B's tools land.
   - Float on the Mac (it says "Not in this build yet" there).

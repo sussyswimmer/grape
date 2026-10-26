@@ -118,6 +118,15 @@ Notes:
 - `gif → video` is offered, but `gif` gets no image targets **[observed]**.
 - PDF → images exports **every page at 300 DPI** **[observed: site copy]**. Multiple pages go into a new folder.
 - `heic` output needs an HEVC encoder. **[Grape]** On macOS use ImageIO. On Windows use the bundled `heif-enc` sidecar (libheif + x265). Because x265 is GPL, it stays a separate executable (ENGINES.md licensing rule 2).
+- **[Grape]** `rar` (RAR 4 and 5) is read through Grape's own bsdtar (D27). Refused with a toast:
+  - password-protected archives;
+  - one part of a multi-part set;
+  - solid RAR 4;
+  - RAR 5 dictionaries over 64 MiB;
+  - self-extracting archives;
+  - RAR 7-only features.
+
+  RAR 5 junctions and file copies are left out and counted. `rar → tar` writes a re-packed GNU tar, not bsdtar's pax.
 
 ## Tools per input [observed]
 

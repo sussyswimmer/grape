@@ -113,7 +113,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Release workflow builds Windows + macOS together from then on.
 
 ## v2 (after both ship)
-Documents, spreadsheets, slides and PDF → office formats, plus all panel/editor tools from `TOOLS_AND_ACTIONS.md`, OCR for scanned PDFs, and file promises on macOS. Order by user demand.
+Documents, spreadsheets, slides and PDF → office formats, plus all panel/editor tools from `TOOLS_AND_ACTIONS.md`, OCR for scanned PDFs, file promises on macOS, and multi-part RAR archives (D27: piping every volume into bsdtar in order works). Order by user demand.
 
 ## Definition of done (every task)
 - Tests added or updated; `fmt`, `clippy` and `typecheck` clean.

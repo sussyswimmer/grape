@@ -58,6 +58,9 @@ pnpm tauri build                  # local release build for the current OS
 .\scripts\fetch-sidecars.ps1      # Windows: pinned FFmpeg/ffprobe and PDFium into src-tauri/binaries/ (D25, D29; -Force refetches, -Only pdfium fetches one)
 ./scripts/fetch-sidecars.sh       # macOS: the same, universal (--force refetches, --only pdfium fetches one)
 cargo test -p grape-engines --features pdf-it   # PDF tests that load PDFium: set GRAPE_TEST_PDFIUM to the fetched library (D29)
+.\scripts\bsdtar\build.ps1 -Install     # Windows: Grape's bsdtar for RAR (D27) into src-tauri/binaries/
+./scripts/bsdtar/build.sh --install      # macOS: the same, universal
+cargo test -p grape-engines --features rar-it --lib archive::rar   # RAR tests with the real bsdtar: set GRAPE_TEST_BSDTAR
 cargo deny --locked check licenses bans sources   # license check (D23)
 cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs   # after a dependency change
 ```
