@@ -9,7 +9,8 @@
 //! - **WebVTT** is recognized by content: the text starts with `WEBVTT`
 //!   alone or followed by whitespace. Its header (up to the first blank
 //!   line, or up to a line with `-->`) is skipped, and so are its `NOTE`,
-//!   `STYLE` and `REGION` blocks.
+//!   `STYLE` and `REGION` blocks, up to their blank line or to a line with
+//!   `-->`, which starts a cue.
 //! - **Cues** start at every valid timing line (`<ts> --> <ts>`, cue
 //!   settings and SRT coordinates dropped), even without a blank line
 //!   before it. A line of digits just before one is its index, not text;
@@ -220,11 +221,16 @@ struct Reader {
 impl Reader {
     /// Reads one block. Every line it looks at or turns into spans counts
     /// as work for `ticker`.
-    fn block(&mut self, block: &[&str], ticker: &mut Ticker) -> Result<(), Cancelled> {
-        if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
-            return Ok(());
-        }
+    fn block(&mut self, mut block: &[&str], ticker: &mut Ticker) -> Result<(), Cancelled> {
         let is_timing = |line: &str| line.contains(ARROW);
+        if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
+            // The comment, style or region ends at a timing line: a cue can
+            // follow it without a blank line.
+            match find(block, ticker, is_timing)? {
+                None => return Ok(()),
+                Some(at) => block = &block[at..],
+            }
+        }
         let Some(first) = find(block, ticker, is_timing)? else {
             // A block of digits is a stray index; anything else is text the
             // blank line cut off from its cue.
@@ -802,6 +808,27 @@ mod tests {
             plain(&parsed(vtt)),
             [cue(1000, 2000, &["Hi"]), cue(3000, 4000, &["Bye"])]
         );
+    }
+
+    #[test]
+    fn a_timing_line_ends_a_note_style_or_region_block() {
+        // The arrow on the line after NOTE: the NOTE line is the cue's
+        // identifier. Further down: the block ends before the arrow.
+        let vtt = "WEBVTT\n\nNOTE This is a comment\n00:00:01.000 --> 00:00:02.000\nHello\n\n\
+                   00:00:03.000 --> 00:00:04.000\nWorld\n";
+        let both = [cue(1000, 2000, &["Hello"]), cue(3000, 4000, &["World"])];
+        assert_eq!(plain(&parsed(vtt)), both);
+        let vtt = "WEBVTT\n\nNOTE\nline two of note\n00:00:01.000 --> 00:00:02.000\nHello\n\
+                   00:00:03.000 --> 00:00:04.000\nWorld\n";
+        assert_eq!(plain(&parsed(vtt)), both);
+        for block in ["STYLE\n::cue { color: red }", "REGION id:x width:40%"] {
+            let vtt = format!("WEBVTT\n\n{block}\n00:00:01.000 --> 00:00:02.000\nHello\n");
+            assert_eq!(
+                plain(&parsed(&vtt)),
+                [cue(1000, 2000, &["Hello"])],
+                "{block}"
+            );
+        }
     }
 
     #[test]
