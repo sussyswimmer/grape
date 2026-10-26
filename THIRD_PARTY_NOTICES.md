@@ -2,7 +2,7 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them.
 
-- **262 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **267 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **Not here yet:** the helper programs Grape will ship as separate files, like FFmpeg. Each one will come with its license text in the `licenses` folder and an entry here.
 
@@ -284,7 +284,7 @@ DEALINGS IN THE SOFTWARE.
 
 ~~~
 
-Used by: [cfg-if 1.0.5](https://crates.io/crates/cfg-if/1.0.5), [socket2 0.6.5](https://crates.io/crates/socket2/0.6.5)
+Used by: [cfg-if 1.0.5](https://crates.io/crates/cfg-if/1.0.5), [filetime 0.2.29](https://crates.io/crates/filetime/0.2.29), [socket2 0.6.5](https://crates.io/crates/socket2/0.6.5)
 
 ~~~text
 Copyright (c) 2014 Alex Crichton
@@ -1610,6 +1610,37 @@ DEALINGS IN THE SOFTWARE.
 
 ~~~
 
+Used by: [tar 0.4.46](https://crates.io/crates/tar/0.4.46)
+
+~~~text
+Copyright (c) The tar-rs Project Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+~~~
+
 Used by: [synstructure 0.14.0](https://crates.io/crates/synstructure/0.14.0)
 
 ~~~text
@@ -2697,7 +2728,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ~~~
 
-Used by: [adler2 2.0.1](https://crates.io/crates/adler2/2.0.1), [anyhow 1.0.104](https://crates.io/crates/anyhow/1.0.104), [camino 1.2.6](https://crates.io/crates/camino/1.2.6), [cargo-platform 0.1.9](https://crates.io/crates/cargo-platform/0.1.9), [cargo_metadata 0.19.2](https://crates.io/crates/cargo_metadata/0.19.2), [displaydoc 0.2.7](https://crates.io/crates/displaydoc/0.2.7), [dtoa 1.0.11](https://crates.io/crates/dtoa/1.0.11), [dyn-clone 1.0.20](https://crates.io/crates/dyn-clone/1.0.20), [erased-serde 0.4.10](https://crates.io/crates/erased-serde/0.4.10), [fastrand 2.5.0](https://crates.io/crates/fastrand/2.5.0), [itoa 1.0.18](https://crates.io/crates/itoa/1.0.18), [once_cell 1.21.4](https://crates.io/crates/once_cell/1.21.4), [pin-project-lite 0.2.17](https://crates.io/crates/pin-project-lite/0.2.17), [proc-macro2 1.0.107](https://crates.io/crates/proc-macro2/1.0.107), [quote 1.0.47](https://crates.io/crates/quote/1.0.47), [semver 1.0.28](https://crates.io/crates/semver/1.0.28), [serde-untagged 0.1.9](https://crates.io/crates/serde-untagged/0.1.9), [serde 1.0.229](https://crates.io/crates/serde/1.0.229), [serde_core 1.0.229](https://crates.io/crates/serde_core/1.0.229), [serde_derive 1.0.229](https://crates.io/crates/serde_derive/1.0.229), [serde_derive_internals 0.29.1](https://crates.io/crates/serde_derive_internals/0.29.1), [serde_json 1.0.151](https://crates.io/crates/serde_json/1.0.151), [serde_repr 0.1.21](https://crates.io/crates/serde_repr/0.1.21), [servo_arc 0.4.3](https://crates.io/crates/servo_arc/0.4.3), [syn 2.0.119](https://crates.io/crates/syn/2.0.119), [syn 3.0.6](https://crates.io/crates/syn/3.0.6), [thiserror-impl 2.0.21](https://crates.io/crates/thiserror-impl/2.0.21), [thiserror 2.0.21](https://crates.io/crates/thiserror/2.0.21), [typeid 1.0.3](https://crates.io/crates/typeid/1.0.3), [unicode-ident 1.0.26](https://crates.io/crates/unicode-ident/1.0.26), [zmij 1.0.23](https://crates.io/crates/zmij/1.0.23)
+Used by: [adler2 2.0.1](https://crates.io/crates/adler2/2.0.1), [anyhow 1.0.104](https://crates.io/crates/anyhow/1.0.104), [camino 1.2.6](https://crates.io/crates/camino/1.2.6), [cargo-platform 0.1.9](https://crates.io/crates/cargo-platform/0.1.9), [cargo_metadata 0.19.2](https://crates.io/crates/cargo_metadata/0.19.2), [displaydoc 0.2.7](https://crates.io/crates/displaydoc/0.2.7), [dtoa 1.0.11](https://crates.io/crates/dtoa/1.0.11), [dyn-clone 1.0.20](https://crates.io/crates/dyn-clone/1.0.20), [erased-serde 0.4.10](https://crates.io/crates/erased-serde/0.4.10), [fastrand 2.5.0](https://crates.io/crates/fastrand/2.5.0), [itoa 1.0.18](https://crates.io/crates/itoa/1.0.18), [once_cell 1.21.4](https://crates.io/crates/once_cell/1.21.4), [pin-project-lite 0.2.17](https://crates.io/crates/pin-project-lite/0.2.17), [proc-macro2 1.0.107](https://crates.io/crates/proc-macro2/1.0.107), [quote 1.0.47](https://crates.io/crates/quote/1.0.47), [semver 1.0.28](https://crates.io/crates/semver/1.0.28), [serde-untagged 0.1.9](https://crates.io/crates/serde-untagged/0.1.9), [serde 1.0.229](https://crates.io/crates/serde/1.0.229), [serde_core 1.0.229](https://crates.io/crates/serde_core/1.0.229), [serde_derive 1.0.229](https://crates.io/crates/serde_derive/1.0.229), [serde_derive_internals 0.29.1](https://crates.io/crates/serde_derive_internals/0.29.1), [serde_json 1.0.151](https://crates.io/crates/serde_json/1.0.151), [serde_repr 0.1.21](https://crates.io/crates/serde_repr/0.1.21), [servo_arc 0.4.3](https://crates.io/crates/servo_arc/0.4.3), [syn 2.0.119](https://crates.io/crates/syn/2.0.119), [syn 3.0.6](https://crates.io/crates/syn/3.0.6), [thiserror-impl 2.0.21](https://crates.io/crates/thiserror-impl/2.0.21), [thiserror 2.0.21](https://crates.io/crates/thiserror/2.0.21), [typed-path 0.12.3](https://crates.io/crates/typed-path/0.12.3), [typeid 1.0.3](https://crates.io/crates/typeid/1.0.3), [unicode-ident 1.0.26](https://crates.io/crates/unicode-ident/1.0.26), [zmij 1.0.23](https://crates.io/crates/zmij/1.0.23)
 
 ~~~text
 Permission is hereby granted, free of charge, to any
@@ -2783,7 +2814,37 @@ The above copyright notice and this permission notice shall be included in all c
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ~~~
 
-Used by: [tracing-core 0.1.36](https://crates.io/crates/tracing-core/0.1.36)
+Used by: [deflate64 0.1.12](https://crates.io/crates/deflate64/0.1.12)
+
+~~~text
+The MIT License (MIT)
+
+Copyright (c) .NET Foundation and Contributors
+Copyright (c) anatawa12 2023
+
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
+Used by: [tracing-core 0.1.36](https://crates.io/crates/tracing-core/0.1.36), [zip 9.0.2](https://crates.io/crates/zip/9.0.2)
 
 ~~~text
 The MIT License (MIT)

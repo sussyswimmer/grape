@@ -13,6 +13,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+#[allow(dead_code)] // Wired into `run_job` after lane B's media push (D27).
+mod archive;
 mod cancel;
 mod headers;
 mod image;
