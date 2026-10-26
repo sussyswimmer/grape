@@ -1343,6 +1343,26 @@ mod tests {
     }
 
     #[test]
+    fn many_ties_keep_their_order() {
+        // Past the length up to which even an unstable sort keeps ties in
+        // order: cue i starts at second (i * 7) % 20, three cues to a start.
+        let srt: String = (0..60u64)
+            .map(|i| {
+                let s = (i * 7) % 20;
+                format!("{}\n00:00:{s:02},000 --> 00:00:{s:02},500\nc{i}\n\n", i + 1)
+            })
+            .collect();
+        let got: Vec<String> = plain(&parsed(&srt))
+            .into_iter()
+            .map(|(_, _, lines)| lines[0].clone())
+            .collect();
+        let mut want: Vec<(u64, u64)> = (0..60u64).map(|i| ((i * 7) % 20, i)).collect();
+        want.sort();
+        let want: Vec<String> = want.into_iter().map(|(_, i)| format!("c{i}")).collect();
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn a_cue_that_doesnt_end_after_it_starts_lasts_one_millisecond() {
         let srt =
             "1\n00:00:02,000 --> 00:00:01,000\nBackwards\n\n2\n00:00:03,000 --> 00:00:03,000\nZero";
