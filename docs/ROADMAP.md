@@ -62,6 +62,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-23:* the first slice is built. The 20 raster pairs among JPG, PNG, WEBP, TIFF and BMP convert through `grape-engines` (D16), with no-clobber writes and cancel inside the engine. The app (`src/jobs.rs`) plans each drop, shows "Making {name}…" with progress, then "Done", "{ok} of {n} done" or the engine's error, and a click reveals the first output. Every other pair shows "Not in this build yet", and every tool shows "Tools arrive in a later build." None of it has run on the PC yet: `TESTING.md` → "Wheel look and image conversions".
 
+*Status 2026-10-26:* subtitles are built: SRT → VTT/TXT and VTT → SRT/TXT (4 pairs) through Grape's own parser (D20), on the same no-clobber publishing as images. 24 of the 178 v1 pairs now run. Not run on the PC yet: `TESTING.md` → "Subtitles, M3". Next: audio and video through the FFmpeg sidecar (D22).
+
 **Accept:** every v1 pair (178) converts a fixture file on Windows (`engines-it` test run on the PC and in CI), and spot-checks by hand pass.
 
 ## M4: v1 tools (lane B engines, lane A panels)

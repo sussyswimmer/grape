@@ -215,6 +215,16 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - `grape-platform` now uses `log` 0.4 too (already in D9), to say why an action did something other than what was asked.
 - **Revisit if:** remapping should allow two keys at once, or Maxwell wants launch at login off by default.
 
+## D20: Subtitle conversion rules (2026-10-26, proposed, confirm)
+- **Decision:** SRT ⇄ WebVTT and SRT/WebVTT → TXT run through Grape's own parser and writers in `grape-engines` (`src/subtitle/`), with no new crate. `ENGINES.md` → "Subtitles" has the full rules. The choices worth a second look:
+  - **Text encoding.** A BOM decides first (UTF-8, UTF-16LE, UTF-16BE), then valid UTF-8. Anything else is read as **Windows-1252**, which is right for most old Western-European SRTs. Cyrillic, Greek, Arabic, Chinese and Japanese files in a legacy code page come out garbled. When a file has no readable cue, the log names the encoding it was read as. Detecting those properly would need `encoding_rs` + `chardetng` (MIT/Apache); revisit if users hit it.
+  - **What's written.** Output is always UTF-8. An SRT gets a UTF-8 BOM unless the source was BOM-less UTF-8, because Windows players otherwise guess the ANSI code page. WebVTT and TXT get no BOM. Line endings follow the source (CRLF or LF).
+  - **Styling.** Italic, bold and underline survive both ways (`<i> <b> <u>`, and SRT's `{\i1}`-style codes). Everything else is dropped but its text kept: SRT `<font>` colors, positioning codes like `{\an8}`, WebVTT classes, voices (`<v Name>`, so the speaker's name is lost), language spans, cue settings and `STYLE`/`REGION` blocks. Ruby annotations are written in parentheses: 漢(かん).
+  - **TXT** is the spoken text only: one line per subtitle line, no timings, no blank lines, and a line that repeats the one before it is written once (auto-generated captions repeat each line as it scrolls).
+  - **Messy files are read leniently**: missing blank lines, `.` or `,` before the milliseconds, missing hours, out-of-order cues (they're sorted, as WebVTT requires) and cues that end before they start (given 1 ms). A file with no readable cue is refused.
+  - **Size:** a subtitle file over 64 MiB is refused unread.
+- **Why:** both formats are simple enough that a small, fully tested parser is safer than a dependency, and every choice above can change in one place.
+
 ## D21: Share and the Float shelf on Windows (2026-10-25, proposed, confirm)
 - **Decision:** on Windows, SHARE opens the system share sheet with the dropped files, and FLOAT puts the dropped items on a small shelf window. Items drag out of the shelf as copies or shortcuts, never as a move. macOS keeps AirDrop for Share. Float on the Mac comes later.
 - **Share:**

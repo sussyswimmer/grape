@@ -5,19 +5,18 @@
 
 mod common;
 
-use std::collections::hash_map::DefaultHasher;
-use std::fs::{self, File};
-use std::hash::Hasher;
-use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::fs;
+use std::io::Cursor;
+use std::path::Path;
 
-use common::{assert_no_leftovers, names_in, TestDir};
-use grape_core::{
-    pairs, plan, DirSnapshot, Features, Format, Job, JobOutput, Operation, OutputLocation,
-    Selection, SelectionItem, Settings, ToolKey,
+use common::{
+    assert_no_leftovers, content_digest, names_in, plan_one, planned_file, SourceState, TestDir,
 };
-use grape_engines::{build_selection, run_job, supports, EngineCtx, ErrorKind, JobOutcome};
+use grape_core::{
+    plan, DirSnapshot, Format, Job, JobOutput, Operation, OutputLocation, Selection, SelectionItem,
+    Settings, ToolKey,
+};
+use grape_engines::{build_selection, run_job, EngineCtx, ErrorKind, JobOutcome};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
 use image::{
@@ -56,76 +55,6 @@ fn encode(img: &DynamicImage, f: Format) -> Vec<u8> {
     let mut buf = Cursor::new(Vec::new());
     img.write_to(&mut buf, image_format(f)).unwrap();
     buf.into_inner()
-}
-
-/// The source's length, content hash and mtime, to prove it was never
-/// touched.
-struct SourceState {
-    path: PathBuf,
-    content: (u64, u64),
-    modified: SystemTime,
-}
-
-/// The length and a hash of a file's bytes, read in chunks so a large
-/// source isn't held in memory.
-fn content_digest(path: &Path) -> (u64, u64) {
-    let mut file = File::open(path).unwrap();
-    let mut hasher = DefaultHasher::new();
-    let mut buf = vec![0u8; 1 << 20];
-    let mut len = 0u64;
-    loop {
-        let n = file.read(&mut buf).unwrap();
-        if n == 0 {
-            return (len, hasher.finish());
-        }
-        hasher.write(&buf[..n]);
-        len += n as u64;
-    }
-}
-
-impl SourceState {
-    fn of(path: &Path) -> SourceState {
-        SourceState {
-            path: path.to_path_buf(),
-            content: content_digest(path),
-            modified: fs::metadata(path).unwrap().modified().unwrap(),
-        }
-    }
-
-    fn assert_unchanged(&self) {
-        assert_eq!(
-            content_digest(&self.path),
-            self.content,
-            "source bytes changed: {}",
-            self.path.display()
-        );
-        assert_eq!(
-            fs::metadata(&self.path).unwrap().modified().unwrap(),
-            self.modified,
-            "source mtime changed: {}",
-            self.path.display()
-        );
-    }
-}
-
-/// Writes `bytes` as `name` in `dir` and plans `op` for it the way the app
-/// does (`build_selection`, outputs next to the source, fallback
-/// `dir/fallback`). Returns the source and the job.
-fn plan_one(dir: &TestDir, name: &str, bytes: &[u8], op: Operation) -> (PathBuf, Job) {
-    let src = dir.join(name);
-    fs::write(&src, bytes).unwrap();
-    let settings = Settings::new(dir.join("fallback"));
-    let sel = build_selection(std::slice::from_ref(&src), &settings);
-    let mut plan = plan(&sel, &op, &settings).unwrap();
-    assert_eq!(plan.jobs.len(), 1);
-    (src, plan.jobs.remove(0))
-}
-
-fn planned_file(job: &Job) -> PathBuf {
-    match &job.output {
-        JobOutput::File(path) => path.clone(),
-        other => panic!("expected a file output, got {other:?}"),
-    }
 }
 
 fn run(job: &Job) -> Result<JobOutcome, grape_engines::GrapeError> {
@@ -1144,36 +1073,6 @@ fn a_cancelled_job_writes_nothing() {
 }
 
 #[test]
-fn supports_exactly_the_twenty_raster_pairs() {
-    let supported: Vec<(Format, Format)> = pairs(Features::V1_ONLY)
-        .into_iter()
-        .filter(|&(from, to)| supports(&Operation::convert(to), Some(from)))
-        .collect();
-    assert_eq!(supported.len(), 20);
-    for (from, to) in &supported {
-        assert!(RASTER.contains(from) && RASTER.contains(to) && from != to);
-    }
-    let full = pairs(Features::FULL)
-        .into_iter()
-        .filter(|&(from, to)| supports(&Operation::convert(to), Some(from)))
-        .count();
-    assert_eq!(full, 20);
-    assert!(!supports(
-        &Operation::convert(Format::Png),
-        Some(Format::Png)
-    ));
-    assert!(!supports(&Operation::convert(Format::Png), None));
-    assert!(!supports(
-        &Operation::convert(Format::Png),
-        Some(Format::Heic)
-    ));
-    assert!(!supports(
-        &Operation::tool(ToolKey::Compress),
-        Some(Format::Png)
-    ));
-}
-
-#[test]
 fn a_unicode_name_keeps_its_stem() {
     let dir = TestDir::new("unicode");
     let (src, job) = plan_one(
@@ -1346,7 +1245,7 @@ fn a_folder_that_turns_read_only_is_a_write_error() {
     let names_before = dir.names();
     fs::set_permissions(&dir.path, fs::Permissions::from_mode(0o555)).unwrap();
     // Restore write access before `TestDir` deletes the tree.
-    struct Unlock(PathBuf);
+    struct Unlock(std::path::PathBuf);
     impl Drop for Unlock {
         fn drop(&mut self) {
             let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o755));

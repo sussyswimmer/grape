@@ -17,7 +17,9 @@ mod cancel;
 mod headers;
 mod image;
 mod output;
+mod publish;
 mod selection;
+mod subtitle;
 
 pub use selection::build_selection;
 
@@ -30,7 +32,7 @@ use std::sync::{
 use grape_core::{Format, Job, JobOutput, Operation};
 
 /// Sidecar locations injected by the app. All `None` in this slice: the
-/// image engine needs no sidecar. Engines never look sidecars up on `PATH`.
+/// image and subtitle engines need no sidecar. Engines never look sidecars up on `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarPaths {
     /// The bundled `ffmpeg` executable.
@@ -139,13 +141,34 @@ impl GrapeError {
 /// Can this build execute `op` for an input of format `from`?
 ///
 /// In this build: conversions between two different raster formats among
-/// JPG, PNG, WebP, TIFF and BMP (20 pairs). Everything else (HEIC, AVIF,
-/// SVG, PDF, audio, video, documents, archives, subtitles, every tool) is
-/// `false`.
+/// JPG, PNG, WebP, TIFF and BMP (20 pairs), and SRT to VTT or TXT and VTT
+/// to SRT or TXT (4 pairs). Everything else (HEIC, AVIF, SVG, PDF, audio,
+/// video, documents, archives, every tool) is `false`.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
     match (op, from) {
-        (Operation::Convert { to }, Some(from)) => image::supports(from, *to),
+        (Operation::Convert { to }, Some(from)) => engine_for(from, *to).is_some(),
         _ => false,
+    }
+}
+
+/// The engines in this build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    /// Raster images ([`image`]).
+    Image,
+    /// SRT and WebVTT subtitles ([`subtitle`]).
+    Subtitle,
+}
+
+/// The engine that converts `from` to `to`, if this build has one. The one
+/// place that decides, so [`supports`] and [`run_job`] always agree.
+fn engine_for(from: Format, to: Format) -> Option<Engine> {
+    if image::supports(from, to) {
+        Some(Engine::Image)
+    } else if subtitle::supports(from, to) {
+        Some(Engine::Subtitle)
+    } else {
+        None
     }
 }
 
@@ -171,10 +194,14 @@ pub fn run_job(
         .and_then(|path| path.file_name())
         .and_then(|name| Format::from_file_name(&name.to_string_lossy()));
     match (from, job.inputs.as_slice(), &job.output, job.op) {
-        (Some(from), [src], JobOutput::File(dest), Operation::Convert { to })
-            if image::supports(from, to) =>
-        {
-            image::convert(job, src, dest, from, to, ctx, progress)
+        (Some(from), [src], JobOutput::File(dest), Operation::Convert { to }) => {
+            match engine_for(from, to) {
+                Some(Engine::Image) => image::convert(job, src, dest, from, to, ctx, progress),
+                Some(Engine::Subtitle) => {
+                    subtitle::convert(job, src, dest, from, to, ctx, progress)
+                }
+                None => Err(not_yet_supported(job, Some(from))),
+            }
         }
         _ => Err(not_yet_supported(job, from)),
     }
