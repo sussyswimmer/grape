@@ -640,6 +640,48 @@ fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
 }
 
 #[test]
+fn a_copy_ffmpeg_refuses_is_retried_re_encoding_everything() {
+    let dir = TestDir::new("media-retry");
+    // H.264 and MP3 in Matroska fit MP4's copy rule, but the mp4 muxer
+    // refuses MP3 below 16 kHz ("muxing mp3 at 8000hz is not standard").
+    let src = dir.join("voice.mkv");
+    ffmpeg(&[
+        TESTSRC[0],
+        TESTSRC[1],
+        TESTSRC[2],
+        TESTSRC[3],
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=1:sample_rate=8000",
+        "-shortest",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "libmp3lame",
+        src.to_str().unwrap(),
+    ]);
+    let info = probe(&src);
+    assert_eq!(field(&info, "video", "codec_name").as_deref(), Some("h264"));
+    assert_eq!(field(&info, "audio", "codec_name").as_deref(), Some("mp3"));
+    assert_eq!(
+        field(&info, "audio", "sample_rate").as_deref(),
+        Some("8000")
+    );
+
+    let (outcome, seen) =
+        convert_file(&dir, &src, Format::Mp4).unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+    let out = probe(&outcome.outputs[0]);
+    // AAC: the retry re-encoded the audio the copy couldn't keep.
+    assert_eq!(field(&out, "video", "codec_name").as_deref(), Some("h264"));
+    assert_eq!(field(&out, "audio", "codec_name").as_deref(), Some("aac"));
+    assert_eq!(seen.last(), Some(&1.0));
+    assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+}
+
+#[test]
 fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
     let dir = TestDir::new("media-short-gif");
     // One frame (1/30 s), and two frames at 50 fps: both shorter than a
