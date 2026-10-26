@@ -855,6 +855,9 @@ format.duration="N/A"
             (StreamKind::Data, "tmcd", "unknown")
         );
         assert_eq!(stream(&probe, 0).tag, "avc1");
+        // Tags are kept lowercase, as AVI's "XVID" would be compared.
+        let upper = TIMECODE_MOV.replace("\"tmcd\"", "\"TMCD\"");
+        assert_eq!(stream(&parse(&upper).unwrap(), 2).tag, "tmcd");
         assert_eq!(stream(&probe, 1).bit_rate, Some(70_233));
         assert_eq!(probe.bit_rate, Some(132_296));
         // 6.1.1 prints no stream group.
@@ -889,6 +892,7 @@ format.duration="N/A"
             ("30/1", Some((30, 1))),
             ("30000/1001", Some((30000, 1001))),
             ("0/0", None),
+            ("0/1", None),
             ("25/0", None),
             ("N/A", None),
             ("30", None),
@@ -957,10 +961,15 @@ format.duration="N/A"
 
     #[test]
     fn a_stream_without_a_channel_layout_is_told_apart() {
-        let audio = parse(WAV_WITHOUT_LAYOUT).unwrap().audio.unwrap();
+        let probe = parse(WAV_WITHOUT_LAYOUT).unwrap();
+        let listed = stream(&probe, 0);
+        assert_eq!((listed.channels, listed.has_layout), (4, false));
+        let audio = probe.audio.unwrap();
         assert_eq!((audio.channels, audio.has_layout), (4, false));
         assert_eq!(audio.layout, "unknown");
-        let flac = parse(FLAC_24).unwrap().audio.unwrap();
+        let flac = parse(FLAC_24).unwrap();
+        assert!(stream(&flac, 0).has_layout);
+        let flac = flac.audio.unwrap();
         assert!(flac.has_layout);
         assert_eq!(flac.layout, "mono");
         // A layout ffprobe doesn't print isn't taken for a missing one.

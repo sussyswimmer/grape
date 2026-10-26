@@ -895,6 +895,9 @@ format.tags.encoder="Lavf60.16.100"
         assert_eq!(parse(&data("camm")).fields, set([Location]));
         assert_eq!(parse(&data("tmcd")).fields, set([CreationDate]));
         assert_eq!(parse(&data("text")).fields, set([Chapters]));
+        // Codec tags are compared lowercase.
+        assert_eq!(parse(&data("GPMD")).fields, set([Location]));
+        assert_eq!(parse(&data("TmCd")).fields, set([CreationDate]));
         assert_eq!(parse(&data("mebx")).fields, set([Other]));
         assert_eq!(parse(&data("[0][0][0][0]")).fields, set([Other]));
     }
@@ -935,6 +938,18 @@ format.tags.encoder="Lavf60.16.100"
             ("time_reference", Some(CreationDate)),
             ("_statistics_writing_date_utc", Some(CreationDate)),
             ("xmp", Some(Xmp)),
+            // Keys only the narrower rules catch: a make, model, serial or
+            // ISO 6709 location under a prefix that isn't stripped, and a
+            // serial that doesn't start with "camera".
+            ("com_vendor_make", Some(Camera)),
+            ("com_vendor_model", Some(Camera)),
+            ("com_vendor_iso6709", Some(Location)),
+            ("serial_number", Some(Camera)),
+            ("body_serial", Some(Camera)),
+            // Only a language code after the last '_' is dropped.
+            ("title_und", Some(Other)),
+            ("title_x2y", Some(Other)),
+            ("title_engl", Some(Other)),
             ("album", Some(Other)),
             ("genre", Some(Other)),
             ("replaygain_album_peak", Some(Other)),
