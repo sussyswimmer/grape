@@ -369,6 +369,43 @@ fn a_job_cancelled_while_writing_reports_it_and_leaves_nothing() {
 }
 
 #[test]
+fn a_read_only_source_converts_and_stays_untouched() {
+    let dir = TestDir::new("read-only-source");
+    let (src, job) = plan_one(
+        &dir,
+        "movie.srt",
+        SRT.as_bytes(),
+        Operation::convert(Format::Vtt),
+    );
+    let writable = fs::metadata(&src).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&src, read_only).unwrap();
+    // Restore write access before `TestDir` deletes the tree.
+    struct Unlock(std::path::PathBuf, fs::Permissions);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+    let _unlock = Unlock(src.clone(), writable);
+    // Root (and CAP_DAC_OVERRIDE) ignores permission bits: check first.
+    if fs::OpenOptions::new().append(true).open(&src).is_ok() {
+        println!(
+            "note: skipped, this user can open a read-only file for writing (running as root?)"
+        );
+        return;
+    }
+    let before = SourceState::of(&src);
+
+    let outcome = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
+
+    assert_eq!(outcome.outputs, [dir.join("movie.vtt")]);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
 fn a_missing_source_is_a_read_error() {
     let dir = TestDir::new("missing");
     let (src, job) = plan_one(
