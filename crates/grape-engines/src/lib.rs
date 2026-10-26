@@ -19,6 +19,8 @@ mod image;
 mod output;
 mod publish;
 mod selection;
+#[allow(dead_code)] // Wired into run_job in the next commit.
+mod subtitle;
 
 pub use selection::build_selection;
 
