@@ -17,7 +17,8 @@
 //!   after a blank line, everything before the timing line is the cue's
 //!   identifier. A line with `-->` that isn't a valid timing line drops its
 //!   cue; in SRT, only one whose text before the arrow starts with a digit
-//!   is taken for a timing line, so an arrow in SRT text stays text. A block
+//!   (after spaces, invisible marks and one `-`) is taken for a timing line,
+//!   so an arrow in SRT text stays text. A block
 //!   without a timing line continues the previous cue's text, unless it is
 //!   only digits and that cue already has text: then it is a stray index.
 //! - **Text** keeps italic, bold and underline from HTML-style, WebVTT and
@@ -321,15 +322,35 @@ fn push_lines(
 }
 
 /// True for a line that is read as a timing line, valid or not: one with
-/// `-->`, and in SRT only when what comes before the arrow starts with a
-/// digit, so an arrow in SRT text stays text. WebVTT text can't hold one.
+/// `-->`. WebVTT text can't hold one, so there every such line counts. In
+/// SRT, only one whose text before the arrow starts with a digit once
+/// spaces, [invisible marks](is_invisible_mark) and one `-` are skipped:
+/// an arrow in SRT text stays text, while a negative timing line (a
+/// shifted SRT has them) or one after a stray BOM is still a timing line,
+/// so its invalid timing drops its cue instead of joining the cue before.
 fn looks_like_timing(line: &str, webvtt: bool) -> bool {
     line.split_once(ARROW).is_some_and(|(before, _)| {
-        webvtt
-            || before
-                .trim_start()
-                .starts_with(|c: char| c.is_ascii_digit())
+        if webvtt {
+            return true;
+        }
+        let before = before.trim_start_matches(|c: char| c.is_whitespace() || is_invisible_mark(c));
+        before
+            .strip_prefix('-')
+            .unwrap_or(before)
+            .starts_with(|c: char| c.is_ascii_digit())
     })
+}
+
+/// True for a character that shows nothing and that editors or joined
+/// files leave at the start of a line: the BOM (U+FEFF), zero-width
+/// spaces, joiners and direction marks (U+200B to U+200F), direction
+/// embeddings and overrides (U+202A to U+202E) and the word joiner
+/// (U+2060).
+fn is_invisible_mark(c: char) -> bool {
+    matches!(
+        c,
+        '\u{FEFF}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'
+    )
 }
 
 /// True for the first line of a WebVTT comment, style or region block:
@@ -1047,10 +1068,69 @@ mod tests {
             plain(&parsed("1\n00:00:01,000 --> 00:00:02,000\n--> this way")),
             [cue(1000, 2000, &["--> this way"])]
         );
+        // A digit later in the line doesn't make it a timing line.
+        assert_eq!(
+            plain(&parsed(
+                "1\n00:00:01,000 --> 00:00:02,000\nRoute 66 -->\nnow"
+            )),
+            [cue(1000, 2000, &["Route 66 -->", "now"])]
+        );
         // In WebVTT a line with an arrow is a timing line, as the format has it.
         let vtt = "WEBVTT\n\n00:01.000 --> 00:02.000\nGo this way -->\nnow\n\n\
                    00:03.000 --> 00:04.000\nok\n";
         assert_eq!(plain(&parsed(vtt)), [cue(3000, 4000, &["ok"])]);
+    }
+
+    #[test]
+    fn an_srt_timing_line_may_start_with_spaces() {
+        let srt =
+            "1\n  00:00:01,000 --> 00:00:02,000\nHi\n\n2\n\t00:00:03,000 --> 00:00:04,000\nBye";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["Hi"]), cue(3000, 4000, &["Bye"])]
+        );
+    }
+
+    #[test]
+    fn a_negative_srt_timing_line_drops_its_cue() {
+        // A shifted SRT can start a cue before zero. Its timing line is
+        // invalid, so the cue is dropped, never added to the cue before.
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nFirst\n\n\
+                   2\n-00:00:00,500 --> 00:00:00,900\nShifted before zero\n\n\
+                   3\n00:00:03,000 --> 00:00:04,000\nThird\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["First"]), cue(3000, 4000, &["Third"])]
+        );
+    }
+
+    #[test]
+    fn an_srt_timing_line_after_an_invisible_mark_drops_its_cue() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nFirst\n\n\
+                   \u{FEFF}00:00:03,000 --> 00:00:04,000\nSecond\n";
+        assert_eq!(plain(&parsed(srt)), [cue(1000, 2000, &["First"])]);
+        for mark in [
+            '\u{FEFF}', '\u{200B}', '\u{200C}', '\u{200D}', '\u{200E}', '\u{200F}', '\u{202A}',
+            '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2060}',
+        ] {
+            let line = format!("{mark}00:00:03,000 --> 00:00:04,000");
+            assert!(looks_like_timing(&line, false), "{mark:?}");
+            let line = format!(" {mark} -00:00:03,000 --> 00:00:04,000");
+            assert!(looks_like_timing(&line, false), "{mark:?}");
+        }
+        // Spaces, marks and one minus sign before the digit; nothing else.
+        assert!(looks_like_timing("\u{A0}00:00:01,000 --> x", false));
+        for text in [
+            "\u{200A}x 1 -->",
+            "\u{2010}00:00:01,000 -->",
+            "\u{2061}00:00:01,000 -->",
+            "--00:00:01,000 -->",
+            "- 00:00:01,000 -->",
+            "-\u{FEFF}00:00:01,000 -->",
+            "00:00:01,000 -> x",
+        ] {
+            assert!(!looks_like_timing(text, false), "{text:?}");
+        }
     }
 
     // Rule 10: cues without blank lines, indexes and identifiers.
