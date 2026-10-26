@@ -46,8 +46,141 @@ fn ctx() -> EngineCtx {
     }
 }
 
-/// Runs the test FFmpeg with `args`; panics with its stderr if it fails.
+/// The encoders, filters (the lavfi sources among them) and muxers of
+/// Grape's own FFmpeg build (DECISIONS D24), as `scripts/ffmpeg/build.sh`
+/// lists them on the build's branch. Sources made with anything else
+/// would only fail against that build, so [`ffmpeg`] refuses them with
+/// every FFmpeg. Keep these in step with D24.
+const BUILD_ENCODERS: [&str; 16] = [
+    "libx264",
+    "aac",
+    "libvpx-vp9",
+    "libopus",
+    "mpeg4",
+    "libmp3lame",
+    "wmv2",
+    "wmav2",
+    "gif",
+    "png",
+    "pcm_s16le",
+    "pcm_s24le",
+    "pcm_s16be",
+    "pcm_s24be",
+    "flac",
+    "libvorbis",
+];
+const BUILD_FILTERS: [&str; 20] = [
+    "scale",
+    "fps",
+    "palettegen",
+    "paletteuse",
+    "format",
+    "aformat",
+    "aresample",
+    "null",
+    "anull",
+    "transpose",
+    "hflip",
+    "vflip",
+    "rotate",
+    "crop",
+    "trim",
+    "atrim",
+    "premultiply_dynamic",
+    "sine",
+    "testsrc",
+    "pan",
+];
+const BUILD_MUXERS: [&str; 15] = [
+    "mp4",
+    "mov",
+    "matroska",
+    "webm",
+    "avi",
+    "asf",
+    "gif",
+    "mp3",
+    "ipod",
+    "wav",
+    "flac",
+    "ogg",
+    "opus",
+    "aiff",
+    "image2pipe",
+];
+
+/// The first encoder, filter or format in an `ffmpeg` argv that Grape's
+/// FFmpeg build lacks ([`BUILD_ENCODERS`]), named for a panic message.
+fn lacking(args: &[&str]) -> Option<String> {
+    let mut lavfi_input = false;
+    for pair in args.windows(2) {
+        let (option, value) = (pair[0], pair[1]);
+        let missing = match option {
+            "-c" | "-codec" | "-vcodec" | "-acodec" => encoder_lacking(value),
+            _ if option.starts_with("-c:") || option.starts_with("-codec:") => {
+                encoder_lacking(value)
+            }
+            "-f" if value == "lavfi" => {
+                lavfi_input = true;
+                None
+            }
+            "-f" => (!BUILD_MUXERS.contains(&value)).then(|| format!("format {value}")),
+            "-i" if lavfi_input => {
+                lavfi_input = false;
+                filters_lacking(value)
+            }
+            "-vf" | "-af" | "-lavfi" | "-filter_complex" => filters_lacking(value),
+            _ if option.starts_with("-filter:") => filters_lacking(value),
+            _ => None,
+        };
+        if missing.is_some() {
+            return missing;
+        }
+    }
+    None
+}
+
+fn encoder_lacking(name: &str) -> Option<String> {
+    (name != "copy" && !BUILD_ENCODERS.contains(&name)).then(|| format!("encoder {name}"))
+}
+
+/// The first filter of the filtergraph `graph` that the build lacks. A
+/// ',' or ';' escaped with '\\' or inside quotes doesn't end a filter.
+fn filters_lacking(graph: &str) -> Option<String> {
+    let mut filters = vec![String::new()];
+    let (mut quoted, mut escaped) = (false, false);
+    for c in graph.chars() {
+        let last = filters.last_mut()?;
+        match c {
+            _ if escaped => {
+                escaped = false;
+                last.push(c);
+            }
+            '\\' => escaped = true,
+            '\'' => quoted = !quoted,
+            ',' | ';' if !quoted => filters.push(String::new()),
+            _ => last.push(c),
+        }
+    }
+    filters.iter().find_map(|filter| {
+        // Labels like `[0:v]` come before the name, and after it.
+        let mut name = filter.trim();
+        while let Some(rest) = name.strip_prefix('[') {
+            name = rest
+                .split_once(']')
+                .map_or("", |(_, after)| after.trim_start());
+        }
+        let name = name.split(['=', '[', '@']).next().unwrap_or("").trim();
+        (!name.is_empty() && !BUILD_FILTERS.contains(&name)).then(|| format!("filter {name}"))
+    })
+}
+
+/// Runs the test FFmpeg with `args`; panics with its stderr if it fails,
+/// or if `args` need what Grape's FFmpeg build lacks ([`lacking`]).
 fn ffmpeg(args: &[&str]) {
+    if let Some(missing) = lacking(args) {
+        panic!("{missing} isn't in Grape's FFmpeg build (D24); make the source with what it has: {args:?}");
+    }
     let out = Command::new(tool("GRAPE_TEST_FFMPEG"))
         .args(["-nostdin", "-hide_banner", "-v", "error", "-y"])
         .args(args)
@@ -57,6 +190,58 @@ fn ffmpeg(args: &[&str]) {
         out.status.success(),
         "ffmpeg {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn sources_needing_what_grapes_ffmpeg_lacks_are_refused() {
+    // What earlier tests used, which the build leaves out.
+    let lacks = |args: &[&str]| lacking(args).unwrap_or_default();
+    let testsrc2 = [
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=320x240:rate=30",
+        "x.mp4",
+    ];
+    assert_eq!(lacks(&testsrc2), "filter testsrc2");
+    assert_eq!(
+        lacks(&["-i", "a.mov", "-c:v", "ffv1", "b.mkv"]),
+        "encoder ffv1"
+    );
+    let setpts = ["-i", "a.mov", "-vf", "fps=10,setpts=PTS-STARTPTS", "b.mkv"];
+    assert_eq!(lacks(&setpts), "filter setpts");
+    let split = ["-i", "a", "-lavfi", "[0:v]split[a][b];[a][b]hstack", "b"];
+    assert_eq!(lacks(&split), "filter split");
+    assert_eq!(
+        lacks(&["-i", "a.wav", "-f", "s16le", "b.raw"]),
+        "format s16le"
+    );
+    // What they use now, labels and escaped commas included.
+    let sources = [
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=1x1:rate=1",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=duration=1,aformat=channel_layouts=5.1(side)",
+        "-af",
+        "pan=5.1|c0=c0|c1=c0",
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "copy",
+        "-f",
+        "matroska",
+        "x.mkv",
+    ];
+    assert_eq!(lacking(&sources), None);
+    let gif = r"[0:V:0]fps=12,scale='min(iw\,720)':-1[x];[x][1:v]paletteuse";
+    assert_eq!(
+        lacking(&["-lavfi", gif, "-c:v", "gif", "-f", "gif", "x"]),
+        None
     );
 }
 
