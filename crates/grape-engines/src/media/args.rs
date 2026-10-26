@@ -41,8 +41,10 @@ pub(crate) const DEMUXERS: &str = "mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gi
 /// an expression are escaped for the filtergraph.
 const EVEN_SIZE: &str = r"scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'";
 
-/// A GIF's frames: 12 per second, at most 720 px wide.
-const GIF_FRAMES: &str = r"fps=12,scale='min(iw\,720)':-1:flags=lanczos";
+/// A GIF's frames: 12 per second, at most 720 px wide. `eof_action=pass`
+/// keeps the last frame of a clip shorter than one GIF frame (1/12 s),
+/// which `fps` would otherwise round away, leaving no frame at all.
+const GIF_FRAMES: &str = r"fps=12:eof_action=pass,scale='min(iw\,720)':-1:flags=lanczos";
 
 /// H.264 for MP4, MOV and MKV.
 const X264: &[&str] = &[
@@ -271,13 +273,17 @@ fn build(
 }
 
 /// The two GIF passes. The first writes the palette as a single PNG with
-/// `image2pipe` (`image2` would expand `%` in the path as a frame number);
-/// the second reads it back as a second input and draws the GIF with it.
+/// `image2pipe` (`image2` would expand `%` in the path as a frame number),
+/// and fails if it wrote none (`-abort_on empty_output`), which the second
+/// would report as an unreadable source; the second reads it back as a
+/// second input and draws the GIF with it.
 fn gif_passes(src: &Path, out: &Path, palette: &Path) -> Vec<Pass> {
     let mut first = prefix(src);
     push(
         &mut first,
         &[
+            "-abort_on",
+            "empty_output",
             "-map",
             "0:V:0",
             "-vf",
@@ -709,10 +715,12 @@ mod tests {
         let passes = passes_for(&typical(Format::Mp4), Format::Gif).unwrap();
         let mut first = PREFIX.to_vec();
         first.extend_from_slice(&[
+            "-abort_on",
+            "empty_output",
             "-map",
             "0:V:0",
             "-vf",
-            r"fps=12,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff",
+            r"fps=12:eof_action=pass,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff",
             "-frames:v",
             "1",
             "-c:v",
@@ -732,7 +740,7 @@ mod tests {
             "-i",
             "<palette>",
             "-lavfi",
-            r"[0:V:0]fps=12,scale='min(iw\,720)':-1:flags=lanczos[x];[x][1:v]paletteuse",
+            r"[0:V:0]fps=12:eof_action=pass,scale='min(iw\,720)':-1:flags=lanczos[x];[x][1:v]paletteuse",
             "-an",
             "-progress",
             "pipe:1",

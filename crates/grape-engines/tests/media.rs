@@ -552,6 +552,35 @@ fn h264_with_b_frames_from_avi_or_wmv_plays_in_order() {
 }
 
 #[test]
+fn a_clip_shorter_than_one_gif_frame_still_makes_a_gif() {
+    let dir = TestDir::new("media-short-gif");
+    // One frame (1/30 s), and two frames at 50 fps: both shorter than a
+    // GIF frame at 12 fps.
+    for (name, source) in [
+        ("one.mp4", "testsrc2=size=320x240:rate=30,trim=end_frame=1"),
+        ("two.mp4", "testsrc2=size=320x240:rate=50:duration=0.04"),
+    ] {
+        let src = dir.join(name);
+        ffmpeg(&[
+            "-f",
+            "lavfi",
+            "-i",
+            source,
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            src.to_str().unwrap(),
+        ]);
+        let (outcome, _) = convert_file(&dir, &src, Format::Gif)
+            .unwrap_or_else(|e| panic!("{name}: {e} ({})", e.detail));
+        let info = probe(&outcome.outputs[0]);
+        assert_eq!(field(&info, "video", "codec_name").as_deref(), Some("gif"));
+        assert_eq!(field(&info, "video", "width").as_deref(), Some("320"));
+    }
+}
+
+#[test]
 fn a_source_without_the_needed_stream_is_refused_before_writing() {
     let dir = TestDir::new("media-missing-stream");
     let silent = dir.join("silent.mp4");

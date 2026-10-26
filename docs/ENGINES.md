@@ -61,7 +61,7 @@ Every video target except GIF scales to even dimensions, at least 2×2: `scale='
 | webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -pix_fmt yuv420p` | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | the layout filter as for opus |
 | avi | `mpeg4 -q:v 3 -tag:v XVID` | `libmp3lame -b:a 192k` (constant bitrate stays in sync in AVI) | |
 | wmv | `wmv2 -q:v 3` | `wmav2 -b:a 192k`, `-ac 2` above stereo, `-ar 48000` above 48 kHz | wmav2 refuses more |
-| gif | pass 1: `fps=12,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff`, one PNG via `image2pipe`; pass 2: the same frames `paletteuse`d with that palette | — | two passes, so a long clip isn't held in memory; `image2pipe` because `image2` expands `%` in paths. Long inputs aren't warned about yet |
+| gif | pass 1: `fps=12:eof_action=pass,scale='min(iw\,720)':-1:flags=lanczos,palettegen=stats_mode=diff`, one PNG via `image2pipe`, with `-abort_on empty_output`; pass 2: the same frames `paletteuse`d with that palette | — | two passes, so a long clip isn't held in memory; `image2pipe` because `image2` expands `%` in paths; `eof_action=pass` keeps the frame of a clip shorter than 1/12 s, and a palette pass that writes nothing fails as "couldn't write a GIF file". Long inputs aren't warned about yet |
 | mp3 | — | `libmp3lame -q:a 2 -id3v2_version 3` | ID3v2.3 is what Explorer and Windows Media Player read best |
 | m4a | — | `aac -b:a 256k` | `-f ipod -movflags +faststart` |
 | wav | — | `pcm_s16le`, or `pcm_s24le` from a lossless source over 16 bits | `-rf64 auto` for files over 4 GiB |
