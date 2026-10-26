@@ -18,6 +18,7 @@ mod archive;
 mod cancel;
 mod headers;
 mod image;
+mod media;
 mod output;
 #[doc(hidden)] // Public only for the worker entry, `pdf::worker_main` (D29).
 pub mod pdf;
@@ -38,8 +39,9 @@ use grape_core::{Format, Job, JobOutput, Operation, ToolKey};
 
 /// Sidecar locations injected by the app, which finds them next to its own
 /// executable at startup (`apps/desktop/src-tauri/src/sidecars.rs`). One
-/// that isn't there is `None`. The image and subtitle engines need none.
-/// Engines never look sidecars up on `PATH`.
+/// that isn't there is `None`. The image and subtitle engines need none;
+/// audio and video need `ffmpeg` and `ffprobe`. Engines never look sidecars
+/// up on `PATH`.
 #[derive(Debug, Clone, Default)]
 pub struct SidecarPaths {
     /// The bundled `ffmpeg` executable.
@@ -221,9 +223,12 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// In this build: raster images among JPG, PNG, WebP, TIFF and BMP (20
 /// pairs); SRT to VTT or TXT and VTT to SRT or TXT (4); ZIP, TAR and GZIP
 /// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
-/// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4). Tools: Extract
+/// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); audio and video
+/// among each other (104) with `ffmpeg` and `ffprobe`. Tools: Extract
 /// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
-/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`.
+/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`. Pure: it
+/// doesn't check that the sidecar files are there; [`run_job`] fails
+/// cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
         && formats.iter().all(|from| match (op, *from) {
@@ -246,6 +251,8 @@ enum Engine {
     Archive,
     /// PDF, in a worker process ([`pdf`]).
     Pdf,
+    /// Audio and video through the FFmpeg sidecar ([`media`]).
+    Media,
 }
 
 /// The engine that converts `from` to `to` with these sidecars, if this
@@ -260,6 +267,8 @@ fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engin
         Some(Engine::Archive)
     } else if pdf::supports(from, to) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         Some(Engine::Pdf)
+    } else if media::supports(from, to) && media::has_sidecars(sidecars) {
+        Some(Engine::Media)
     } else {
         None
     }
@@ -318,6 +327,7 @@ pub fn run_job(
                 }
                 // PDF → TXT or MD.
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
+                Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 None => Err(not_yet_supported(job, Some(from))),
             }
         }
