@@ -16,8 +16,10 @@
 //!   before it. A line of digits just before one is its index, not text;
 //!   after a blank line, everything before the timing line is the cue's
 //!   identifier. A line with `-->` that isn't a valid timing line drops its
-//!   cue. A block without a timing line continues the previous cue's text,
-//!   unless it is only digits.
+//!   cue; in SRT, only one whose text before the arrow starts with a digit
+//!   is taken for a timing line, so an arrow in SRT text stays text. A block
+//!   without a timing line continues the previous cue's text, unless it is
+//!   only digits.
 //! - **Text** keeps italic, bold and underline from HTML-style, WebVTT and
 //!   ASS tags; other known tags are dropped with their text kept, `<rt>`
 //!   ruby text is put in parentheses, and unknown markup stays literal.
@@ -222,7 +224,8 @@ impl Reader {
     /// Reads one block. Every line it looks at or turns into spans counts
     /// as work for `ticker`.
     fn block(&mut self, mut block: &[&str], ticker: &mut Ticker) -> Result<(), Cancelled> {
-        let is_timing = |line: &str| line.contains(ARROW);
+        let webvtt = self.webvtt;
+        let is_timing = |line: &str| looks_like_timing(line, webvtt);
         if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
             // The comment, style or region ends at a timing line: a cue can
             // follow it without a blank line.
@@ -307,6 +310,18 @@ fn push_lines(
         }
     }
     Ok(())
+}
+
+/// True for a line that is read as a timing line, valid or not: one with
+/// `-->`, and in SRT only when what comes before the arrow starts with a
+/// digit, so an arrow in SRT text stays text. WebVTT text can't hold one.
+fn looks_like_timing(line: &str, webvtt: bool) -> bool {
+    line.split_once(ARROW).is_some_and(|(before, _)| {
+        webvtt
+            || before
+                .trim_start()
+                .starts_with(|c: char| c.is_ascii_digit())
+    })
 }
 
 /// True for the first line of a WebVTT comment, style or region block:
@@ -957,6 +972,27 @@ mod tests {
                 cue(7000, 8000, &["Good again"])
             ]
         );
+    }
+
+    #[test]
+    fn an_arrow_in_srt_text_stays_text() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nGo this way -->\nnow\n\n\
+                   2\n00:00:03,000 --> 00:00:04,000\nok\n";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [
+                cue(1000, 2000, &["Go this way -->", "now"]),
+                cue(3000, 4000, &["ok"])
+            ]
+        );
+        assert_eq!(
+            plain(&parsed("1\n00:00:01,000 --> 00:00:02,000\n--> this way")),
+            [cue(1000, 2000, &["--> this way"])]
+        );
+        // In WebVTT a line with an arrow is a timing line, as the format has it.
+        let vtt = "WEBVTT\n\n00:01.000 --> 00:02.000\nGo this way -->\nnow\n\n\
+                   00:03.000 --> 00:04.000\nok\n";
+        assert_eq!(plain(&parsed(vtt)), [cue(3000, 4000, &["ok"])]);
     }
 
     // Rule 10: cues without blank lines, indexes and identifiers.
