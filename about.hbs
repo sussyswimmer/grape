@@ -5,7 +5,8 @@ Grape is free and open source, under the MIT License in `LICENSE`. It's built wi
 - **{{len @root.crates}} Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
-- **Not here yet:** the helper programs Grape will ship as separate files, like FFmpeg. Each one will come with its license text in the `licenses` folder and an entry here.
+- **libarchive**, whose `bsdtar` program Grape will read RAR archives with. It will ship as a separate program, with its license texts in the `licenses/libarchive` folder. Today's installer and DMG don't carry it yet.
+- **Not here yet:** the other helper programs Grape will ship as separate files, like FFmpeg. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
 
@@ -25,7 +26,7 @@ The Rust crates use these, most used first:
 - {{{name}}} (`{{id}}`)
 {{/each}}
 
-The JavaScript is all MIT. PDFium and the libraries built into it have their own section.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so does libarchive.
 
 {{#each overview}}
 {{#if (eq id "MPL-2.0")}}
@@ -137,6 +138,24 @@ Portions of this software are copyright © 2026 The FreeType Project (www.freety
 This software is based in part on the work of the Independent JPEG Group.
 
 `icu.txt` also holds GPL texts with the Autoconf exception. They cover two of ICU4C's build scripts, which PDFium's build doesn't use, so no GPL code is in the library. This section is written by hand: check it again when `scripts/sidecars.lock` changes PDFium's version.
+
+## libarchive
+
+Grape will read RAR archives with `bsdtar` from [libarchive](https://www.libarchive.org/) 3.8.10, built by Grape's CI from the release tarball with six small patches (three upstream fixes and three of Grape's own). It will ship as a separate program: `bsdtar.exe` next to `Grape.exe` on Windows, and `Grape.app/Contents/MacOS/bsdtar` on macOS. Its license texts will ship with it in the `licenses/libarchive` folder, where `SOURCE.md` says exactly how it was built. Today's installer and DMG don't carry it yet.
+
+| Component | License | Text in `licenses/libarchive` |
+|---|---|---|
+| libarchive and bsdtar | BSD-2-Clause | `LICENSE.txt`, with the copyright holders in `copyright-lines.txt` |
+| Parts from the University of California (compress, strmode, umask, setmode) | BSD-3-Clause | `regents-bsd-3-clause.txt` |
+| Parts from The NetBSD Foundation (red-black tree, device numbers) | BSD-2-Clause | `netbsd-bsd-2-clause.txt` |
+| Windows error-code table, from PostgreSQL (Windows build only) | PostgreSQL License | `postgresql.txt` |
+| BLAKE2 | CC0-1.0, which Grape takes (or OpenSSL, or Apache-2.0) | `blake2.txt` |
+| Unicode composition tables, from Unicode 6.0 data | Unicode-3.0 | `unicode.txt` |
+| arc4random and readpassphrase, from OpenBSD (used only where the system has none, so not normally in the Windows or macOS build) | ISC | `openbsd-isc.txt` |
+| Branch filters from XZ Embedded and XZ Utils, in the 7-Zip reader | 0BSD | none needed |
+| PPMd (Igor Pavlov, Dmitry Shkarin) and the date parser | Public domain | none needed |
+
+This section is written by hand: check it again when `scripts/bsdtar/sources.json` changes libarchive's version.
 
 ## Rust crates
 

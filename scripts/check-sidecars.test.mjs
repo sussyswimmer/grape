@@ -204,3 +204,141 @@ test('the sidecars overlay runs this gate before the UI build of the base config
   assert.equal(overlay.build.beforeBuildCommand, `node ../../scripts/check-sidecars.mjs && ${base.build.beforeBuildCommand}`);
   assert.deepEqual(Object.keys(overlay), ['build', 'bundle']);
 });
+
+// bsdtar (D27): Grape's build of libarchive's bsdtar, from scripts/bsdtar.
+const BSDTAR_WINDOWS = 'bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled \r\n';
+const BSDTAR_MACOS = 'bsdtar 3.8.10-grape.1 - libarchive 3.8.10 CommonCrypto/system libb2/bundled \n';
+const OVERLAY_ALL = JSON.stringify({
+  build: { beforeBuildCommand: 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build' },
+  bundle: { externalBin: ['binaries/ffmpeg', 'binaries/ffprobe', 'binaries/bsdtar'] },
+});
+const NOTICES_ALL = `${NOTICES}\n## libarchive\n\nGrape reads RAR archives with bsdtar.\n`;
+
+/** Everything a passing build with FFmpeg and bsdtar has, for one triple. */
+function allOk(triple, bsdtarOut, overrides = {}) {
+  const file = (name) => join(APP, sidecarFile(`binaries/${name}`, triple));
+  return {
+    files: {
+      [join(APP, 'tauri.sidecars.conf.json')]: OVERLAY_ALL,
+      [join(REPO, 'about.hbs')]: NOTICES_ALL,
+      [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES_ALL,
+      [file('ffmpeg')]: '',
+      [file('ffprobe')]: '',
+      [file('bsdtar')]: '',
+      ...overrides.files,
+    },
+    dirs: {
+      [join(REPO, 'licenses', 'ffmpeg')]: ['LICENSE.txt', 'SOURCE.md'],
+      [join(REPO, 'licenses', 'libarchive')]: ['LICENSE.txt', 'copyright-lines.txt'],
+      ...overrides.dirs,
+    },
+    outputs: {
+      [file('ffmpeg')]: GRAPE_FFMPEG,
+      [file('ffprobe')]: GRAPE_FFPROBE,
+      [file('bsdtar')]: bsdtarOut,
+      ...overrides.outputs,
+    },
+  };
+}
+
+test("Grape's bsdtar passes on Windows and as a universal Mac file", () => {
+  let io = fakeIo(allOk('x86_64-pc-windows-msvc', BSDTAR_WINDOWS));
+  assert.deepEqual(check({ repo: REPO, triple: 'x86_64-pc-windows-msvc', io }), []);
+  assert.deepEqual(io.ran[2], [join(APP, 'binaries', 'bsdtar-x86_64-pc-windows-msvc.exe'), ['--version']]);
+
+  io = fakeIo(allOk('universal-apple-darwin', BSDTAR_MACOS));
+  assert.deepEqual(check({ repo: REPO, triple: 'universal-apple-darwin', io }), []);
+  assert.deepEqual(io.ran[2], [join(APP, 'binaries', 'bsdtar-universal-apple-darwin'), ['--version']]);
+
+  // The same line on macOS without CommonCrypto, and without the trailing space.
+  for (const out of ['bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled \n', 'bsdtar 3.8.10-grape.12 - libarchive 3.8.10\n']) {
+    io = fakeIo(allOk('universal-apple-darwin', out));
+    assert.deepEqual(check({ repo: REPO, triple: 'universal-apple-darwin', io }), [], out);
+  }
+});
+
+test('stock and system bsdtars are refused: no -grape marker on the version', () => {
+  const bsdtar = join(APP, 'binaries', 'bsdtar-x86_64-pc-windows-msvc.exe');
+  for (const line of [
+    // Stock 3.8.10, built without Grape's patches.
+    'bsdtar 3.8.10 - libarchive 3.8.10 libb2/bundled ',
+    // Windows' own tar.exe.
+    'bsdtar 3.7.7 - libarchive 3.7.7 zlib/1.2.13.1-motley liblzma/5.4.3 bz2lib/1.0.8 libzstd/1.5.5',
+    // -grape anywhere but on bsdtar's own version doesn't count.
+    'bsdtar 3.8.10 - libarchive 3.8.10-grape.1 libb2/bundled ',
+    'bsdtar 3.8.10 - libarchive 3.8.10 libb2/bundled-grape ',
+    'bsdtar 3.8.10 - libarchive 3.8.10 x/-grape.1',
+    'bsdtar 3.8.10-grapefruit - libarchive 3.8.10 libb2/bundled ',
+    'bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled extra',
+    ' bsdtar 3.8.10-grape.1 - libarchive 3.8.10',
+  ]) {
+    const io = fakeIo(allOk('x86_64-pc-windows-msvc', BSDTAR_WINDOWS, { outputs: { [bsdtar]: `${line}\n` } }));
+    const failures = check({ repo: REPO, triple: 'x86_64-pc-windows-msvc', io });
+    assert.equal(failures.length, 1, line);
+    assert.match(failures[0], /^bsdtar: this isn't Grape's own build\./, line);
+    assert.match(failures[0], /scripts\/bsdtar.*\(D27\)\.$/, line);
+  }
+});
+
+test('a missing bsdtar points at scripts/bsdtar and the bsdtar workflow', () => {
+  const base = allOk('universal-apple-darwin', BSDTAR_MACOS);
+  delete base.files[join(APP, 'binaries', 'bsdtar-universal-apple-darwin')];
+  const failures = check({ repo: REPO, triple: 'universal-apple-darwin', io: fakeIo(base) });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^bsdtar: src-tauri\/binaries\/bsdtar-universal-apple-darwin is missing\. Build it with scripts\/bsdtar\/build\.ps1/);
+});
+
+test("bsdtar's licenses: the folder and the notices section, but no SOURCE.md rule", () => {
+  const triple = 'x86_64-pc-windows-msvc';
+  // Not GPL, so LICENSE.txt alone is enough.
+  let failures = check({ repo: REPO, triple, io: fakeIo(allOk(triple, BSDTAR_WINDOWS, { dirs: { [join(REPO, 'licenses', 'libarchive')]: ['LICENSE.txt'] } })) });
+  assert.deepEqual(failures, []);
+
+  failures = check({ repo: REPO, triple, io: fakeIo(allOk(triple, BSDTAR_WINDOWS, { dirs: { [join(REPO, 'licenses', 'libarchive')]: [] } })) });
+  assert.deepEqual(failures, ['bsdtar: licenses/libarchive/ is missing or empty (ENGINES.md licensing rule 3).']);
+
+  failures = check({ repo: REPO, triple, io: fakeIo(allOk(triple, BSDTAR_WINDOWS, { files: { [join(REPO, 'about.hbs')]: NOTICES } })) });
+  assert.deepEqual(failures, ['bsdtar: about.hbs has no "## libarchive" section (licenses/README.md).']);
+
+  failures = check({ repo: REPO, triple, io: fakeIo(allOk(triple, BSDTAR_WINDOWS, { files: { [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES } })) });
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /^bsdtar: THIRD_PARTY_NOTICES\.md has no "## libarchive" section/);
+});
+
+test('every externalBin in the real overlays has a rule and ships its licenses folder', async () => {
+  const { readdirSync, readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const { RULES } = await import('./check-sidecars.mjs');
+  const app = fileURLToPath(new URL('../apps/desktop/src-tauri/', import.meta.url));
+  const overlays = readdirSync(app).filter((f) => /^tauri.*\.conf\.json$/.test(f));
+  let checked = 0;
+  for (const name of overlays) {
+    const conf = JSON.parse(readFileSync(join(app, name), 'utf8'));
+    const bins = conf?.bundle?.externalBin;
+    if (bins === undefined) continue;
+    assert.ok(Array.isArray(bins) && bins.length > 0, `${name}: externalBin must be a non-empty list`);
+    const resources = conf.bundle.resources ?? {};
+    for (const entry of bins) {
+      const rule = RULES[sidecarName(entry)];
+      assert.ok(rule, `${name}: ${entry} has no rule in scripts/check-sidecars.mjs`);
+      const folder = `../../../licenses/${rule.licenses}/`;
+      assert.equal(resources[folder], `licenses/${rule.licenses}/`, `${name}: ${entry} needs "${folder}" in bundle.resources`);
+      checked++;
+    }
+  }
+  // tauri.sidecars.conf.json: ffmpeg, ffprobe and bsdtar at least.
+  assert.ok(checked >= 3, `only ${checked} externalBin entries found`);
+});
+
+test("the bsdtar workflow's cache keys cover the copyright lines its full build checks", async () => {
+  // The notices check runs only in a full build, and a cache hit skips the
+  // build: a key without the file would pass a changed copyright-lines.txt.
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const yml = readFileSync(fileURLToPath(new URL('../.github/workflows/bsdtar.yml', import.meta.url)), 'utf8');
+  const keys = [...yml.matchAll(/^\s*key: (bsdtar-.*)$/gm)].map((m) => m[1]);
+  assert.equal(keys.length, 2, 'one cache key per OS');
+  for (const key of keys) {
+    assert.match(key, /hashFiles\('scripts\/bsdtar\/\*\*', 'licenses\/libarchive\/copyright-lines\.txt'\)/);
+  }
+});

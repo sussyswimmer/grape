@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Grape <grape@invalid>
+Date: Mon, 26 Oct 2026 10:43:22 +0000
+Subject: [PATCH] tar: use UTF-8 as the process code page on Windows
+
+Add <activeCodePage>UTF-8</activeCodePage> (SMI/2019 WindowsSettings
+namespace, Windows 10 1903 and later) to the embedded bsdtar manifest.
+setlocale(LC_ALL, "") then selects UTF-8, so every RAR5 and Unicode
+RAR4 entry name converts to the "MBS" form libarchive hands to the pax
+writer, and the lossy-conversion paths behind libarchive issues #3681
+and #3695 are not reached.
+
+[Grape-owned patch. Effective only in MSVC builds, which merge
+tar/bsdtar.exe.manifest via TARGET_SOURCES.]
+---
+ tar/bsdtar.exe.manifest | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tar/bsdtar.exe.manifest b/tar/bsdtar.exe.manifest
+index 32142e9..a966e36 100644
+--- a/tar/bsdtar.exe.manifest
++++ b/tar/bsdtar.exe.manifest
+@@ -10,6 +10,7 @@
+   <application xmlns="urn:schemas-microsoft-com:asm.v3">
+     <windowsSettings xmlns:ws2="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
+       <ws2:longPathAware>true</ws2:longPathAware>
++      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+     </windowsSettings>
+   </application>
+ </assembly>

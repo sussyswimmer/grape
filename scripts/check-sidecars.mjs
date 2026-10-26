@@ -6,7 +6,8 @@
 //   - is in `apps/desktop/src-tauri/binaries/` for the target being built,
 //   - is Grape's own build: its version line carries the `-grape` marker
 //     (the prebuilt FFmpeg pins in `scripts/sidecars.lock` are for dev
-//     testing only and never ship, D24),
+//     testing only and never ship, D24; bsdtar is built by
+//     `scripts/bsdtar/build.*` from libarchive and Grape's patches, D27),
 //   - has its license texts in `licenses/<folder>/` (with `SOURCE.md` for
 //     GPL code) and its section in `about.hbs` and `THIRD_PARTY_NOTICES.md`.
 //
@@ -20,7 +21,14 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-/** What each sidecar must answer and which license files must ship with it. */
+const FFMPEG_MISSING = "Build it, or take it from CI's build job (D24, D25).";
+const FFMPEG_FOREIGN = 'The pins in scripts/sidecars.lock are for dev testing only and never ship (D24, D25).';
+
+/**
+ * What each sidecar must answer and which license files must ship with it.
+ * `missing` and `foreign` end the messages for a sidecar that isn't there
+ * and for one that isn't Grape's own build.
+ */
 export const RULES = {
   ffmpeg: {
     args: ['-hide_banner', '-version'],
@@ -29,6 +37,8 @@ export const RULES = {
     licenses: 'ffmpeg',
     gpl: true,
     notice: 'FFmpeg',
+    missing: FFMPEG_MISSING,
+    foreign: FFMPEG_FOREIGN,
   },
   ffprobe: {
     args: ['-hide_banner', '-version'],
@@ -36,6 +46,18 @@ export const RULES = {
     licenses: 'ffmpeg',
     gpl: true,
     notice: 'FFmpeg',
+    missing: FFMPEG_MISSING,
+    foreign: FFMPEG_FOREIGN,
+  },
+  bsdtar: {
+    args: ['--version'],
+    // patch 0007 in scripts/bsdtar/patches: "bsdtar 3.8.10-grape.1 - libarchive 3.8.10 …".
+    line: /^bsdtar \S+-grape(?:\.\d+)? - libarchive \S+(?: \S+\/\S+)* ?$/,
+    licenses: 'libarchive',
+    gpl: false,
+    notice: 'libarchive',
+    missing: "Build it with scripts/bsdtar/build.ps1 -Install or build.sh --install, or take it from CI's bsdtar workflow (D27).",
+    foreign: "Only Grape's build, with the patches in scripts/bsdtar, ever ships: never the OS's own bsdtar (D27).",
   },
 };
 
@@ -98,7 +120,7 @@ export function check({ repo, triple, io }) {
     }
     const file = join(appDir, sidecarFile(entry, triple));
     if (!io.isFile(file)) {
-      failures.push(`${name}: src-tauri/${sidecarFile(entry, triple)} is missing. Build it, or take it from CI's build job (D24, D25).`);
+      failures.push(`${name}: src-tauri/${sidecarFile(entry, triple)} is missing. ${rule.missing}`);
     } else {
       let out;
       try {
@@ -109,7 +131,7 @@ export function check({ repo, triple, io }) {
       if (out !== undefined) {
         const line = firstLine(out);
         if (!rule.line.test(line)) {
-          failures.push(`${name}: this isn't Grape's own build. Its version line is "${line}", without the -grape marker. The pins in scripts/sidecars.lock are for dev testing only and never ship (D24, D25).`);
+          failures.push(`${name}: this isn't Grape's own build. Its version line is "${line}", without the -grape marker. ${rule.foreign}`);
         }
       }
     }

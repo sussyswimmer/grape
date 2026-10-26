@@ -108,6 +108,56 @@ jobs:
           GRAPE_TEST_PDFIUM: ${{ github.workspace }}/apps/desktop/src-tauri/binaries/libpdfium-universal-apple-darwin.dylib
         run: cargo test -p grape-engines --features pdf-it --locked --no-fail-fast
 
+  # Grape's own bsdtar for RAR (DECISIONS D27), built in this run.
+  bsdtar:
+    name: bsdtar
+    uses: ./.github/workflows/bsdtar.yml
+
+  # The RAR engine against the bsdtar just built (feature rar-it).
+  rar-it:
+    name: RAR tests (${{ matrix.name }})
+    needs: bsdtar
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: bsdtar-x86_64-pc-windows-msvc
+            file: bsdtar-x86_64-pc-windows-msvc.exe
+          - name: macOS
+            os: macos-latest
+            artifact: bsdtar-apple-darwin
+            file: bsdtar-universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The tests run a program built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8      # v8.0.2, 2026-10-07 (checked)
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/bsdtar
+      # Artifacts lose the executable bit.
+      - name: Make it executable
+        if: runner.os == 'macOS'
+        run: chmod +x "$RUNNER_TEMP"/bsdtar/bsdtar-*
+      # The default clippy run doesn't enable rar-it.
+      - name: Clippy (rar-it)
+        run: cargo clippy -p grape-engines --features rar-it --all-targets --locked -- -D warnings
+      # The rar-it tests fail, not skip, without GRAPE_TEST_BSDTAR.
+      - name: RAR tests (real bsdtar)
+        env:
+          GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
+        run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
+
   # A Windows build anyone can download from the run's Artifacts: the
   # per-user NSIS installer (no admin needed), with PDFium next to Grape.exe
   # (D29). It's unsigned until M7, so SmartScreen asks first:
@@ -326,7 +376,9 @@ jobs:
           node-version: 22
       # The lock's FFmpeg builds are for dev testing only (D24). The bundling
       # gate that tauri.sidecars.conf.json runs must refuse them for lacking
-      # the -grape marker.
+      # the -grape marker. It also reports bsdtar as missing here: Grape's
+      # bsdtar comes from the bsdtar workflow (scripts/bsdtar, D27), never
+      # from the lock. The step still wants exit 1 and both FFmpeg refusals.
       - name: The bundling gate refuses the dev builds (D25)
         shell: bash
         run: |

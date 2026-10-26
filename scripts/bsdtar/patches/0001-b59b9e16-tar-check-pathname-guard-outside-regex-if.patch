@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Tobias Stoeckmann <tobias@stoeckmann.org>
+Date: Sat, 17 Oct 2026 12:25:48 +0200
+Subject: [PATCH] tar: Check if pathname exists during writing
+
+The entry pathname can be NULL if the input string cannot be converted.
+See archive_entry_pathname for more details.
+
+If that happens, reject the entry instead of eventually running into
+NULL pointer dereferences.
+
+Signed-off-by: Tobias Stoeckmann <tobias@stoeckmann.org>
+
+[Grape: upstream b59b9e16 (PR #3696, merged 8c4d7d77 2026-10-18).
+Changed from upstream: the NULL-name guard is placed outside the
+"#if defined(HAVE_REGEX_H) || ... HAVE_PCRE2POSIX_H" block, so it is
+compiled in builds without a regex library (MSVC with
+POSIX_REGEX_LIB=NONE). Upstream still has it inside the #if at
+master 0490256c.]
+---
+ tar/util.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/tar/util.c b/tar/util.c
+index 42b08a6..fffbc83 100644
+--- a/tar/util.c
++++ b/tar/util.c
+@@ -426,7 +426,15 @@ edit_pathname(struct bsdtar *bsdtar, struct archive_entry *entry)
+ #if defined(HAVE_REGEX_H) || defined(HAVE_PCREPOSIX_H) || defined(HAVE_PCRE2POSIX_H)
+ 	char *subst_name;
+ 	int r;
++#endif
+ 
++	/* Check if entry pathname can be processed. */
++	if (name == NULL) {
++		lafe_warnc(0, "Archive entry has empty or unreadable filename ... skipping");
++		return 1;
++	}
++
++#if defined(HAVE_REGEX_H) || defined(HAVE_PCREPOSIX_H) || defined(HAVE_PCRE2POSIX_H)
+ 	/* Apply user-specified substitution to pathname. */
+ 	r = apply_substitution(bsdtar, name, &subst_name, 0, 0);
+ 	if (r == -1) {
