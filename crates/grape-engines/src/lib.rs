@@ -49,8 +49,6 @@ pub struct SidecarPaths {
     pub ffmpeg: Option<PathBuf>,
     /// The bundled `ffprobe` executable.
     pub ffprobe: Option<PathBuf>,
-    /// The bundled `heif-enc` executable (Windows HEIC output).
-    pub heif_enc: Option<PathBuf>,
     /// The PDFium library the PDF worker loads (D29): `pdfium.dll` next to
     /// Grape's executable on Windows, `libpdfium.dylib` in the app's
     /// `Frameworks` folder on macOS.
