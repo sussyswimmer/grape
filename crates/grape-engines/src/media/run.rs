@@ -6,6 +6,10 @@
 //! - **Never stuck on a full pipe:** two reader threads drain the child's
 //!   stdout and stderr while the calling thread watches the child. Only the
 //!   last [`TAIL_BYTES`] of stderr are kept, for the log.
+//! - **Bounded output:** [`probe`] keeps at most [`MAX_PROBE_OUTPUT`] of
+//!   stdout; [`probe_lines`] keeps none, handing each line over as it's
+//!   read, and stops at the limit its caller sets. Past either, the child is
+//!   stopped ([`RunError::TooMuch`]).
 //! - **Cancel and timeouts** are checked at least every [`POLL`]. The child
 //!   is killed and then waited for, on every way out of a run, a panic in
 //!   the caller's callback included ([`Reaper`]): on Windows its temp
@@ -42,8 +46,9 @@ const TAIL_BYTES: usize = 16 * 1024;
 /// The most stdout [`probe`] accepts.
 pub(crate) const MAX_PROBE_OUTPUT: usize = 4 * 1024 * 1024;
 
-/// The longest `-progress` line that is parsed; longer ones are skipped.
-const MAX_LINE: usize = 4 * 1024;
+/// The longest `-progress` line that is parsed (longer ones are skipped),
+/// and how much of a longer line [`probe_lines`] hands over.
+pub(crate) const MAX_LINE: usize = 4 * 1024;
 
 /// `CREATE_NO_WINDOW`: no console window flashes up for a child of a GUI app.
 #[cfg(windows)]
@@ -76,6 +81,12 @@ pub(crate) enum RunError {
     /// The child ran past its timeout and was killed.
     #[error("the sidecar timed out")]
     TimedOut,
+    /// The child printed more than `limit` bytes on stdout and was stopped.
+    #[error("the sidecar printed more than {} MiB", .limit >> 20)]
+    TooMuch {
+        /// The most it could print, in bytes.
+        limit: u64,
+    },
     /// Watching the child or reading its output failed. The child is gone.
     #[error("sidecar I/O failed: {0}")]
     Io(io::Error),
@@ -151,7 +162,7 @@ fn transcode_command(
 
 /// Runs `ffprobe` with `args` and returns its stdout (lossy UTF-8). Kills
 /// it when `cancel` is cancelled or after `timeout`, and refuses more than
-/// [`MAX_PROBE_OUTPUT`] of output.
+/// [`MAX_PROBE_OUTPUT`] of output ([`RunError::TooMuch`]).
 pub(crate) fn probe(
     program: &Path,
     args: &[OsString],
@@ -173,17 +184,54 @@ fn probe_command(
 ) -> Result<String, RunError> {
     let deadline = Instant::now().checked_add(timeout);
     let mut output = None;
-    let mut keep = |read: io::Result<Vec<u8>>| match read {
-        Ok(bytes) => {
-            output = Some(bytes);
-            Ok(())
-        }
-        Err(e) => Err(RunError::Io(e)),
+    let mut keep = |read: Result<Vec<u8>, RunError>| {
+        output = Some(read?);
+        Ok(())
     };
     supervise(command, cancel, deadline, read_all, &mut keep)?;
     let bytes =
         output.ok_or_else(|| RunError::Io(io::Error::other("the sidecar's stdout was lost")))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// Runs `ffprobe` with `args` and hands `each` every line of its stdout as
+/// it's read: the line (lossy UTF-8, without its line end) and whether it
+/// was cut, a line longer than [`MAX_LINE`] coming as its first
+/// [`MAX_LINE`] bytes only. Nothing else is kept, so a probe whose output
+/// matters line by line needs no room for all of it. Kills it when `cancel`
+/// is cancelled, after `timeout`, or once it printed more than `limit`
+/// bytes ([`RunError::TooMuch`], with every whole line before that handed
+/// over).
+pub(crate) fn probe_lines(
+    program: &Path,
+    args: &[OsString],
+    cancel: &CancelToken,
+    timeout: Duration,
+    limit: u64,
+    each: &mut (dyn FnMut(&str, bool) + Send),
+) -> Result<(), RunError> {
+    #[cfg(test)]
+    if let Some(fake) = tests::next_fake(args) {
+        return fake.probe_lines(cancel, timeout, limit, each);
+    }
+    probe_lines_command(command(program, args)?, cancel, timeout, limit, each)
+}
+
+/// [`probe_lines`] with a ready [`Command`] (tests add environment to it).
+fn probe_lines_command(
+    command: Command,
+    cancel: &CancelToken,
+    timeout: Duration,
+    limit: u64,
+    each: &mut (dyn FnMut(&str, bool) + Send),
+) -> Result<(), RunError> {
+    let deadline = Instant::now().checked_add(timeout);
+    let read = |stdout: ChildStdout, ended: Sender<Result<(), RunError>>| {
+        // The receiver outlives the reader: both live in one scope.
+        let _ = ended.send(read_heads(stdout, limit, each));
+    };
+    supervise(command, cancel, deadline, read, &mut |ended| ended)?;
+    Ok(())
 }
 
 /// Starts `command` and sees it through: `read_stdout` runs on its own
@@ -319,21 +367,70 @@ fn read_progress(stdout: ChildStdout, times: Sender<Duration>) {
     });
 }
 
-/// The stdout reader for [`probe`]: sends all of stdout once it ends, or an
-/// error as soon as it passes [`MAX_PROBE_OUTPUT`]. Returning drops the
-/// pipe, so a child that keeps writing gets an error instead of blocking.
-fn read_all(stdout: ChildStdout, output: Sender<io::Result<Vec<u8>>>) {
+/// The stdout reader for [`probe`]: sends all of stdout once it ends, or
+/// [`RunError::TooMuch`] as soon as it passes [`MAX_PROBE_OUTPUT`].
+/// Returning drops the pipe, so a child that keeps writing gets an error
+/// instead of blocking.
+fn read_all(stdout: ChildStdout, output: Sender<Result<Vec<u8>, RunError>>) {
     let mut bytes = Vec::new();
     let limit = MAX_PROBE_OUTPUT as u64 + 1;
     let read = match stdout.take(limit).read_to_end(&mut bytes) {
-        Ok(_) if bytes.len() > MAX_PROBE_OUTPUT => Err(io::Error::other(format!(
-            "the sidecar printed more than {} MiB",
-            MAX_PROBE_OUTPUT >> 20
-        ))),
+        Ok(_) if bytes.len() > MAX_PROBE_OUTPUT => Err(RunError::TooMuch {
+            limit: MAX_PROBE_OUTPUT as u64,
+        }),
         Ok(_) => Ok(bytes),
-        Err(e) => Err(e),
+        Err(e) => Err(RunError::Io(e)),
     };
     let _ = output.send(read);
+}
+
+/// The stdout reader for [`probe_lines`]: hands `each` every line of
+/// `reader` with its line end (`\n` or `\r\n`) removed, until the end or
+/// a read error. A line longer than [`MAX_LINE`] is handed over as its
+/// first [`MAX_LINE`] bytes, cut, and the rest of it is skipped a buffer at
+/// a time, so no line grows the buffer. Fails with [`RunError::TooMuch`]
+/// once more than `limit` bytes were read; the line that passed it isn't
+/// handed over. Returning drops the pipe, as in [`read_all`].
+fn read_heads(
+    reader: impl Read,
+    limit: u64,
+    each: &mut dyn FnMut(&str, bool),
+) -> Result<(), RunError> {
+    let mut reader = BufReader::new(reader);
+    let (mut head, mut rest) = (Vec::new(), Vec::new());
+    let mut total = 0u64;
+    // Reads up to MAX_LINE bytes of the line into `buf`, counting them.
+    let mut next = |buf: &mut Vec<u8>, total: &mut u64| -> Result<bool, RunError> {
+        buf.clear();
+        let n = reader
+            .by_ref()
+            .take(MAX_LINE as u64)
+            .read_until(b'\n', buf)
+            .map_err(RunError::Io)?;
+        *total = total.saturating_add(n as u64);
+        if *total > limit {
+            return Err(RunError::TooMuch { limit });
+        }
+        Ok(n > 0)
+    };
+    while next(&mut head, &mut total)? {
+        // A full buffer without a line end is the start of a longer line,
+        // unless all that's left of it is the line end.
+        let mut cut = false;
+        if head.len() == MAX_LINE && head.last() != Some(&b'\n') {
+            while next(&mut rest, &mut total)? {
+                let ended = rest.last() == Some(&b'\n');
+                cut |= !matches!(rest.as_slice(), b"\n" | b"\r\n" | b"\r");
+                if ended {
+                    break;
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&head);
+        let text = text.strip_suffix('\n').unwrap_or(&text);
+        each(text.strip_suffix('\r').unwrap_or(text), cut);
+    }
+    Ok(())
 }
 
 /// Calls `each` with every line of `reader` (lossy UTF-8, line end
@@ -581,6 +678,25 @@ pub(super) mod tests {
                 Fake::Child(..) => probe_command(self.command(), cancel, timeout),
             }
         }
+
+        /// The outcome of a scripted `ffprobe` run read line by line: what
+        /// it prints goes through the same reader as a child's stdout.
+        pub(super) fn probe_lines(
+            self,
+            cancel: &CancelToken,
+            timeout: Duration,
+            limit: u64,
+            each: &mut (dyn FnMut(&str, bool) + Send),
+        ) -> Result<(), RunError> {
+            match self.fake {
+                Fake::Prints(text) => read_heads(text.as_bytes(), limit, each),
+                Fake::Runs(run) => read_heads(run().as_bytes(), limit, each),
+                Fake::Fails(e) => Err(e),
+                Fake::Child(..) => {
+                    probe_lines_command(self.command(), cancel, timeout, limit, each)
+                }
+            }
+        }
     }
 
     thread_local! {
@@ -656,7 +772,9 @@ pub(super) mod tests {
     ///   exits 1;
     /// - `hold`: writes its pid to [`FAKE_OUT`] and holds it open (on
     ///   Windows, so nobody else can open or delete it), reports one output
-    ///   time, then runs until killed, or for 30 s.
+    ///   time, then runs until killed, or for 30 s;
+    /// - `tags-flood`: a tags probe's lines for one stream, then the same
+    ///   format tag over and over, until its stdout is closed or for 30 s.
     #[test]
     fn fake_child() {
         let Ok(mode) = std::env::var(FAKE_MODE) else {
@@ -688,6 +806,18 @@ pub(super) mod tests {
             "big-hold" => {
                 let _ = io::stdout().lock().write_all(&vec![b'x'; 5 << 20]);
                 thread::sleep(Duration::from_secs(30));
+                0
+            }
+            "tags-flood" => {
+                let mut out = io::stdout().lock();
+                let stream = "\nstreams.stream.0.index=0\nstreams.stream.0.codec_type=\"audio\"\n\
+                              streams.stream.0.tags.language=\"deu\"\n";
+                let tags = "format.tags.title=\"again\"\n".repeat(4096);
+                let started = Instant::now();
+                let mut wrote = out.write_all(stream.as_bytes());
+                while wrote.is_ok() && started.elapsed() < Duration::from_secs(30) {
+                    wrote = out.write_all(tags.as_bytes());
+                }
                 0
             }
             "write" => {
@@ -1006,6 +1136,15 @@ pub(super) mod tests {
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
         let result = probe(&missing, &[], &token, Duration::from_secs(1));
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        let result = probe_lines(
+            &missing,
+            &[],
+            &token,
+            Duration::from_secs(1),
+            1,
+            &mut |_, _| {},
+        );
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
     }
 
     #[test]
@@ -1030,14 +1169,18 @@ pub(super) mod tests {
         assert!(output.contains(PROBE_OUTPUT), "{output:?}");
     }
 
+    /// True for the error of a child that printed more than `limit`.
+    fn too_much(result: &Result<impl std::fmt::Debug, RunError>, limit: usize) -> bool {
+        matches!(result, Err(RunError::TooMuch { limit: l }) if *l == limit as u64)
+    }
+
     #[test]
     fn probe_refuses_more_than_4_mib() {
         let token = CancelToken::new();
         let result = probe_command(fake("big"), &token, Duration::from_secs(10));
-        assert!(
-            matches!(&result, Err(RunError::Io(e)) if e.kind() == io::ErrorKind::Other),
-            "{result:?}"
-        );
+        assert!(too_much(&result, MAX_PROBE_OUTPUT), "{result:?}");
+        let message = result.unwrap_err().to_string();
+        assert_eq!(message, "the sidecar printed more than 4 MiB");
     }
 
     #[test]
@@ -1046,12 +1189,130 @@ pub(super) mod tests {
         let started = Instant::now();
         // The child never closes its stdout: only the limit ends the read.
         let result = probe_command(fake("big-hold"), &token, Duration::from_secs(10));
-        assert!(
-            matches!(&result, Err(RunError::Io(e)) if e.kind() == io::ErrorKind::Other),
-            "{result:?}"
-        );
+        assert!(too_much(&result, MAX_PROBE_OUTPUT), "{result:?}");
         let took = started.elapsed();
         assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    /// What [`read_heads`] hands over for `text` with `limit`, and how it
+    /// ended.
+    fn heads(text: &str, limit: u64) -> (Vec<(String, bool)>, Result<(), RunError>) {
+        let mut lines = Vec::new();
+        let ended = read_heads(Cursor::new(text), limit, &mut |line, cut| {
+            lines.push((line.to_string(), cut));
+        });
+        (lines, ended)
+    }
+
+    #[test]
+    fn probe_lines_hands_over_each_line_and_the_start_of_long_ones() {
+        let long = format!("k=\"{}\"", "x".repeat(MAX_LINE * 2 + 7));
+        let exact = "y".repeat(MAX_LINE);
+        let text = format!("a=1\r\n{long}\nb=2\n{exact}\n{exact}\r\n\nc=3");
+        let (lines, ended) = heads(&text, u64::MAX);
+        ended.unwrap();
+        let want = [
+            ("a=1", false),
+            (&long[..MAX_LINE], true),
+            ("b=2", false),
+            // A line of exactly the buffer's size isn't cut by its line end.
+            (exact.as_str(), false),
+            (exact.as_str(), false),
+            ("", false),
+            // The last line needs no line end.
+            ("c=3", false),
+        ];
+        let want: Vec<(String, bool)> = want.iter().map(|&(l, c)| (l.to_string(), c)).collect();
+        assert_eq!(lines, want);
+        // A character cut in two at the end of a long line's start.
+        let wide = format!("a{}", "\u{e9}".repeat(MAX_LINE));
+        let (lines, _) = heads(&wide, u64::MAX);
+        let start = format!("a{}\u{fffd}", "\u{e9}".repeat(MAX_LINE / 2 - 1));
+        assert_eq!(lines, [(start, true)]);
+    }
+
+    #[test]
+    fn probe_lines_stop_once_past_their_limit() {
+        let text = "a=1\nb=2\nc=3\n";
+        // Exactly the limit is fine; one byte less stops before the line
+        // that passes it.
+        let (lines, ended) = heads(text, 12);
+        assert_eq!(lines.len(), 3);
+        ended.unwrap();
+        let (lines, ended) = heads(text, 11);
+        let names: Vec<&str> = lines.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(names, ["a=1", "b=2"]);
+        assert!(
+            matches!(ended, Err(RunError::TooMuch { limit: 11 })),
+            "{ended:?}"
+        );
+        // Skipping a long line counts too.
+        let long = "x".repeat(MAX_LINE * 3);
+        let (lines, ended) = heads(&long, MAX_LINE as u64 * 2);
+        assert!(lines.is_empty());
+        assert!(ended.is_err());
+    }
+
+    #[test]
+    fn probe_lines_stop_a_child_that_prints_too_much() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let limit = 1 << 20;
+        let mut lines = 0;
+        for mode in ["big", "big-hold"] {
+            let started = Instant::now();
+            let result = probe_lines_command(
+                fake(mode),
+                &token,
+                Duration::from_secs(20),
+                limit as u64,
+                &mut |_, _| lines += 1,
+            );
+            assert!(too_much(&result, limit), "{mode}: {result:?}");
+            assert!(started.elapsed() < Duration::from_secs(5), "{mode}");
+        }
+        // The harness's own lines, before the child's single long one.
+        assert!(lines < 5, "{lines}");
+        // A child that ends within its limit.
+        let mut seen = Vec::new();
+        let result = probe_lines_command(
+            fake("probe"),
+            &token,
+            Duration::from_secs(10),
+            limit as u64,
+            &mut |line, cut| seen.push((line.to_string(), cut)),
+        );
+        result.unwrap();
+        assert!(
+            seen.contains(&("  \"format\": {".to_string(), false)),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_line_probe_is_reaped() {
+        let held = Held::new();
+        let token = CancelToken::new();
+        let canceller = {
+            let (token, file) = (token.clone(), held.file.clone());
+            thread::spawn(move || {
+                let started = Instant::now();
+                while !file.exists() && started.elapsed() < Duration::from_secs(10) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                token.cancel();
+            })
+        };
+        let result = probe_lines_command(
+            holding(&held.file),
+            &token,
+            Duration::from_secs(20),
+            u64::MAX,
+            &mut |_, _| {},
+        );
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        canceller.join().unwrap();
+        held.assert_gone();
     }
 
     #[test]

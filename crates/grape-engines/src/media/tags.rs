@@ -3,12 +3,14 @@
 //!
 //! [`probe_args`] asks for every tag of the container and of each stream,
 //! each stream's kind and codec tag, the cover-art flag and the chapters'
-//! ids. [`parse`] keeps the tag *keys*, sorted into [`MetaField`]s, and only
-//! these values: a stream's language (`[a-z]{2,3}`, not `und`), the
+//! ids. [`read`] runs it and hands each line, as it's read, to a
+//! [`Parser`], which keeps the tag *keys*, sorted into [`MetaField`]s, and
+//! only these values: a stream's language (`[a-z]{2,3}`, not `und`), the
 //! container's `creation_time` (an ISO 8601 date, the first of a `;` list)
 //! and whether an attachment's MIME type is a font. Titles, comments and
 //! locations are never kept, so nothing a file says can reach a log or an
-//! argv from here.
+//! argv from here, and a large tag (an editor's XMP history) costs nothing
+//! to read: only [`MAX_OUTPUT`] and the probe's timeout bound it.
 //!
 //! The keys are `-of flat`'s: every character but an ASCII letter or digit
 //! is `_` (`com.apple.quicktime.make` is `com_apple_quicktime_make`), so a
@@ -21,11 +23,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use super::args::{file_url, DEMUXERS};
 use super::probe::unquote;
-use super::run::MAX_PROBE_OUTPUT;
-use crate::MetaField;
+use super::run::{self, RunError};
+use crate::{CancelToken, MetaField};
+
+/// How much the tags probe may print. Far more than any real file's tags
+/// need, and only reading time, since nothing but keys is kept: past it,
+/// the probe is stopped and what it said so far is used ([`Tags::cut`]).
+pub(crate) const MAX_OUTPUT: u64 = 64 * 1024 * 1024;
 
 /// The fields `-show_entries` asks for: every container and stream tag,
 /// and only what's needed to judge them.
@@ -80,61 +88,112 @@ pub(crate) struct Tags {
 }
 
 impl Tags {
-    /// What an output too large to read says: there was something, and
-    /// nothing else is known.
-    pub(crate) fn too_much() -> Tags {
-        Tags {
-            fields: BTreeSet::from([MetaField::Other]),
-            ..Tags::default()
-        }
+    /// What a probe stopped at [`MAX_OUTPUT`] says: what it printed before
+    /// that, and that there was more, unseen.
+    fn cut(mut self) -> Tags {
+        self.fields.insert(MetaField::Other);
+        self
     }
 }
 
-/// Parses the tags probe's `-of flat` output. Never fails: a line it can't
-/// read counts as [`MetaField::Other`], and output longer than
-/// [`MAX_PROBE_OUTPUT`] is [`Tags::too_much`].
-pub(crate) fn parse(flat: &str) -> Tags {
-    if flat.len() > MAX_PROBE_OUTPUT {
-        return Tags::too_much();
+/// Runs the tags probe on `src_abs` (an absolute path; `export_xmp` for the
+/// MOV family, see [`probe_args`]) and parses it as it's read. An output
+/// past [`MAX_OUTPUT`] isn't an error: the tags it printed before count,
+/// and [`MetaField::Other`] stands for the rest ([`Tags::cut`]).
+pub(crate) fn read(
+    ffprobe: &Path,
+    src_abs: &Path,
+    export_xmp: bool,
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<Tags, RunError> {
+    let mut parser = Parser::default();
+    let args = probe_args(src_abs, export_xmp);
+    let ran = run::probe_lines(
+        ffprobe,
+        &args,
+        cancel,
+        timeout,
+        MAX_OUTPUT,
+        &mut |line, cut| {
+            parser.line(line, cut);
+        },
+    );
+    match ran {
+        Ok(()) => Ok(parser.finish()),
+        Err(RunError::TooMuch { .. }) => Ok(parser.finish().cut()),
+        Err(e) => Err(e),
     }
-    let mut tags = Tags::default();
-    let mut streams: BTreeMap<u32, Stream> = BTreeMap::new();
-    let mut chapters = BTreeSet::new();
+}
+
+/// Parses all of a tags probe's `-of flat` output at once.
+#[cfg(test)]
+pub(crate) fn parse(flat: &str) -> Tags {
+    let mut parser = Parser::default();
     for line in flat.lines() {
+        parser.line(line, false);
+    }
+    parser.finish()
+}
+
+/// What a value too long for [`run::probe_lines`] to hand over whole stands
+/// for: one that isn't empty, and none of the values kept (a language, a
+/// date, a MIME type) or compared (`Lavf`), so it's judged by its key.
+const LONG: &str = "\u{2026}";
+
+/// The tags probe's `-of flat` output, one line at a time. Never fails: a
+/// line it can't read counts as [`MetaField::Other`].
+#[derive(Debug, Default)]
+pub(crate) struct Parser {
+    tags: Tags,
+    /// Each `streams.stream.N.` group by its N.
+    streams: BTreeMap<u32, Stream>,
+}
+
+impl Parser {
+    /// One line, without its line end; `cut` when only its start came
+    /// ([`run::probe_lines`]).
+    pub(crate) fn line(&mut self, line: &str, cut: bool) {
         if line.is_empty() {
-            continue;
+            return;
         }
-        let Some((key, value)) = line.split_once('=').and_then(|(key, raw)| {
-            let value = unquote(raw)?;
+        let read = line.split_once('=').and_then(|(key, raw)| {
+            let value = if cut { LONG.to_owned() } else { unquote(raw)? };
             Some((key, value))
-        }) else {
-            tags.fields.insert(MetaField::Other);
-            continue;
+        });
+        let Some((key, value)) = read else {
+            self.tags.fields.insert(MetaField::Other);
+            return;
         };
         if let Some(name) = key.strip_prefix("format.tags.") {
-            format_tag(&mut tags, name, &value);
+            format_tag(&mut self.tags, name, &value);
         } else if let Some(rest) = key.strip_prefix("streams.stream.") {
             let Some((position, field)) = rest.split_once('.') else {
-                continue;
+                return;
             };
             if let Ok(position) = position.parse::<u32>() {
-                streams.entry(position).or_default().set(field, &value);
+                self.streams.entry(position).or_default().set(field, &value);
             }
         } else if let Some(rest) = key.strip_prefix("chapters.chapter.") {
-            if let Some(Ok(position)) = rest.split_once('.').map(|(n, _)| n.parse::<u32>()) {
-                chapters.insert(position);
+            // One `id` line per chapter: counted, never listed.
+            if let Some((Ok(_), "id")) = rest.split_once('.').map(|(n, f)| (n.parse::<u32>(), f)) {
+                self.tags.chapters = self.tags.chapters.saturating_add(1);
             }
         }
         // Anything else (9.0's stream_groups.*) repeats the streams.
     }
-    for (position, stream) in streams {
-        stream.into_tags(position, &mut tags);
+
+    /// The tags of every line so far.
+    pub(crate) fn finish(self) -> Tags {
+        let mut tags = self.tags;
+        for (position, stream) in self.streams {
+            stream.into_tags(position, &mut tags);
+        }
+        if tags.chapters > 0 {
+            tags.fields.insert(MetaField::Chapters);
+        }
+        tags
     }
-    tags.chapters = u32::try_from(chapters.len()).unwrap_or(u32::MAX);
-    if tags.chapters > 0 {
-        tags.fields.insert(MetaField::Chapters);
-    }
-    tags
 }
 
 /// One `format.tags.` line.
@@ -362,6 +421,8 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use crate::media::run::tests::{script, Fake};
+    use crate::media::run::MAX_LINE;
     use MetaField::*;
 
     // Golden text: the tags probe's output for files made with FFmpeg
@@ -893,16 +954,66 @@ format.tags.ENCODER="Lavf60.16.100"
         assert_eq!(parse(&many).chapters, 10_000);
     }
 
+    /// [`read`] on a source, with its ffprobe run scripted.
+    fn read_scripted(fake: Fake) -> Result<Tags, RunError> {
+        script([fake]);
+        let src = std::env::temp_dir().join("grape-tags-unit.mkv");
+        let ffprobe = std::env::temp_dir().join("grape-no-ffprobe");
+        read(
+            &ffprobe,
+            &src,
+            false,
+            &CancelToken::new(),
+            Duration::from_secs(20),
+        )
+    }
+
     #[test]
-    fn output_past_the_cap_is_too_much() {
-        let line = "format.tags.genre=\"x\"\n";
-        let big = line.repeat(MAX_PROBE_OUTPUT / line.len() + 1);
-        assert!(big.len() > MAX_PROBE_OUTPUT);
-        assert_eq!(parse(&big), Tags::too_much());
-        assert_eq!(Tags::too_much().fields, set([Other]));
-        let fits = line.repeat(MAX_PROBE_OUTPUT / line.len());
-        assert_eq!(parse(&fits).fields, set([Other]));
-        assert_eq!(parse(&fits).creation_time, None);
+    fn the_probe_is_parsed_as_it_is_read() {
+        let tags = read_scripted(Fake::Prints(MOVIE_MKV.to_owned())).unwrap();
+        assert_eq!(tags, parse(MOVIE_MKV));
         assert_eq!(parse(""), Tags::default());
+        // A value too long to hand over whole is judged by its key.
+        let long = "x".repeat(MAX_LINE * 3);
+        let flat = format!(
+            "streams.stream.0.index=0\n\
+             streams.stream.0.codec_type=\"audio\"\n\
+             streams.stream.0.tags.language=\"e{long}\"\n\
+             streams.stream.1.index=1\n\
+             streams.stream.1.codec_type=\"attachment\"\n\
+             streams.stream.1.tags.mimetype=\"font/{long}\"\n\
+             format.tags.creation_time=\"2024{long}\"\n\
+             format.tags.encoder=\"Lavf{long}\"\n\
+             format.tags.xmp=\"<x:xmpmeta {long}\"\n"
+        );
+        let tags = read_scripted(Fake::Prints(flat)).unwrap();
+        assert_eq!(tags.fields, set([Software, CreationDate, Xmp, Other]));
+        assert!(tags.languages.is_empty());
+        assert!(tags.font_streams.is_empty());
+        assert_eq!(tags.creation_time, None);
+        // A long line without '=' in its start is something Grape can't name.
+        let mut parser = Parser::default();
+        parser.line(&long[..MAX_LINE], true);
+        assert_eq!(parser.finish().fields, set([Other]));
+    }
+
+    #[test]
+    fn a_probe_past_its_limit_keeps_what_it_read_and_says_other() {
+        // A child that prints a stream, then the same tag until it's
+        // stopped. (The test harness's own lines around a fake child's
+        // aren't tags either.)
+        let started = std::time::Instant::now();
+        let tags = read_scripted(Fake::Child("tags-flood", String::new())).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(15));
+        assert_eq!(tags.languages, BTreeMap::from([(0, "deu".to_owned())]));
+        assert_eq!(tags.fields, set([Title, Other]));
+        // Any other failure is the caller's to judge.
+        let limit = RunError::TooMuch { limit: MAX_OUTPUT };
+        assert_eq!(
+            read_scripted(Fake::Fails(limit)).unwrap().fields,
+            set([Other])
+        );
+        let err = read_scripted(Fake::Fails(RunError::TimedOut)).unwrap_err();
+        assert!(matches!(err, RunError::TimedOut), "{err:?}");
     }
 }

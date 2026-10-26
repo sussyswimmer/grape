@@ -402,7 +402,8 @@ fn probe_source(
             src.display(),
             stderr_tail.trim()
         )),
-        RunError::TimedOut | RunError::Io(_) => {
+        // An output past MAX_PROBE_OUTPUT isn't a file's header.
+        RunError::TimedOut | RunError::Io(_) | RunError::TooMuch { .. } => {
             names.decode_failed(format!("probe {}: {e}", src.display()))
         }
     })?;
@@ -590,7 +591,7 @@ fn ffmpeg_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
                 names.encode_failed(detail)
             }
         }
-        RunError::TimedOut | RunError::Io(_) => {
+        RunError::TimedOut | RunError::Io(_) | RunError::TooMuch { .. } => {
             names.encode_failed(format!("convert {}: {e}", src.display()))
         }
     }
@@ -847,6 +848,19 @@ mod tests {
         // Only the probe ran.
         assert_eq!(ran().len(), 1);
         assert!(!case.dir.0.join("converted.mp3").exists());
+    }
+
+    #[test]
+    fn a_source_whose_probe_prints_too_much_isnt_readable() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        let limit = run::MAX_PROBE_OUTPUT as u64;
+        script([Fake::Fails(RunError::TooMuch { limit })]);
+        let err = case.run().unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "clip.mkv isn't a readable MKV video.");
+        assert!(err.detail.contains("more than 4 MiB"), "{}", err.detail);
+        assert_eq!(ran().len(), 1);
+        case.assert_clean();
     }
 
     #[test]
