@@ -864,6 +864,31 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_after_the_check_publishes_nothing() {
+        let _serial = one_at_a_time();
+        let case = Case::new("song.wav", Format::Flac);
+        script([
+            Fake::Prints(flat("wav", false, "pcm_s16le")),
+            Fake::Child("write", "flac".to_string()),
+            Fake::Prints(flat("flac", false, "flac")),
+        ]);
+        let ctx = ctx();
+        let cancel = ctx.cancel.clone();
+        // CHECKED comes once the output is checked and synced, just before
+        // the publish.
+        let err = crate::run_job(&case.job, &ctx, &mut |f| {
+            if f == CHECKED {
+                cancel.cancel();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Cancelled, "{}", err.detail);
+        assert_eq!(ran().len(), 3);
+        assert!(!case.dir.0.join("converted.flac").exists());
+        case.assert_clean();
+    }
+
+    #[test]
     fn a_job_holds_an_ffmpeg_slot_while_it_runs() {
         let _serial = one_at_a_time();
         let case = Case::new("song.wav", Format::Flac);
