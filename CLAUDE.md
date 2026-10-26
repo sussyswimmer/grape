@@ -55,8 +55,9 @@ cargo fmt --all
 pnpm -C apps/desktop/ui typecheck
 pnpm -C apps/desktop/ui test
 pnpm tauri build                  # local release build for the current OS
-.\scripts\fetch-sidecars.ps1      # Windows: pinned FFmpeg/ffprobe into src-tauri/binaries/ (D25; -Force refetches)
-./scripts/fetch-sidecars.sh       # macOS: the same, merged universal (--force refetches)
+.\scripts\fetch-sidecars.ps1      # Windows: pinned FFmpeg/ffprobe and PDFium into src-tauri/binaries/ (D25, D29; -Force refetches, -Only pdfium fetches one)
+./scripts/fetch-sidecars.sh       # macOS: the same, universal (--force refetches, --only pdfium fetches one)
+cargo test -p grape-engines --features pdf-it   # PDF tests that load PDFium: set GRAPE_TEST_PDFIUM to the fetched library (D29)
 cargo deny --locked check licenses bans sources   # license check (D23)
 cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs   # after a dependency change
 ```

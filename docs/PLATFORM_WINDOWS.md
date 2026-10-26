@@ -133,6 +133,22 @@ FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They a
 - **Installed**, they lose the suffix: the installer puts `ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` in `%LOCALAPPDATA%\Grape`. That's where `src/sidecars.rs` looks, never on `PATH`.
 - `GRAPE_SIDECARS_NO_RUN=1` skips the `-version` runs and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
 
+## PDFium
+
+PDFium is the library Grape reads PDFs with (DECISIONS D29). Unlike FFmpeg it ships now. It isn't in the repo either: the same script fetches it, as pinned in `scripts/sidecars.lock` → `libraries`. A plain run fetches it with the sidecars; `-Only pdfium` fetches just it (3.9 MB):
+
+```powershell
+.\scripts\fetch-sidecars.ps1 -Only pdfium
+```
+
+- **What lands where.** `apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll` (7.5 MB), from bblanchon's `pdfium-win-x64.tgz` for `chromium/8086`. The script extracts it with Windows' own `%SystemRoot%\System32\tar.exe` (Windows 10 1803 and later have it), never a `tar` on `PATH`. It gets its line in `sidecars.stamp`, and with `-Only` the other files keep theirs.
+- **The checks.** The archive's size and SHA-256 must match the lock, and then the DLL's own SHA-256 too. A DLL can't be run, so there's no `-version` check.
+- **In the installer.** A build that passes `--config src-tauri/tauri.pdfium.windows.conf.json` (from `apps\desktop`) installs it as `pdfium.dll` next to `Grape.exe` in `%LOCALAPPDATA%\Grape`, with its license texts in `licenses\pdfium\`. CI's installer job does: `pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json`. A build without it has no PDFium, so PDF drops can't run. The overlay fails the build while the DLL isn't fetched.
+- **In dev**, `pnpm tauri dev --config src-tauri/tauri.pdfium.windows.conf.json` makes tauri-build copy it to `target\debug\pdfium.dll`, next to Grape's executable. Pass `--config` twice to add the sidecars overlay too.
+- **Who loads it.** Only the PDF worker: Grape's own executable started again as `Grape.exe --grape-pdf-worker`, once per PDF job, with no window. It loads `pdfium.dll` from next to the executable by its full path, never from `PATH` or the system folders. Grape's main process never loads it, so a crash on a bad PDF ends only that job.
+- **Tests.** `cargo test -p grape-engines --features pdf-it` runs the tests that need PDFium. They fail, not skip, without `GRAPE_TEST_PDFIUM`, the DLL's full path: `$env:GRAPE_TEST_PDFIUM = "$PWD\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll"` from the repo root. CI's Rust job runs them after fetching PDFium only.
+- From M7, the bundler signs the DLL in place in `binaries\` when it signs the installer. That changes its hash, so the next fetch run downloads it again.
+
 ## Distribution
 - Installer: Tauri **NSIS** bundle (per-user install, no admin needed) plus a portable `.zip`. Keep MSI for later.
 - Code signing: unsigned builds trigger SmartScreen ("Windows protected your PC"). Free option for open source: **SignPath Foundation** (free signing for OSS projects that meet its criteria). Alternatives: Azure Trusted Signing (paid, identity checks). Log in DECISIONS when chosen.
@@ -187,7 +203,7 @@ If the version check fails, nothing was built or released. Delete the tag (`git 
 - That download is the installer's, not Grape's. Windows 11 and current Windows 10 already have WebView2, so it rarely happens.
 - A PC that is offline *and* has no WebView2 can't install Grape. The `offlineInstaller` mode would fix that, for about 127 MB more per download.
 
-**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
+**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23), and, in a build with the PDFium overlay (CI's installer; not `release.yml` yet), `pdfium.dll` and `licenses\pdfium\` (D29). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
 
 ## Windows QA must-checks
 - Drag from Explorer, the Desktop, Downloads, search results, OneDrive placeholders (cloud-only files: Grape must hydrate or skip them, not hang), and zip folders opened in Explorer (virtual paths, which v1 should skip).

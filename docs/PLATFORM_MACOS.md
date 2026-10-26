@@ -63,7 +63,7 @@ FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They a
 ./scripts/fetch-sidecars.sh --force   # fetch again anyway
 ```
 
-- It needs `curl`, `shasum`, `unzip`, `lipo`, `codesign`, `arch` and `python3`, which reads the lock. `lipo` and `python3` come with the Xcode Command Line Tools (`xcode-select --install`), which Rust needs anyway. It runs in macOS's own bash 3.2.
+- It needs `curl`, `shasum`, `unzip`, `/usr/bin/tar`, `lipo`, `codesign`, `arch` and `python3`, which reads the lock. `lipo` and `python3` come with the Xcode Command Line Tools (`xcode-select --install`), which Rust needs anyway. It runs in macOS's own bash 3.2.
 - **What lands where.** `apps/desktop/src-tauri/binaries/`, which git ignores, gets:
   - `ffmpeg-aarch64-apple-darwin` and `ffmpeg-x86_64-apple-darwin`, and the same two for `ffprobe`: Martin Riedl's release builds, one zip each (28 to 34 MB). tauri-build looks for these while a universal build compiles each arch.
   - `ffmpeg-universal-apple-darwin` and `ffprobe-universal-apple-darwin`: each pair merged with `lipo -create`, then signed ad hoc (`codesign --force --sign -`), because lipo breaks Riedl's own signature. These are the ones the bundler puts in Grape.app.
@@ -77,7 +77,26 @@ FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They a
 - **In dev**, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` makes tauri-build copy this Mac's per-arch files into `target/debug` as `ffmpeg` and `ffprobe`, next to Grape's executable.
 - **Installed**, they lose the suffix: `Grape.app/Contents/MacOS/ffmpeg` and `ffprobe`, next to Grape's executable. That's where `src/sidecars.rs` looks, never on `PATH`. The bundler signs them again with the app's identity (ad hoc for now). Notarization (M9) needs each signed with the Developer ID and the hardened runtime (Distribution, below).
 - **Intel:** Riedl's Intel release builds stop in January 2027. A pin after that needs another Intel source (D22).
-- `GRAPE_SIDECARS_NO_RUN=1` skips lipo, codesign and the `-version` run, places only the per-arch files, and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
+- `GRAPE_SIDECARS_NO_RUN=1` skips lipo, codesign and the `-version` run, places only the per-arch files (and PDFium unsigned), and writes no stamp, so the download can be tested on another OS. It's for testing only. The next run without it checks everything again.
+
+## PDFium
+
+PDFium is the library Grape reads PDFs with (DECISIONS D29). Unlike FFmpeg it ships now. It isn't in the repo either: the same script fetches it, as pinned in `scripts/sidecars.lock` → `libraries`. A plain run fetches it with the sidecars; `--only pdfium` fetches just it (7.1 MB):
+
+```bash
+./scripts/fetch-sidecars.sh --only pdfium
+```
+
+- **What lands where.** From bblanchon's universal `pdfium-mac-univ.tgz` for `chromium/8086`, extracted with `/usr/bin/tar`:
+  - `binaries/libpdfium-universal-apple-darwin.dylib` (15 MB, arm64 + x86_64; it's universal already, so no lipo merge);
+  - the same file as `binaries/macos/libpdfium.dylib`, because `bundle.macOS.frameworks` keeps a file's name and Grape looks for `libpdfium.dylib`.
+  - Both get their lines in `sidecars.stamp`, and with `--only` the other files keep theirs.
+- **The checks.** The archive's size and SHA-256 must match the lock, then the dylib's own SHA-256. It can't be run, so there's no `-version` check. `lipo -archs` must show arm64 and x86_64. The build signs only the arm64 half (linker-signed), so the script signs the whole file ad hoc (`codesign --force --sign -`) and checks it with `codesign --verify --strict`. The signed file no longer has the lock's hash, so a second run compares it with the stamp, as for the sidecars.
+- **In Grape.app.** A build that passes `--config src-tauri/tauri.pdfium.macos.conf.json` (from `apps/desktop`) puts it in `Grape.app/Contents/Frameworks/libpdfium.dylib`, and its license texts in `Contents/Resources/licenses/pdfium/`. The bundler signs the dylib (ad hoc for now) before it signs the app. It goes in `Frameworks`, not `Resources`, because files in `Resources` are sealed as data, not signed as code. CI's DMG job does this and checks it: `pnpm tauri build --target universal-apple-darwin --bundles app,dmg --ci --config src-tauri/tauri.pdfium.macos.conf.json`. A build without it has no PDFium, so PDF drops can't run. The overlay fails the build while the dylib isn't fetched.
+- **In dev**, `pnpm tauri dev --config src-tauri/tauri.pdfium.macos.conf.json` makes tauri-build copy it to `target/Frameworks/libpdfium.dylib` (`target/<triple>/Frameworks/` for a `--target` build) and add an `@executable_path/../Frameworks` rpath. So `../Frameworks/libpdfium.dylib` from Grape's executable is right in dev and in Grape.app alike.
+- **Who loads it.** Only the PDF worker: Grape's own executable started again as `Grape --grape-pdf-worker`, once per PDF job, with no window or menu-bar item. It loads the dylib by its full path, never from the system. Grape's main process never loads it, so a crash on a bad PDF ends only that job.
+- **Hardened runtime off for now.** `tauri.conf.json` sets `bundle.macOS.hardenedRuntime: false` while the DMG is signed ad hoc. The hardened runtime turns on library validation, which loads only code signed by Apple or with the app's own Team ID. Ad-hoc code has no Team ID, so the ad-hoc DMG would most likely refuse the ad-hoc dylib. That's unverified, the first thing to check on a Mac. An ad-hoc app can't be notarized anyway, so nothing is lost now. With Developer ID (M9) the bundler signs the dylib with the app's identity, the Team IDs match, and the hardened runtime goes back on, with no `disable-library-validation` entitlement. CI's DMG job fails if Grape.app has the runtime flag.
+- **Tests.** `cargo test -p grape-engines --features pdf-it` runs the tests that need PDFium. They fail, not skip, without `GRAPE_TEST_PDFIUM`, the dylib's full path: `GRAPE_TEST_PDFIUM="$PWD/apps/desktop/src-tauri/binaries/libpdfium-universal-apple-darwin.dylib"` from the repo root. CI's Rust job runs them after fetching PDFium only. Test binaries aren't signed with the hardened runtime, so they never meet library validation.
 
 ## Running a CI build
 
@@ -91,7 +110,7 @@ Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silic
 5. Grape appears in the menu bar (no Dock icon). Quit it from its menu.
 
 ## Distribution
-- **Direct download first:** a DMG signed with **Developer ID**, hardened runtime, **notarized** and stapled. Every sidecar binary must be signed with the same identity and hardened runtime, or notarization fails.
+- **Direct download first:** a DMG signed with **Developer ID**, hardened runtime, **notarized** and stapled. Every sidecar binary must be signed with the same identity and hardened runtime, or notarization fails. `libpdfium.dylib` needs the same identity too, for library validation. Today's ad-hoc DMG has the hardened runtime off (PDFium, above; D29).
 - Entitlements: none needed for drag/modifier polling. Add `com.apple.security.cs.disable-library-validation` **only** if a sidecar loads unsigned dylibs (avoid this).
 - Mac App Store is **later**. The sandbox complicates writing outputs next to sources: a dropped file grants access to that file, not its folder. It would need security-scoped bookmarks or a user-chosen output folder. Tracked in `DECISIONS.md`.
 - Auto-update: `tauri-plugin-updater` with signed update manifests on GitHub Releases. It's the *only* allowed network call (rule 3), and it's opt-in.
