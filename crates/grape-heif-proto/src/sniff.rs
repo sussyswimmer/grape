@@ -19,8 +19,13 @@ const HEVC: [&[u8; 4]; 8] = [
 ];
 
 /// Structural brands: with one of these as the major brand, a compatible
-/// HEVC brand makes the file HEIC.
+/// HEVC brand makes the file HEIC, and so does having no codec brand at all.
 const STRUCTURAL: [&[u8; 4]; 4] = [b"mif1", b"msf1", b"miaf", b"MiHE"];
+
+/// The brands of HEIF's other codecs.
+const OTHER_CODEC: [&[u8; 4]; 10] = [
+    b"avif", b"avis", b"avci", b"avcs", b"jpeg", b"jpgs", b"j2ki", b"j2is", b"vvic", b"vvis",
+];
 
 /// The other HEIF brands.
 const OTHER_HEIF: [&[u8; 4]; 14] = [
@@ -37,7 +42,9 @@ const OTHER_HEIF: [&[u8; 4]; 14] = [
 ///   "to the end", read as `head.len()`. The box must be at least 16 bytes
 ///   (its header, the major brand and the minor version).
 /// - [`Sniff::Heic`]: the major brand is an HEVC brand, or it's `mif1`,
-///   `msf1`, `miaf` or `MiHE` and a compatible brand is an HEVC brand.
+///   `msf1`, `miaf` or `MiHE` and a compatible brand is an HEVC brand or
+///   none names a codec. libheif writes a grid that way when it can't find
+///   its first tile's brand, so the decoder decides what's inside.
 /// - [`Sniff::OtherHeif`]: otherwise, the major or a compatible brand is a
 ///   HEIF brand.
 /// - [`Sniff::NotHeif`]: everything else.
@@ -47,7 +54,11 @@ pub fn sniff(head: &[u8]) -> Sniff {
     };
     let is = |set: &[&[u8; 4]], brand: &[u8; 4]| set.contains(&brand);
     let any_compatible = |set: &[&[u8; 4]]| compatible.iter().any(|b| is(set, b));
-    if is(&HEVC, major) || (is(&STRUCTURAL, major) && any_compatible(&HEVC)) {
+    let structural = is(&STRUCTURAL, major);
+    if is(&HEVC, major)
+        || (structural && any_compatible(&HEVC))
+        || (structural && !any_compatible(&OTHER_CODEC))
+    {
         Sniff::Heic
     } else if is(&OTHER_HEIF, major) || any_compatible(&OTHER_HEIF) {
         Sniff::OtherHeif
@@ -135,23 +146,39 @@ mod tests {
     }
 
     #[test]
+    fn structural_brands_alone_go_to_the_decoder() {
+        // libheif 1.23 writes a grid of HEVC tiles as mif1 + [mif1, miaf]
+        // when it can't find its first tile's brand.
+        assert_eq!(sniff(&file(b"mif1", &[b"mif1", b"miaf"])), Sniff::Heic);
+        assert_eq!(sniff(&file(b"mif1", &[b"mif1"])), Sniff::Heic);
+        assert_eq!(sniff(&file(b"mif1", &[])), Sniff::Heic);
+        assert_eq!(sniff(&file(b"miaf", &[b"mif1", b"unif"])), Sniff::Heic);
+        assert_eq!(sniff(&file(b"msf1", &[b"isom"])), Sniff::Heic);
+    }
+
+    #[test]
     fn other_heif_is_told_apart() {
-        assert_eq!(sniff(&file(b"mif1", &[])), Sniff::OtherHeif);
-        assert_eq!(sniff(&file(b"mif1", &[b"mif1"])), Sniff::OtherHeif);
         assert_eq!(sniff(&file(b"avif", &[b"mif1", b"avif"])), Sniff::OtherHeif);
         assert_eq!(sniff(&file(b"mif1", &[b"avif", b"miaf"])), Sniff::OtherHeif);
         // HEVC only as a compatible brand under a non-structural major one.
         assert_eq!(sniff(&file(b"avif", &[b"heic"])), Sniff::OtherHeif);
-        for brand in OTHER_HEIF {
+        for brand in OTHER_CODEC {
             assert_eq!(sniff(&file(brand, &[])), Sniff::OtherHeif, "{brand:?}");
+            assert_eq!(
+                sniff(&file(b"mif1", &[b"mif1", brand, b"miaf"])),
+                Sniff::OtherHeif,
+                "{brand:?}"
+            );
+        }
+        for brand in OTHER_HEIF {
             assert_eq!(
                 sniff(&file(b"isom", &[brand])),
                 Sniff::OtherHeif,
                 "{brand:?}"
             );
         }
-        // MiHE alone names no codec.
-        assert_eq!(sniff(&file(b"MiHE", &[])), Sniff::NotHeif);
+        // MiHE alone names no codec, so the decoder decides.
+        assert_eq!(sniff(&file(b"MiHE", &[])), Sniff::Heic);
     }
 
     #[test]
@@ -221,7 +248,7 @@ mod tests {
 
     #[test]
     fn compatible_brands_stop_at_the_box_end() {
-        let mut bytes = ftyp(b"mif1", &[b"miaf"]);
+        let mut bytes = ftyp(b"mif1", &[b"avif"]);
         // A following box whose type happens to read as a brand.
         bytes.extend_from_slice(b"heic");
         assert_eq!(sniff(&bytes), Sniff::OtherHeif);
@@ -235,15 +262,15 @@ mod tests {
             bytes[..4].copy_from_slice(&size.to_be_bytes());
             assert_eq!(sniff(&bytes), Sniff::NotHeif, "size {size}");
         }
-        let full = file(b"mif1", &[b"miaf", b"heic"]);
+        let full = file(b"mif1", &[b"avif", b"heic"]);
         // Cut inside the type or the major brand.
         for len in 0..12 {
             assert_eq!(sniff(&full[..len]), Sniff::NotHeif, "len {len}");
         }
         // The major brand is there but the compatible brands are cut: what
-        // is there decides.
-        assert_eq!(sniff(&full[..12]), Sniff::OtherHeif);
-        assert_eq!(sniff(&full[..16]), Sniff::OtherHeif);
+        // is there decides. A structural brand alone goes to the decoder.
+        assert_eq!(sniff(&full[..12]), Sniff::Heic);
+        assert_eq!(sniff(&full[..16]), Sniff::Heic);
         assert_eq!(sniff(&full[..20]), Sniff::OtherHeif);
         // `heic` cut to `hei`.
         assert_eq!(sniff(&full[..23]), Sniff::OtherHeif);

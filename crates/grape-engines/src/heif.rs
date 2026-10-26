@@ -2190,8 +2190,10 @@ mod tests {
         if let Err(err) = fs::write(&src, &heic) {
             // APFS refuses names that aren't UTF-8 ("Illegal byte
             // sequence"), so no such source can reach Grape on a Mac.
-            assert!(cfg!(target_os = "macos"), "{err}");
-            return;
+            if cfg!(target_os = "macos") {
+                return;
+            }
+            panic!("{err}");
         }
         let settings = Settings::new(dir.0.join("fallback"));
         let selection = crate::build_selection(std::slice::from_ref(&src), &settings);
