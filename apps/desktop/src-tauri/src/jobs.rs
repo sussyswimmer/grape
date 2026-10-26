@@ -1176,18 +1176,19 @@ mod tests {
                 assert_eq!(why.title, "Not in this build yet", "{op:?}");
             }
         }
-        // A PDF and a PNG without PDFium: where PDFium ships, the PNG is
+        // A PDF and a TIFF without PDFium: where PDFium ships, the TIFF is
         // what this build can't run, so it names the toast. Elsewhere no
-        // PDF runs, so the PDF does.
+        // PDF runs, so the PDF does. (TIFF, not PNG or JPG: lane B's tools
+        // (D26) run Remove Metadata on those.)
         let op = Operation::tool(ToolKey::RemoveMetadata);
         let mixed = [
             SelectionItem::file("/a/a.pdf"),
-            SelectionItem::file("/a/b.png"),
+            SelectionItem::file("/a/b.tiff"),
         ];
         let why = check_runnable(&op, &mixed, &none()).unwrap_err();
         assert_eq!(why.title, "Not in this build yet");
         let named = if cfg!(any(windows, target_os = "macos")) {
-            "Remove Metadata on PNG is coming."
+            "Remove Metadata on TIFF is coming."
         } else {
             "Remove Metadata on PDF is coming."
         };
@@ -1205,31 +1206,33 @@ mod tests {
 
     #[test]
     fn other_tools_say_they_are_coming() {
+        // TIFF stays "coming" for both tools once lane B's tools (D26) run
+        // them on JPG, PNG and media.
         for tool in [ToolKey::Compress, ToolKey::RemoveMetadata] {
             let op = Operation::Tool {
                 tool,
                 params: ToolParams::default(),
             };
-            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.png")], &installed())
+            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.tiff")], &installed())
                 .unwrap_err();
             assert_eq!(why.title, "Not in this build yet");
             assert_eq!(
                 why.detail,
-                Some(format!("{} on PNG is coming.", tool.name()))
+                Some(format!("{} on TIFF is coming.", tool.name()))
             );
         }
-        // Remove Metadata on a PDF and a PNG: the PNG names the toast.
+        // Remove Metadata on a PDF and a TIFF: the TIFF names the toast.
         let op = Operation::tool(ToolKey::RemoveMetadata);
         let mixed = [
             SelectionItem::file("/a/a.pdf"),
-            SelectionItem::file("/a/b.png"),
+            SelectionItem::file("/a/b.tiff"),
         ];
         assert_eq!(
             check_runnable(&op, &mixed, &installed())
                 .unwrap_err()
                 .detail
                 .as_deref(),
-            Some("Remove Metadata on PNG is coming.")
+            Some("Remove Metadata on TIFF is coming.")
         );
     }
 
