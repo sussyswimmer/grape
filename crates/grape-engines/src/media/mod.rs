@@ -588,6 +588,15 @@ mod tests {
         text
     }
 
+    /// [`flat`] with `duration` (seconds, as ffprobe prints them) in place
+    /// of 2 s, or none at all.
+    fn lasting(flat: String, duration: Option<&str>) -> Fake {
+        let two = "format.duration=\"2.000000\"\n";
+        assert!(flat.contains(two));
+        let line = duration.map_or(String::new(), |d| format!("format.duration=\"{d}\"\n"));
+        Fake::Prints(flat.replace(two, &line))
+    }
+
     /// An H.264 and AAC Matroska file, which MP4 copies.
     fn mkv_h264_aac() -> Fake {
         Fake::Prints(flat("matroska,webm", true, "aac"))
@@ -924,6 +933,81 @@ mod tests {
         assert_eq!(*last, 1.0, "{seen:?}");
         assert!(before.iter().all(|&f| f <= CHECKED), "{seen:?}");
         assert!(seen.windows(2).all(|w| w[0] < w[1]), "{seen:?}");
+    }
+
+    /// Asserts that `seen` is `want`, to f32 rounding.
+    fn assert_progress(seen: &[f32], want: &[f32]) {
+        let same =
+            seen.len() == want.len() && seen.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-5);
+        assert!(same, "seen {seen:?}, want {want:?}");
+    }
+
+    /// The scripted runs of a GIF job whose source `ffprobe` says lasts
+    /// `duration`: its probe, the palette pass, the GIF pass and the check.
+    /// Each pass reports the output times 0 to 2 s.
+    fn gif_job(duration: Option<&str>) -> [Fake; 4] {
+        [
+            lasting(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac"), duration),
+            Fake::Child("write", "palette".to_string()),
+            Fake::Child("write", "gif".to_string()),
+            Fake::Prints(flat("gif", true, "")),
+        ]
+    }
+
+    #[test]
+    fn a_gif_fills_the_bar_through_both_passes_by_their_weights() {
+        let case = Case::new("clip.mp4", Format::Gif);
+        script(gif_job(Some("2.000000")));
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        // The palette pass fills 30 % of the passes' 98 %, the GIF pass
+        // the other 70 %, each by its output time against the 2 s.
+        let want = [
+            0.0735, 0.147, 0.2205, 0.294, 0.4655, 0.637, 0.8085, 0.98, CHECKED, 1.0,
+        ];
+        assert_progress(&seen, &want);
+    }
+
+    #[test]
+    fn output_times_past_the_probed_duration_count_as_the_end() {
+        let case = Case::new("clip.mp4", Format::Gif);
+        // ffprobe says 1 s; each pass reports times up to 2 s.
+        script(gif_job(Some("1.000000")));
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        // The palette pass stops at its 30 %, not further.
+        assert_progress(&seen, &[0.147, 0.294, 0.637, 0.98, CHECKED, 1.0]);
+    }
+
+    #[test]
+    fn without_a_duration_the_bar_moves_at_the_end_of_each_pass() {
+        let case = Case::new("clip.mp4", Format::Gif);
+        script(gif_job(None));
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        assert_progress(&seen, &[0.294, 0.98, CHECKED, 1.0]);
+    }
+
+    #[test]
+    fn a_copy_refused_part_way_leaves_the_rest_of_the_bar_to_the_re_encode() {
+        let case = Case::new("clip.mkv", Format::Mp4);
+        // The copy gets to 2 s of 4 s, then the muxer refuses.
+        let refused = "[out#0/mp4 @ 0x1] Error writing trailer: Invalid argument";
+        script([
+            lasting(flat("matroska,webm", true, "aac"), Some("4.000000")),
+            Fake::Child("error", refused.to_string()),
+            Fake::Child("write", "re-encoded".to_string()),
+            mp4_h264_aac(),
+        ]);
+        let (result, seen) = case.run_seeing_progress();
+        result.unwrap();
+        assert_eq!(ran().len(), 4);
+        // The copy gets halfway, to 49 %; the re-encode goes on from
+        // there, filling what's left by its own output time.
+        let want = [
+            0.1225, 0.245, 0.3675, 0.49, 0.55125, 0.6125, 0.67375, 0.735, 0.98, CHECKED, 1.0,
+        ];
+        assert_progress(&seen, &want);
     }
 
     #[test]
