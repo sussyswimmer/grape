@@ -693,7 +693,8 @@ mod tests {
         }
     }
 
-    /// A name with an unpaired surrogate, which NTFS allows.
+    /// A name with an unpaired surrogate, which NTFS allows (wine's file
+    /// system doesn't, so this test fails under wine).
     #[cfg(windows)]
     fn unpaired(prefix: &str, suffix: &str) -> OsString {
         use std::os::windows::ffi::OsStringExt;
@@ -706,12 +707,13 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_name_ffmpeg_would_change_is_refused_before_it_runs() {
-        // The source's name.
+        // The source's name. The file is made under that name directly,
+        // which NTFS stores as it is.
         let case = Case::new("clip.mp4", Format::Mov);
         let src = case.dir.0.join(unpaired("clip", ".mp4"));
-        fs::rename(&case.job.inputs[0], &src).unwrap();
+        fs::write(&src, b"source").unwrap_or_else(|e| panic!("create {src:?}: {e}"));
         let job = Job {
-            inputs: vec![src],
+            inputs: vec![src.clone()],
             ..case.job.clone()
         };
         script([mp4_h264_aac()]);
@@ -723,11 +725,13 @@ mod tests {
             err.user_message
         );
         assert!(ran().is_empty());
+        assert_eq!(fs::read(&src).unwrap(), b"source");
+        case.assert_clean();
 
         // The output folder's name.
         let case = Case::new("clip.mp4", Format::Mov);
         let out_dir = case.dir.0.join(unpaired("out", ""));
-        fs::create_dir(&out_dir).unwrap();
+        fs::create_dir(&out_dir).unwrap_or_else(|e| panic!("create {out_dir:?}: {e}"));
         let job = Job {
             output: JobOutput::File(out_dir.join("clip.mov")),
             ..case.job.clone()
