@@ -189,7 +189,8 @@ pub(crate) fn convert(
         })
         .map_err(or_cancelled)?;
     // FFmpeg doesn't sync its output. Windows only flushes a file opened for
-    // writing; this never truncates or creates it.
+    // writing; this never truncates or creates it. No test can tell whether
+    // the sync ran: only a crash or power cut right after would show it.
     OpenOptions::new()
         .write(true)
         .open(&out)
