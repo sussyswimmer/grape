@@ -357,12 +357,14 @@ struct Helper {
     with: fn(&SidecarPaths) -> SidecarPaths,
 }
 
-/// The helpers lane A's engines need. PDFium ships wherever a build has
-/// one (D29). bsdtar ships once the bundles carry it (#27, D27): then
-/// `ships` becomes `cfg!(any(windows, target_os = "macos"))` too. The HEIC
-/// helper ships on Windows (`grape-heif.exe`, D33); on macOS it's Grape
-/// itself, so it's never missing there.
-const HELPERS: [Helper; 3] = [
+/// The helpers the engines need. PDFium ships wherever a build has one
+/// (D29). FFmpeg (`ffmpeg` and `ffprobe`, Grape's own build, D24) and
+/// bsdtar (D27) ship in every installer and DMG through the per-OS
+/// sidecars overlay (D25). The HEIC helper ships on Windows
+/// (`grape-heif.exe`, D33); on macOS it's Grape itself, so it's never
+/// missing there. Grape ships for no other OS, so there every drop that
+/// needs a helper is "coming".
+const HELPERS: [Helper; 4] = [
     Helper {
         title: "Grape's PDF library is missing",
         detail: "Reinstalling Grape brings it back.",
@@ -372,7 +374,7 @@ const HELPERS: [Helper; 3] = [
     Helper {
         title: "Grape's RAR helper is missing",
         detail: "Reinstalling Grape brings it back.",
-        ships: false,
+        ships: cfg!(any(windows, target_os = "macos")),
         with: with_bsdtar,
     },
     Helper {
@@ -380,6 +382,13 @@ const HELPERS: [Helper; 3] = [
         detail: "Reinstall Grape to convert HEIC files.",
         ships: cfg!(windows),
         with: with_heif,
+    },
+    // 221 px in the title's 13 px semibold (Inter), of its 248.
+    Helper {
+        title: "Grape's media converter is missing",
+        detail: "Reinstalling Grape brings it back.",
+        ships: cfg!(any(windows, target_os = "macos")),
+        with: with_ffmpeg,
     },
 ];
 
@@ -401,6 +410,16 @@ fn with_bsdtar(sidecars: &SidecarPaths) -> SidecarPaths {
 fn with_heif(sidecars: &SidecarPaths) -> SidecarPaths {
     SidecarPaths {
         heif: Some(PathBuf::from("grape-heif")),
+        ..sidecars.clone()
+    }
+}
+
+/// Both programs: the media engine needs `ffmpeg` and `ffprobe`, and they
+/// ship together, so one missing is the same broken install.
+fn with_ffmpeg(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        ffmpeg: Some(PathBuf::from("ffmpeg")),
+        ffprobe: Some(PathBuf::from("ffprobe")),
         ..sidecars.clone()
     }
 }
@@ -872,9 +891,13 @@ mod tests {
         Settings::new(PathBuf::from("/home/max/Downloads/Grape"))
     }
 
-    /// What Grape finds in a full install: PDFium, the worker and bsdtar.
+    /// What Grape finds in a full install on every OS: FFmpeg and ffprobe,
+    /// PDFium, the worker and bsdtar. (The HEIC helper is
+    /// [`with_heic_helper`].)
     fn installed() -> SidecarPaths {
         SidecarPaths {
+            ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
+            ffprobe: Some(PathBuf::from("ffprobe.exe")),
             pdfium: Some(PathBuf::from("pdfium.dll")),
             pdf_worker: Some(PathBuf::from("Grape.exe")),
             bsdtar: Some(PathBuf::from("bsdtar.exe")),
@@ -1127,26 +1150,113 @@ mod tests {
         let rar = [SelectionItem::file("/a/x.rar")];
         let to_zip = Operation::Convert { to: Format::Zip };
         assert_eq!(check_runnable(&to_zip, &rar, &installed()), Ok(()));
-        // bsdtar isn't in any installer yet (#27): RAR is "coming".
-        assert_eq!(
-            check_runnable(&to_zip, &rar, &none()),
-            Err(NotRunnable {
-                title: "Not in this build yet".to_owned(),
-                detail: Some("RAR to ZIP is coming.".to_owned()),
-            })
-        );
         let extract = Operation::tool(ToolKey::ExtractArchive);
         let both = [
             SelectionItem::file("/a/x.zip"),
             SelectionItem::file("/a/y.rar"),
         ];
         assert_eq!(check_runnable(&extract, &both, &installed()), Ok(()));
+        // Every installer and DMG carries bsdtar (D27), so without it a RAR
+        // drop is a broken install there. Grape ships for no other OS, so
+        // there RAR is "coming".
+        let missing = NotRunnable {
+            title: "Grape's RAR helper is missing".to_owned(),
+            detail: Some("Reinstalling Grape brings it back.".to_owned()),
+        };
+        for (op, items, coming) in [
+            (&to_zip, &rar[..], "RAR to ZIP is coming."),
+            (&extract, &both[..], "Extract Archive on RAR is coming."),
+        ] {
+            let why = check_runnable(op, items, &none()).unwrap_err();
+            if cfg!(any(windows, target_os = "macos")) {
+                assert_eq!(why, missing, "{op:?}");
+            } else {
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Not in this build yet".to_owned(),
+                        detail: Some(coming.to_owned()),
+                    }
+                );
+            }
+        }
+        // A build where bsdtar doesn't ship says "coming" on every OS.
+        let unshipped = [Helper {
+            ships: false,
+            ..HELPERS[1]
+        }];
         assert_eq!(
-            check_runnable(&extract, &both, &none())
-                .unwrap_err()
-                .detail
-                .as_deref(),
-            Some("Extract Archive on RAR is coming.")
+            runnable_with(&extract, &both, &none(), &unshipped),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("Extract Archive on RAR is coming.".to_owned()),
+            })
+        );
+        // With the RAR helper shipped, a missing one is named on every OS.
+        let shipped = [Helper {
+            ships: true,
+            ..HELPERS[1]
+        }];
+        assert_eq!(
+            runnable_with(&to_zip, &rar, &none(), &shipped),
+            Err(missing)
+        );
+    }
+
+    #[test]
+    fn mp4_to_mov_runs_with_ffmpeg_and_says_when_it_is_missing() {
+        let to_mov = Operation::Convert { to: Format::Mov };
+        let mp4 = [SelectionItem::file("/a/clip.mp4")];
+        assert_eq!(check_runnable(&to_mov, &mp4, &installed()), Ok(()));
+        let missing = NotRunnable {
+            title: "Grape's media converter is missing".to_owned(),
+            detail: Some("Reinstalling Grape brings it back.".to_owned()),
+        };
+        let coming = NotRunnable {
+            title: "Not in this build yet".to_owned(),
+            detail: Some("MP4 to MOV is coming.".to_owned()),
+        };
+        // Either program missing is a broken install: the engine needs both.
+        let no_ffmpeg = SidecarPaths {
+            ffmpeg: None,
+            ..installed()
+        };
+        let no_ffprobe = SidecarPaths {
+            ffprobe: None,
+            ..installed()
+        };
+        for sidecars in [none(), no_ffmpeg, no_ffprobe] {
+            let why = check_runnable(&to_mov, &mp4, &sidecars).unwrap_err();
+            // Every installer and DMG carries FFmpeg (D24, D25); Grape
+            // ships for no other OS.
+            if cfg!(any(windows, target_os = "macos")) {
+                assert_eq!(why, missing, "{sidecars:?}");
+            } else {
+                assert_eq!(why, coming, "{sidecars:?}");
+            }
+        }
+        // Each OS's case, on every OS: FFmpeg shipped, and not.
+        let ffmpeg = HELPERS[3];
+        assert_eq!(ffmpeg.title, "Grape's media converter is missing");
+        let shipped = [Helper {
+            ships: true,
+            ..ffmpeg
+        }];
+        let unshipped = [Helper {
+            ships: false,
+            ..ffmpeg
+        }];
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &none(), &shipped),
+            Err(missing)
+        );
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &none(), &unshipped),
+            Err(coming)
+        );
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &installed(), &unshipped),
+            Ok(())
         );
     }
 
