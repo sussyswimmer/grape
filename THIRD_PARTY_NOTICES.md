@@ -31,7 +31,7 @@ The Rust crates use these, most used first:
 - ISC License (`ISC`)
 - zlib License (`Zlib`)
 
-The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so does libarchive.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive and FFmpeg.
 
 ## The MPL-2.0 crates
 
