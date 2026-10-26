@@ -83,6 +83,8 @@ On a shared 4-core container (2026-10-26, Ubuntu 24.04, GCC 13.3, mingw-w64 GCC 
 
 The Windows exes are PE32+ x86-64 and import only `KERNEL32.dll`, `SHELL32.dll`, `bcrypt.dll` and `msvcrt.dll`. They ran under wine 9.0 (`-version`, `-protocols`, MP4 to WebM, MP3 and GIF with Grape's own arguments), not yet on Windows itself. The source bundle is 34.9 MB.
 
+**Reproducible.** Two `windows-x86_64` builds of one commit, in different folders, come out byte for byte the same: the script sets `SOURCE_DATE_EPOCH=0` and links without a timestamp, and libvpx gets a prefix that names no folder. A `linux-x86_64` build from the unpacked source bundle, in another folder and with nothing downloaded, matched the repo's build except its 20-byte GNU build ID, which hashes the unstripped symbol table and its folder names (Linux isn't shipped). The source bundle is the same from every target's run.
+
 The macOS targets haven't run yet (no Mac here). Their settings are the Linux ones with Xcode's clang, `-mmacosx-version-min=11.0` and the `aarch64-apple-darwin`/`x86_64-apple-darwin` hosts for autotools; the first CI run is their test.
 
 ## Changing a pin

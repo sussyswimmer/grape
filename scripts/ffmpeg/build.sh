@@ -227,6 +227,9 @@ export PKG_CONFIG_LIBDIR="$prefix/lib/pkgconfig"
 unset PKG_CONFIG_PATH PKG_CONFIG_SYSROOT_DIR
 # Keep a user's flags out of the libraries' build systems.
 unset CFLAGS CXXFLAGS CPPFLAGS LDFLAGS
+# Tools that stamp a date take this one instead of the clock (strip writes
+# it into the Windows exe's header), so two builds can match byte for byte.
+export SOURCE_DATE_EPOCH=0
 export CC="$cc"
 if [ -n "$cross" ]; then
   export AR="$cross-ar" RANLIB="$cross-ranlib" STRIP="$cross-strip" NM="$cross-nm"
@@ -633,7 +636,9 @@ esac
 # ends up in the configure line that ffmpeg -version prints.
 ff_args+=(--extra-cflags=-I../../prefix/include --extra-ldflags=-L../../prefix/lib)
 case "$target" in
-  windows-x86_64) ff_args+=(--extra-ldflags=-static) ;;
+  # -static: no DLLs but Windows' own. No timestamp in the PE header, so two
+  # builds of one commit can come out byte for byte the same.
+  windows-x86_64) ff_args+=(--extra-ldflags=-static "--extra-ldflags=-Wl,--no-insert-timestamp") ;;
   macos-*)
     ff_args+=(--extra-cflags="-mmacosx-version-min=$macos_min"
       --extra-ldflags="-mmacosx-version-min=$macos_min")
