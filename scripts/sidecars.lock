@@ -1,6 +1,7 @@
 {
   "_comment": [
     "The sidecar builds Grape bundles, pinned. This file is the one source of truth for them.",
+    "DEV TESTING ONLY for now: the BtbN and martin-riedl builds below are never bundled. Both link GPL-2.0-only code (libzvbi) into a GPL-3.0 build and about 100 libraries Grape doesn't use, so Grape builds its own minimal FFmpeg instead (D24, lane B), and these entries will point at that build's assets on Grape's own GitHub Release.",
     "The pin is DECISIONS D22 (lane B). How the builds are fetched and checked is D25.",
     "Read by scripts/fetch-sidecars.ps1 (Windows) and scripts/fetch-sidecars.sh (macOS). Change a pin here, never in the scripts.",
     "archives: one entry per download: its https URL, the SHA-256 of the archive itself (checked before anything is extracted) and its size in bytes.",

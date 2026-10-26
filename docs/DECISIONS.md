@@ -309,6 +309,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Revisit if:** Maxwell decides O6 another way (then drop the MPL exceptions and the dependency with them), a clarified crate's file changes (its checksum fails), a sidecar ships (D22), or the UI gets a runtime dependency.
 
 ## D25: Fetching and bundling sidecars (2026-10-26, proposed, confirm)
+- **Superseded in part (2026-10-26):** the prebuilt BtbN and martin-riedl FFmpeg builds pinned below are for dev testing only and are never bundled: both link GPL-2.0-only code (libzvbi) into a GPL-3.0 build, and about 100 libraries Grape doesn't use. Grape builds its own minimal FFmpeg instead (D24, lane B); CI builds it per target, and the lock will point at its assets on Grape's own GitHub Release. The fetch scripts, the lock format, the checks and the bundling gate stay as decided here.
 - **Decision:** the sidecar builds are pinned in one file, `scripts/sidecars.lock`, and two scripts fetch them from it: `scripts/fetch-sidecars.ps1` on Windows and `scripts/fetch-sidecars.sh` on macOS. Only the lock is committed. The binaries land in `apps/desktop/src-tauri/binaries/`, which git ignores. The pin itself (FFmpeg 9.0.2: BtbN's build for Windows, martin-riedl.de's for macOS) is D22, lane B.
 - **The lock** is JSON (`format` 1, with `_comment` keys for notes):
   - `archives`: each download by id, with its https URL, its SHA-256 and its size in bytes.

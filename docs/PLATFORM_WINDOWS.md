@@ -110,6 +110,8 @@ No haptics on Windows. The tick plays via WebAudio in the overlay or `PlaySoundW
 
 ## Sidecars
 
+**Dev testing only for now.** The prebuilt FFmpeg builds the lock pins today are never bundled: Grape builds its own minimal FFmpeg (DECISIONS D24, lane B), and the lock will point at that build once it exists (D25).
+
 FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They aren't in the repo. A script fetches the builds pinned in `scripts/sidecars.lock` (D25; the pin itself is D22). Run it from the repo root:
 
 ```powershell
