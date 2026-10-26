@@ -821,6 +821,42 @@ fn playlists_and_corrupt_files_named_like_media_are_refused() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pipe_named_like_media_is_refused_at_once() {
+    let dir = TestDir::new("media-fifo");
+    let fifo = dir.join("pipe.wav");
+    let made = Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    // Opening the pipe would block until someone writes to it, so the
+    // source isn't hashed.
+    let settings = grape_core::Settings::new(dir.join("fallback"));
+    let sel = grape_engines::build_selection(std::slice::from_ref(&fifo), &settings);
+    let job = grape_core::plan(&sel, &Operation::convert(Format::Mp3), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    let ctx = ctx();
+    // ffprobe would wait on the pipe for its whole timeout; end it sooner.
+    let (finished, watching) = std::sync::mpsc::channel::<()>();
+    let cancel = ctx.cancel.clone();
+    let watchdog = std::thread::spawn(move || {
+        if watching.recv_timeout(Duration::from_secs(5)).is_err() {
+            cancel.cancel();
+        }
+    });
+    let started = Instant::now();
+    let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+    let took = started.elapsed();
+    drop(finished);
+    watchdog.join().unwrap();
+    assert_eq!(err.kind, ErrorKind::ReadFailed, "{} ({})", err, err.detail);
+    assert_eq!(err.user_message, "Grape couldn't read pipe.wav.");
+    assert!(took < Duration::from_secs(2), "{took:?}");
+    assert!(!planned_file(&job).exists());
+    assert_no_leftovers(&dir.path);
+}
+
 #[test]
 fn a_cancel_mid_conversion_stops_ffmpeg_and_leaves_nothing() {
     let dir = TestDir::new("media-cancel");
