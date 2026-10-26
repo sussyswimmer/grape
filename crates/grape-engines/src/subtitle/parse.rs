@@ -1445,6 +1445,16 @@ mod tests {
         for name in ["EACUTE", "Amp", "Quot", "apos;", "", "bogus"] {
             assert_eq!(entities::named(name), None, "{name}");
         }
+        // Computed apart from this table, from Python's
+        // html.entities.name2codepoint plus the seven names added to HTML 4's:
+        // sum((i + 1) * codepoint for i, (name, codepoint) in enumerate(
+        // the names sorted bytewise)). One wrong character changes it.
+        let checksum: u64 = entities::NAMED
+            .iter()
+            .zip(1..)
+            .map(|(&(_, c), i)| i * u64::from(c))
+            .sum();
+        assert_eq!(checksum, 135_890_855);
     }
 
     #[test]
