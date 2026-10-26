@@ -8,6 +8,9 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
+# Real audio and video conversions through FFmpeg; needs GRAPE_TEST_FFMPEG
+# and GRAPE_TEST_FFPROBE set to the sidecars' absolute paths.
+engines-it = []
 # Integration tests that need a PDFium library: `GRAPE_TEST_PDFIUM` names it
 # (the tests fail, not skip, without it). They run the PDF worker built from
 # src/bin/grape-pdf-worker.rs (DECISIONS D29).

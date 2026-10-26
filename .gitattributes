@@ -11,3 +11,6 @@ THIRD_PARTY_NOTICES.md -text
 # Applied byte for byte by scripts/bsdtar/build.* (their SHA-256s are in
 # sources.json), so git must never convert their line endings (D27).
 scripts/bsdtar/patches/*.patch -text
+# dsd2pcm's LICENSE.txt, byte for byte as its author released it (CRLF line
+# endings); licenses/ffmpeg/SOURCE.md gives its SHA-256.
+licenses/ffmpeg/dsd2pcm.txt -text

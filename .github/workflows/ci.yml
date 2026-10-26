@@ -48,10 +48,12 @@ jobs:
       - name: Fetch PDFium
         shell: powershell
         run: ./scripts/fetch-sidecars.ps1 -Only pdfium
-      # The default clippy run doesn't enable pdf-it, so tests/pdf.rs isn't
-      # linted there.
-      - name: Clippy (pdf-it)
-        run: cargo clippy -p grape-engines --features pdf-it --all-targets --locked -- -D warnings
+      # The default clippy run doesn't enable pdf-it or engines-it, so
+      # tests/pdf.rs and tests/media.rs aren't linted there. engines-it
+      # needs no FFmpeg to compile: its tests read GRAPE_TEST_FFMPEG only
+      # when they run, and nothing here runs them yet.
+      - name: Clippy (pdf-it, engines-it)
+        run: cargo clippy -p grape-engines --features pdf-it,engines-it --all-targets --locked -- -D warnings
       # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
       - name: PDF tests (PDFium)
         env:

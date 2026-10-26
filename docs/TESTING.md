@@ -5,7 +5,7 @@
 | Layer | Where | Runs in CI | What |
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
-| Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
+| Engine integration | `grape-engines/tests` | macOS + Windows jobs | convert generated sources through each v1 pair, then validate the output. Image and subtitle tests always run; audio and video need feature `engines-it` and the FFmpeg sidecars (below), and CI only compiles those so far |
 | Dispatch | `grape-engines/tests/{dispatch,archive}.rs` | always | which pairs and tools run with which sidecars; archives through `run_job` |
 | PDF, real PDFium | `grape-engines` unit tests (`pdf::it`) and `tests/pdf.rs`, feature `pdf-it` (`GRAPE_TEST_PDFIUM`) | Windows + macOS Rust jobs | the worker and PDFium, through `pdf::it` and through `run_job` |
 | RAR, real bsdtar | `grape-engines` unit tests, feature `rar-it` (`GRAPE_TEST_BSDTAR`) | Windows + macOS `rar-it` jobs | libarchive's own RAR files and the writer's cases through the bsdtar CI just built, and `run_job` with `SidecarPaths::bsdtar` |
@@ -14,6 +14,10 @@
 | Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS. Tests never open a dialog, AirDrop or the share sheet, and never start a real drag: on Windows a test only reaches code that returns before `ShowShareUIForWindow` or `SHDoDragDrop` |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
+
+## Running the FFmpeg tests (`engines-it`)
+- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. CI compiles and lints them but doesn't run them yet: that waits on CI building Grape's own FFmpeg (D24; lane A's engines-it jobs). Locally any FFmpeg with the encoders `ENGINES.md` lists, and `lavfi`, works; on Linux, `scripts/ffmpeg/build.sh linux-x86_64` builds Grape's own (D24), which has all of it.
+- They make their own sources with FFmpeg's `lavfi` (`testsrc`, `sine`) in a temp folder, convert every audio and video pair, and check each output with `ffprobe`: container, codec, duration within max(0.25 s, 5 %), even dimensions, audio kept. Plus: odd sizes, rotation, 24-bit and 5.1 audio, sources without the needed stream, playlists renamed `.mp4`, cancel mid-run, a name taken mid-run, awkward file names, and that the build has every encoder Grape uses and isn't `nonfree`.
 
 ## Fixtures
 - `fixtures/` holds one small, license-free file per input format (≤ 200 KB each; generate media with FFmpeg's `testsrc`/`sine`). Add a `fixtures/README.md` listing each file's origin.
@@ -160,6 +164,15 @@ HEIC, D33 (use scratch copies of files; nothing here has run on the PC or a Mac 
 - [ ] mac (DMG): the same, but `kill -9` Grape's own process (the first `Grape` in `pgrep -l Grape`, not the worker) mid-job → the worker `Grape` is gone within about 1 s (it watches its parent). A `$TMPDIR/grape-heif-…` folder may be left; start Grape again → within a few seconds it's gone, and the log says `contain: removed 1 work folder(s) an earlier run left`. `shasum -a 256` of the HEIC is the same before and after.
 - [ ] mac (DMG) on macOS 13 Ventura: Grape launches (the DMG doesn't need `CGImageSourceSetAllowableTypes`, which is 14.2+), and a HEIC → JPG works and is upright. `shasum -a 256` of the HEIC is the same before and after.
 - [ ] mac (DMG), if you have one: a 100 MP or larger 10-bit HEIF (a stitched panorama, or a camera HEIF renamed `.heic`) → WEBP says "… is too large to convert." within a second or two, and Activity Monitor never shows the worker `Grape` near 1 GB.
+
+Audio and video, M3 (D22; win; needs a build with the FFmpeg sidecars; use scratch copies of files)
+- [ ] win: Shift-drop an MP3 on M4A, FLAC and WAV → each plays in Media Player and sounds the same; the MP3 is unchanged (`Get-FileHash`).
+- [ ] win: Shift-drop a phone video (MOV) on MP4 → it plays upright in Media Player and Photos; the toast's bar moves while it converts.
+- [ ] win: an MKV with H.264 video on MP4 → done in seconds (copied, not re-encoded), and it plays.
+- [ ] win: a video on GIF → the GIF animates in a browser; a video on MP3 → only the sound.
+- [ ] win: no black console window flashes during any conversion.
+- [ ] win: start converting a long video to WEBM, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
+- [ ] win: with Windows Security → Ransomware protection → Controlled folder access on, convert a video in Documents → either it works or the toast says Grape couldn't save; never a half-written file.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

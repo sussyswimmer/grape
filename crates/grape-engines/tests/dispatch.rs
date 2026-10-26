@@ -1,12 +1,16 @@
 //! Which conversions this build runs: [`supports`] and [`run_job`] decide
 //! from the same table, so a pair is offered exactly when it can run.
-//! [`supports`] assumes no sidecars; the PDF and RAR pairs need theirs
-//! ([`supports_with`]).
+//! [`supports`] assumes no sidecars; the PDF, RAR, audio and video pairs
+//! need theirs ([`supports_with`]).
 #![allow(clippy::unwrap_used)]
 
-use grape_core::{pairs, tools_enabled, Features, Format, Operation, ToolKey};
-use grape_engines::{supports, supports_with, SidecarPaths};
+mod common;
+
 use std::path::PathBuf;
+
+use common::{plan_one, SourceState, TestDir};
+use grape_core::{pairs, targets, tools_enabled, Category, Features, Format, Operation, ToolKey};
+use grape_engines::{run_job, supports, supports_with, EngineCtx, ErrorKind, SidecarPaths};
 
 const RASTER: [Format; 5] = [
     Format::Jpg,
@@ -72,6 +76,8 @@ fn supports_the_raster_subtitle_and_archive_pairs() {
 fn all_sidecars() -> SidecarPaths {
     let some = || Some(PathBuf::from("x"));
     SidecarPaths {
+        ffmpeg: some(),
+        ffprobe: some(),
         pdfium: some(),
         pdf_worker: some(),
         bsdtar: some(),
@@ -105,7 +111,7 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
         .into_iter()
         .filter(|&(from, to)| supports_with(&Operation::convert(to), &[Some(from)], &all))
         .collect();
-    assert_eq!(with.len(), 37);
+    assert_eq!(with.len(), 37 + 104);
     for to in [Format::Jpg, Format::Png, Format::Txt, Format::Md] {
         assert!(with.contains(&(Format::Pdf, to)), "{to:?}");
         assert!(
@@ -126,10 +132,10 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
 #[test]
 fn nothing_runs_outside_the_v1_matrix_and_tools() {
     let all = all_sidecars();
-    // Over every pair of formats, only the 37 v1 pairs run.
+    // Over every pair of formats, only the 37 + 104 v1 pairs run.
     let v1 = pairs(Features::V1_ONLY);
     let runnable = runnable_pairs(&all);
-    assert_eq!(runnable.len(), 37);
+    assert_eq!(runnable.len(), 37 + 104);
     for pair in &runnable {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
@@ -178,7 +184,7 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
                 .all(|&(_, format)| format != Format::Pdf),
             "{without:?}"
         );
-        assert_eq!(runnable_pairs(&without).len(), 33, "{without:?}");
+        assert_eq!(runnable_pairs(&without).len(), 33 + 104, "{without:?}");
     }
     // RAR needs bsdtar.
     let no_bsdtar = SidecarPaths {
@@ -189,4 +195,124 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         .iter()
         .all(|&(from, _)| from != Format::Rar));
     assert!(!runnable_tools(&no_bsdtar).contains(&(ToolKey::ExtractArchive, Format::Rar)));
+}
+
+/// Sidecar paths that are set but point at nothing.
+fn absent_sidecars(dir: &TestDir) -> SidecarPaths {
+    let missing = |name: &str| -> PathBuf {
+        let path = dir.join(name);
+        std::path::absolute(path).unwrap()
+    };
+    SidecarPaths {
+        ffmpeg: Some(missing("no-ffmpeg")),
+        ffprobe: Some(missing("no-ffprobe")),
+        ..SidecarPaths::default()
+    }
+}
+
+#[test]
+fn audio_and_video_run_only_with_both_ffmpeg_sidecars() {
+    let dir = TestDir::new("dispatch-media");
+    let both = absent_sidecars(&dir);
+    let count = |sidecars: &SidecarPaths| {
+        pairs(Features::V1_ONLY)
+            .into_iter()
+            .filter(|&(from, to)| supports_with(&Operation::convert(to), &[Some(from)], sidecars))
+            .count()
+    };
+    // The 30 that need no sidecar: raster, subtitle and archive pairs.
+    assert_eq!(count(&SidecarPaths::default()), 30);
+    assert_eq!(count(&both), 30 + 104);
+    let only_ffmpeg = SidecarPaths {
+        ffprobe: None,
+        ..both.clone()
+    };
+    assert_eq!(count(&only_ffmpeg), 30);
+    let only_ffprobe = SidecarPaths {
+        ffmpeg: None,
+        ..both.clone()
+    };
+    assert_eq!(count(&only_ffprobe), 30);
+    // Every media pair in the matrix, and nothing else, is added.
+    for from in [
+        Format::Mp3,
+        Format::M4a,
+        Format::Wav,
+        Format::Flac,
+        Format::Ogg,
+        Format::Opus,
+        Format::Aiff,
+        Format::Wma,
+        Format::Mp4,
+        Format::Mov,
+        Format::Mkv,
+        Format::Webm,
+        Format::Avi,
+        Format::Wmv,
+        Format::Gif,
+    ] {
+        assert!(matches!(from.category(), Category::Audio | Category::Video));
+        for &to in targets(from) {
+            assert!(
+                supports_with(&Operation::convert(to), &[Some(from)], &both),
+                "{from:?} to {to:?}"
+            );
+            assert!(
+                !supports(&Operation::convert(to), Some(from)),
+                "{from:?} to {to:?}"
+            );
+        }
+    }
+    assert!(!supports_with(
+        &Operation::convert(Format::Mp3),
+        &[Some(Format::Mp3)],
+        &both
+    ));
+    assert!(!supports_with(
+        &Operation::tool(ToolKey::Compress),
+        &[Some(Format::Mp4)],
+        &both
+    ));
+}
+
+#[test]
+fn a_media_job_without_its_sidecars_is_not_in_this_build() {
+    let dir = TestDir::new("media-unwired");
+    let (src, job) = plan_one(&dir, "song.wav", b"RIFF", Operation::convert(Format::Mp3));
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+
+    let err = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::NotYetSupported);
+    assert_eq!(err.user_message, "WAV to MP3 isn't in this build yet.");
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
+}
+
+#[test]
+fn a_media_job_whose_sidecar_file_is_gone_fails_cleanly() {
+    let dir = TestDir::new("media-missing");
+    let (src, job) = plan_one(
+        &dir,
+        "clip.mp4",
+        b"not really",
+        Operation::convert(Format::Mov),
+    );
+    let before = SourceState::of(&src);
+    let names_before = dir.names();
+    let ctx = EngineCtx {
+        sidecars: absent_sidecars(&dir),
+        ..EngineCtx::default()
+    };
+
+    let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::EncodeFailed);
+    assert_eq!(
+        err.user_message,
+        "Grape's media converter is missing. Reinstall Grape."
+    );
+    assert_eq!(dir.names(), names_before);
+    before.assert_unchanged();
 }
