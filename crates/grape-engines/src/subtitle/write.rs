@@ -694,7 +694,13 @@ mod tests {
         // One cue of 16 different lines of 24 KiB, each with a character
         // to escape (WebVTT) or a `-` or `>` (SRT) every few bytes.
         let line = |i: usize| format!("{i:02}{}", "&<>-->".repeat(4096));
-        let doc = one_cue((0..16).map(|i| vec![text(&line(i))]).collect());
+        // Each line is two pieces of text around a tag, so writing a line
+        // gathered first is caught as well as writing a cue gathered first.
+        let doc = one_cue(
+            (0..16)
+                .map(|i| vec![text(&line(i)), Span::Open(Style::Italic), text("!")])
+                .collect(),
+        );
         // WebVTT and SRT write an escape, a tag, a line break, a piece of
         // the signature or of a timing line, held-back dashes (at most 64
         // at a time) or the text between two characters they look for
