@@ -477,7 +477,7 @@ fn millis(digits: &str) -> Option<u64> {
 
 /// Normalizes the cues as read: sorted by start (stable), each lasting at
 /// least 1 ms, and without cues that have no line of visible text. Each cue
-/// counts as work, and `ticker` checks once more after the sort.
+/// counts as work, and so does sorting them (see [`sort_by_start`]).
 fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseError> {
     for cue in &mut cues {
         ticker.tick()?;
@@ -487,13 +487,49 @@ fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseE
         cue.lines.shrink_to_fit();
     }
     cues.retain(|cue| !cue.lines.is_empty());
-    cues.sort_by_key(|cue| cue.start_ms);
-    ticker.check()?;
+    sort_by_start(&mut cues, ticker)?;
     if cues.is_empty() {
         Err(ParseError::NoCues)
     } else {
         Ok(cues)
     }
+}
+
+/// Sorts `cues` by start, keeping the file order of cues that start
+/// together. `ticker` checks before the sort, which most files (already in
+/// order) end at, and after sorting (start, index) keys, the one step it
+/// can't check inside: for a million cues in random order that takes
+/// about 35 ms. Moving the cues into place then counts as work.
+fn sort_by_start(cues: &mut [Cue], ticker: &mut Ticker) -> Result<(), Cancelled> {
+    ticker.check()?;
+    if cues.is_sorted_by_key(|cue| cue.start_ms) {
+        return Ok(());
+    }
+    let mut order: Vec<(u64, usize)> = cues
+        .iter()
+        .enumerate()
+        .map(|(i, cue)| (cue.start_ms, i))
+        .collect();
+    // The keys are all different, so an unstable sort keeps ties in order.
+    order.sort_unstable();
+    ticker.check()?;
+    // order[i].1 is where the cue that belongs at i is now. Follow each
+    // cycle of that permutation, a swap putting one cue in its place, and
+    // mark each place done by pointing it at itself.
+    for start in 0..order.len() {
+        let mut at = start;
+        loop {
+            ticker.tick()?;
+            let from = order[at].1;
+            order[at].1 = at;
+            if from == start {
+                break;
+            }
+            cues.swap(at, from);
+            at = from;
+        }
+    }
+    Ok(())
 }
 
 /// The cue lines one line of text reads as, in spans: one, or more where a
@@ -1497,6 +1533,46 @@ mod tests {
     }
 
     #[test]
+    fn cues_in_any_order_sort_as_a_stable_sort_would() {
+        // Pseudo-random starts with many ties, a reversed run, and one
+        // long cycle (each cue belongs one place to the left).
+        let mut x: u64 = 0x2545_F491_4F6C_DD1D;
+        let random: Vec<u64> = (0..10_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x % 3_000
+            })
+            .collect();
+        let reversed: Vec<u64> = (0..1_000).rev().collect();
+        let rotated: Vec<u64> = (0..1_000).map(|i| (i + 1) % 1_000).collect();
+        for starts in [random, reversed, rotated] {
+            // Each cue's text is its index in the file.
+            let mut cues: Vec<Cue> = starts
+                .iter()
+                .enumerate()
+                .map(|(i, &start_ms)| Cue {
+                    start_ms,
+                    end_ms: start_ms + 1,
+                    lines: vec![vec![text(&i.to_string())]],
+                })
+                .collect();
+            let mut want: Vec<(u64, usize)> = starts.iter().copied().zip(0..).collect();
+            want.sort_by_key(|&(start, _)| start);
+            sort_by_start(&mut cues, &mut Ticker::new(&mut || false)).unwrap();
+            let got: Vec<(u64, usize)> = cues
+                .iter()
+                .map(|cue| match &cue.lines[0][0] {
+                    Span::Text(i) => (cue.start_ms, i.parse().unwrap()),
+                    other => panic!("{other:?}"),
+                })
+                .collect();
+            assert_eq!(got, want);
+        }
+    }
+
+    #[test]
     fn a_cue_that_doesnt_end_after_it_starts_lasts_one_millisecond() {
         let srt =
             "1\n00:00:02,000 --> 00:00:01,000\nBackwards\n\n2\n00:00:03,000 --> 00:00:03,000\nZero";
@@ -1765,15 +1841,43 @@ mod tests {
     }
 
     #[test]
-    fn a_cancel_is_noticed_after_the_sort() {
-        // The only check before the sort is at the first cue.
-        let cues = [2000, 1000]
-            .map(|start_ms| Cue {
-                start_ms,
-                end_ms: start_ms + 1,
-                lines: vec![vec![text("x")]],
-            })
-            .to_vec();
+    fn a_cancel_is_noticed_before_and_after_the_sort() {
+        let cue = |start_ms| Cue {
+            start_ms,
+            end_ms: start_ms + 1,
+            lines: vec![vec![text("x")]],
+        };
+        // Checks at the first cue, before the sort, and after it: a cancel
+        // found at the last one leaves the cues where they were.
+        for (cancelled_from, starts) in [(2, [1000, 2000]), (2, [2000, 1000]), (3, [2000, 1000])] {
+            let mut calls = 0;
+            let mut is_cancelled = || {
+                calls += 1;
+                calls >= cancelled_from
+            };
+            let mut ticker = Ticker::new(&mut is_cancelled);
+            ticker.tick().unwrap();
+            let mut cues = starts.map(cue);
+            assert_eq!(sort_by_start(&mut cues, &mut ticker), Err(Cancelled));
+            assert_eq!(cues.map(|cue| cue.start_ms), starts);
+        }
+        // Moving the cues into place counts as work: one long cycle of
+        // 3 * CHECK_EVERY cues is checked at least five times more.
+        let n = 3 * CHECK_EVERY as u64;
+        let mut cues: Vec<Cue> = (0..n).map(|i| cue((i + 1) % n)).collect();
+        let mut calls = 0;
+        let mut count = || {
+            calls += 1;
+            false
+        };
+        let mut ticker = Ticker::new(&mut count);
+        ticker.tick().unwrap();
+        sort_by_start(&mut cues, &mut ticker).unwrap();
+        assert!(calls >= 3 + 5, "{calls}");
+        assert!(cues.iter().zip(0..).all(|(cue, i)| cue.start_ms == i));
+        // In normalize, the check before the sort comes after the one at
+        // the first cue.
+        let cues = [2000, 1000].map(cue).to_vec();
         let mut is_cancelled = cancelled_after_first();
         assert_eq!(
             normalize(cues, &mut Ticker::new(&mut is_cancelled)),
