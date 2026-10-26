@@ -43,7 +43,7 @@
 
 - **Offline and contained.** `ffprobe` and `ffmpeg` both get `-protocol_whitelist file` and `-format_whitelist mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif`, and every path is a `file:` URL. So no source can reach the network or open other files: an HLS, DASH or `ffconcat` playlist renamed `.mp4` is refused before it reads anything, and no file name is ever taken for an option or a protocol (`pipe:1.ogg`, `-v error.wav`).
 - **Probe first.** `ffprobe -of flat` gives the container, the duration, and for the first video stream that isn't cover art (`0:V:0`) and the first audio stream (`0:a:0`) their codec, size, pixel format, rotation, rate, channels and bit depth. Tags are never read. A source without the stream the target needs is refused before anything is written ("… has no sound to save as MP3", "… has no video to convert").
-- **Only what the user sees.** The output keeps that video and that audio stream. Subtitles, data streams, further audio tracks and cover art are dropped.
+- **Only what the user sees.** The output keeps that video and that audio stream. Subtitles, data streams, further audio tracks and cover art are dropped. MP4 and MOV also get `-write_tmcd 0`: their muxer would otherwise rebuild a camera's timecode (GoPro, DJI, pro cameras) as a data track of its own.
 - **Writing:** into a temp file next to the planned name (`-y` is safe: the temp name is new), with the output format forced by `-f`; the planned name never appears in the argv. Then `ffprobe` checks the output has the target's stream, the file is synced (reopened for writing: Windows only flushes a writable handle), and it's published no-clobber like every engine's.
 - **Progress** comes from `-progress pipe:1`'s `out_time_us` against the source's duration (none when the duration is unknown), up to 99 % until the file is published. **Cancel** kills the child within about 50 ms and waits for it, then the temp files go. At most **two FFmpeg jobs** run at once.
 - **Process hygiene:** absolute program paths only, stdin empty, `FFREPORT` removed, and on Windows `CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS` (no console window flashes; encoding doesn't starve the desktop). `ffprobe` has 60 s.
@@ -51,11 +51,11 @@
 
 ### Target arguments
 
-Every video target except GIF scales to even dimensions, at least 2×2: `scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'` (yuv420p needs them).
+Every re-encoded video stream except GIF's is scaled to even dimensions, at least 2×2: `scale='max(2\,trunc(iw/2)*2)':'max(2\,trunc(ih/2)*2)'` (yuv420p needs them; AVI's variant is in its row). A copied video stream keeps its size, odd or not.
 
 | Target | Video | Audio | Notes |
 |---|---|---|---|
-| mp4 | `libx264 -crf 20 -preset medium -pix_fmt yuv420p` | `aac -b:a 192k` | `-movflags +faststart`. **Copied** (`-c copy`) when the source is H.264 yuv420p, not rotated, not from an AVI or WMV, with no audio or AAC/MP3 |
+| mp4 | `libx264 -crf 20 -preset medium -pix_fmt yuv420p` | `aac -b:a 192k` | `-movflags +faststart -write_tmcd 0`. **Copied** (`-c copy`) when the source is H.264 yuv420p, not rotated, not from an AVI or WMV, with no audio or AAC/MP3 |
 | mov | same as mp4 | same as mp4 | same as mp4 |
 | mkv | copy H.264/HEVC/VP8/VP9/AV1 that isn't rotated or from an AVI or WMV, else as mp4 | copy AAC/MP3/Opus/Vorbis/FLAC/AC-3/E-AC-3, else `aac -b:a 192k` | each stream decided on its own; rotated video is re-encoded upright |
 | webm | `libvpx-vp9 -crf 32 -b:v 0 -row-mt 1 -deadline good -cpu-used 4 -pix_fmt yuv420p` | `libopus -b:a 128k`, `-af aformat=channel_layouts=mono\|stereo\|3.0\|quad\|5.0\|5.1\|6.1\|7.1` | the layout filter as for opus |

@@ -19,7 +19,8 @@
 //!
 //! **Only what the user sees.** A conversion keeps the first video stream
 //! that isn't cover art and the first audio stream. Subtitles, data
-//! streams, further audio tracks and cover art are dropped.
+//! streams, further audio tracks and cover art are dropped, and MP4 and
+//! MOV get no timecode track.
 //!
 //! The source is only ever an input; the output is always the temp path the
 //! caller passes, never the planned final name.

@@ -23,7 +23,8 @@
 //!   200 kHz limit.
 //!
 //! Only the mapped streams are written: subtitles, data streams, further
-//! audio tracks and cover art are dropped.
+//! audio tracks and cover art are dropped, and MP4 and MOV get no timecode
+//! track.
 
 use std::ffi::OsString;
 use std::path::Path;
@@ -270,7 +271,9 @@ fn build(
                 }
             }
             if matches!(to, Format::Mp4 | Format::Mov) {
-                push(&mut args, &["-movflags", "+faststart"]);
+                // Without `-write_tmcd 0` the muxer turns a camera's
+                // timecode (GoPro, DJI, pro cameras) back into a data track.
+                push(&mut args, &["-movflags", "+faststart", "-write_tmcd", "0"]);
             }
         }
         None => {
@@ -661,6 +664,8 @@ mod tests {
             "192k",
             "-movflags",
             "+faststart",
+            "-write_tmcd",
+            "0",
         ];
         assert_one_pass(&typical(Format::Webm), Format::Mp4, &reencode, "mp4");
         assert_one_pass(&typical(Format::Avi), Format::Mov, &reencode, "mov");
@@ -910,6 +915,9 @@ mod tests {
                     "{to:?}: filter on a copy"
                 );
             }
+            // MP4 and MOV never write a timecode track.
+            let tmcd = matches!(to, Format::Mp4 | Format::Mov) && last;
+            assert_eq!(has(args, ["-write_tmcd", "0"]), tmcd, "{to:?}");
             // Opus and Vorbis always get the layout filter, as the only
             // audio filter; nothing else gets one.
             let vorbis_family = has(args, ["-c:a", "libopus"]) || has(args, ["-c:a", "libvorbis"]);
@@ -963,6 +971,8 @@ mod tests {
             "copy",
             "-movflags",
             "+faststart",
+            "-write_tmcd",
+            "0",
         ];
         for (to, muxer) in [(Format::Mp4, "mp4"), (Format::Mov, "mov")] {
             assert_eq!(copy_plan(to, &aac), both);
@@ -1155,7 +1165,7 @@ mod tests {
                 "medium", "-pix_fmt", "yuv420p", "-vf", EVEN, "-c:a", "aac", "-b:a", "192k",
             ];
             if to != Format::Mkv {
-                middle.extend_from_slice(&["-movflags", "+faststart"]);
+                middle.extend_from_slice(&["-movflags", "+faststart", "-write_tmcd", "0"]);
             }
             assert_eq!(retry.len(), 1);
             assert_eq!(retry[0].args, expect(&middle, muxer), "{to:?}");

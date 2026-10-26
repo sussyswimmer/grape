@@ -399,6 +399,43 @@ fn video_too_large_for_avi_is_scaled_to_fit() {
 }
 
 #[test]
+fn a_camera_timecode_doesnt_become_a_track() {
+    let dir = TestDir::new("media-timecode");
+    // Cameras write a timecode, which MOV keeps as a data (tmcd) track.
+    let src = dir.join("camera.mov");
+    let mut args: Vec<&str> = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p"]);
+    args.extend(["-c:a", "aac", "-timecode", "01:00:00:00"]);
+    args.push(src.to_str().unwrap());
+    ffmpeg(&args);
+    let kinds = |path: &Path| -> Vec<String> {
+        let info = probe(path);
+        (0..8)
+            .filter_map(|i| info.get(&format!("streams.stream.{i}.codec_type")).cloned())
+            .collect()
+    };
+    assert_eq!(kinds(&src), ["video", "audio", "data"]);
+    // Copied: to MP4 and MKV.
+    for to in [Format::Mp4, Format::Mkv] {
+        let (outcome, _) = convert_file(&dir, &src, to).unwrap();
+        assert_eq!(kinds(&outcome.outputs[0]), ["video", "audio"], "{to:?}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+    }
+    // Re-encoded: from an MKV that carries the timecode as a tag.
+    let mkv = dir.join("camera.mkv");
+    let mut args: Vec<&str> = vec!["-i", src.to_str().unwrap(), "-map", "0:v", "-map", "0:a"];
+    args.extend(["-c:v", "ffv1", "-c:a", "copy", "-timecode", "01:00:00:00"]);
+    args.push(mkv.to_str().unwrap());
+    ffmpeg(&args);
+    for to in [Format::Mp4, Format::Mov] {
+        let (outcome, _) = convert_file(&dir, &mkv, to).unwrap();
+        assert_eq!(kinds(&outcome.outputs[0]), ["video", "audio"], "{to:?}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+    }
+}
+
+#[test]
 fn audio_depth_channels_and_rate_follow_the_target() {
     let dir = TestDir::new("media-audio");
     // 24-bit, 96 kHz, 5.1 FLAC.
