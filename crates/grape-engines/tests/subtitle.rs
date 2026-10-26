@@ -144,6 +144,23 @@ fn an_srt_gets_a_bom_unless_its_source_was_plain_utf8() {
 }
 
 #[test]
+fn an_srt_from_a_utf16_or_windows_1252_source_gets_a_bom() {
+    let dir = TestDir::new("bom-encodings");
+    let text = "WEBVTT\r\n\r\n00:01.000 --> 00:02.000\r\nCaf\u{e9}\r\n";
+    let mut le = vec![0xFF, 0xFE];
+    le.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut be = vec![0xFE, 0xFF];
+    be.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+    let ansi = b"WEBVTT\r\n\r\n00:01.000 --> 00:02.000\r\nCaf\xE9\r\n".to_vec();
+    for (name, bytes) in [("le.vtt", le), ("be.vtt", be), ("ansi.vtt", ansi)] {
+        let (out, _) = convert(&dir, name, &bytes, Format::Srt);
+        assert!(out.starts_with(b"\xEF\xBB\xBF1\r\n"), "{name}: {out:?}");
+        let text = String::from_utf8(out[3..].to_vec()).unwrap();
+        assert!(text.contains("Caf\u{e9}\r\n"), "{name}: {text}");
+    }
+}
+
+#[test]
 fn utf16_and_windows_1252_sources_come_out_as_utf8() {
     let dir = TestDir::new("encodings");
     let text = "1\r\n00:00:01,000 --> 00:00:02,000\r\nCaf\u{e9} \u{2014} na\u{ef}ve\r\n";
