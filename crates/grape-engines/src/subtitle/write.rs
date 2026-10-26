@@ -11,8 +11,10 @@
 //! - **Text that would read back as structure** is made safe: WebVTT
 //!   escapes `&`, `<` and `>`, and SRT writes a `-->` in text as `->`, so
 //!   a text line can never become a timing line.
-//! - **Cancellation** is checked before writing and every [`CHECK_EVERY`]
-//!   cues; once the token is set the writer fails with an error.
+//! - **Cancellation:** `is_cancelled` is asked before anything is written
+//!   and then every [`CHECK_EVERY`](super::CHECK_EVERY) lines; once it
+//!   says so, the writer
+//!   fails with an error.
 //!
 //! A line without visible text, and a cue without such lines, is left out,
 //! so even a document that wasn't normalized can't produce a blank line in
@@ -21,28 +23,31 @@
 use std::io::{self, Write};
 
 use super::parse::{has_text, Cue, Document, Span, Style};
-use crate::CancelToken;
+use super::{Cancelled, Ticker};
 
-/// How many cues are written between cancel checks.
-const CHECK_EVERY: usize = 256;
+impl From<Cancelled> for io::Error {
+    fn from(_: Cancelled) -> Self {
+        io::Error::other("cancelled")
+    }
+}
 
 /// Writes `doc` as WebVTT: the signature, a blank line, then each cue's
 /// number, timing line and escaped text. No BOM.
 pub(crate) fn write_vtt(
     doc: &Document,
     out: &mut impl Write,
-    cancel: &CancelToken,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> io::Result<()> {
     let nl = doc.newline.as_str();
-    check(cancel)?;
+    let mut ticker = Ticker::new(is_cancelled);
+    ticker.tick()?;
     write!(out, "WEBVTT{nl}")?;
     for (i, cue) in visible_cues(doc).enumerate() {
-        if i.is_multiple_of(CHECK_EVERY) {
-            check(cancel)?;
-        }
         let (start, end) = (timestamp(cue.start_ms, '.'), timestamp(cue.end_ms, '.'));
         write!(out, "{nl}{}{nl}{start} --> {end}{nl}", i + 1)?;
-        tagged_lines(cue, escape_vtt, |line| write!(out, "{line}{nl}"))?;
+        tagged_lines(cue, escape_vtt, &mut ticker, |line| {
+            write!(out, "{line}{nl}")
+        })?;
     }
     Ok(())
 }
@@ -53,23 +58,21 @@ pub(crate) fn write_srt(
     doc: &Document,
     out: &mut impl Write,
     bom: bool,
-    cancel: &CancelToken,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> io::Result<()> {
     let nl = doc.newline.as_str();
-    check(cancel)?;
+    let mut ticker = Ticker::new(is_cancelled);
+    ticker.tick()?;
     if bom {
         out.write_all(b"\xEF\xBB\xBF")?;
     }
     for (i, cue) in visible_cues(doc).enumerate() {
-        if i.is_multiple_of(CHECK_EVERY) {
-            check(cancel)?;
-        }
         if i > 0 {
             out.write_all(nl.as_bytes())?;
         }
         let (start, end) = (timestamp(cue.start_ms, ','), timestamp(cue.end_ms, ','));
         write!(out, "{}{nl}{start} --> {end}{nl}", i + 1)?;
-        tagged_lines(cue, String::push_str, |line| {
+        tagged_lines(cue, String::push_str, &mut ticker, |line| {
             write!(out, "{}{nl}", defuse_arrows(line))
         })?;
     }
@@ -82,17 +85,16 @@ pub(crate) fn write_srt(
 pub(crate) fn write_txt(
     doc: &Document,
     out: &mut impl Write,
-    cancel: &CancelToken,
+    is_cancelled: &mut dyn FnMut() -> bool,
 ) -> io::Result<()> {
     let nl = doc.newline.as_str();
-    check(cancel)?;
+    let mut ticker = Ticker::new(is_cancelled);
+    ticker.tick()?;
     let mut previous = String::new();
     let mut text = String::new();
-    for (i, cue) in doc.cues.iter().enumerate() {
-        if i.is_multiple_of(CHECK_EVERY) {
-            check(cancel)?;
-        }
+    for cue in &doc.cues {
         for line in &cue.lines {
+            ticker.tick()?;
             text.clear();
             for span in line {
                 if let Span::Text(t) = span {
@@ -109,15 +111,6 @@ pub(crate) fn write_txt(
         }
     }
     Ok(())
-}
-
-/// The error every writer returns once the token is set.
-fn check(cancel: &CancelToken) -> io::Result<()> {
-    if cancel.is_cancelled() {
-        Err(io::Error::other("cancelled"))
-    } else {
-        Ok(())
-    }
 }
 
 /// The cues with at least one line of visible text.
@@ -140,8 +133,8 @@ fn timestamp(ms: u64, separator: char) -> String {
 }
 
 /// Renders the cue's lines with visible text one at a time and hands each
-/// to `emit`: `text` writes each text span, and `<i>`, `<b>` and `<u>`
-/// tags are balanced across the cue:
+/// to `emit`, each line counted as work for `ticker`. `text` writes each
+/// text span, and `<i>`, `<b>` and `<u>` tags are balanced across the cue:
 /// - opening a style that is already open, or closing one that isn't,
 ///   writes nothing;
 /// - closing a style that isn't the innermost closes the inner ones, then
@@ -151,6 +144,7 @@ fn timestamp(ms: u64, separator: char) -> String {
 fn tagged_lines(
     cue: &Cue,
     text: fn(&mut String, &str),
+    ticker: &mut Ticker,
     mut emit: impl FnMut(&str) -> io::Result<()>,
 ) -> io::Result<()> {
     let Some(last) = cue.lines.iter().rposition(|line| has_text(line)) else {
@@ -159,6 +153,7 @@ fn tagged_lines(
     let mut open: Vec<Style> = Vec::new();
     let mut rendered = String::new();
     for (i, line) in cue.lines.iter().enumerate() {
+        ticker.tick()?;
         if !has_text(line) {
             continue;
         }
@@ -255,11 +250,9 @@ mod tests {
 
     use super::super::decode::decode;
     use super::super::parse::{parse, Newline};
+    use super::super::CHECK_EVERY;
     use super::*;
-
-    fn token() -> CancelToken {
-        CancelToken::new()
-    }
+    use crate::CancelToken;
 
     fn text(s: &str) -> Span {
         Span::Text(s.to_owned())
@@ -286,26 +279,26 @@ mod tests {
 
     fn vtt(doc: &Document) -> String {
         let mut out = Vec::new();
-        write_vtt(doc, &mut out, &token()).unwrap();
+        write_vtt(doc, &mut out, &mut || false).unwrap();
         String::from_utf8(out).unwrap()
     }
 
     fn srt(doc: &Document) -> String {
         let mut out = Vec::new();
-        write_srt(doc, &mut out, false, &token()).unwrap();
+        write_srt(doc, &mut out, false, &mut || false).unwrap();
         String::from_utf8(out).unwrap()
     }
 
     fn txt(doc: &Document) -> String {
         let mut out = Vec::new();
-        write_txt(doc, &mut out, &token()).unwrap();
+        write_txt(doc, &mut out, &mut || false).unwrap();
         String::from_utf8(out).unwrap()
     }
 
     /// Decodes and parses `source`, as the convert step will.
     fn read(source: &[u8]) -> Document {
-        let (text, _) = decode(source, &token()).unwrap();
-        parse(&text, &token()).unwrap()
+        let (text, _) = decode(source, &CancelToken::new()).unwrap();
+        parse(&text, &mut || false).unwrap()
     }
 
     /// The text lines of a one-cue SRT, tags as written.
@@ -437,7 +430,7 @@ mod tests {
     fn srt_starts_with_a_bom_only_when_asked() {
         let doc = one_cue(vec![vec![text("Hi")]]);
         let mut out = Vec::new();
-        write_srt(&doc, &mut out, true, &token()).unwrap();
+        write_srt(&doc, &mut out, true, &mut || false).unwrap();
         assert_eq!(out, b"\xEF\xBB\xBF1\n00:00:01,000 --> 00:00:02,000\nHi\n");
         assert_eq!(srt(&doc), "1\n00:00:01,000 --> 00:00:02,000\nHi\n");
     }
@@ -546,14 +539,12 @@ mod tests {
     // Cancellation.
 
     #[test]
-    fn a_cancelled_token_makes_every_writer_fail() {
+    fn a_cancelled_job_makes_every_writer_fail() {
         let doc = one_cue(vec![vec![text("Hi")]]);
-        let cancelled = token();
-        cancelled.cancel();
         let results = [
-            write_vtt(&doc, &mut Vec::new(), &cancelled),
-            write_srt(&doc, &mut Vec::new(), true, &cancelled),
-            write_txt(&doc, &mut Vec::new(), &cancelled),
+            write_vtt(&doc, &mut Vec::new(), &mut || true),
+            write_srt(&doc, &mut Vec::new(), true, &mut || true),
+            write_txt(&doc, &mut Vec::new(), &mut || true),
         ];
         for result in results {
             let err = result.unwrap_err();
@@ -562,58 +553,56 @@ mod tests {
         }
         // Nothing at all is written, not even the BOM or the signature.
         let mut out = Vec::new();
-        assert!(write_srt(&doc, &mut out, true, &cancelled).is_err());
+        assert!(write_srt(&doc, &mut out, true, &mut || true).is_err());
         assert!(out.is_empty());
-    }
-
-    /// A sink that cancels the token once the first cue's text is written.
-    struct CancelOnWrite {
-        cancel: CancelToken,
-        written: Vec<u8>,
-    }
-
-    impl Write for CancelOnWrite {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            if buf.windows(4).any(|w| w == b"line") {
-                self.cancel.cancel();
-            }
-            self.written.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     #[test]
     fn a_cancel_while_writing_stops_at_the_next_check() {
-        let cues = (0..300)
-            .map(|i| Cue {
-                start_ms: i,
-                end_ms: i + 1,
-                lines: vec![vec![text(&format!("line {i}"))]],
-            })
-            .collect();
-        let doc = doc(Newline::Lf, cues);
-        type Writer = fn(&Document, &mut CancelOnWrite, &CancelToken) -> io::Result<()>;
+        let line = |i: usize| vec![text(&format!("line {i}"))];
+        let n = CHECK_EVERY + 10;
+        // Many lines in one cue, and as many one-line cues.
+        let one_cue = doc(
+            Newline::Lf,
+            vec![Cue {
+                start_ms: 0,
+                end_ms: 1,
+                lines: (0..n).map(line).collect(),
+            }],
+        );
+        let many_cues = doc(
+            Newline::Lf,
+            (0..n)
+                .map(|i| Cue {
+                    start_ms: i as u64,
+                    end_ms: i as u64 + 1,
+                    lines: vec![line(i)],
+                })
+                .collect(),
+        );
+        type Writer = fn(&Document, &mut Vec<u8>, &mut dyn FnMut() -> bool) -> io::Result<()>;
         let writers: [Writer; 3] = [
-            |doc, out, cancel| write_vtt(doc, out, cancel),
-            |doc, out, cancel| write_srt(doc, out, false, cancel),
-            |doc, out, cancel| write_txt(doc, out, cancel),
+            |doc, out, is_cancelled| write_vtt(doc, out, is_cancelled),
+            |doc, out, is_cancelled| write_srt(doc, out, false, is_cancelled),
+            |doc, out, is_cancelled| write_txt(doc, out, is_cancelled),
         ];
-        for (n, writer) in writers.into_iter().enumerate() {
-            let cancel = token();
-            let mut out = CancelOnWrite {
-                cancel: cancel.clone(),
-                written: Vec::new(),
-            };
-            let err = writer(&doc, &mut out, &cancel).unwrap_err();
-            assert_eq!(err.to_string(), "cancelled");
-            let written = String::from_utf8(out.written).unwrap();
-            // The first CHECK_EVERY cues were written; the next check failed.
-            let lines = written.lines().filter(|l| l.starts_with("line ")).count();
-            assert_eq!(lines, CHECK_EVERY, "writer {n}");
+        for doc in [&one_cue, &many_cues] {
+            for (w, writer) in writers.iter().enumerate() {
+                // Not cancelled at the first check, before anything is
+                // written; cancelled from the second on.
+                let mut calls = 0;
+                let mut is_cancelled = || {
+                    calls += 1;
+                    calls > 1
+                };
+                let mut out = Vec::new();
+                let err = writer(doc, &mut out, &mut is_cancelled).unwrap_err();
+                assert_eq!(err.to_string(), "cancelled");
+                let written = String::from_utf8(out).unwrap();
+                // The first check counted as one unit, each line as one.
+                let lines = written.lines().filter(|l| l.starts_with("line ")).count();
+                assert_eq!(lines, CHECK_EVERY - 1, "writer {w}");
+            }
         }
     }
 

@@ -23,10 +23,7 @@
 //!   after it starts lasts 1 ms, and lines without visible text (and cues
 //!   left without lines) are dropped.
 
-use crate::CancelToken;
-
-/// How many blocks and cues are read between cancel checks.
-const CHECK_EVERY: usize = 256;
+use super::{Cancelled, Ticker};
 
 /// The most lines a subtitle text may have. Real files have tens of
 /// thousands; this bounds the memory and time parsing takes, whatever the
@@ -102,7 +99,7 @@ pub(crate) struct Document {
 /// Why a text gave no document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ParseError {
-    /// The cancel token was set.
+    /// The job was cancelled.
     Cancelled,
     /// Not one cue had a valid timing line and visible text.
     NoCues,
@@ -110,19 +107,26 @@ pub(crate) enum ParseError {
     TooLarge,
 }
 
-/// Reads `text` (SRT or WebVTT) into a normalized [`Document`], as the
-/// module docs describe. `cancel` is checked before reading and every
-/// [`CHECK_EVERY`] blocks or cues.
-pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseError> {
-    if cancel.is_cancelled() {
-        return Err(ParseError::Cancelled);
+impl From<Cancelled> for ParseError {
+    fn from(_: Cancelled) -> Self {
+        ParseError::Cancelled
     }
+}
+
+/// Reads `text` (SRT or WebVTT) into a normalized [`Document`], as the
+/// module docs describe. `is_cancelled` is asked before the first line,
+/// as the work goes on (every line read, looked at or turned into spans,
+/// and every cue, counts) and after the sort.
+pub(crate) fn parse(
+    text: &str,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<Document, ParseError> {
     // `decode` strips the BOM; a second one would hide the WEBVTT signature.
     let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     let newline = newline(text);
     let webvtt = is_webvtt(text);
 
-    let mut ticker = Ticker { cancel, count: 0 };
+    let mut ticker = Ticker::new(is_cancelled);
     let mut reader = Reader {
         webvtt,
         cues: Vec::new(),
@@ -138,6 +142,7 @@ pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseE
         if n == MAX_LINES {
             return Err(ParseError::TooLarge);
         }
+        ticker.tick()?;
         let line = line.trim_end();
         if in_header {
             if line.is_empty() || line.contains(ARROW) {
@@ -149,13 +154,11 @@ pub(crate) fn parse(text: &str, cancel: &CancelToken) -> Result<Document, ParseE
         if !line.is_empty() {
             block.push(line);
         } else if !block.is_empty() {
-            ticker.tick()?;
             reader.block(&block, &mut ticker)?;
             block.clear();
         }
     }
     if !block.is_empty() {
-        ticker.tick()?;
         reader.block(&block, &mut ticker)?;
     }
     let cues = normalize(reader.cues, &mut ticker)?;
@@ -195,25 +198,6 @@ fn is_webvtt(text: &str) -> bool {
         .is_some_and(|rest| matches!(rest.chars().next(), None | Some(' ' | '\t' | '\r' | '\n')))
 }
 
-/// Checks the cancel token every [`CHECK_EVERY`] ticks, from the first.
-struct Ticker<'a> {
-    cancel: &'a CancelToken,
-    count: usize,
-}
-
-impl Ticker<'_> {
-    /// Counts one block or cue.
-    fn tick(&mut self) -> Result<(), ParseError> {
-        let due = self.count.is_multiple_of(CHECK_EVERY);
-        self.count = self.count.wrapping_add(1);
-        if due && self.cancel.is_cancelled() {
-            Err(ParseError::Cancelled)
-        } else {
-            Ok(())
-        }
-    }
-}
-
 /// Reads blocks (runs of non-blank lines) into cues, their text already
 /// in spans and without lines that have no visible text.
 struct Reader {
@@ -226,16 +210,20 @@ struct Reader {
 }
 
 impl Reader {
-    fn block(&mut self, block: &[&str], ticker: &mut Ticker) -> Result<(), ParseError> {
+    /// Reads one block. Every line it looks at or turns into spans counts
+    /// as work for `ticker`.
+    fn block(&mut self, block: &[&str], ticker: &mut Ticker) -> Result<(), Cancelled> {
         if self.webvtt && block.first().is_some_and(|line| starts_non_cue_block(line)) {
             return Ok(());
         }
-        let Some(first) = block.iter().position(|line| line.contains(ARROW)) else {
+        let is_timing = |line: &str| line.contains(ARROW);
+        let Some(first) = find(block, ticker, is_timing)? else {
             // A block of digits is a stray index; anything else is text the
             // blank line cut off from its cue.
-            if !block.iter().all(|line| is_digits(line)) && self.continues {
+            let digits = find(block, ticker, |line| !is_digits(line))?.is_none();
+            if !digits && self.continues {
                 if let Some(cue) = self.cues.last_mut() {
-                    push_lines(&mut cue.lines, block, self.webvtt);
+                    push_lines(&mut cue.lines, block, self.webvtt, ticker)?;
                 }
             }
             return Ok(());
@@ -243,11 +231,7 @@ impl Reader {
         // The lines before the first timing line are its cue's identifier.
         let mut rest = &block[first..];
         while let Some((timing, after)) = rest.split_first() {
-            ticker.tick()?;
-            let next = after
-                .iter()
-                .position(|line| line.contains(ARROW))
-                .unwrap_or(after.len());
+            let next = find(after, ticker, is_timing)?.unwrap_or(after.len());
             let mut text = &after[..next];
             // A line of digits right before the next timing line is its index.
             if next < after.len() {
@@ -260,7 +244,7 @@ impl Reader {
             match timing_line(timing) {
                 Some((start_ms, end_ms)) => {
                     let mut lines = Vec::new();
-                    push_lines(&mut lines, text, self.webvtt);
+                    push_lines(&mut lines, text, self.webvtt, ticker)?;
                     self.cues.push(Cue {
                         start_ms,
                         end_ms,
@@ -276,18 +260,39 @@ impl Reader {
     }
 }
 
+/// The index of the first of `lines` that `pred` holds for; each line
+/// looked at counts as work.
+fn find(
+    lines: &[&str],
+    ticker: &mut Ticker,
+    pred: impl Fn(&str) -> bool,
+) -> Result<Option<usize>, Cancelled> {
+    for (i, line) in lines.iter().enumerate() {
+        ticker.tick()?;
+        if pred(line) {
+            return Ok(Some(i));
+        }
+    }
+    Ok(None)
+}
+
 /// Appends `text`'s lines to a cue's `lines` as spans, leaving out those
 /// without visible text. Each is shrunk to fit, as most hold one span.
-fn push_lines(lines: &mut Vec<Vec<Span>>, text: &[&str], webvtt: bool) {
-    lines.extend(
-        text.iter()
-            .map(|line| spans(line, webvtt))
-            .filter(|line| has_text(line))
-            .map(|mut line| {
-                line.shrink_to_fit();
-                line
-            }),
-    );
+fn push_lines(
+    lines: &mut Vec<Vec<Span>>,
+    text: &[&str],
+    webvtt: bool,
+    ticker: &mut Ticker,
+) -> Result<(), Cancelled> {
+    for line in text {
+        ticker.tick()?;
+        let mut line = spans(line, webvtt);
+        if has_text(&line) {
+            line.shrink_to_fit();
+            lines.push(line);
+        }
+    }
+    Ok(())
 }
 
 /// True for the first line of a WebVTT comment, style or region block:
@@ -380,7 +385,8 @@ fn millis(digits: &str) -> Option<u64> {
 }
 
 /// Normalizes the cues as read: sorted by start (stable), each lasting at
-/// least 1 ms, and without cues that have no line of visible text.
+/// least 1 ms, and without cues that have no line of visible text. Each cue
+/// counts as work, and `ticker` checks once more after the sort.
 fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseError> {
     for cue in &mut cues {
         ticker.tick()?;
@@ -391,6 +397,7 @@ fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseE
     }
     cues.retain(|cue| !cue.lines.is_empty());
     cues.sort_by_key(|cue| cue.start_ms);
+    ticker.check()?;
     if cues.is_empty() {
         Err(ParseError::NoCues)
     } else {
@@ -621,10 +628,20 @@ fn in_radix(digits: &str, radix: u32) -> Option<u32> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use super::super::CHECK_EVERY;
     use super::*;
 
     fn parsed(text: &str) -> Document {
-        parse(text, &CancelToken::new()).unwrap()
+        parse(text, &mut || false).unwrap()
+    }
+
+    /// A check that finds the job cancelled from its second call on.
+    fn cancelled_after_first() -> impl FnMut() -> bool {
+        let mut calls = 0;
+        move || {
+            calls += 1;
+            calls > 1
+        }
     }
 
     fn text(s: &str) -> Span {
@@ -1152,12 +1169,7 @@ mod tests {
             end_ms: max,
             lines: vec![vec![text("End of time")]],
         }];
-        let token = CancelToken::new();
-        let mut ticker = Ticker {
-            cancel: &token,
-            count: 0,
-        };
-        let cues = normalize(raw, &mut ticker).unwrap();
+        let cues = normalize(raw, &mut Ticker::new(&mut || false)).unwrap();
         assert_eq!((cues[0].start_ms, cues[0].end_ms), (max, max));
     }
 
@@ -1194,7 +1206,6 @@ mod tests {
 
     #[test]
     fn a_text_without_cues_is_an_error() {
-        let token = CancelToken::new();
         for text in [
             "",
             "\n\n",
@@ -1204,51 +1215,120 @@ mod tests {
             "1\n00:00:01,000 --> 00:00:02,000\n\n",
             "1\nnot --> timing\nText",
         ] {
-            assert_eq!(parse(text, &token), Err(ParseError::NoCues), "{text:?}");
+            assert_eq!(
+                parse(text, &mut || false),
+                Err(ParseError::NoCues),
+                "{text:?}"
+            );
         }
     }
 
     #[test]
     fn a_text_over_the_line_limit_is_too_large() {
-        let token = CancelToken::new();
         // Three lines of cue, then blank lines up to exactly the limit.
         let mut srt = "1\n00:00:01,000 --> 00:00:02,000\nHi\n".to_owned();
         srt.push_str(&"\n".repeat(MAX_LINES - 3));
         assert_eq!(split_lines(&srt).count(), MAX_LINES);
         assert_eq!(plain(&parsed(&srt)), [cue(1000, 2000, &["Hi"])]);
         srt.push('\n');
-        assert_eq!(parse(&srt, &token), Err(ParseError::TooLarge));
+        assert_eq!(parse(&srt, &mut || false), Err(ParseError::TooLarge));
         // A line without a line break after it counts too.
         srt.pop();
         srt.push('x');
-        assert_eq!(parse(&srt, &token), Err(ParseError::TooLarge));
+        assert_eq!(parse(&srt, &mut || false), Err(ParseError::TooLarge));
+    }
+
+    // Cancellation.
+
+    #[test]
+    fn a_job_cancelled_before_parsing_is_cancelled() {
+        for text in ["1\n00:00:01,000 --> 00:00:02,000\nHi", ""] {
+            assert_eq!(
+                parse(text, &mut || true),
+                Err(ParseError::Cancelled),
+                "{text:?}"
+            );
+        }
     }
 
     #[test]
-    fn a_cancelled_token_returns_cancelled() {
-        let token = CancelToken::new();
-        token.cancel();
+    fn a_cancel_is_noticed_while_lines_are_read() {
+        // Blank lines only, so no other step counts any work.
+        let blank = "\n".repeat(CHECK_EVERY + 1);
         assert_eq!(
-            parse("1\n00:00:01,000 --> 00:00:02,000\nHi", &token),
+            parse(&blank, &mut cancelled_after_first()),
             Err(ParseError::Cancelled)
         );
-        assert_eq!(parse("", &token), Err(ParseError::Cancelled));
-        // The ticker itself stops at its next check.
-        let token = CancelToken::new();
-        let mut ticker = Ticker {
-            cancel: &token,
-            count: 1,
-        };
-        for _ in 1..CHECK_EVERY {
-            ticker.tick().unwrap();
+    }
+
+    #[test]
+    fn a_cancel_is_noticed_inside_a_long_block() {
+        let text = vec!["x"; CHECK_EVERY];
+        // A valid timing line keeps the text after it; a bad one drops it.
+        for timing in [
+            "00:00:01,000 --> 00:00:02,000",
+            "00:00:0x,000 --> 00:00:02,000",
+        ] {
+            let block = [&[timing][..], &text].concat();
+            let mut reader = Reader {
+                webvtt: false,
+                cues: Vec::new(),
+                continues: false,
+            };
+            let mut is_cancelled = cancelled_after_first();
+            let mut ticker = Ticker::new(&mut is_cancelled);
+            assert_eq!(
+                reader.block(&block, &mut ticker),
+                Err(Cancelled),
+                "{timing}"
+            );
         }
-        token.cancel();
-        assert_eq!(ticker.tick(), Err(ParseError::Cancelled));
+    }
+
+    #[test]
+    fn a_cancel_is_noticed_while_cues_are_normalized() {
+        let cues = (0..=CHECK_EVERY as u64)
+            .map(|i| Cue {
+                start_ms: i,
+                end_ms: i + 1,
+                lines: vec![vec![text("x")]],
+            })
+            .collect();
+        let mut is_cancelled = cancelled_after_first();
+        assert_eq!(
+            normalize(cues, &mut Ticker::new(&mut is_cancelled)),
+            Err(ParseError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_cancel_is_noticed_after_the_sort() {
+        // The only check before the sort is at the first cue.
+        let cues = [2000, 1000]
+            .map(|start_ms| Cue {
+                start_ms,
+                end_ms: start_ms + 1,
+                lines: vec![vec![text("x")]],
+            })
+            .to_vec();
+        let mut is_cancelled = cancelled_after_first();
+        assert_eq!(
+            normalize(cues, &mut Ticker::new(&mut is_cancelled)),
+            Err(ParseError::Cancelled)
+        );
+        // So a short text still reports a cancel after its first line.
+        assert_eq!(
+            parse(
+                "1\n00:00:01,000 --> 00:00:02,000\nHi",
+                &mut cancelled_after_first()
+            ),
+            Err(ParseError::Cancelled)
+        );
     }
 
     #[test]
     fn many_cues_parse_across_cancel_checks() {
-        let srt: String = (0..1000u64)
+        let srt: String = (0..20_000u64)
             .map(|i| {
                 format!(
                     "{}\n00:00:{:02},000 --> 00:00:{:02},500\nCue {i}\n\n",
@@ -1259,7 +1339,7 @@ mod tests {
             })
             .collect();
         let doc = parsed(&srt);
-        assert_eq!(doc.cues.len(), 1000);
+        assert_eq!(doc.cues.len(), 20_000);
         assert!(doc.cues.windows(2).all(|w| w[0].start_ms <= w[1].start_ms));
     }
 }

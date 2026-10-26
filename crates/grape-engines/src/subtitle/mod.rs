@@ -16,8 +16,9 @@
 //! [`convert`] runs the three on one file: it reads the source read-only
 //! (refusing one over [`MAX_SOURCE`] before reading it), writes a temp file
 //! next to the planned name and publishes it with [`crate::publish`]. The
-//! token is checked between steps and inside each one, and the temp file's
-//! writer fails once the job is cancelled.
+//! token is checked between steps, and inside each one through a check
+//! closure: parse and write count their work with a [`Ticker`]. The temp
+//! file's writer also fails once the job is cancelled.
 
 pub(crate) mod decode;
 pub(crate) mod parse;
@@ -41,6 +42,51 @@ use parse::{Document, ParseError};
 /// With [`parse::MAX_LINES`] this bounds the memory a conversion takes,
 /// whatever the file holds.
 pub(crate) const MAX_SOURCE: u64 = 16 * 1024 * 1024;
+
+/// How many units of work (lines read, looked at or written; cues) are
+/// done between cancel checks. A unit takes well under a microsecond, so a
+/// check comes every few milliseconds of work.
+pub(crate) const CHECK_EVERY: usize = 64 * 1024;
+
+/// What a step returns once the job is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Cancelled;
+
+/// Counts units of work and asks `is_cancelled` at the first unit and
+/// every [`CHECK_EVERY`] after it.
+pub(crate) struct Ticker<'a> {
+    is_cancelled: &'a mut dyn FnMut() -> bool,
+    count: usize,
+}
+
+impl<'a> Ticker<'a> {
+    pub(crate) fn new(is_cancelled: &'a mut dyn FnMut() -> bool) -> Self {
+        Ticker {
+            is_cancelled,
+            count: 0,
+        }
+    }
+
+    /// Counts one unit of work, checking first when a check is due.
+    pub(crate) fn tick(&mut self) -> Result<(), Cancelled> {
+        let due = self.count.is_multiple_of(CHECK_EVERY);
+        self.count = self.count.wrapping_add(1);
+        if due {
+            self.check()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Checks now, whatever the count.
+    pub(crate) fn check(&mut self) -> Result<(), Cancelled> {
+        if (self.is_cancelled)() {
+            Err(Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// True for SRT → VTT or TXT, and WebVTT → SRT or TXT.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
@@ -70,12 +116,13 @@ pub(crate) fn convert(
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
+    let mut is_cancelled = || cancel.is_cancelled();
     let bytes = read(src, &names, cancel).map_err(or_cancelled)?;
     let Some((text, encoding)) = decode::decode(&bytes, cancel) else {
         return Err(crate::cancelled(src));
     };
     drop(bytes);
-    let doc = match parse::parse(&text, cancel) {
+    let doc = match parse::parse(&text, &mut is_cancelled) {
         Ok(doc) => doc,
         Err(ParseError::Cancelled) => return Err(crate::cancelled(src)),
         Err(ParseError::TooLarge) => {
@@ -156,12 +203,15 @@ fn write_output(
 ) -> Result<(), GrapeError> {
     let write_failed = |e: io::Error| names.write_failed(format!("write {}: {e}", temp.display()));
     let mut out = BufWriter::new(Cancellable::new(file, cancel));
+    let mut is_cancelled = || cancel.is_cancelled();
     match to {
-        Format::Vtt => write::write_vtt(doc, &mut out, cancel),
+        Format::Vtt => write::write_vtt(doc, &mut out, &mut is_cancelled),
         // A BOM unless the source was plain UTF-8: Windows players otherwise
         // read a BOM-less SRT in the ANSI code page.
-        Format::Srt => write::write_srt(doc, &mut out, encoding != Encoding::Utf8, cancel),
-        Format::Txt => write::write_txt(doc, &mut out, cancel),
+        Format::Srt => {
+            write::write_srt(doc, &mut out, encoding != Encoding::Utf8, &mut is_cancelled)
+        }
+        Format::Txt => write::write_txt(doc, &mut out, &mut is_cancelled),
         other => return Err(names.encode_failed(format!("no subtitle writer for {}", other.key()))),
     }
     .map_err(write_failed)?;
@@ -170,4 +220,44 @@ fn write_output(
         .map_err(|e| write_failed(io::Error::other(e.error().to_string())))?
         .into_inner();
     file.sync_all().map_err(write_failed)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn a_ticker_checks_at_the_first_unit_and_every_check_every_after() {
+        let mut calls = 0;
+        let mut is_cancelled = || {
+            calls += 1;
+            false
+        };
+        {
+            let mut ticker = Ticker::new(&mut is_cancelled);
+            for _ in 0..2 * CHECK_EVERY + 1 {
+                ticker.tick().unwrap();
+            }
+            ticker.check().unwrap();
+        }
+        // At units 0, CHECK_EVERY and 2 * CHECK_EVERY, then the check.
+        assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn a_ticker_stops_at_the_first_check_that_finds_a_cancel() {
+        let mut calls = 0;
+        let mut is_cancelled = || {
+            calls += 1;
+            calls > 1
+        };
+        let mut ticker = Ticker::new(&mut is_cancelled);
+        for _ in 0..CHECK_EVERY {
+            ticker.tick().unwrap();
+        }
+        assert_eq!(ticker.tick(), Err(Cancelled));
+        assert_eq!(ticker.check(), Err(Cancelled));
+    }
 }
