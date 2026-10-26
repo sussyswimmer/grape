@@ -1663,6 +1663,7 @@ dependencies = [
  "flate2",
  "grape-core",
  "grape-heif-proto",
+ "grape-platform",
  "image",
  "lopdf",
  "pdfium-render",

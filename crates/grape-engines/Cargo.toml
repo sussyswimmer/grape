@@ -43,6 +43,11 @@ serde_json.workspace = true
 # HEIC (D33): the protocol with Grape's HEIC helper, a separate process.
 grape-heif-proto.workspace = true
 
+# tests/heif.rs runs the HEIC helper on Windows in the Job Object an
+# installed Grape puts it in (D33).
+[target.'cfg(windows)'.dev-dependencies]
+grape-platform.workspace = true
+
 [[bin]]
 # The PDF worker on its own, for the `pdf-it` tests. The app runs the same
 # `grape_engines::pdf::worker_main` as `Grape --grape-pdf-worker`.

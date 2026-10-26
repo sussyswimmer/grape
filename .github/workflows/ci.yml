@@ -207,6 +207,23 @@ jobs:
         env:
           GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
         run: cargo test -p grape-platform --features heif-it --test job_object --locked -- --nocapture
+      # cargo runs its tests inside a job of its own, so above the helper's
+      # job is always nested, without UI limits. Run straight from here, the
+      # helper is in no other job, as in an installed Grape, and
+      # GRAPE_TEST_JOB_UI=1 makes the test insist on that (if this runner
+      # ran steps in a job, it would fail here and say so). The 35.6 MP
+      # encode isn't run twice.
+      - name: Job Object tests outside cargo (the UI-limited job)
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+        run: |
+          $bin = @(cargo test -p grape-platform --features heif-it --test job_object --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'job_object' -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no job_object test binary.'; exit 1 }
+          & $bin --nocapture --test-threads=1 --skip grape_heif_encodes_the_largest_picture_under_the_cap
+          exit $LASTEXITCODE
 
   # ImageIO (Grape's HEIC worker on macOS) against the fixtures libheif wrote
   # on Windows. Encoding needs a hardware HEVC encoder, which GitHub's macOS

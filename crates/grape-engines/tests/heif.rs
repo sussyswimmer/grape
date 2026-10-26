@@ -9,7 +9,10 @@
 //!   wrote (heic-spec §5.6).
 //!
 //! Without either, these tests fail rather than skip. Jobs go through
-//! `run_job` with `SidecarPaths::heif`, as the app runs them. Every test
+//! `run_job` with `SidecarPaths::heif`, as the app runs them; on Windows
+//! the helper is also contained as the app contains it (`set_contain` with
+//! a Job Object per helper, so started detached, in a one-process job with
+//! the 2 GiB cap). Every test
 //! checks that its source is unchanged, that nothing is left next to it,
 //! and that no `grape-heif-…` work folder is left in the OS temp folder
 //! (so the tests take turns).
@@ -87,9 +90,52 @@ fn fixture(name: &str) -> Vec<u8> {
 }
 
 fn sidecars() -> SidecarPaths {
+    contain_like_the_app();
     SidecarPaths {
         heif: Some(helper()),
         ..SidecarPaths::default()
+    }
+}
+
+/// How many helpers [`contain_like_the_app`]'s hook has contained.
+#[cfg(windows)]
+static CONTAINED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// On Windows, sets the hook the app's `contain.rs` sets: a Job Object of
+/// its own for every helper (`grape_platform::windows::job`), once for
+/// this test binary. Under cargo the job is nested in cargo's, so it has
+/// every limit but the UI ones. Elsewhere there's nothing to set.
+fn contain_like_the_app() {
+    #[cfg(windows)]
+    {
+        use std::process::Child;
+        use std::sync::atomic::Ordering;
+        use std::sync::Once;
+
+        use grape_engines::{set_contain, Contain, Contained};
+        use grape_platform::windows::job::JobGuard;
+
+        #[derive(Debug)]
+        struct Jobs;
+        struct Job(JobGuard);
+        impl Contained for Job {
+            fn peak_memory(&self) -> Option<u64> {
+                self.0.peak_memory()
+            }
+        }
+        impl Contain for Jobs {
+            fn contain(
+                &self,
+                child: &Child,
+                max_memory: Option<u64>,
+            ) -> Result<Box<dyn Contained>, String> {
+                let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
+                CONTAINED.fetch_add(1, Ordering::SeqCst);
+                Ok(Box::new(Job(guard)))
+            }
+        }
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| assert!(set_contain(Arc::new(Jobs)), "the hook was set already"));
     }
 }
 
@@ -261,6 +307,33 @@ fn the_helper_answers_a_probe() {
         assert!(caps.codec.starts_with("libheif 1.23.7"), "{}", caps.codec);
     }
     assert!(fs::read_dir(&work.path).unwrap().next().is_none());
+}
+
+/// The way an installed Grape runs it: started detached (no console, so no
+/// console host in its one-process job) and contained before it gets its
+/// request, both ways.
+#[cfg(windows)]
+#[test]
+fn the_helper_runs_contained_both_ways_as_the_app_runs_it() {
+    use std::sync::atomic::Ordering;
+
+    let _turn = serial();
+    let dir = TestDir::new("heif-it");
+    let before = {
+        contain_like_the_app();
+        CONTAINED.load(Ordering::SeqCst)
+    };
+    let img = decoded(convert(&dir, "odd.heic", &fixture("odd.heic"), Format::Png));
+    assert_eq!((img.width(), img.height()), (3, 5));
+    let blue = png(&DynamicImage::ImageRgb8(RgbImage::from_pixel(
+        17,
+        9,
+        image::Rgb([0, 90, 200]),
+    )));
+    let other = TestDir::new("heif-it");
+    let heic = encoded(convert(&other, "blue.png", &blue, Format::Heic)).unwrap();
+    assert!(fs::read(heic).unwrap().get(4..8) == Some(b"ftyp"));
+    assert_eq!(CONTAINED.load(Ordering::SeqCst), before + 2);
 }
 
 #[test]

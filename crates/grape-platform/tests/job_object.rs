@@ -6,6 +6,13 @@
 //! it's in the job, as Grape does with `grape-heif.exe`: nothing runs
 //! outside the job.
 //!
+//! Under `cargo test` every child starts in cargo's own job, so the
+//! helper's job is nested and has no UI limits (`windows::job`'s doc).
+//! `ui_limits_are_set_unless_the_helper_is_already_in_a_job` checks both
+//! cases; CI's heif-it-windows job runs this binary outside cargo too, with
+//! `GRAPE_TEST_JOB_UI=1`, so the UI-limited job, the one an installed
+//! Grape makes, is tested as well.
+//!
 //! With `--features heif-it` and `GRAPE_TEST_HEIF` set to `grape-heif.exe`,
 //! one more test encodes HEVC level 6.2's largest picture under Grape's
 //! 2 GiB cap and prints the peak (heic-spec J24). Without the variable it
@@ -19,7 +26,16 @@ use std::io::{BufRead, Write};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+use std::os::windows::io::AsRawHandle;
+
 use grape_platform::windows::job::JobGuard;
+use windows::core::{BOOL, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+};
 
 const MIB: u64 = 1024 * 1024;
 
@@ -49,6 +65,46 @@ fn spawn_child(test: &str, task: &str) -> Child {
 fn go(child: &mut Child) {
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(b"go\n").unwrap();
+}
+
+/// True when `child` is in a job already.
+fn in_a_job(child: &Child) -> bool {
+    let mut result = BOOL(0);
+    // SAFETY: the child's handle is open and `result` is a live BOOL.
+    unsafe { IsProcessInJob(HANDLE(child.as_raw_handle()), None, &raw mut result) }.unwrap();
+    result.as_bool()
+}
+
+/// A job like cargo's (kill on close, nothing else), holding `child`: what
+/// a helper is in when Grape runs inside a job. Closed when dropped.
+struct OuterJob(HANDLE);
+
+impl OuterJob {
+    fn holding(child: &Child) -> OuterJob {
+        // SAFETY: a new unnamed job; the limits structure is the one this
+        // class takes; both handles are open for the assignment.
+        unsafe {
+            let job = OuterJob(CreateJobObjectW(None, PCWSTR::null()).unwrap());
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&info).cast(),
+                u32::try_from(std::mem::size_of_val(&info)).unwrap(),
+            )
+            .unwrap();
+            AssignProcessToJobObject(job.0, HANDLE(child.as_raw_handle())).unwrap();
+            job
+        }
+    }
+}
+
+impl Drop for OuterJob {
+    fn drop(&mut self) {
+        // SAFETY: the handle is this guard's, closed once.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
 }
 
 fn wait_with_deadline(child: &mut Child, limit: Duration) -> Option<std::process::ExitStatus> {
@@ -143,12 +199,63 @@ fn the_helper_cant_start_another_process() {
     );
 }
 
+/// Grape under `pnpm tauri dev` (cargo run) or a launcher's job: the helper
+/// starts in that job, and a job with UI limits can't nest under it. The
+/// helper still gets one, with every other limit.
+#[test]
+fn a_helper_already_in_a_job_gets_a_nested_one_with_its_limits() {
+    let mut child = spawn_child("job_child", "spawn");
+    let _outer = OuterJob::holding(&child);
+    let job = JobGuard::assign(&child, None).expect("a nested job");
+    assert!(!job.has_ui_limits());
+    go(&mut child);
+    let status = wait_with_deadline(&mut child, Duration::from_secs(30)).expect("still running");
+    assert_eq!(status.code(), Some(7), "a second process started");
+
+    let mut child = spawn_child("job_child", "allocate");
+    let _outer = OuterJob::holding(&child);
+    let job = JobGuard::assign(&child, Some(128 * MIB)).expect("a nested job");
+    go(&mut child);
+    let status = wait_with_deadline(&mut child, Duration::from_secs(60)).expect("still running");
+    assert_eq!(status.code(), Some(3), "the cap didn't stop the allocation");
+    assert!(job.peak_memory().unwrap() <= 136 * MIB);
+}
+
+/// The UI limits are set exactly when the helper is in no other job. Under
+/// cargo it always is; CI also runs this outside cargo with
+/// `GRAPE_TEST_JOB_UI=1`, which insists on the UI-limited case.
+#[test]
+fn ui_limits_are_set_unless_the_helper_is_already_in_a_job() {
+    let mut child = spawn_child("job_child", "sleep");
+    let nested = in_a_job(&child);
+    let job = JobGuard::assign(&child, Some(512 * MIB)).unwrap();
+    println!(
+        "helper job: {}",
+        if nested {
+            "nested in another job, no UI limits"
+        } else {
+            "on its own, with UI limits"
+        }
+    );
+    assert_eq!(job.has_ui_limits(), !nested);
+    if std::env::var_os("GRAPE_TEST_JOB_UI").is_some_and(|v| v == "1") {
+        assert!(
+            !nested,
+            "GRAPE_TEST_JOB_UI=1, but the helper started inside a job: run this binary outside cargo (or the runner itself runs steps in a job)"
+        );
+    }
+    drop(job);
+    let status = wait_with_deadline(&mut child, Duration::from_secs(5));
+    assert!(status.is_some(), "the helper outlived its job");
+}
+
 /// grape-heif.exe at HEVC level 6.2's largest picture (8192×4352, 35.6 MP)
 /// under the cap Grape uses (heic-spec J24). Prints the peak for tuning.
 #[cfg(feature = "heif-it")]
 #[test]
 fn grape_heif_encodes_the_largest_picture_under_the_cap() {
     use std::io::BufWriter;
+    use std::os::windows::process::CommandExt;
 
     use grape_heif_proto::{
         names, Limits, Message, Op, PixelHeader, PixelWriter, Request, PROTOCOL, WORKER_FLAG,
@@ -199,6 +306,7 @@ fn grape_heif_encodes_the_largest_picture_under_the_cap() {
         op: Op::Encode { quality: None },
         limits: Limits::DEFAULT,
     };
+    // As grape-engines' helper.rs starts it: DETACHED_PROCESS, so no console.
     let mut child = Command::new(exe)
         .arg(WORKER_FLAG)
         .current_dir(&work)
@@ -207,6 +315,7 @@ fn grape_heif_encodes_the_largest_picture_under_the_cap() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
+        .creation_flags(0x0000_0008)
         .spawn()
         .unwrap();
     let job = JobGuard::assign(&child, Some(2048 * MIB)).unwrap();

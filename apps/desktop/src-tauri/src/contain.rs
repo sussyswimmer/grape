@@ -3,7 +3,11 @@
 //! On Windows every HEIC helper (`grape-heif.exe`) runs in a Job Object of
 //! its own (`grape_platform::windows::job`): its memory is capped, it ends
 //! when Grape does or when its job is dropped, it can't start another
-//! process, and an unhandled exception ends it without a dialog. The engine
+//! process, an unhandled exception ends it without a dialog, and it's kept
+//! from the desktop and the clipboard. When Grape itself runs inside a job
+//! (`pnpm tauri dev` runs it through cargo, which makes one), the helper's
+//! job is nested in that one and can't have the UI limits; the log says so
+//! once. The engine
 //! reaches it through the process-wide hook `grape_engines::set_contain`,
 //! which [`install`] sets once in setup, before any drop can run. The
 //! engine fails closed: a helper it can't contain is killed and its job
@@ -27,6 +31,7 @@ pub fn install() {
 #[cfg(windows)]
 mod job {
     use std::process::Child;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use grape_engines::{Contain, Contained};
     use grape_platform::windows::job::JobGuard;
@@ -35,6 +40,9 @@ mod job {
     #[derive(Debug)]
     pub(super) struct JobContain;
 
+    /// Set once the log has said the helpers' jobs are nested.
+    static SAID_NESTED: AtomicBool = AtomicBool::new(false);
+
     impl Contain for JobContain {
         fn contain(
             &self,
@@ -42,9 +50,13 @@ mod job {
             max_memory: Option<u64>,
         ) -> Result<Box<dyn Contained>, String> {
             // PlatformError says what failed and its code, never a path.
-            JobGuard::assign(child, max_memory)
-                .map(|guard| Box::new(Job(guard)) as Box<dyn Contained>)
-                .map_err(|err| err.to_string())
+            let guard = JobGuard::assign(child, max_memory).map_err(|err| err.to_string())?;
+            if !guard.has_ui_limits() && !SAID_NESTED.swap(true, Ordering::Relaxed) {
+                log::info!(
+                    "contain: Grape runs inside a job, so the helpers' jobs are nested and have no UI limits"
+                );
+            }
+            Ok(Box::new(Job(guard)))
         }
     }
 

@@ -7,7 +7,7 @@
 //!   with whatever is in it when dropped, so large intermediate files never
 //!   land in the user's folder or on a network share.
 //! - [`start`]: spawns the helper with stdin and stdout piped and stderr
-//!   discarded, no console window on Windows, the named variables removed
+//!   discarded, no console at all on Windows, the named variables removed
 //!   from its environment and its working folder set. It puts the helper
 //!   into the app's container ([`set_contain`]) before the helper has its
 //!   request, and fails closed: a helper that can't be contained is killed.
@@ -36,9 +36,12 @@ use serde::de::DeserializeOwned;
 use crate::archive::folder::remove_tree;
 use crate::output::unique_suffix;
 
-/// `CREATE_NO_WINDOW`: a console-subsystem helper opens no console window.
+/// `DETACHED_PROCESS`: a console-subsystem helper gets no console at all,
+/// so Windows starts no `conhost.exe` for it. Its stdio are pipes, so it
+/// needs none, and a console host would be a second process in a job that
+/// allows one (D33). `CREATE_NO_WINDOW` would still make a hidden console.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// How many fresh names [`WorkDir::create`] tries.
 const UNIQUE_ATTEMPTS: usize = 8;
@@ -149,7 +152,7 @@ where
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
+        command.creation_flags(DETACHED_PROCESS);
     }
     let child = command.spawn().map_err(|e| StartError::Spawn(e.kind()))?;
     let (tx, rx) = mpsc::channel();

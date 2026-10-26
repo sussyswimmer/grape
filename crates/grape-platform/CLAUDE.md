@@ -27,14 +27,14 @@ src/
     drag_out.rs       drag out of the shelf: SHDoDragDrop of Grape's own data object (CF_HDROP + Preferred DropEffect, never a shell ID list, only what callers stored besides), COPY | LINK never MOVE, button-up guard before and after the path check, Esc watchdog
     share.rs          the share sheet: files looked up as StorageFiles (MTA, 10 s), then the "grape-share" STA thread's invisible anchor window owns the sheet (30 s for DataRequested, Chromium's handler rules)
     actions.rs        CF_HDROP and text clipboard, IFileOpenDialog on an STA thread of its own (Move and pick_folder), IFileOperation move, wt/PowerShell, explorer /select
-    job.rs            JobGuard: the Job Object around one helper process (D33): memory cap, kill on close, die on unhandled exception, one active process, UI limits; peak_memory
+    job.rs            JobGuard: the Job Object around one helper process (D33): memory cap, kill on close, die on unhandled exception, one active process, UI limits unless the helper is already in a job (then nested, without them: has_ui_limits); peak_memory
   mock.rs             scripted DragSignal sequences for app-level tests
   unsupported.rs      every entry point returns Unsupported (Linux and other hosts)
   bin/
     grape-heif-worker.rs  heif-it only, never shipped: ImageIo behind worker_main, for grape-engines' Mac HEIC tests (GRAPE_TEST_HEIF); "macOS only" elsewhere
 tests/
   heif_imageio.rs     macOS + heif-it: ImageIo against the libheif fixtures from CI's Windows job (GRAPE_TEST_HEIF_FIXTURES; fails without it)
-  job_object.rs       Windows: the Job Object's cap, kill on close and one-process limit; with heif-it, grape-heif.exe under the 2 GiB cap (GRAPE_TEST_HEIF)
+  job_object.rs       Windows: the Job Object's cap, kill on close and one-process limit, nested in an outer job and on its own (GRAPE_TEST_JOB_UI=1 outside cargo insists on the UI-limited case); with heif-it, grape-heif.exe under the 2 GiB cap (GRAPE_TEST_HEIF)
 ```
 
 ## Hard rules

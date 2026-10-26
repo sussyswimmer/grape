@@ -10,7 +10,17 @@
 //! - caps the helper's committed memory, when asked;
 //! - keeps it away from the desktop, the clipboard, global atoms, other
 //!   processes' windows (USER handles), display and system settings, and
-//!   shutting Windows down (heic-spec J14).
+//!   shutting Windows down (heic-spec J14), unless the helper is already in
+//!   a job (below).
+//!
+//! A child starts in its parent's job. When Grape itself runs in one (under
+//! `cargo run`, so `pnpm tauri dev`, and `cargo test`, since cargo puts
+//! itself in a job; or a launcher that does the same), the helper is in that
+//! job too, and Windows nests the new job under it only if neither job sets
+//! UI limits (Microsoft's "Nested Jobs"; `AssignProcessToJobObject` fails
+//! otherwise). So a helper that's already in a job gets every limit above
+//! but the UI ones ([`JobGuard::has_ui_limits`] says which). Breaking away
+//! from the outer job isn't an option: cargo's job doesn't allow it.
 //!
 //! It isn't a sandbox: the helper still has the user's rights to files.
 
@@ -19,10 +29,10 @@ use std::mem::size_of;
 use std::os::windows::io::AsRawHandle;
 use std::process::Child;
 
-use ::windows::core::PCWSTR;
+use ::windows::core::{BOOL, PCWSTR};
 use ::windows::Win32::Foundation::{CloseHandle, HANDLE};
 use ::windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicUIRestrictions,
+    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicUIRestrictions,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     JOBOBJECTINFOCLASS, JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION,
@@ -43,6 +53,9 @@ const CONTEXT: &str = "assigning the helper to a job object";
 #[derive(Debug)]
 pub struct JobGuard {
     job: HANDLE,
+    /// False when the helper was already in a job, so this one is nested
+    /// and sets no UI limits.
+    ui_limits: bool,
 }
 
 // SAFETY: a job handle is a kernel handle, usable from any thread; the guard
@@ -52,7 +65,9 @@ unsafe impl Send for JobGuard {}
 impl JobGuard {
     /// Makes a new job with the limits above and puts `child` in it.
     /// `max_memory` caps the helper's committed memory, in bytes
-    /// (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`); `None` leaves it uncapped.
+    /// (`JOB_OBJECT_LIMIT_PROCESS_MEMORY`); `None` leaves it uncapped. When
+    /// `child` is already in a job, the new one is nested under it and sets
+    /// no UI limits, which nested jobs can't have.
     ///
     /// Call it right after the spawn and before the helper is given any
     /// work.
@@ -62,11 +77,16 @@ impl JobGuard {
     /// the process. The caller should then kill the helper: it isn't
     /// contained (heic-spec J6).
     pub fn assign(child: &Child, max_memory: Option<u64>) -> Result<JobGuard, PlatformError> {
+        let process = HANDLE(child.as_raw_handle());
+        let nested = in_a_job(process)?;
         // SAFETY: no security attributes and no name: a new, unnamed job
         // that only the handle returned here reaches.
         let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(|e| os_err(&e))?;
         // From here on, an early return closes the job.
-        let guard = JobGuard { job };
+        let guard = JobGuard {
+            job,
+            ui_limits: !nested,
+        };
 
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         let mut flags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
@@ -90,13 +110,22 @@ impl JobGuard {
                 | JOB_OBJECT_UILIMIT_WRITECLIPBOARD
                 | JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
         };
-        guard.set(JobObjectBasicUIRestrictions, &ui)?;
+        if guard.ui_limits {
+            guard.set(JobObjectBasicUIRestrictions, &ui)?;
+        }
 
-        let process = HANDLE(child.as_raw_handle());
         // SAFETY: both handles are open: the job is the guard's, and the
         // process handle is `child`'s own, borrowed for this call.
         unsafe { AssignProcessToJobObject(guard.job, process) }.map_err(|e| os_err(&e))?;
         Ok(guard)
+    }
+
+    /// True when the job keeps the helper away from the desktop, the
+    /// clipboard and the rest of the UI limits; false when the helper was
+    /// already in a job (Grape under cargo, or a launcher's job), so the
+    /// job is nested and can't.
+    pub fn has_ui_limits(&self) -> bool {
+        self.ui_limits
     }
 
     /// The most memory the helper ever committed (`PeakProcessMemoryUsed`),
@@ -142,6 +171,15 @@ impl Drop for JobGuard {
         // helper is still running, the job's KILL_ON_JOB_CLOSE ends it.
         let _ = unsafe { CloseHandle(self.job) };
     }
+}
+
+/// True when `process` is in a job already (any job).
+fn in_a_job(process: HANDLE) -> Result<bool, PlatformError> {
+    let mut result = BOOL(0);
+    // SAFETY: `process` is an open process handle (the caller's `child`),
+    // no job handle means "any job", and `result` is a live BOOL.
+    unsafe { IsProcessInJob(process, None, &raw mut result) }.map_err(|e| os_err(&e))?;
+    Ok(result.as_bool())
 }
 
 /// A structure's size for a Win32 length argument (these are all small).
