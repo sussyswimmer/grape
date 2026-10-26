@@ -47,8 +47,8 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 - **Compress** is a three-way segmented control, Small / Balanced / High, not a slider: three named choices, all visible, one click each. It remembers the last preset that ran (`tools.compress`, Balanced at first). What each preset means per media is Grape's own choice (REA U6); lane B records the numbers in `ENGINES.md`.
 - **Audio Channels** is Mono / Stereo, starting at Mono every time.
 - **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
-- **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder.
-- **Remove Metadata** runs at once (although the table marks it Panel) and its toast lists what was stripped once the engine reports it.
+- **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder. Its panel opens once Grape's PDF library is found (D35).
+- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No metadata found"); for now on PDFs only.
 
 ## File actions
 

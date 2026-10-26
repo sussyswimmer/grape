@@ -6,7 +6,9 @@
 |---|---|---|---|
 | Unit | `grape-core` | always | matrix counts, naming, tools table, geometry/hit test, planning |
 | Engine integration | `grape-engines/tests` (feature `engines-it`) | macOS + Windows jobs | convert each fixture through each v1 pair, then validate the output |
-| RAR, real bsdtar | `grape-engines` unit tests, feature `rar-it` (`GRAPE_TEST_BSDTAR`) | Windows + macOS `rar-it` jobs | libarchive's own RAR files and the writer's cases through the bsdtar CI just built |
+| Dispatch | `grape-engines/tests/{dispatch,archive}.rs` | always | which pairs and tools run with which sidecars; archives through `run_job` |
+| PDF, real PDFium | `grape-engines` unit tests (`pdf::it`) and `tests/pdf.rs`, feature `pdf-it` (`GRAPE_TEST_PDFIUM`) | Windows + macOS Rust jobs | the worker and PDFium, through `pdf::it` and through `run_job` |
+| RAR, real bsdtar | `grape-engines` unit tests, feature `rar-it` (`GRAPE_TEST_BSDTAR`) | Windows + macOS `rar-it` jobs | libarchive's own RAR files and the writer's cases through the bsdtar CI just built, and `run_job` with `SidecarPaths::bsdtar` |
 | Platform | `grape-platform` | Windows + macOS jobs | lint both `cfg`s; logic behind traits gets mock tests; clipboard and move tests run on the real OS. Tests never open a dialog, AirDrop or the share sheet, and never start a real drag: on Windows a test only reaches code that returns before `ShowShareUIForWindow` or `SHDoDragDrop` |
 | UI | `apps/desktop/ui` (Vitest) | always | segment path generation, label placement, empty states, key-name substitution |
 | Manual QA | checklist below | before every release | real drags on real OSes |
@@ -62,12 +64,12 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
 - [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
 - [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
-- The app runs `grape-engines` jobs for the 20 raster pairs and the 4 subtitle pairs (next section); every other conversion and every tool shows an info toast instead:
+- The app runs `grape-engines` jobs for the 20 raster pairs, the 4 subtitle pairs ("Subtitles, M3"), and archives and PDF ("Archives, M3/M4" and "PDF, M3/M4"); every other conversion and tool shows an info toast instead:
 - [ ] win: Shift-drop `photo.png` on JPG → the toast reads "Making photo.jpg…" then "Done / photo.jpg"; `photo.jpg` appears next to the original and opens in Photos. `Get-FileHash` of `photo.png` is the same before and after.
 - [ ] win: do it again → `photo 2.jpg`; the first `photo.jpg` is untouched.
 - [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.
 - [ ] win: a PNG with a transparent background → JPG has a white background. A phone photo that displays rotated → its PNG is upright.
-- [ ] win: drop on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
+- [ ] win: Shift-drop a PNG on HEIC, AVIF or PDF → an info toast says it isn't in this build yet, and nothing is written.
 - [ ] win: a source folder you can't write to → the output lands in `Downloads\Grape` (created only now, if it didn't exist), and the toast's title says "Saved in Downloads\Grape".
 - [ ] win: with hidden files shown, no `.grape-tmp-…` or `.grape-probe-…` file is left in any folder you converted in, also after a failed or cancelled conversion.
 - [ ] win: convert a very large image (a 100+ MP TIFF or PNG to WEBP) and, while the toast says "Making …", choose tray → Quit → Grape and its tray icon are gone within about 2 s. No file with the output's final name appears, and with hidden files shown no `.grape-tmp-…` file is left. The log shows `jobs: cancelled 1 running drop(s): Grape is quitting`, `jobs: drop cancelled with 1 of 1 job(s) started` and `jobs: waited N ms for 1 cancelled drop(s) to end`. If it says `still running after 2 s; quitting anyway` instead, note it.
@@ -79,12 +81,12 @@ Sidecars, M3 (D25; the fetch scripts and the app's lookup. No installer or DMG c
 - [ ] win: run it again in PowerShell 7 → "Sidecars are already current", and nothing downloads. `-Force` downloads and checks everything again, including the `-version` lines. After editing one byte of `ffmpeg-LICENSE.txt`, a plain run fetches again.
 - [ ] win: `git status` stays clean after a fetch (`binaries/` is ignored).
 - [ ] win: if scripts are disabled, `powershell -ExecutionPolicy Bypass -File .\scripts\fetch-sidecars.ps1` works the same.
-- [ ] win: after the fetch, and with Grape's bsdtar in `binaries\` too (`.\scripts\bsdtar\build.ps1 -Install` or CI's artifact, `PLATFORM_WINDOWS.md` → "bsdtar (RAR)": the overlay lists it, and tauri-build fails on any listed file that's missing), from `apps\desktop`, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` → `target\debug` holds `ffmpeg.exe`, `ffprobe.exe` and `bsdtar.exe`, and the log's `sidecars:` line says `found ffmpeg, ffprobe; missing heif-enc`. Plain `pnpm tauri dev` in a clone that never fetched says `none found (looked for ffmpeg, ffprobe, heif-enc)`. With the overlay but no bsdtar, the build stops at ``resource path `binaries/bsdtar-x86_64-pc-windows-msvc.exe` doesn't exist``.
-- [ ] win: the `sidecars:` line at startup never shows a path. Today's CI installer says `none found (looked for ffmpeg, ffprobe, heif-enc)`; once the installer carries FFmpeg it says `found ffmpeg, ffprobe; missing heif-enc`, and `found ffmpeg, ffprobe, heif-enc` once heif-enc ships too. Put another `ffmpeg.exe` on `PATH` (and, once bundled, remove the one next to `Grape.exe`) → the line still says ffmpeg is missing, and Grape never runs the one on `PATH`.
+- [ ] win: after the fetch, and with Grape's bsdtar in `binaries\` too (`.\scripts\bsdtar\build.ps1 -Install` or CI's artifact, `PLATFORM_WINDOWS.md` → "bsdtar (RAR)": the overlay lists it, and tauri-build fails on any listed file that's missing), from `apps\desktop`, `pnpm tauri dev --config src-tauri/tauri.sidecars.conf.json` → `target\debug` holds `ffmpeg.exe`, `ffprobe.exe` and `bsdtar.exe`, and the log's `sidecars:` line says `found ffmpeg, ffprobe, bsdtar; missing heif-enc, pdfium` (`pdfium` is found too if `target\debug` holds `pdfium.dll` from a run with the PDFium overlay). Plain `pnpm tauri dev` in a clone that never fetched says `none found (looked for ffmpeg, ffprobe, heif-enc, bsdtar, pdfium)`. With the overlay but no bsdtar, the build stops at ``resource path `binaries/bsdtar-x86_64-pc-windows-msvc.exe` doesn't exist``.
+- [ ] win: the `sidecars:` line at startup never shows a path. Today's CI installer says `found pdfium; missing ffmpeg, ffprobe, heif-enc, bsdtar`; once the installer carries FFmpeg and bsdtar it says `found ffmpeg, ffprobe, bsdtar, pdfium; missing heif-enc`, and `found ffmpeg, ffprobe, heif-enc, bsdtar, pdfium` once heif-enc ships too. Put another `ffmpeg.exe` on `PATH` (and, once bundled, remove the one next to `Grape.exe`) → the line still says ffmpeg is missing, and Grape never runs the one on `PATH`.
 - [ ] mac: `./scripts/fetch-sidecars.sh` prints the four downloads, "Made ffmpeg-universal-apple-darwin (arm64 + x86_64), signed ad hoc." with a `ffmpeg version 9.0.2-https://www.martin-riedl.de` line, the same for ffprobe, and "Sidecars are ready". `binaries/` holds the `-aarch64-apple-darwin`, `-x86_64-apple-darwin` and `-universal-apple-darwin` files for both programs, plus `sidecars.stamp`.
 - [ ] mac: `lipo -info apps/desktop/src-tauri/binaries/ffmpeg-universal-apple-darwin` (and ffprobe's) names both `x86_64` and `arm64`, and `codesign -dv` on each says `Signature=adhoc`.
 - [ ] mac: a second run says "already current"; `--force` fetches again. On Apple silicon with Rosetta, both halves print a version line.
-- [ ] mac: the `sidecars:` line at startup says `none found (looked for ffmpeg, ffprobe)` in today's DMG, and `found ffmpeg, ffprobe` once the DMG carries them in `Grape.app/Contents/MacOS`.
+- [ ] mac: the `sidecars:` line at startup says `found pdfium; missing ffmpeg, ffprobe, bsdtar` in today's DMG, and `found ffmpeg, ffprobe, bsdtar, pdfium` once the DMG carries them in `Grape.app/Contents/MacOS`.
 
 Subtitles, M3 (D20; win; use scratch copies of files)
 - [ ] win: Shift-drag `movie.srt` → the wheel offers VTT and TXT. Drop on VTT → "Done / movie.vtt" appears next to the original; open it in a text editor → it starts with `WEBVTT`, cues are numbered 1, 2, 3…, and times read `00:01:02.500 --> 00:01:04.000`. `Get-FileHash` of `movie.srt` is the same before and after.
@@ -103,6 +105,32 @@ RAR, M3 (D27; win; needs Grape's bsdtar on the PC: `PLATFORM_WINDOWS.md` → "bs
 - [ ] win: a several-GB RAR → progress moves smoothly to the end; Pause/Quit mid-way → nothing left in the folder, and no `bsdtar.exe` left in Task Manager.
 - [ ] win: a RAR downloaded with a browser → the converted zip and the extracted files carry the Mark of the Web (file Properties → "Unblock").
 - [ ] win: Defender: no detection of `bsdtar.exe`, and the first conversion isn't noticeably slow.
+
+Archives, M3/M4 (D27, D35; use scratch copies of files)
+- [ ] win: Shift-drop `x.zip` on TAR and on GZIP, `x.tar` on ZIP and GZIP, and `x.tar.gz` on ZIP and TAR → each output opens in 7-Zip or Explorer with the same files; the toast says "Making x.tar…" then "Done / x.tar". `Get-FileHash` of each source is the same before and after.
+- [ ] win: Ctrl-drop a ZIP, a TAR and a `.tgz` on EXTRACT → `x Extracted` folders hold the files with their dates. A zip made on a Mac (with `__MACOSX`) → no `__MACOSX` folder or `._` files, and the toast says "Done".
+- [ ] win: a tar with a symlink (make it in Git Bash or WSL: `ln -s a.txt ln; tar cf l.tar a.txt ln`) → Extract says "1 link left out", and `ln` isn't in the folder; tar → zip keeps the link and says "Done".
+- [ ] win, CI installer (no bsdtar): Shift-drop a `.rar` on ZIP → "Not in this build yet / RAR to ZIP is coming.", nothing is written, and the log's `sidecars:` line says `found pdfium; missing ffmpeg, ffprobe, heif-enc, bsdtar`. Ctrl-drop a ZIP and a RAR together on EXTRACT → "Extract Archive on RAR is coming.", and nothing is written.
+- [ ] win, with bsdtar next to Grape (`pnpm tauri dev` with the sidecars overlay, `PLATFORM_WINDOWS.md` → "bsdtar (RAR)"): the "RAR, M3" items above run from the wheel, and a RAR made with `-oi` ("store identical files as references") says "1 repeated file left out" (or more).
+- [ ] win: Quit from the tray during a big extract → no folder with the final name and no `.grape-tmp-…` folder left (with hidden files shown); with bsdtar, no `bsdtar.exe` left in Task Manager after a RAR.
+- [ ] mac (DMG): Shift-drop a zip made by Finder (right-click → Compress) on TAR and on GZIP → each opens in Archive Utility with the same files, with no `__MACOSX` folder or `._` files, and the toast says "Done". `shasum -a 256` of the zip is the same before and after.
+- [ ] mac (DMG): Command-drop a ZIP, a TAR and a `.tgz` on EXTRACT → `x Extracted` folders hold the files with their dates. Note whether the log says a drop ran "on release because no drop arrived".
+- [ ] mac (DMG, no bsdtar yet): Shift-drop a `.rar` on ZIP → "Not in this build yet / RAR to ZIP is coming.", and the log's `sidecars:` line says `found pdfium; missing ffmpeg, ffprobe, bsdtar`.
+
+PDF, M3/M4 (D29, D35; use scratch copies of files)
+- [ ] win: Shift-drop a one-page PDF on PNG → `doc.png`. A 3-page one on JPG → a `doc` folder with `doc 1.jpg` … `doc 3.jpg`, at 2550×3300 for Letter. During a long render Task Manager shows a second `Grape.exe` (the worker), and it's gone afterwards. `Get-FileHash` of each PDF is the same before and after.
+- [ ] win: PDF → TXT and → MD open in Notepad with the text. A scanned PDF → "… has no text to extract — it may be a scan."; a password-protected PDF → "… is password-protected."
+- [ ] win: an A0 poster PDF (or any page over 100 MP at 300 DPI) → PNG → "1 page drawn below 300 DPI", and the image opens.
+- [ ] win: Ctrl-drop a PDF on SPLIT → `doc Pages` with `doc 1.pdf` …, each opening in Edge.
+- [ ] win: Ctrl-drop three PDFs on MERGE PDF, **without** `GRAPE_PREVIEW_PANELS` → the panel opens. Reorder, Run → "Making … Merged.pdf…" then "Done / {first} Merged.pdf". The pages in Edge follow the panel's order, and the file is next to the new first file.
+- [ ] win: a PDF exported from Word (it has an author) on METADATA → "Removed author, title and N more" (or similar) / `doc No Metadata.pdf`; its Properties → Details shows no author. Run it again on the output → "No metadata found".
+- [ ] win: Ctrl-drop a PDF and a JPG together → METADATA is offered; drop → "Not in this build yet / Remove Metadata on JPG is coming.", and nothing is written.
+- [ ] win: rename `pdfium.dll` in `%LOCALAPPDATA%\Grape` and restart Grape → a PDF drop says "Grape's PDF library is missing / Reinstalling Grape brings it back."; Merge opens no panel; the log's `sidecars:` line says `none found (looked for ffmpeg, ffprobe, heif-enc, bsdtar, pdfium)`. Rename it back.
+- [ ] win: Quit from the tray during a long PDF render → nothing with the final name and no `.grape-tmp-…` left; no worker `Grape.exe` left in Task Manager.
+- [ ] mac (DMG): Shift-drop a 3-page PDF on PNG → a `doc` folder with `doc 1.png` … `doc 3.png` that open in Preview. This is the first time `libpdfium.dylib` loads from `Grape.app/Contents/Frameworks` and the worker runs on a Mac (D29's open item). If the toast says "Grape's PDF library is missing", copy the log's `sidecars:` line; if the job fails, copy the toast and the `jobs:` lines.
+- [ ] mac (DMG): PDF → TXT and → MD open in TextEdit with the text. Command-drop a PDF on SPLIT → `doc Pages`. Command-drop three PDFs on MERGE PDF → the panel opens without `GRAPE_PREVIEW_PANELS`; reorder, Run → `{first} Merged.pdf` with the pages in that order in Preview.
+- [ ] mac (DMG): a PDF with an author on METADATA → "Removed author…" / `doc No Metadata.pdf`; Preview → Tools → Show Inspector shows no author.
+- [ ] mac (DMG): Quit from the menu bar during a long PDF render → no second `Grape` process left in Activity Monitor, nothing with the final name and no `.grape-tmp-…` left.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
@@ -177,10 +205,10 @@ Settings, M6 (D19; use scratch copies of files)
 - [ ] win: Terminal set to PowerShell → Alt-drop on TERMINAL opens PowerShell in the folder, not Windows Terminal. Set back to Windows Terminal → Windows Terminal opens.
 - [ ] mac: Terminal set to iTerm2 with iTerm2 installed → Control-drop on TERMINAL opens iTerm2 in the folder. Uninstall iTerm2 (or pick it without it installed) → Terminal opens, and the log says why.
 
-Tool panels, M4 (D31; nothing here has run on the PC or a Mac yet. No panel opens until lane B wires the tool engines, so quit Grape and start it with GRAPE_PREVIEW_PANELS=1 set: in PowerShell $env:GRAPE_PREVIEW_PANELS = "1" and then start Grape or pnpm tauri dev from that window; on a Mac run the Grape executable in Grape.app/Contents/MacOS/ from Terminal with GRAPE_PREVIEW_PANELS=1 in front. Run then shows "Tools arrive in a later build." Use scratch copies.)
+Tool panels, M4 (D31; nothing here has run on the PC or a Mac yet. Merge PDFs opens its panel in a normal run when Grape's PDF library is found; the other three need GRAPE_PREVIEW_PANELS=1 until lane B's media engine runs them, so for those quit Grape and start it with GRAPE_PREVIEW_PANELS=1 set: in PowerShell $env:GRAPE_PREVIEW_PANELS = "1" and then start Grape or pnpm tauri dev from that window; on a Mac run the Grape executable in Grape.app/Contents/MacOS/ from Terminal with GRAPE_PREVIEW_PANELS=1 in front. Their Run then shows "Not in this build yet / Compress on JPG is coming." Use scratch copies.)
 - [ ] win: Ctrl-drop two JPGs on COMPRESS → the panel appears right of where the wheel was (left of it near the screen's right edge), on that monitor, inside the work area, with "Click here to use the keyboard." Explorer keeps the keyboard: arrow keys still move its selection.
 - [ ] win: click the panel once → the hint turns into "Enter runs · Esc cancels", and the log says `panel: focused true`. Note whether that first click also picked the segment under it.
-- [ ] win: click Run (or Enter after the click) → the panel hides, the toast says "Tools arrive in a later build.", and Explorer is active again: arrow keys work without a click.
+- [ ] win: click Run (or Enter after the click) → the panel hides, the toast says "Not in this build yet / Compress on JPG is coming.", and Explorer is active again: arrow keys work without a click.
 - [ ] win: Esc before clicking the panel → it closes. Esc while dragging a file with a panel open → the drag cancels and the panel stays; also when you let go of the button the moment you press Esc.
 - [ ] win: Merge on eight PDFs, click the panel and reorder a few rows, then click the Explorer window → the panel stays. In Explorer press F2 and then Esc to cancel the rename (or Esc to close a context menu or the search box) → the panel stays with its order, and the log has no `cancelled (esc)`. Click the panel again and press Esc → it closes.
 - [ ] win: with a panel open, drag another file over it and tap Shift → the wheel opens over the panel, the segments under the panel highlight, and the drop works. Do the same over an open float shelf.
@@ -190,7 +218,7 @@ Tool panels, M4 (D31; nothing here has run on the PC or a Mac yet. No panel open
 - [ ] win: Merge on three PDFs → the list is in Explorer's order (note what order Explorer gave). Drag a row to the top with the mouse; select one and use Alt+↑ and Alt+↓; use Move up and Move down. "Saves as" follows the first file. With 8 files the list scrolls and a drag near its edge scrolls it. Hover a row other than the selected one → only the selected row has the accent bar; after Alt+↑ or Alt+↓ the row that slid under the pointer doesn't look selected.
 - [ ] win (touchscreen, if one is at hand): drag a merge row with a finger, and with a pen → the row lifts and moves, as with the mouse; the list doesn't pan instead.
 - [ ] win: a second tool drop while a panel is open → the new panel replaces the old one.
-- [ ] win: Remove Metadata → no panel, only the usual toast.
+- [ ] win: Remove Metadata on a PDF → no panel; it runs, and the toast says what it removed.
 - [ ] win: drop a file on the open panel → nothing happens, and the file stays where it was.
 - [ ] win: Alt+F4 on the active panel → it closes like Cancel. Tray → Pause with a panel open → it closes.
 - [ ] win: two monitors at different scales → the panel opens on the drop's monitor at the right size.

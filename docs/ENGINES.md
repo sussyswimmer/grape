@@ -17,12 +17,12 @@
 | **SVG input** | `resvg` + `usvg` | Rasterize; see the size rule in FORMAT_MATRIX |
 | **Images → PDF / Create PDF** | `printpdf` or `lopdf` embedding JPEG/PNG streams directly | One page per image, page size = image aspect at 72 dpi-equivalent |
 | **Audio & video** | **FFmpeg sidecar** (static build, pinned version) | Arguments per target below |
-| **PDF → JPG/PNG** | `pdfium-render` 0.9.4 + bundled PDFium (BSD-3-Clause; "PDFium build" below), in Grape's PDF worker process (DECISIONS D29) | 300 DPI, every page; a page over 100 megapixels at the DPI that fits. Folder for > 1 page |
+| **PDF → JPG/PNG** | `pdfium-render` 0.9.4 + bundled PDFium (BSD-3-Clause; "PDFium build" below), in Grape's PDF worker process (DECISIONS D29) | 300 DPI, every page; a page over 100 megapixels at the DPI that fits, and the toast says how many. Folder for > 1 page |
 | **PDF → TXT / MD** | PDFium text extraction, in the worker (D29). MD = paragraphs + headings by font-size heuristics | Scanned PDFs: OCR is v2 (Apple Vision on mac, `Windows.Media.Ocr` on Windows) |
 | **PDF split / merge / metadata** | `lopdf` 0.45.0 with Grape's own page copier, in the worker; PDFium's page import when lopdf can't open a file (D29) | Split and merge drop the outline, form fields and tags. Encrypted PDFs are refused |
 | **PDF compress** (v2) | Downsample embedded images via pdfium + lopdf rewrite | No Ghostscript |
 | **Subtitles** | Our own parser in `grape-engines` (srt ⇄ vtt ⇄ txt) | Tiny, fully tested. Rules in "Subtitles" below (D20) |
-| **Archives** | `zip`, `tar`, `flate2` (D27); RAR input through Grape's own `bsdtar` sidecar, built from libarchive 3.8.10 (BSD-2-Clause) with Grape's patches (D27; "bsdtar build" below) | Zip-slip guard on extract: reject `..` and absolute paths. RAR: a Rust header preflight refuses encrypted, multi-part, solid RAR4, big-dictionary and self-extracting archives before bsdtar runs |
+| **Archives** | `zip`, `tar`, `flate2` (D27); RAR input through Grape's own `bsdtar` sidecar, built from libarchive 3.8.10 (BSD-2-Clause) with Grape's patches (D27; "bsdtar build" below) | Zip-slip guard on extract: reject `..` and absolute paths. RAR: a Rust header preflight refuses encrypted, multi-part, solid RAR4, big-dictionary and self-extracting archives before bsdtar runs. Links, special files and RAR5 file copies are left out and counted, and the toast says how many (`Note::LeftOut`) |
 | **Documents** (v2) | `pandoc` sidecar (GPL, rule 2) for docx/md/html/epub/txt/rtf. macOS can also use `NSAttributedString` for docx/rtf/rtfd | → PDF: render HTML in the system webview and print to PDF (WKWebView `createPDF`, WebView2 `PrintToPdfAsync`). No LaTeX |
 | **Spreadsheets** (v2) | `calamine` (read xlsx/xls/ods), `rust_xlsxwriter` (xlsx), `spreadsheet-ods` (ods), `csv` | → PDF via HTML table + webview print |
 | **Slides** (v2) | LibreOffice headless sidecar (MPL) for ppt/pptx → pdf, then pdfium → images | Big download (~300 MB). Make it an **optional add-on download**, which needs a DECISIONS entry since it's a network call |
@@ -105,4 +105,4 @@ Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). N
 - Images: decode and re-encode without EXIF/XMP/IPTC. Apply the orientation first, so stripping it doesn't rotate the picture.
 - Media: `-map_metadata -1 -map_chapters -1 -c copy`.
 - PDF: clear the `Info` dictionary and XMP `Metadata` stream with lopdf, and write the whole file again so old revisions go too (D29). Page-level XMP and image metadata stay.
-- Report what was removed (GPS, camera, author…) in the toast.
+- Report what was removed (GPS, camera, author…) in the toast (`JobOutcome::notes` → `Note::MetadataRemoved`; the app words it, PDF first).

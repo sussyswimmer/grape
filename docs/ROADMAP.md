@@ -64,6 +64,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-26:* subtitles are built: SRT → VTT/TXT and VTT → SRT/TXT (4 pairs) through Grape's own parser (D20), on the same no-clobber publishing as images. 24 of the 178 v1 pairs now run. Not run on the PC yet: `TESTING.md` → "Subtitles, M3". Next: audio and video through the FFmpeg sidecar (D22).
 
+*Status 2026-10-26:* archives and PDF run from the wheel too (D35): ZIP, TAR and GZIP among each other (6 pairs), RAR → ZIP, TAR or GZIP with Grape's bsdtar (3), and PDF → JPG, PNG, TXT and MD with PDFium (4). 37 of the 178 v1 pairs now run. The app finds `bsdtar` next to its executable as it finds FFmpeg, and gives every job PDFium and the PDF worker with the other sidecars. No installer or DMG carries bsdtar until CI builds FFmpeg (D24, D27), so RAR runs in `tauri dev` with a built bsdtar and in CI's `rar-it` jobs; every CI installer and DMG carries PDFium. Not run on the PC or a Mac yet: `TESTING.md` → "Archives, M3/M4" and "PDF, M3/M4".
+
 **Accept:** every v1 pair (178) converts a fixture file on Windows (`engines-it` test run on the PC and in CI), and spot-checks by hand pass.
 
 ## M4: v1 tools (lane B engines, lane A panels)
@@ -71,6 +73,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Panels: compress presets, merge reorder list, channels toggle, normalize target.
 
 *Status 2026-10-26:* the four panels are built (D31): the window, the IPC with golden fixtures, the order list, and remembered presets. No panel opens in a normal build until lane B wires the tool engines; `GRAPE_PREVIEW_PANELS=1` opens them for QA. CI checks the model, the contract and the page; nothing has run on the PC or a Mac yet (`TESTING.md` → "Tool panels, M4").
+
+*Status 2026-10-26:* Extract Archive (ZIP, TAR and GZIP; RAR with Grape's bsdtar), Split PDF, Merge PDFs and Remove Metadata on PDFs run (D35), and Merge PDFs' panel opens in a normal build when PDFium is found. Remove Metadata's toast says what it removed. Compress, Audio Channels and Normalize Volume wait for lane B's media engine; `GRAPE_PREVIEW_PANELS=1` still opens their panels. Not run on the PC or a Mac yet: `TESTING.md` → "Archives, M3/M4" and "PDF, M3/M4".
 
 ## M5: File actions on Windows (lane A)
 - [ ] copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.

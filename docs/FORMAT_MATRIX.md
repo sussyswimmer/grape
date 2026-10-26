@@ -117,6 +117,7 @@ Notes:
 - `video → mp3` extracts the audio track. `video → gif` uses a palette (see `ENGINES.md`).
 - `gif → video` is offered, but `gif` gets no image targets **[observed]**.
 - PDF → images exports **every page at 300 DPI** **[observed: site copy]**. Multiple pages go into a new folder.
+- **[Grape]** A page over 100 megapixels, or over 65,535 px on a side, is drawn at the highest DPI that fits (only that page), and the toast says how many pages were (D29).
 - `heic` output needs an HEVC encoder. **[Grape]** On macOS use ImageIO. On Windows use the bundled `heif-enc` sidecar (libheif + x265). Because x265 is GPL, it stays a separate executable (ENGINES.md licensing rule 2).
 - **[Grape]** `rar` (RAR 4 and 5) is read through Grape's own bsdtar (D27). Refused with a toast:
   - password-protected archives;
