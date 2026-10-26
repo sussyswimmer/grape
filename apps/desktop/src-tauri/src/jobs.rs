@@ -283,23 +283,42 @@ pub fn check_runnable(
     items: &[SelectionItem],
     sidecars: &SidecarPaths,
 ) -> Result<(), NotRunnable> {
+    runnable_with(op, items, sidecars, &HELPERS)
+}
+
+/// [`check_runnable`] with `helpers` as the helpers Grape ships (tests
+/// pass their own, so each OS's case runs everywhere).
+fn runnable_with(
+    op: &Operation,
+    items: &[SelectionItem],
+    sidecars: &SidecarPaths,
+    helpers: &[Helper],
+) -> Result<(), NotRunnable> {
     let formats: Vec<Option<Format>> = items.iter().map(SelectionItem::format).collect();
     if supports_with(op, &formats, sidecars) {
         return Ok(());
     }
-    if let Some(helper) = missing_helper(op, &formats, sidecars) {
+    if let Some(helper) = missing_helper(op, &formats, sidecars, helpers) {
         return Err(NotRunnable {
             title: helper.title.to_owned(),
             detail: Some(helper.detail.to_owned()),
         });
     }
-    // One item names the toast: the first that can't run even with every
-    // helper Grape ships, so a missing PDFium never blames the PDF in a
-    // PDF and PNG drop; else the first that can't run as is.
-    let shipped = HELPERS
+    let shipped = helpers
         .iter()
         .filter(|helper| helper.ships)
         .fold(sidecars.clone(), |found, helper| (helper.with)(&found));
+    // No one helper is enough, but those Grape ships are: several are
+    // missing (a PDF and a HEIC without PDFium and grape-heif).
+    if supports_with(op, &formats, &shipped) {
+        return Err(NotRunnable {
+            title: "Some of Grape's helpers are missing".to_owned(),
+            detail: Some("Reinstalling Grape brings them back.".to_owned()),
+        });
+    }
+    // One item names the toast: the first that can't run even with every
+    // helper Grape ships, so a missing PDFium never blames the PDF in a
+    // PDF and PNG drop; else the first that can't run as is.
     let fails =
         |item: &SelectionItem, with: &SidecarPaths| !supports_with(op, &[item.format()], with);
     let first = items
@@ -386,14 +405,17 @@ fn with_heif(sidecars: &SidecarPaths) -> SidecarPaths {
     }
 }
 
-/// The shipped helper whose absence alone stops `op` on `formats`.
+/// The shipped helper among `helpers` whose absence alone stops `op` on
+/// `formats`.
 fn missing_helper(
     op: &Operation,
     formats: &[Option<Format>],
     sidecars: &SidecarPaths,
+    helpers: &[Helper],
 ) -> Option<Helper> {
-    HELPERS
-        .into_iter()
+    helpers
+        .iter()
+        .copied()
         .find(|helper| helper.ships && supports_with(op, formats, &(helper.with)(sidecars)))
 }
 
@@ -465,7 +487,9 @@ fn run(
                 if outcome.renamed { " (renamed)" } else { "" },
                 log_notes(&outcome.notes)
             ),
-            Err(err) => log::warn!("jobs: {err} ({})", err.detail),
+            // The kind and the detail without the job's paths: the user
+            // message names the file, so it's only for the toast.
+            Err(err) => log::warn!("{}", failure_log(err, job)),
         }
         results.push(result);
     }
@@ -681,6 +705,47 @@ fn count(n: u32, one: &str, many: &str) -> String {
     } else {
         format!("{n} {many}")
     }
+}
+
+/// The log line for a job that failed: its kind and the engine's detail,
+/// with the job's paths, their folders and their file names taken out (an
+/// engine's detail may hold the paths involved). Never the user message,
+/// which names the file.
+fn failure_log(err: &GrapeError, job: &Job) -> String {
+    format!("jobs: {:?} ({})", err.kind, without_paths(&err.detail, job))
+}
+
+/// `detail` with every input and output path of `job` replaced by
+/// `<path>`, their folders by `<folder>` and their file names by `<name>`.
+/// Words under 3 characters are left (a bare root, a one-letter name).
+fn without_paths(detail: &str, job: &Job) -> String {
+    let mut paths: Vec<&Path> = job.inputs.iter().map(PathBuf::as_path).collect();
+    match &job.output {
+        JobOutput::File(path) | JobOutput::Folder(path) => paths.push(path),
+        JobOutput::PagesFileOrFolder { file, folder, .. } => {
+            paths.push(file);
+            paths.push(folder);
+        }
+    }
+    let mut words: Vec<(String, &str)> = Vec::new();
+    for path in paths {
+        words.push((path.to_string_lossy().into_owned(), "<path>"));
+        if let Some(parent) = path.parent() {
+            words.push((parent.to_string_lossy().into_owned(), "<folder>"));
+        }
+        if let Some(name) = path.file_name() {
+            words.push((name.to_string_lossy().into_owned(), "<name>"));
+        }
+    }
+    // Longest first, so a path goes before its folder and its name.
+    words.sort_by_key(|word| std::cmp::Reverse(word.0.len()));
+    let mut out = detail.to_owned();
+    for (word, with) in &words {
+        if word.chars().count() >= 3 {
+            out = out.replace(word.as_str(), with);
+        }
+    }
+    out
 }
 
 /// The notes for the log: counts and kinds, never names.
@@ -955,6 +1020,94 @@ mod tests {
                 title: "Not in this build yet".to_owned(),
                 detail: Some("AVIF to PNG is coming.".to_owned()),
             })
+        );
+    }
+
+    #[test]
+    fn several_missing_helpers_say_so_and_never_blame_a_pdf_as_coming() {
+        let shipped = [
+            Helper {
+                ships: true,
+                ..HELPERS[0]
+            },
+            Helper {
+                ships: true,
+                ..HELPERS[2]
+            },
+        ];
+        let to_png = Operation::Convert { to: Format::Png };
+        let both = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.heic"),
+        ];
+        let several = Err(NotRunnable {
+            title: "Some of Grape's helpers are missing".to_owned(),
+            detail: Some("Reinstalling Grape brings them back.".to_owned()),
+        });
+        assert_eq!(runnable_with(&to_png, &both, &none(), &shipped), several);
+        // One missing: that one is named.
+        let heif_only = SidecarPaths {
+            heif: Some(PathBuf::from("grape-heif.exe")),
+            ..none()
+        };
+        assert_eq!(
+            runnable_with(&to_png, &both, &heif_only, &shipped)
+                .unwrap_err()
+                .title,
+            "Grape's PDF library is missing"
+        );
+        assert_eq!(
+            runnable_with(&to_png, &both, &with_heic_helper(), &shipped),
+            Ok(())
+        );
+        // Something that can't run even with both is what the toast names.
+        let three = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.heic"),
+            SelectionItem::file("/a/c.avif"),
+        ];
+        assert_eq!(
+            runnable_with(&to_png, &three, &none(), &shipped)
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("AVIF to PNG is coming.")
+        );
+        // The real list on Windows, where both ship.
+        if cfg!(windows) {
+            assert_eq!(check_runnable(&to_png, &both, &none()), several);
+        }
+    }
+
+    #[test]
+    fn a_failure_is_logged_without_the_jobs_names_or_paths() {
+        let job = job(
+            "/home/max/Taxes/Divorce papers scan.heic",
+            "/home/max/Taxes/Divorce papers scan.jpg",
+            false,
+        );
+        let err = GrapeError {
+            kind: ErrorKind::DecodeFailed,
+            user_message: "Divorce papers scan.heic isn't a readable HEIC image.".to_owned(),
+            detail: "decode /home/max/Taxes/Divorce papers scan.heic: bad; create temp in /home/max/Taxes: denied; Divorce papers scan.jpg".to_owned(),
+        };
+        let line = failure_log(&err, &job);
+        assert!(
+            !line.contains("Divorce") && !line.contains("/home/max"),
+            "{line}"
+        );
+        assert_eq!(
+            line,
+            "jobs: DecodeFailed (decode <path>: bad; create temp in <folder>: denied; <name>)"
+        );
+        // A detail without the job's paths (the HEIC helper's) stays as is.
+        let helper = GrapeError {
+            detail: "HEIC helper: Damaged: ImageIO's image status is 3".to_owned(),
+            ..err
+        };
+        assert_eq!(
+            failure_log(&helper, &job),
+            "jobs: DecodeFailed (HEIC helper: Damaged: ImageIO's image status is 3)"
         );
     }
 
