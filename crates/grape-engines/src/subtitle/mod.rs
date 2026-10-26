@@ -237,7 +237,68 @@ fn write_output(
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use std::fs;
+    use std::path::PathBuf;
+
     use super::*;
+
+    /// A fresh folder under the system temp dir, removed when dropped.
+    struct Dir(PathBuf);
+
+    impl Dir {
+        fn new() -> Dir {
+            let path = std::env::temp_dir().join(format!(
+                "grape-subtitle-unit-{}",
+                crate::output::unique_suffix()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Dir(path)
+        }
+    }
+
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_source_over_the_limit_is_refused_without_reading_it() {
+        let dir = Dir::new();
+        let src = dir.0.join("huge.srt");
+        // Sparse where the file system allows it.
+        File::create(&src).unwrap().set_len(MAX_SOURCE + 1).unwrap();
+        let names = Names::new(&src, &dir.0.join("huge.vtt"), Format::Srt, Format::Vtt);
+        // Cancelled, so reading any of it would fail as a read error.
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        let err = read(&src, &names, &cancel).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed);
+        assert_eq!(err.user_message, "huge.srt is too large to convert.");
+        assert!(
+            err.detail.contains("over the 16 MiB limit"),
+            "{}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn reading_the_source_stops_once_the_job_is_cancelled() {
+        let dir = Dir::new();
+        let src = dir.0.join("subs.srt");
+        let srt = b"1\n00:00:01,000 --> 00:00:02,000\nHi\n";
+        fs::write(&src, srt).unwrap();
+        let names = Names::new(&src, &dir.0.join("subs.vtt"), Format::Srt, Format::Vtt);
+        let cancel = CancelToken::new();
+        assert_eq!(read(&src, &names, &cancel).unwrap(), srt);
+        cancel.cancel();
+        let err = read(&src, &names, &cancel).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::ReadFailed);
+        assert_eq!(err.user_message, "Grape couldn't read subs.srt.");
+        // convert reports it as the cancel it is.
+        let err = publish::or_cancelled(&cancel, &src, err);
+        assert_eq!(err.kind, ErrorKind::Cancelled);
+    }
 
     #[test]
     fn a_text_parse_refused_is_a_cancel_once_the_job_is_cancelled() {
