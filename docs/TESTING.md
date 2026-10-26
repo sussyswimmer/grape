@@ -11,7 +11,7 @@
 | Manual QA | checklist below | before every release | real drags on real OSes |
 
 ## Running the FFmpeg tests (`engines-it`)
-- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. In CI they point at the pinned 9.0.2 sidecars (D22); any FFmpeg with the encoders `ENGINES.md` lists works locally.
+- `GRAPE_TEST_FFMPEG=<abs path to ffmpeg> GRAPE_TEST_FFPROBE=<abs path to ffprobe> cargo test -p grape-engines --features engines-it`. The tests fail, never skip, when either variable is missing. In CI they point at the pinned 9.0.2 sidecars (D22); any FFmpeg with the encoders `ENGINES.md` lists, and `lavfi`, works locally. On Linux, `scripts/ffmpeg/build.sh linux-x86_64` builds Grape's own (D24), which has all of it.
 - They make their own sources with FFmpeg's `lavfi` (`testsrc`, `sine`) in a temp folder, convert every audio and video pair, and check each output with `ffprobe`: container, codec, duration within max(0.25 s, 5 %), even dimensions, audio kept. Plus: odd sizes, rotation, 24-bit and 5.1 audio, sources without the needed stream, playlists renamed `.mp4`, cancel mid-run, a name taken mid-run, awkward file names, and that the build has every encoder Grape uses and isn't `nonfree`.
 
 ## Fixtures
