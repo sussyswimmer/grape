@@ -432,11 +432,11 @@ export interface ToastHidePayload { id: number }
 - (Reworded from the first draft, whose second sentences echoed the observed copy in `INTERACTION_SPEC.md` §5; `ui/src/wheel/copy.ts` owns these strings.)
 - Pending center label: `…`
 - Toasts:
-  - Working, one file: `Making {name}…`. Several files: `Making {n} files…`.
+  - Working, one file: `Making {name}…`. Several files: `Making {n} files…`. (Since D35: `{n} folders` when every output is a folder, `{n} items` when they're mixed or PDF → images, which may make a file or a folder; one PDF → images job is `Making {stem}…`. The done detail counts the same way.)
   - Done: title `Done`, detail `{name}` (or `{n} files`). (Since D35 the title says instead what a job left out or removed, such as `2 links left out` or `Removed author and title`: `INTERACTION_SPEC.md` §6.)
   - Partial: title `{ok} of {n} done`, detail = the first error's `user_message`.
   - Error: title = `user_message`, detail null.
-  - Fallback, with the location first so the ellipsis can't cut it: when every output fell back, title `Saved in Downloads\Grape`, detail `{name}; its folder is read-only` (or `{n} files; their folders are read-only`). When only some did, title `Done`, detail `{n} files; {k} in Downloads\Grape`.
+  - Fallback, with the location first so the ellipsis can't cut it: when every output fell back, title `Saved in Downloads\Grape`, detail `{name}; its folder is read-only` (or `{n} files; their folders are read-only`). When only some did, title `Done` (or the notes' title, D35), detail `{n} files; {k} in Downloads\Grape`.
   - Not in this build: info, title `Not in this build yet`, detail `{FROM} to {TO} is coming.` (The detail is one line cut with an ellipsis, about 248 px at 12 px, so a list of the formats that do convert wouldn't be seen.)
   - Tools: info, `Tools arrive in a later build.` (M1 to M4 only: since D35 a tool this build can't run says `Not in this build yet` / `{Tool} on {FORMAT} is coming.`) Actions: info, `File actions arrive in a later build.` (M1 only. Since M5 the actions run in `actions.rs`. An action an OS doesn't have yet says `Not in this build yet` / `{action} is coming.`, which today is only Float on macOS, D21.)
   - (The "Making {name}…" / "Done" wording follows ROADMAP M3; its clean-room status falls under open question O7.)

@@ -31,7 +31,9 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use grape_core::{plan, Format, Job, Operation, SelectionItem, Settings, ToolParams, WheelEntry};
+use grape_core::{
+    plan, Format, Job, JobOutput, Operation, SelectionItem, Settings, ToolParams, WheelEntry,
+};
 use grape_engines::{
     build_selection, run_job, supports_with, CancelToken, EngineCtx, GrapeError, JobOutcome,
     MetaField, Note, SidecarPaths,
@@ -470,13 +472,17 @@ fn run(
     );
 }
 
-/// "Making photo.jpg…" or "Making 3 files…", while job `done` (counting
-/// from 0) runs and has reported `fraction` of its work. Progress is for
-/// the whole drop: unknown for a single job that hasn't reported yet.
+/// "Making photo.jpg…" or "Making 3 files…" (folders, items), while job
+/// `done` (counting from 0) runs and has reported `fraction` of its work.
+/// Progress is for the whole drop: unknown for a single job that hasn't
+/// reported yet.
 fn working(jobs: &[Job], done: usize, fraction: Option<f32>) -> Report {
     let title = match jobs {
-        [one] => format!("Making {}…", name(one.output.display_path())),
-        many => format!("Making {} files…", many.len()),
+        [one] => format!("Making {}…", output_name(&one.output)),
+        many => format!(
+            "Making {}…",
+            several(&many.iter().map(|job| &job.output).collect::<Vec<_>>())
+        ),
     };
     let mut report = Report::new(ToastTone::Working, title, None);
     let fraction = fraction.filter(|fraction| fraction.is_finite());
@@ -499,13 +505,24 @@ fn finished(
         .filter_map(|result| result.as_ref().ok())
         .filter_map(|outcome| outcome.outputs.first().map(PathBuf::as_path))
         .collect();
+    // What each of those jobs was planned to make: files, folders or both.
+    let written: Vec<&JobOutput> = jobs
+        .iter()
+        .zip(results)
+        .filter(|(_, result)| {
+            result
+                .as_ref()
+                .is_ok_and(|outcome| !outcome.outputs.is_empty())
+        })
+        .map(|(job, _)| &job.output)
+        .collect();
     let first_error = results.iter().find_map(|result| result.as_ref().err());
     let reveal = outputs.first().map(|path| path.to_path_buf());
     let mut report = match (outputs.as_slice(), first_error) {
         (_, None) => {
             let what = match outputs.as_slice() {
                 [one] => name(one),
-                many => format!("{} files", many.len()),
+                _ => several(&written),
             };
             // Only the jobs that wrote something count. The detail row is
             // one line cut with an ellipsis, so where the files went leads.
@@ -531,9 +548,11 @@ fn finished(
                     format!("Saved in {folder}"),
                     Some(format!("{what}; their folders are read-only")),
                 ),
+                // The detail says where some went, so the notes keep the
+                // title.
                 (some, _) => Report::new(
                     ToastTone::Done,
-                    "Done",
+                    noted(results).unwrap_or_else(|| "Done".to_owned()),
                     Some(format!("{what}; {some} in {folder}")),
                 ),
             }
@@ -596,8 +615,11 @@ fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
     removed.map(|fields| removed_title(&fields))
 }
 
-/// "Removed author and title", "Removed author, title and 3 more", or "No
-/// metadata found".
+/// "Removed author and title", "Removed author, title and 3 more",
+/// "Removed keywords and 4 more" when two names would make the title too
+/// wide, or "No document metadata found". PDFs keep page-level XMP and
+/// their images' metadata (ENGINES.md → Metadata removal), so it never
+/// says the file has none.
 fn removed_title(fields: &[MetaField]) -> String {
     let mut names: Vec<&str> = Vec::new();
     let mut sorted = fields.to_vec();
@@ -618,13 +640,24 @@ fn removed_title(fields: &[MetaField]) -> String {
             names.push(name);
         }
     }
-    match names.as_slice() {
-        [] => "No metadata found".to_owned(),
-        [one] => format!("Removed {one}"),
+    let title = match names.as_slice() {
+        [] => return "No document metadata found".to_owned(),
+        [one] => return format!("Removed {one}"),
         [one, two] => format!("Removed {one} and {two}"),
         [one, two, rest @ ..] => format!("Removed {one}, {two} and {} more", rest.len()),
+    };
+    if title.chars().count() <= REMOVED_MAX {
+        title
+    } else {
+        format!("Removed {} and {} more", names[0], names.len() - 1)
     }
 }
+
+/// The longest "Removed …" title with two names: 33 characters. The
+/// widest of those is about 231 px in the title's 13 px semibold, measured
+/// with Inter (the system fonts differ a little), and the toast's title
+/// has 248 px.
+const REMOVED_MAX: usize = 33;
 
 /// "1 link", "2 links".
 fn count(n: u32, one: &str, many: &str) -> String {
@@ -665,6 +698,35 @@ fn show(app: &AppHandle, id: u64, report: Report, anchor: (i32, i32), display: &
         revealable: report.reveal.is_some(),
     };
     toast::show(app, toast, anchor, display);
+}
+
+/// What a job makes, as the toast names it before it runs: the file or the
+/// folder. A PDF → image export makes a file for one page and a folder for
+/// more, which isn't known yet, so it's the source's stem ("doc").
+fn output_name(output: &JobOutput) -> String {
+    match output {
+        JobOutput::File(path) | JobOutput::Folder(path) => name(path),
+        JobOutput::PagesFileOrFolder { page_stem, .. } => page_stem.clone(),
+    }
+}
+
+/// "3 files", "2 folders", or "3 items" when they're mixed or include a
+/// page export, which may be either.
+fn several(outputs: &[&JobOutput]) -> String {
+    let n = outputs.len();
+    if outputs
+        .iter()
+        .all(|output| matches!(output, JobOutput::File(_)))
+    {
+        format!("{n} files")
+    } else if outputs
+        .iter()
+        .all(|output| matches!(output, JobOutput::Folder(_)))
+    {
+        format!("{n} folders")
+    } else {
+        format!("{n} items")
+    }
 }
 
 /// "photo.jpg", or the whole path when it has no last part.
@@ -966,7 +1028,7 @@ mod tests {
     fn done_says_what_remove_metadata_removed() {
         let jobs = [job("/a/doc.pdf", "/a/doc No Metadata.pdf", false)];
         let cases: [(Vec<MetaField>, &str); 5] = [
-            (vec![], "No metadata found"),
+            (vec![], "No document metadata found"),
             (vec![MetaField::Title], "Removed title"),
             (
                 vec![MetaField::Title, MetaField::Author],
@@ -1003,6 +1065,56 @@ mod tests {
     }
 
     #[test]
+    fn remove_metadata_titles_fit_the_toast() {
+        // Two names would make 37 characters, wider than the title.
+        let fields = [
+            MetaField::Keywords,
+            MetaField::Producer,
+            MetaField::CreationDate,
+            MetaField::Xmp,
+            MetaField::Other,
+        ];
+        assert_eq!(removed_title(&fields), "Removed keywords and 4 more");
+        assert_eq!(
+            removed_title(&[MetaField::Subject, MetaField::Keywords, MetaField::Creator]),
+            "Removed subject and 2 more"
+        );
+        // These fit with two names.
+        assert_eq!(
+            removed_title(&[MetaField::Author, MetaField::Title, MetaField::Xmp]),
+            "Removed author, title and 1 more"
+        );
+        // Every set of fields: at most 33 characters, about 231 px in the
+        // title's font (the title has 248 px).
+        let all = [
+            MetaField::Author,
+            MetaField::Title,
+            MetaField::Subject,
+            MetaField::Keywords,
+            MetaField::Creator,
+            MetaField::Producer,
+            MetaField::CreationDate,
+            MetaField::ModDate,
+            MetaField::Xmp,
+            MetaField::Other,
+        ];
+        for mask in 0u32..(1 << all.len()) {
+            let fields: Vec<MetaField> = all
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, field)| *field)
+                .collect();
+            let title = removed_title(&fields);
+            assert!(title.chars().count() <= 33, "{title}");
+        }
+        assert_eq!(
+            removed_title(&[MetaField::Keywords, MetaField::Other]),
+            "Removed keywords and other fields"
+        );
+    }
+
+    #[test]
     fn a_fallback_or_a_failure_outranks_the_notes() {
         let jobs = [job(
             "/ro/x.tar",
@@ -1024,6 +1136,69 @@ mod tests {
             failed("2.tar isn't a readable TAR file."),
         ];
         assert_eq!(finished(&two, &results, &settings()).title, "1 of 2 done");
+    }
+
+    fn folder_job(input: &str, output: &str, used_fallback: bool) -> Job {
+        Job {
+            inputs: vec![PathBuf::from(input)],
+            output: JobOutput::Folder(PathBuf::from(output)),
+            op: Operation::tool(ToolKey::ExtractArchive),
+            used_fallback,
+        }
+    }
+
+    fn pages_job(input: &str, stem: &str) -> Job {
+        Job {
+            inputs: vec![PathBuf::from(input)],
+            output: JobOutput::PagesFileOrFolder {
+                file: PathBuf::from(format!("/a/{stem}.jpg")),
+                folder: PathBuf::from(format!("/a/{stem}")),
+                page_stem: stem.to_owned(),
+            },
+            op: Operation::Convert { to: Format::Jpg },
+            used_fallback: false,
+        }
+    }
+
+    #[test]
+    fn when_only_some_fell_back_the_notes_keep_the_title() {
+        let jobs = [
+            folder_job("/a/1.tar", "/a/1 Extracted", false),
+            folder_job("/ro/2.tar", "/home/max/Downloads/Grape/2 Extracted", true),
+        ];
+        let results = [
+            noting("/a/1 Extracted", vec![left_out(1, 0, 0, 0)]),
+            noting("/home/max/Downloads/Grape/2 Extracted", Vec::new()),
+        ];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.title, "1 link left out");
+        let expected = format!("2 folders; 1 in {}", grape_folder());
+        assert_eq!(report.detail.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn folders_and_page_exports_are_not_called_files() {
+        // One PDF → JPG: a file for one page, a folder for more.
+        let pdf = [pages_job("/a/doc.pdf", "doc")];
+        assert_eq!(working(&pdf, 0, None).title, "Making doc…");
+        let report = finished(&pdf, &[wrote("/a/doc")], &settings());
+        assert_eq!(report.detail.as_deref(), Some("doc"));
+
+        let extract = [
+            folder_job("/a/1.zip", "/a/1 Extracted", false),
+            folder_job("/a/2.zip", "/a/2 Extracted", false),
+        ];
+        assert_eq!(working(&extract, 0, None).title, "Making 2 folders…");
+        let results = [wrote("/a/1 Extracted"), wrote("/a/2 Extracted")];
+        let report = finished(&extract, &results, &settings());
+        assert_eq!(report.detail.as_deref(), Some("2 folders"));
+
+        // Page exports may be files or folders.
+        let pdfs = [pages_job("/a/a.pdf", "a"), pages_job("/a/b.pdf", "b")];
+        assert_eq!(working(&pdfs, 0, None).title, "Making 2 items…");
+        let results = [wrote("/a/a.jpg"), wrote("/a/b")];
+        let report = finished(&pdfs, &results, &settings());
+        assert_eq!(report.detail.as_deref(), Some("2 items"));
     }
 
     #[test]

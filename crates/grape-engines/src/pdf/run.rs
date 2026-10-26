@@ -1538,7 +1538,7 @@ mod tests {
                 .notes,
             [crate::Note::MetadataRemoved(vec![crate::MetaField::Title])]
         );
-        // Nothing removed still says so: "No metadata found".
+        // Nothing removed still says so: "No document metadata found".
         assert_eq!(
             done(Vec::new(), Vec::new()).into_outcome(&remove).notes,
             [crate::Note::MetadataRemoved(Vec::new())]

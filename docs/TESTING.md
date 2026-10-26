@@ -123,7 +123,7 @@ PDF, M3/M4 (D29, D35; use scratch copies of files)
 - [ ] win: an A0 poster PDF (or any page over 100 MP at 300 DPI) → PNG → "1 page drawn below 300 DPI", and the image opens.
 - [ ] win: Ctrl-drop a PDF on SPLIT → `doc Pages` with `doc 1.pdf` …, each opening in Edge.
 - [ ] win: Ctrl-drop three PDFs on MERGE PDF, **without** `GRAPE_PREVIEW_PANELS` → the panel opens. Reorder, Run → "Making … Merged.pdf…" then "Done / {first} Merged.pdf". The pages in Edge follow the panel's order, and the file is next to the new first file.
-- [ ] win: a PDF exported from Word (it has an author) on METADATA → "Removed author, title and N more" (or similar) / `doc No Metadata.pdf`; its Properties → Details shows no author. Run it again on the output → "No metadata found".
+- [ ] win: a PDF exported from Word (it has an author) on METADATA → "Removed author, title and N more" (or similar) / `doc No Metadata.pdf`; its Properties → Details shows no author. Run it again on the output → "No document metadata found".
 - [ ] win: Ctrl-drop a PDF and a JPG together → METADATA is offered; drop → "Not in this build yet / Remove Metadata on JPG is coming.", and nothing is written.
 - [ ] win: rename `pdfium.dll` in `%LOCALAPPDATA%\Grape` and restart Grape → a PDF drop says "Grape's PDF library is missing / Reinstalling Grape brings it back."; Merge opens no panel; the log's `sidecars:` line says `none found (looked for ffmpeg, ffprobe, heif-enc, bsdtar, pdfium)`. Rename it back.
 - [ ] win: Quit from the tray during a long PDF render → nothing with the final name and no `.grape-tmp-…` left; no worker `Grape.exe` left in Task Manager.
