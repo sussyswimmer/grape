@@ -11,7 +11,7 @@
 //!   (`grape_core::plan`), show "Making …", run each job with
 //!   `grape_engines::run_job`, and finish with done, partial or error.
 //!   Clicking the finished toast reveals the first output.
-//! - Tools arrive in a later build. A tool's panel hands its choices over
+//! - Tools run like conversions. A tool's panel hands its choices over
 //!   through [`submit_op`], with the items in the panel's order.
 //! - Where outputs go and the fallback folder come from Settings
 //!   ([`crate::settings`]), read when the drop is planned. The sidecars
@@ -33,7 +33,8 @@ use std::time::{Duration, Instant};
 
 use grape_core::{plan, Format, Job, Operation, SelectionItem, Settings, ToolParams, WheelEntry};
 use grape_engines::{
-    build_selection, run_job, supports, CancelToken, EngineCtx, GrapeError, JobOutcome,
+    build_selection, run_job, supports_with, CancelToken, EngineCtx, GrapeError, JobOutcome,
+    MetaField, Note, SidecarPaths,
 };
 use grape_platform::DisplayBounds;
 use tauri::{AppHandle, Manager};
@@ -238,7 +239,7 @@ pub fn submit_op(
     anchor: (i32, i32),
     display: DisplayBounds,
 ) {
-    if let Err(why) = check_runnable(&op, items) {
+    if let Err(why) = check_runnable(&op, items, &sidecars::for_jobs(app)) {
         log::info!("jobs: {op:?} not in this build: {}", why.title);
         let report = Report::new(ToastTone::Info, why.title, why.detail);
         show(
@@ -271,27 +272,112 @@ pub fn submit_op(
 
 /// The one runnability check, for the direct path ([`submit`],
 /// [`submit_op`]) and the panel route (`panel::route_for`): `Ok` when this
-/// build can run `op` on every item, or what the info toast says. Every
-/// item must be supported, so a mixed drop never half-runs. Wiring an
-/// engine (archives, PDF, lane B's media) changes only this function.
-pub fn check_runnable(op: &Operation, items: &[SelectionItem]) -> Result<(), NotRunnable> {
-    match op {
-        Operation::Tool { .. } => Err(NotRunnable {
-            title: "Tools arrive in a later build.".to_owned(),
-            detail: None,
-        }),
-        Operation::Convert { to } => {
-            let Some(item) = items.iter().find(|item| !supports(op, item.format())) else {
-                return Ok(());
-            };
-            let from = item.format().map_or("This file", Format::display_name);
-            Err(NotRunnable {
-                title: "Not in this build yet".to_owned(),
-                // One line: the detail row is cut with an ellipsis.
-                detail: Some(format!("{from} to {} is coming.", to.display_name())),
-            })
-        }
+/// build can run `op` on every item with the `sidecars` Grape found, or
+/// what the info toast says. Every item must be supported, so a mixed drop
+/// never half-runs. Wiring an engine changes only `grape_engines` and this
+/// function's copy.
+pub fn check_runnable(
+    op: &Operation,
+    items: &[SelectionItem],
+    sidecars: &SidecarPaths,
+) -> Result<(), NotRunnable> {
+    let formats: Vec<Option<Format>> = items.iter().map(SelectionItem::format).collect();
+    if supports_with(op, &formats, sidecars) {
+        return Ok(());
     }
+    if let Some(helper) = missing_helper(op, &formats, sidecars) {
+        return Err(NotRunnable {
+            title: helper.title.to_owned(),
+            detail: Some(helper.detail.to_owned()),
+        });
+    }
+    // One item names the toast: the first that can't run even with every
+    // helper Grape ships, so a missing PDFium never blames the PDF in a
+    // PDF and PNG drop; else the first that can't run as is.
+    let shipped = HELPERS
+        .iter()
+        .filter(|helper| helper.ships)
+        .fold(sidecars.clone(), |found, helper| (helper.with)(&found));
+    let fails =
+        |item: &SelectionItem, with: &SidecarPaths| !supports_with(op, &[item.format()], with);
+    let first = items
+        .iter()
+        .find(|item| fails(item, &shipped))
+        .or_else(|| items.iter().find(|item| fails(item, sidecars)))
+        .and_then(SelectionItem::format);
+    let from = first.map_or("this file", Format::display_name);
+    let detail = match op {
+        Operation::Convert { to } => format!(
+            "{} to {} is coming.",
+            first.map_or("This file", Format::display_name),
+            to.display_name()
+        ),
+        Operation::Tool { tool, .. } => format!("{} on {from} is coming.", tool.name()),
+    };
+    Err(NotRunnable {
+        title: "Not in this build yet".to_owned(),
+        // One line: the detail row is cut with an ellipsis.
+        detail: Some(detail),
+    })
+}
+
+/// A program or library Grape ships whose absence alone stops a drop.
+#[derive(Debug, Clone, Copy)]
+struct Helper {
+    /// The toast's title when it's missing.
+    title: &'static str,
+    /// The toast's detail when it's missing: one line.
+    detail: &'static str,
+    /// True once installers and DMGs carry it: only then is a missing one
+    /// a broken install. Until then the drop is "not in this build yet".
+    ships: bool,
+    /// `sidecars` with this helper filled in (any path will do: nothing
+    /// runs it).
+    with: fn(&SidecarPaths) -> SidecarPaths,
+}
+
+/// The helpers lane A's engines need. PDFium ships wherever a build has
+/// one (D29). bsdtar ships once the bundles carry it (#27, D27): then
+/// `ships` becomes `cfg!(any(windows, target_os = "macos"))` too.
+const HELPERS: [Helper; 2] = [
+    Helper {
+        title: "Grape's PDF library is missing",
+        detail: "Reinstalling Grape brings it back.",
+        ships: cfg!(any(windows, target_os = "macos")),
+        with: with_pdf,
+    },
+    Helper {
+        title: "Grape's RAR helper is missing",
+        detail: "Reinstalling Grape brings it back.",
+        ships: false,
+        with: with_bsdtar,
+    },
+];
+
+fn with_pdf(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        pdfium: Some(PathBuf::from("pdfium")),
+        pdf_worker: Some(PathBuf::from("grape")),
+        ..sidecars.clone()
+    }
+}
+
+fn with_bsdtar(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        bsdtar: Some(PathBuf::from("bsdtar")),
+        ..sidecars.clone()
+    }
+}
+
+/// The shipped helper whose absence alone stops `op` on `formats`.
+fn missing_helper(
+    op: &Operation,
+    formats: &[Option<Format>],
+    sidecars: &SidecarPaths,
+) -> Option<Helper> {
+    HELPERS
+        .into_iter()
+        .find(|helper| helper.ships && supports_with(op, formats, &(helper.with)(sidecars)))
 }
 
 /// Plans and runs the jobs for one drop, updating the toast as it goes,
@@ -356,10 +442,11 @@ fn run(
         match &result {
             // Counts only: a log never carries a path or a file name.
             Ok(outcome) => log::info!(
-                "jobs: {} input(s) -> {} output(s){}",
+                "jobs: {} input(s) -> {} output(s){}{}",
                 job.inputs.len(),
                 outcome.outputs.len(),
-                if outcome.renamed { " (renamed)" } else { "" }
+                if outcome.renamed { " (renamed)" } else { "" },
+                log_notes(&outcome.notes)
             ),
             Err(err) => log::warn!("jobs: {err} ({})", err.detail),
         }
@@ -429,7 +516,11 @@ fn finished(
                 .count();
             let folder = short(&settings.fallback_dir);
             match (fell_back, outputs.as_slice()) {
-                (0, _) => Report::new(ToastTone::Done, "Done", Some(what)),
+                (0, _) => Report::new(
+                    ToastTone::Done,
+                    noted(results).unwrap_or_else(|| "Done".to_owned()),
+                    Some(what),
+                ),
                 (1, [_]) => Report::new(
                     ToastTone::Done,
                     format!("Saved in {folder}"),
@@ -456,6 +547,108 @@ fn finished(
     };
     report.reveal = reveal;
     report
+}
+
+/// The done toast's title when the jobs' notes say more than "Done":
+/// what was left out, pages drawn below 300 DPI, or what Remove Metadata
+/// removed. macOS metadata left out of an archive isn't mentioned (it's
+/// never the user's content); the log counts it.
+fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
+    let notes: Vec<&Note> = results
+        .iter()
+        .filter_map(|result| result.as_ref().ok())
+        .flat_map(|outcome| &outcome.notes)
+        .collect();
+    let (mut links, mut specials, mut copies, mut scaled) = (0u32, 0u32, 0u32, 0u32);
+    let mut removed: Option<Vec<MetaField>> = None;
+    for note in &notes {
+        match note {
+            Note::LeftOut(left) => {
+                links = links.saturating_add(left.links);
+                specials = specials.saturating_add(left.specials);
+                copies = copies.saturating_add(left.copies);
+            }
+            Note::PagesScaled(pages) => scaled = scaled.saturating_add(*pages),
+            Note::MetadataRemoved(fields) => removed.get_or_insert_with(Vec::new).extend(fields),
+            _ => {}
+        }
+    }
+    let left_out = match (links, specials, copies) {
+        (0, 0, 0) => None,
+        (n, 0, 0) => Some(count(n, "link", "links")),
+        (0, n, 0) => Some(count(n, "special file", "special files")),
+        (0, 0, n) => Some(count(n, "repeated file", "repeated files")),
+        _ => Some(count(
+            links.saturating_add(specials).saturating_add(copies),
+            "item",
+            "items",
+        )),
+    };
+    if let Some(what) = left_out {
+        return Some(format!("{what} left out"));
+    }
+    if scaled > 0 {
+        return Some(format!(
+            "{} drawn below 300 DPI",
+            count(scaled, "page", "pages")
+        ));
+    }
+    removed.map(|fields| removed_title(&fields))
+}
+
+/// "Removed author and title", "Removed author, title and 3 more", or "No
+/// metadata found".
+fn removed_title(fields: &[MetaField]) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    let mut sorted = fields.to_vec();
+    sorted.sort();
+    for field in sorted {
+        let name = match field {
+            MetaField::Author => "author",
+            MetaField::Title => "title",
+            MetaField::Subject => "subject",
+            MetaField::Keywords => "keywords",
+            MetaField::Creator => "creator",
+            MetaField::Producer => "producer",
+            MetaField::CreationDate | MetaField::ModDate => "dates",
+            MetaField::Xmp => "XMP",
+            _ => "other fields",
+        };
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    match names.as_slice() {
+        [] => "No metadata found".to_owned(),
+        [one] => format!("Removed {one}"),
+        [one, two] => format!("Removed {one} and {two}"),
+        [one, two, rest @ ..] => format!("Removed {one}, {two} and {} more", rest.len()),
+    }
+}
+
+/// "1 link", "2 links".
+fn count(n: u32, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// The notes for the log: counts and kinds, never names.
+fn log_notes(notes: &[Note]) -> String {
+    notes
+        .iter()
+        .map(|note| match note {
+            Note::LeftOut(left) => format!(
+                "; left out {} link(s), {} special, {} macOS metadata, {} copies",
+                left.links, left.specials, left.mac_metadata, left.copies
+            ),
+            Note::PagesScaled(pages) => format!("; {pages} page(s) below 300 DPI"),
+            Note::MetadataRemoved(fields) => format!("; removed {fields:?}"),
+            other => format!("; {other:?}"),
+        })
+        .collect()
 }
 
 fn show(app: &AppHandle, id: u64, report: Report, anchor: (i32, i32), display: &DisplayBounds) {
@@ -537,18 +730,32 @@ mod tests {
         Settings::new(PathBuf::from("/home/max/Downloads/Grape"))
     }
 
+    /// What Grape finds in a full install: PDFium, the worker and bsdtar.
+    fn installed() -> SidecarPaths {
+        SidecarPaths {
+            pdfium: Some(PathBuf::from("pdfium.dll")),
+            pdf_worker: Some(PathBuf::from("Grape.exe")),
+            bsdtar: Some(PathBuf::from("bsdtar.exe")),
+            ..SidecarPaths::default()
+        }
+    }
+
+    fn none() -> SidecarPaths {
+        SidecarPaths::default()
+    }
+
     #[test]
     fn raster_pairs_run_and_the_rest_say_they_are_coming() {
         let to_jpg = Operation::Convert { to: Format::Jpg };
         let png = [SelectionItem::file("/a/photo.png")];
-        assert_eq!(check_runnable(&to_jpg, &png), Ok(()));
+        assert_eq!(check_runnable(&to_jpg, &png, &none()), Ok(()));
 
-        let to_heic = Operation::Convert { to: Format::Heic };
+        let to_avif = Operation::Convert { to: Format::Avif };
         assert_eq!(
-            check_runnable(&to_heic, &png),
+            check_runnable(&to_avif, &png, &installed()),
             Err(NotRunnable {
                 title: "Not in this build yet".to_owned(),
-                detail: Some("PNG to HEIC is coming.".to_owned()),
+                detail: Some("PNG to AVIF is coming.".to_owned()),
             })
         );
     }
@@ -558,29 +765,265 @@ mod tests {
         let to_png = Operation::Convert { to: Format::Png };
         let mixed = [
             SelectionItem::file("/a/one.jpg"),
-            SelectionItem::file("/a/two.heic"),
-            SelectionItem::file("/a/three.avif"),
+            SelectionItem::file("/a/two.avif"),
+            SelectionItem::file("/a/three.heic"),
         ];
-        let why = check_runnable(&to_png, &mixed).unwrap_err();
+        let why = check_runnable(&to_png, &mixed, &installed()).unwrap_err();
         // The first unsupported item names the toast.
-        assert_eq!(why.detail.as_deref(), Some("HEIC to PNG is coming."));
+        assert_eq!(why.detail.as_deref(), Some("AVIF to PNG is coming."));
     }
 
     #[test]
-    fn tools_wait_for_a_later_build() {
-        for tool in [
-            ToolKey::Compress,
-            ToolKey::MergePdf,
-            ToolKey::RemoveMetadata,
+    fn archives_run_and_rar_needs_bsdtar() {
+        for (name, to) in [
+            ("/a/x.zip", Format::Tar),
+            ("/a/x.tar", Format::Zip),
+            ("/a/x.tar.gz", Format::Zip),
         ] {
+            let op = Operation::Convert { to };
+            assert_eq!(
+                check_runnable(&op, &[SelectionItem::file(name)], &none()),
+                Ok(())
+            );
+        }
+        let rar = [SelectionItem::file("/a/x.rar")];
+        let to_zip = Operation::Convert { to: Format::Zip };
+        assert_eq!(check_runnable(&to_zip, &rar, &installed()), Ok(()));
+        // bsdtar isn't in any installer yet (#27): RAR is "coming".
+        assert_eq!(
+            check_runnable(&to_zip, &rar, &none()),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("RAR to ZIP is coming.".to_owned()),
+            })
+        );
+        let extract = Operation::tool(ToolKey::ExtractArchive);
+        let both = [
+            SelectionItem::file("/a/x.zip"),
+            SelectionItem::file("/a/y.rar"),
+        ];
+        assert_eq!(check_runnable(&extract, &both, &installed()), Ok(()));
+        assert_eq!(
+            check_runnable(&extract, &both, &none())
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("Extract Archive on RAR is coming.")
+        );
+    }
+
+    #[test]
+    fn pdf_jobs_run_with_pdfium_and_say_when_it_is_missing() {
+        let pdfs = [
+            SelectionItem::file("/a/one.pdf"),
+            SelectionItem::file("/a/two.pdf"),
+        ];
+        let ops = [
+            Operation::Convert { to: Format::Png },
+            Operation::Convert { to: Format::Md },
+            Operation::tool(ToolKey::SplitPdf),
+            Operation::tool(ToolKey::MergePdf),
+            Operation::tool(ToolKey::RemoveMetadata),
+        ];
+        for op in ops {
+            assert_eq!(check_runnable(&op, &pdfs, &installed()), Ok(()), "{op:?}");
+            let why = check_runnable(&op, &pdfs, &none()).unwrap_err();
+            if cfg!(any(windows, target_os = "macos")) {
+                assert_eq!(why.title, "Grape's PDF library is missing", "{op:?}");
+                assert_eq!(
+                    why.detail.as_deref(),
+                    Some("Reinstalling Grape brings it back.")
+                );
+            } else {
+                assert_eq!(why.title, "Not in this build yet", "{op:?}");
+            }
+        }
+        // A PDF and a PNG without PDFium: where PDFium ships, the PNG is
+        // what this build can't run, so it names the toast. Elsewhere no
+        // PDF runs, so the PDF does.
+        let op = Operation::tool(ToolKey::RemoveMetadata);
+        let mixed = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.png"),
+        ];
+        let why = check_runnable(&op, &mixed, &none()).unwrap_err();
+        assert_eq!(why.title, "Not in this build yet");
+        let named = if cfg!(any(windows, target_os = "macos")) {
+            "Remove Metadata on PNG is coming."
+        } else {
+            "Remove Metadata on PDF is coming."
+        };
+        assert_eq!(why.detail.as_deref(), Some(named));
+        // Compress on a PDF is v2: coming, whatever is installed.
+        let compress = Operation::tool(ToolKey::Compress);
+        assert_eq!(
+            check_runnable(&compress, &pdfs, &none()),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("Compress on PDF is coming.".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn other_tools_say_they_are_coming() {
+        for tool in [ToolKey::Compress, ToolKey::RemoveMetadata] {
             let op = Operation::Tool {
                 tool,
                 params: ToolParams::default(),
             };
-            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.png")]).unwrap_err();
-            assert_eq!(why.title, "Tools arrive in a later build.");
-            assert_eq!(why.detail, None);
+            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.png")], &installed())
+                .unwrap_err();
+            assert_eq!(why.title, "Not in this build yet");
+            assert_eq!(
+                why.detail,
+                Some(format!("{} on PNG is coming.", tool.name()))
+            );
         }
+        // Remove Metadata on a PDF and a PNG: the PNG names the toast.
+        let op = Operation::tool(ToolKey::RemoveMetadata);
+        let mixed = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.png"),
+        ];
+        assert_eq!(
+            check_runnable(&op, &mixed, &installed())
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("Remove Metadata on PNG is coming.")
+        );
+    }
+
+    fn noting(path: &str, notes: Vec<Note>) -> Result<JobOutcome, GrapeError> {
+        Ok(JobOutcome {
+            outputs: vec![PathBuf::from(path)],
+            renamed: false,
+            notes,
+        })
+    }
+
+    fn left_out(links: u32, specials: u32, mac_metadata: u32, copies: u32) -> Note {
+        Note::LeftOut(grape_engines::LeftOut {
+            links,
+            specials,
+            mac_metadata,
+            copies,
+        })
+    }
+
+    #[test]
+    fn done_says_what_an_archive_left_out() {
+        let jobs = [job("/a/x.tar", "/a/x Extracted", false)];
+        let cases = [
+            (left_out(1, 0, 0, 0), "1 link left out"),
+            (left_out(2, 0, 7, 0), "2 links left out"),
+            (left_out(0, 1, 0, 0), "1 special file left out"),
+            (left_out(0, 0, 0, 3), "3 repeated files left out"),
+            (left_out(1, 1, 0, 1), "3 items left out"),
+        ];
+        for (note, title) in cases {
+            let report = finished(&jobs, &[noting("/a/x Extracted", vec![note])], &settings());
+            assert_eq!(report.tone, ToastTone::Done);
+            assert_eq!(report.title, title);
+            assert_eq!(report.detail.as_deref(), Some("x Extracted"));
+        }
+        // macOS metadata alone isn't mentioned.
+        let only_mac = [noting("/a/x Extracted", vec![left_out(0, 0, 9, 0)])];
+        assert_eq!(finished(&jobs, &only_mac, &settings()).title, "Done");
+        // Two jobs add up.
+        let two = [
+            job("/a/1.zip", "/a/1.tar", false),
+            job("/a/2.zip", "/a/2.tar", false),
+        ];
+        let results = [
+            noting("/a/1.tar", vec![left_out(1, 0, 0, 0)]),
+            noting("/a/2.tar", vec![left_out(2, 0, 0, 0)]),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.title, "3 links left out");
+        assert_eq!(report.detail.as_deref(), Some("2 files"));
+    }
+
+    #[test]
+    fn done_says_pages_were_drawn_below_300_dpi() {
+        let jobs = [job("/a/doc.pdf", "/a/doc.png", false)];
+        let report = finished(
+            &jobs,
+            &[noting("/a/doc", vec![Note::PagesScaled(2)])],
+            &settings(),
+        );
+        assert_eq!(report.title, "2 pages drawn below 300 DPI");
+        assert_eq!(report.detail.as_deref(), Some("doc"));
+        let one = [noting("/a/doc.png", vec![Note::PagesScaled(1)])];
+        assert_eq!(
+            finished(&jobs, &one, &settings()).title,
+            "1 page drawn below 300 DPI"
+        );
+    }
+
+    #[test]
+    fn done_says_what_remove_metadata_removed() {
+        let jobs = [job("/a/doc.pdf", "/a/doc No Metadata.pdf", false)];
+        let cases: [(Vec<MetaField>, &str); 5] = [
+            (vec![], "No metadata found"),
+            (vec![MetaField::Title], "Removed title"),
+            (
+                vec![MetaField::Title, MetaField::Author],
+                "Removed author and title",
+            ),
+            (
+                vec![
+                    MetaField::CreationDate,
+                    MetaField::ModDate,
+                    MetaField::Producer,
+                ],
+                "Removed producer and dates",
+            ),
+            (
+                vec![
+                    MetaField::Author,
+                    MetaField::Title,
+                    MetaField::Producer,
+                    MetaField::ModDate,
+                    MetaField::Xmp,
+                ],
+                "Removed author, title and 3 more",
+            ),
+        ];
+        for (fields, title) in cases {
+            let results = [noting(
+                "/a/doc No Metadata.pdf",
+                vec![Note::MetadataRemoved(fields)],
+            )];
+            let report = finished(&jobs, &results, &settings());
+            assert_eq!(report.title, title);
+            assert_eq!(report.detail.as_deref(), Some("doc No Metadata.pdf"));
+        }
+    }
+
+    #[test]
+    fn a_fallback_or_a_failure_outranks_the_notes() {
+        let jobs = [job(
+            "/ro/x.tar",
+            "/home/max/Downloads/Grape/x Extracted",
+            true,
+        )];
+        let results = [noting(
+            "/home/max/Downloads/Grape/x Extracted",
+            vec![left_out(2, 0, 0, 0)],
+        )];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+        let two = [
+            job("/a/1.tar", "/a/1.zip", false),
+            job("/a/2.tar", "/a/2.zip", false),
+        ];
+        let results = [
+            noting("/a/1.zip", vec![left_out(2, 0, 0, 0)]),
+            failed("2.tar isn't a readable TAR file."),
+        ];
+        assert_eq!(finished(&two, &results, &settings()).title, "1 of 2 done");
     }
 
     #[test]

@@ -24,6 +24,7 @@ use grape_core::{
     output_name, Channels, CompressPreset, Operation, SelectionItem, ToolKey, ToolParams,
     WheelEntry, GEOMETRY,
 };
+use grape_engines::SidecarPaths;
 use grape_platform::{DisplayBounds, Rect};
 
 use crate::events::{PanelChoice, PanelItem, PanelOpen, PanelRun, PanelSpec};
@@ -136,13 +137,17 @@ pub fn route(
 }
 
 /// The check `GRAPE_PREVIEW_PANELS=1` routes with: the four panel tools
-/// pass, so their panels open although this build can't run them, and
+/// pass, so their panels open even when this build can't run them, and
 /// everything else gets [`jobs::check_runnable`]. A preview panel's Run
 /// still meets the real check in `jobs::submit_op`, so nothing is written.
-pub fn preview_check(op: &Operation, items: &[SelectionItem]) -> Result<(), NotRunnable> {
+pub fn preview_check(
+    op: &Operation,
+    items: &[SelectionItem],
+    sidecars: &SidecarPaths,
+) -> Result<(), NotRunnable> {
     match op {
         Operation::Tool { tool, .. } if has_panel(*tool) => Ok(()),
-        _ => jobs::check_runnable(op, items),
+        _ => jobs::check_runnable(op, items, sidecars),
     }
 }
 
@@ -734,25 +739,57 @@ mod tests {
         }
     }
 
-    /// Update when lane B wires the tool engines into `check_runnable`.
+    /// What Grape finds in a full install: PDFium, the worker and bsdtar.
+    fn installed() -> SidecarPaths {
+        SidecarPaths {
+            pdfium: Some(PathBuf::from("pdfium.dll")),
+            pdf_worker: Some(PathBuf::from("Grape.exe")),
+            bsdtar: Some(PathBuf::from("bsdtar.exe")),
+            ..SidecarPaths::default()
+        }
+    }
+
+    /// Update when lane B wires the media tools into `check_runnable`.
     #[test]
-    fn this_build_opens_no_panel() {
-        let items = files(&["/a/one.pdf", "/a/two.pdf"]);
-        for tool in ALL_FOUR {
+    fn this_build_opens_only_the_merge_panel() {
+        let real =
+            |op: &Operation, items: &[SelectionItem]| jobs::check_runnable(op, items, &installed());
+        let pdfs = files(&["/a/one.pdf", "/a/two.pdf"]);
+        assert_eq!(
+            route(WheelEntry::Tool(ToolKey::MergePdf), &pdfs, real),
+            Route::Panel(ToolKey::MergePdf)
+        );
+        let media = files(&["/a/one.mp3", "/a/two.mp3"]);
+        for tool in [
+            ToolKey::Compress,
+            ToolKey::NormalizeAudio,
+            ToolKey::AudioChannels,
+        ] {
             assert_eq!(
-                route(WheelEntry::Tool(tool), &items, jobs::check_runnable),
+                route(WheelEntry::Tool(tool), &media, real),
                 Route::Direct,
                 "{tool:?}"
             );
         }
+        // Without PDFium the drop goes the direct way, to its toast.
+        let missing = |op: &Operation, items: &[SelectionItem]| {
+            jobs::check_runnable(op, items, &SidecarPaths::default())
+        };
+        assert_eq!(
+            route(WheelEntry::Tool(ToolKey::MergePdf), &pdfs, missing),
+            Route::Direct
+        );
     }
 
     #[test]
     fn the_preview_opens_the_four_panels_and_nothing_else() {
         let items = files(&["/a/one.png", "/a/two.png"]);
+        let preview = |op: &Operation, items: &[SelectionItem]| {
+            preview_check(op, items, &SidecarPaths::default())
+        };
         for tool in ALL_FOUR {
             assert_eq!(
-                route(WheelEntry::Tool(tool), &items, preview_check),
+                route(WheelEntry::Tool(tool), &items, preview),
                 Route::Panel(tool)
             );
         }
@@ -762,12 +799,12 @@ mod tests {
             WheelEntry::Tool(ToolKey::SplitPdf),
             WheelEntry::Convert(Format::Jpg),
         ] {
-            assert_eq!(route(entry, &items, preview_check), Route::Direct);
+            assert_eq!(route(entry, &items, preview), Route::Direct);
         }
         // The real check still answers for everything but the four.
         let to_jpg = Operation::convert(Format::Jpg);
-        assert_eq!(preview_check(&to_jpg, &items), Ok(()));
-        assert!(preview_check(&Operation::tool(ToolKey::MuteVideo), &items).is_err());
+        assert_eq!(preview(&to_jpg, &items), Ok(()));
+        assert!(preview(&Operation::tool(ToolKey::MuteVideo), &items).is_err());
     }
 
     #[test]

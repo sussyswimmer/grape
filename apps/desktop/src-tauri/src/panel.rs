@@ -7,10 +7,10 @@
 //!
 //! - **Route.** Only a v1 panel tool this build can run opens a panel
 //!   ([`route_for`], [`model::route`] with `jobs::check_runnable`);
-//!   everything else goes straight to `jobs::submit`. In this build that's
-//!   every tool, so no panel opens unless `GRAPE_PREVIEW_PANELS=1` is set
-//!   (QA): the four panels then open, and their Run meets the same check
-//!   and shows the same info toast.
+//!   everything else goes straight to `jobs::submit`. Merge PDFs opens when
+//!   Grape's PDF library is found; the other three wait for the media
+//!   engine, so `GRAPE_PREVIEW_PANELS=1` still opens them (QA), and their
+//!   Run meets the same check and shows the same info toast.
 //! - **One at a time.** A new request replaces the open panel, which counts
 //!   as cancelled. Run, Cancel, ×, Esc, Alt+F4, Pause and Quit close it.
 //!   Losing the focus doesn't.
@@ -48,7 +48,7 @@ use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
 
 use crate::controller::RunRequest;
 use crate::events::{PanelChoice, PanelClose, PanelOpen, PanelRun};
-use crate::{jobs, settings};
+use crate::{jobs, settings, sidecars};
 use model::{PanelModel, PanelRequest, Route};
 
 /// Label of the panel window in tauri.conf.json.
@@ -73,8 +73,8 @@ pub struct PanelState {
     /// the HWND value on Windows, the pid on macOS. Main thread only.
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     back_to: Mutex<Option<i64>>,
-    /// `GRAPE_PREVIEW_PANELS=1`: the four panel tools open their panels
-    /// although this build can't run them.
+    /// `GRAPE_PREVIEW_PANELS=1`: the four panel tools open their panels,
+    /// also those this build can't run.
     preview: AtomicBool,
     /// Set while the Esc poll runs.
     #[cfg(target_os = "windows")]
@@ -111,7 +111,7 @@ pub fn set_preview(app: &AppHandle, on: bool) {
     }
     if on {
         log::info!(
-            "panel: preview on: GRAPE_PREVIEW_PANELS=1 opens the tool panels although this build can't run their tools"
+            "panel: preview on: GRAPE_PREVIEW_PANELS=1 opens the tool panels, also those this build can't run"
         );
     }
 }
@@ -121,10 +121,15 @@ pub fn route_for(app: &AppHandle, entry: WheelEntry, items: &[SelectionItem]) ->
     let preview = app
         .try_state::<PanelState>()
         .is_some_and(|state| state.preview.load(Ordering::Acquire));
+    let sidecars = sidecars::for_jobs(app);
     if preview {
-        model::route(entry, items, model::preview_check)
+        model::route(entry, items, |op, items| {
+            model::preview_check(op, items, &sidecars)
+        })
     } else {
-        model::route(entry, items, jobs::check_runnable)
+        model::route(entry, items, |op, items| {
+            jobs::check_runnable(op, items, &sidecars)
+        })
     }
 }
 
