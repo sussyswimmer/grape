@@ -157,7 +157,7 @@ PDFium is the library Grape reads PDFs with (DECISIONS D29). Unlike FFmpeg it sh
 
 ## Releasing
 
-A version tag makes a draft release. `.github/workflows/release.yml` builds the installer from the tag and drafts a GitHub Release with it. It never publishes: Maxwell checks the draft and publishes it by hand. So far it builds x64 only.
+A version tag makes a draft release. `.github/workflows/release.yml` builds the installer from the tag and drafts a GitHub Release with it. It never publishes: Maxwell checks the draft and publishes it by hand. So far it builds x64 only. It fetches PDFium fresh (`fetch-sidecars.ps1 -Only pdfium`, every hash checked), builds with the PDFium overlay and fails if `pdfium.dll` or `licenses\pdfium\` is missing (D29).
 
 **Cutting a release**
 
@@ -203,7 +203,7 @@ If the version check fails, nothing was built or released. Delete the tag (`git 
 - That download is the installer's, not Grape's. Windows 11 and current Windows 10 already have WebView2, so it rarely happens.
 - A PC that is offline *and* has no WebView2 can't install Grape. The `offlineInstaller` mode would fix that, for about 127 MB more per download.
 
-**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23), and, in a build with the PDFium overlay (CI's installer; not `release.yml` yet), `pdfium.dll` and `licenses\pdfium\` (D29). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
+**Where it installs.** `%LOCALAPPDATA%\Grape`, for the current user only (`installMode: currentUser`). The folder holds Grape itself, `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` (D23), and, in a build with the PDFium overlay (CI's installer and `release.yml`'s), `pdfium.dll` and `licenses\pdfium\` (D29). The uninstaller removes that folder and the launch-at-login entry (the `Grape` value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`). It keeps `%APPDATA%\io.github.sussyswimmer.grape\` (settings) and `%LOCALAPPDATA%\io.github.sussyswimmer.grape\` (logs and WebView2's data), unless the user ticks "Delete the application data".
 
 ## Windows QA must-checks
 - Drag from Explorer, the Desktop, Downloads, search results, OneDrive placeholders (cloud-only files: Grape must hydrate or skip them, not hang), and zip folders opened in Explorer (virtual paths, which v1 should skip).

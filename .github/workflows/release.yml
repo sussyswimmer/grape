@@ -99,9 +99,24 @@ jobs:
           toolchain: "1.99"
       - uses: Swatinem/rust-cache@v2
       - run: pnpm install --frozen-lockfile
+      # Fetched fresh for a release, not from ci.yml's cache. The script
+      # checks every hash in scripts/sidecars.lock (D25, D29).
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      # The overlay adds pdfium.dll and licenses/pdfium/ to bundle.resources.
       - name: Build Grape and the installer
         working-directory: apps/desktop
-        run: pnpm tauri build --bundles nsis --ci
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json
+      - name: Check PDFium is in the build
+        shell: pwsh
+        run: |
+          foreach ($f in 'target/release/pdfium.dll', 'target/release/licenses/pdfium/pdfium.txt', 'target/release/licenses/pdfium/SOURCE.md') {
+            if (-not (Test-Path -LiteralPath $f -PathType Leaf)) {
+              Write-Output "::error::$f is missing from the build."
+              exit 1
+            }
+          }
       # Tauri names the installer Grape_<version>_x64-setup.exe. The release
       # file has one name for every version, so the latest-release link works.
       - name: Name the installer and hash it
