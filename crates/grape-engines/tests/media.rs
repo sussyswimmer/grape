@@ -1022,6 +1022,30 @@ fn the_sidecar_has_everything_grape_uses_and_is_redistributable() {
             "muxer {muxer} missing"
         );
     }
+    // The filters Grape names, and the ones FFmpeg inserts for them: format
+    // and rate conversion, and turning rotated video upright.
+    let filters = run(&["-hide_banner", "-filters"]);
+    for filter in [
+        "scale",
+        "fps",
+        "palettegen",
+        "paletteuse",
+        "aformat",
+        "aresample",
+        "format",
+        "null",
+        "anull",
+        "transpose",
+        "hflip",
+        "vflip",
+    ] {
+        assert!(
+            filters
+                .lines()
+                .any(|l| l.split_whitespace().nth(1) == Some(filter)),
+            "filter {filter} missing"
+        );
+    }
     let demuxers = run(&["-hide_banner", "-demuxers"]);
     for demuxer in [
         "mov,mp4,m4a,3gp,3g2,mj2",
