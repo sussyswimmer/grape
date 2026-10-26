@@ -246,6 +246,50 @@ fn sources_needing_what_grapes_ffmpeg_lacks_are_refused() {
     );
 }
 
+#[test]
+fn the_guard_reads_codecs_escapes_and_quotes_each_on_its_own() {
+    // Plain -c (and its spellings), not only -c:v and -c:a.
+    for option in ["-c", "-codec", "-vcodec", "-acodec"] {
+        let args = ["-i", "a.mov", option, "ffv1", "b.mkv"];
+        assert_eq!(lacking(&args).as_deref(), Some("encoder ffv1"), "{option}");
+        assert_eq!(lacking(&["-i", "a.mov", option, "copy", "b.mkv"]), None);
+    }
+    // An escaped comma outside quotes, and a plain one inside them, don't
+    // end the filter: each alone, so neither hides the other.
+    let escaped = r"scale=w=min(iw\,720):h=-1";
+    assert_eq!(lacking(&["-vf", escaped]), None);
+    assert_eq!(lacking(&["-vf", r"pan=stereo|c0=c0\;c1=c1"]), None);
+    let quoted = "scale='min(iw,720)':-1";
+    assert_eq!(lacking(&["-vf", quoted]), None);
+    assert_eq!(lacking(&["-lavfi", "[0:v]scale='a;b'[x]"]), None);
+    // After either, the next filter is read again.
+    let after = |graph: &str| lacking(&["-vf", graph]);
+    let escaped_then = format!("{escaped},setpts=PTS");
+    assert_eq!(after(&escaped_then).as_deref(), Some("filter setpts"));
+    let quoted_then = format!("{quoted};hstack");
+    assert_eq!(after(&quoted_then).as_deref(), Some("filter hstack"));
+}
+
+/// Makes a source with [`ffmpeg`]: it must refuse, before running
+/// anything, what Grape's FFmpeg build lacks.
+#[test]
+#[should_panic(expected = "filter testsrc2 isn't in Grape's FFmpeg build")]
+fn the_source_maker_refuses_what_the_build_lacks() {
+    let dir = TestDir::new("media-guard");
+    let out = dir.join("never.mkv");
+    // testsrc2 and FFV1 are in 6.1 and not in Grape's 9.0 build: without
+    // the guard this would pass on one and fail differently on the other.
+    ffmpeg(&[
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc2=size=16x16:duration=0.1",
+        "-c:v",
+        "ffv1",
+        out.to_str().unwrap(),
+    ]);
+}
+
 /// `ffprobe`'s view of `path` as flat key=value pairs (quotes removed).
 fn probe(path: &Path) -> HashMap<String, String> {
     let out = Command::new(tool("GRAPE_TEST_FFPROBE"))
