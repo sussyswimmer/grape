@@ -19,7 +19,7 @@
 //!   cue; in SRT, only one whose text before the arrow starts with a digit
 //!   is taken for a timing line, so an arrow in SRT text stays text. A block
 //!   without a timing line continues the previous cue's text, unless it is
-//!   only digits.
+//!   only digits and that cue already has text: then it is a stray index.
 //! - **Text** keeps italic, bold and underline from HTML-style, WebVTT and
 //!   ASS tags; other known tags are dropped with their text kept, `<rt>`
 //!   ruby text is put in parentheses, and unknown markup stays literal.
@@ -235,12 +235,16 @@ impl Reader {
             }
         }
         let Some(first) = find(block, ticker, is_timing)? else {
-            // A block of digits is a stray index; anything else is text the
-            // blank line cut off from its cue.
-            let digits = find(block, ticker, |line| !is_digits(line))?.is_none();
-            if !digits && self.continues {
-                if let Some(cue) = self.cues.last_mut() {
-                    push_lines(&mut cue.lines, block, self.webvtt, ticker)?;
+            // Text the blank line cut off from its cue, unless it is only
+            // digits and the cue already has text: then it is a stray index.
+            if !self.continues {
+                return Ok(());
+            }
+            if let Some(cue) = self.cues.last_mut() {
+                let stray_index = !cue.lines.is_empty()
+                    && find(block, ticker, |line| !is_digits(line))?.is_none();
+                if !stray_index {
+                    push_lines(&mut cue.lines, block, webvtt, ticker)?;
                 }
             }
             return Ok(());
@@ -1042,6 +1046,25 @@ mod tests {
         assert_eq!(
             plain(&parsed(srt)),
             [cue(1000, 2000, &["Hi"]), cue(3000, 4000, &["Bye"])]
+        );
+    }
+
+    #[test]
+    fn a_block_of_digits_is_the_text_of_a_cue_without_any() {
+        let srt =
+            "1\n00:00:01,000 --> 00:00:02,000\n\n1984\n\n2\n00:00:03,000 --> 00:00:04,000\nNext";
+        assert_eq!(
+            plain(&parsed(srt)),
+            [cue(1000, 2000, &["1984"]), cue(3000, 4000, &["Next"])]
+        );
+        // YouTube captions start a cue with a line of one space, which ends
+        // the block once trimmed.
+        let vtt = "WEBVTT\nKind: captions\nLanguage: en\n\n\
+                   00:00:00.199 --> 00:00:02.270 align:start position:0%\n \n2019\n\n\
+                   00:00:02.270 --> 00:00:02.280 align:start position:0%\n2019\n \n\n";
+        assert_eq!(
+            plain(&parsed(vtt)),
+            [cue(199, 2270, &["2019"]), cue(2270, 2280, &["2019"])]
         );
     }
 
