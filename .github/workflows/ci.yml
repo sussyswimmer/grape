@@ -72,6 +72,8 @@ jobs:
         run: pnpm -C apps/desktop/ui test
       - name: Build
         run: pnpm -C apps/desktop/ui build
+      - name: Sidecar gate tests (D25)
+        run: node --test scripts/check-sidecars.test.mjs
 
   # The macOS port (DECISIONS D18): lint and test on a Mac, like Windows.
   rust-macos:
@@ -319,3 +321,32 @@ jobs:
           lipo -info apps/desktop/src-tauri/binaries/*-universal-apple-darwin apps/desktop/src-tauri/binaries/*-universal-apple-darwin.dylib
           codesign -dv apps/desktop/src-tauri/binaries/macos/libpdfium.dylib
           cat apps/desktop/src-tauri/binaries/sidecars.stamp
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # The lock's FFmpeg builds are for dev testing only (D24). The bundling
+      # gate that tauri.sidecars.conf.json runs must refuse them for lacking
+      # the -grape marker.
+      - name: The bundling gate refuses the dev builds (D25)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows) triple=x86_64-pc-windows-msvc ;;
+            macOS) triple=universal-apple-darwin ;;
+          esac
+          set +e
+          out=$(node scripts/check-sidecars.mjs --target "$triple" 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -ne 1 ]; then
+            echo "::error::The gate should refuse the dev builds with exit code 1, but exited with $code."
+            exit 1
+          fi
+          case "$out" in
+            *"ffmpeg: this isn't Grape's own build"*"ffprobe: this isn't Grape's own build"*) ;;
+            *)
+              echo "::error::The gate didn't refuse the dev builds for lacking the -grape marker."
+              exit 1
+              ;;
+          esac
