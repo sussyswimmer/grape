@@ -5,6 +5,7 @@
     "Each is the newest release at least 14 days old on 2026-10-26 (D9).",
     "Checked byte for byte from this machine on 2026-10-26: ffmpeg (and its GPG signature, key FCF986EA15E6E293A5644F10B4322F04D67658D8), x264 (downloaded twice, same bytes), lame, libogg, libvorbis, dav1d (matches VideoLAN's .sha256 file) and zlib, each from the URL below.",
     "Not reachable from that machine: downloads.xiph.org (it redirects to ftp.osuosl.org, whose TLS failed through the proxy) and codeload.github.com (403). So the opus and libvpx bytes came from copies, and the hashes below are those copies' hashes, which other people's records of the official files confirm. See each one's _comment.",
+    "Rechecked on 2026-10-26 by a review: the seven reachable URLs gave the same bytes again. Opus's file is byte for byte the one on mirror.csclub.uwaterloo.ca/xiph/releases/opus/, a mirror of downloads.xiph.org whose SHA256SUMS.txt lists the same SHA-256. libvpx's is byte for byte what `git archive --format=tar --prefix=libvpx-1.17.0/ v1.17.0 | gzip -cn` makes from github.com/webmproject/libvpx at tag v1.17.0, so it can be recreated if GitHub's archive ever changes.",
     "libogg and libvorbis are the Xiph release files as Xiph also attached them to its GitHub releases. Those are the same bytes as on downloads.xiph.org: libogg's .tar.xz matches Debian's libogg_1.3.6.orig.tar.xz and its .tar.gz matches Alpine's SHA-512 for downloads.xiph.org's; libvorbis's matches Alpine's SHA-512 for downloads.xiph.org's .tar.xz."
   ],
   "format": 1,

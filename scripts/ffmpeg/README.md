@@ -59,18 +59,18 @@ The script needs nothing else, never uses `sudo`, and changes no settings. pkg-c
 
 ## What it builds
 
-The libraries, in order, each as a static library: zlib, libogg, libvorbis, Opus, LAME (no decoder, no frontend), x264 (8-bit, library only), libvpx (the VP9 encoder only), dav1d (library only). On Windows, libvpx is made to use Win32 threads instead of winpthreads (a `pthread.h` that doesn't compile, so its configure picks the path it uses with MSVC), and x264 and FFmpeg use Win32 threads by their own options. On macOS, libvorbis's `configure` loses `-force_cpusubtype_ALL`, an option of Apple's old linker; that's the only change the script makes to a source.
+The libraries, in order, each as a static library: zlib, libogg, libvorbis, Opus, LAME (no decoder, no frontend), x264 (8-bit, library only), libvpx (the VP9 encoder only), dav1d (library only). On Windows, libvpx is made to use Win32 threads instead of winpthreads (a `pthread.h` that doesn't compile, so its configure picks the path it uses with MSVC), x264's configure picks Win32 threads by itself on Windows, and FFmpeg gets `--enable-w32threads`. On macOS, libvorbis's `configure` loses `-force_cpusubtype_ALL`, an option of Apple's old linker; that's the only change the script makes to a source.
 
 Then FFmpeg with `--disable-everything` and only these turned back on:
 
 - **protocols:** `file` and `pipe`, and `--disable-network`, so the binary itself can't open a URL (golden rule 3);
 - **demuxers:** the ten Grape reads (`mov matroska avi asf mp3 flac ogg wav aiff gif`) and `image_png_pipe` for the GIF palette;
-- **muxers:** the fifteen Grape writes (`mp4 mov matroska webm avi asf gif mp3 ipod wav flac ogg opus aiff`) and `image2pipe`;
+- **muxers:** the fourteen Grape writes (`mp4 mov matroska webm avi asf gif mp3 ipod wav flac ogg opus aiff`; WMV and WMA share `asf`) and `image2pipe`;
 - **all decoders, parsers and bitstream filters**, because people drop every kind of file and copying a stream needs the bitstream filters; except the Opus, Vorbis and VPx decoders of the libraries, which FFmpeg's own decoders come before anyway;
 - **encoders:** exactly the sixteen in `the_sidecar_has_everything_grape_uses_and_is_redistributable`, and `h263`, which the `mpeg4` encoder is built on;
-- **filters:** the ones Grape passes (`scale fps palettegen paletteuse format aformat aresample null anull split`), the ones ffmpeg inserts by itself (`transpose hflip vflip rotate` turn rotated video upright, `crop` applies a container's crop, `trim atrim` cut, `premultiply_dynamic` converts alpha; FFmpeg's configure selects most of them for the ffmpeg program anyway), and `sine testsrc pan` with the `lavfi` input device for the engine tests, which make their sources with this ffmpeg. Grape's own argv can't reach `lavfi`: its `-format_whitelist` lists only file demuxers.
+- **filters:** the ones Grape passes (`scale fps palettegen paletteuse`), the ones ffmpeg inserts by itself (`format aformat aresample scale premultiply_dynamic` convert pixel, sample and alpha formats, `null anull` are the default graph, `transpose hflip vflip rotate` turn rotated video upright, `crop` applies a container's crop, `trim atrim` cut; FFmpeg's configure selects most of them for the ffmpeg program anyway), and `sine testsrc pan` with the `lavfi` input device for the engine tests, which make their sources with this ffmpeg. Grape's own argv can't reach `lavfi`: the only input format it names is `png_pipe` (the GIF palette), and the source's `-format_whitelist` lists only file demuxers.
 
-The script checks the result before writing anything to `dist/`: the generated component lists must match exactly, `CONFIG_NETWORK` must be 0, the license GPL without version3 or nonfree; on Linux and macOS `ffmpeg -version` must print the configure line from `config.h` and `ffmpeg -protocols` must list only `file` and `pipe`; on Windows every DLL the exe imports must be part of Windows.
+The script checks the result before writing anything to `dist/`; it runs the programs where FFmpeg built them and copies them only once every check has passed: the generated component lists must match exactly, `CONFIG_NETWORK` must be 0, the license GPL without version3 or nonfree; on Linux and macOS `ffmpeg -version` must print the configure line from `config.h` and `ffmpeg -protocols` must list only `file` and `pipe`; on Windows every DLL the exe imports must be part of Windows.
 
 ## Measured
 
@@ -78,8 +78,8 @@ On a shared 4-core container (2026-10-26, Ubuntu 24.04, GCC 13.3, mingw-w64 GCC 
 
 | Target | Whole run | FFmpeg alone | ffmpeg | ffprobe |
 |---|---|---|---|---|
-| `linux-x86_64` | 524 s | 305 s | 27,975,184 bytes | 27,762,128 bytes |
-| `windows-x86_64` | 615 s | 386 s | 28,008,960 bytes (`ffmpeg.exe`) | 27,811,328 bytes (`ffprobe.exe`) |
+| `linux-x86_64` | 524 s | 305 s | 27,975,184 bytes | 27,758,032 bytes |
+| `windows-x86_64` | 615 s | 386 s | 28,007,936 bytes (`ffmpeg.exe`) | 27,810,304 bytes (`ffprobe.exe`) |
 
 The Windows exes are PE32+ x86-64 and import only `KERNEL32.dll`, `SHELL32.dll`, `bcrypt.dll` and `msvcrt.dll`. They ran under wine 9.0 (`-version`, `-protocols`, MP4 to WebM, MP3 and GIF with Grape's own arguments), not yet on Windows itself. The source bundle is 34.9 MB.
 

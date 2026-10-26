@@ -605,7 +605,7 @@ protocols="file,pipe"
 demuxers="mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif,image_png_pipe"
 muxers="mp4,mov,matroska,webm,avi,asf,gif,mp3,ipod,wav,flac,ogg,opus,aiff,image2pipe"
 encoders="libx264,aac,libvpx_vp9,libopus,mpeg4,libmp3lame,wmv2,wmav2,gif,png,pcm_s16le,pcm_s24le,pcm_s16be,pcm_s24be,flac,libvorbis"
-filters="scale,fps,palettegen,paletteuse,split,format,aformat,aresample,null,anull,transpose,hflip,vflip,rotate,crop,trim,atrim,premultiply_dynamic,sine,testsrc,pan"
+filters="scale,fps,palettegen,paletteuse,format,aformat,aresample,null,anull,transpose,hflip,vflip,rotate,crop,trim,atrim,premultiply_dynamic,sine,testsrc,pan"
 # FFmpeg's own decoders come first anyway; these copies are never picked.
 library_decoders="libopus,libvorbis,libvpx_vp8,libvpx_vp9"
 
@@ -733,17 +733,18 @@ extra=$(comm -13 <(printf '%s\n' "$want_filters") <(printf '%s\n' "$filter_names
 echo "  protocols: file, pipe. Demuxers, muxers, encoders and filters: exactly Grape's."
 echo "  $decoder_count decoders, $parser_count parsers, $bsf_count bitstream filters, input device lavfi."
 
+# The programs are checked where FFmpeg built them, and only programs that
+# pass are copied to dist/. An older run's are removed first, so a check
+# that fails leaves no programs in dist/<target>/.
 out="$dist_root/$target"
 mkdir -p "$out"
 rm -f "$out/ffmpeg$exe" "$out/ffprobe$exe" "$out/BUILDINFO.txt"
-cp "$ffdir/ffmpeg$exe" "$ffdir/ffprobe$exe" "$out/"
-chmod 755 "$out/ffmpeg$exe" "$out/ffprobe$exe"
 
 case "$target" in
   windows-x86_64)
     # Every DLL the exe imports must ship with Windows.
     for prog in ffmpeg ffprobe; do
-      dlls=$("$cross-objdump" -p "$out/$prog.exe" | sed -n 's/^[[:space:]]*DLL Name: //p' | sort -u)
+      dlls=$("$cross-objdump" -p "$ffdir/$prog.exe" | sed -n 's/^[[:space:]]*DLL Name: //p' | sort -u)
       [ -n "$dlls" ] || fail "$prog.exe imports no DLLs at all, which can't be right."
       while IFS= read -r dll; do
         lower=$(printf '%s' "$dll" | tr '[:upper:]' '[:lower:]')
@@ -758,7 +759,7 @@ case "$target" in
     ;;
   *)
     # Run what was built.
-    version=$("$out/ffmpeg" -hide_banner -version)
+    version=$("$ffdir/ffmpeg" -hide_banner -version)
     first=$(printf '%s\n' "$version" | sed -n 1p)
     case "$first" in
       "ffmpeg version $(source_field ffmpeg 2)-grape "*) ;;
@@ -766,13 +767,15 @@ case "$target" in
     esac
     [ "$(printf '%s\n' "$version" | sed -n 's/^configuration: //p')" = "$configuration" ] ||
       fail "ffmpeg -version prints another configure line than config.h has."
-    listed=$("$out/ffmpeg" -hide_banner -protocols | sed -n '/^Input:/,$p' | grep -v ':$' | sort -u | tr -d ' ' | tr '\n' ' ')
+    listed=$("$ffdir/ffmpeg" -hide_banner -protocols | sed -n '/^Input:/,$p' | grep -v ':$' | sort -u | tr -d ' ' | tr '\n' ' ')
     [ "$listed" = "file pipe " ] || fail "ffmpeg -protocols lists: $listed"
-    "$out/ffprobe" -hide_banner -version >/dev/null || fail "ffprobe doesn't run."
+    "$ffdir/ffprobe" -hide_banner -version >/dev/null || fail "ffprobe doesn't run."
     echo "  $first"
     echo "  ffmpeg -protocols (input and output): $listed"
     ;;
 esac
+cp "$ffdir/ffmpeg$exe" "$ffdir/ffprobe$exe" "$out/"
+chmod 755 "$out/ffmpeg$exe" "$out/ffprobe$exe"
 step_done
 
 # --- BUILDINFO.txt ---------------------------------------------------------
