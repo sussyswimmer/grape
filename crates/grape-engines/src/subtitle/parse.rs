@@ -42,9 +42,10 @@ use super::{Cancelled, Ticker};
 /// lines, spans and text a parsed document holds.
 pub(crate) const MAX_LINES: usize = 1_000_000;
 
-/// The longest line a subtitle text may have, in bytes of UTF-8. Real
-/// subtitle lines are under a few hundred bytes; this bounds the work
-/// and memory one line takes.
+/// The longest line a subtitle text may have, in bytes of UTF-8: it is
+/// measured on the decoded text, so a Windows-1252 or UTF-16 line can be
+/// shorter in the file. Real subtitle lines are under a few hundred bytes;
+/// this bounds the work and memory one line takes.
 pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// What separates the two timestamps of a timing line.

@@ -294,6 +294,12 @@ fn a_file_with_a_line_over_64_kib_is_refused_before_anything_is_written() {
     assert!(String::from_utf8(out)
         .unwrap()
         .ends_with(&format!("\n{amps}\n")));
+    // Measured once read as UTF-8: 32 KiB and one byte of Windows-1252 "é"
+    // are over 64 KiB as UTF-8.
+    let mut ansi = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+    ansi.resize(ansi.len() + 32 * 1024 + 1, 0xE9);
+    let err = fail(&dir, "ansi.srt", &ansi, Format::Vtt);
+    assert_eq!(err.user_message, "ansi.srt is too large to convert.");
 }
 
 #[test]
