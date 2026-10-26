@@ -339,6 +339,36 @@ fn a_cancelled_job_writes_nothing() {
 }
 
 #[test]
+fn a_job_cancelled_while_writing_reports_it_and_leaves_nothing() {
+    for (name, bytes, to) in [
+        ("subs.srt", SRT, Format::Vtt),
+        ("subs.srt", SRT, Format::Txt),
+        ("talk.vtt", VTT, Format::Srt),
+    ] {
+        let dir = TestDir::new("cancel-writing");
+        let (src, job) = plan_one(&dir, name, bytes.as_bytes(), Operation::convert(to));
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+        let ctx = EngineCtx::default();
+        let token = ctx.cancel.clone();
+        // progress(0.5) comes once the text is parsed, just before the
+        // temp file is created and written.
+        let mut seen = Vec::new();
+        let err = run_job(&job, &ctx, &mut |f| {
+            seen.push(f);
+            if f == 0.5 {
+                token.cancel();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(seen, [0.5], "{to:?}");
+        assert_eq!(err.kind, ErrorKind::Cancelled, "{to:?}: {err:?}");
+        assert_eq!(dir.names(), names_before, "{to:?}");
+        before.assert_unchanged();
+    }
+}
+
+#[test]
 fn a_missing_source_is_a_read_error() {
     let dir = TestDir::new("missing");
     let (src, job) = plan_one(

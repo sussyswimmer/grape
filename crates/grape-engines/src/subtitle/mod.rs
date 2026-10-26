@@ -301,6 +301,26 @@ mod tests {
     }
 
     #[test]
+    fn writing_fails_once_the_job_is_cancelled_and_the_temp_file_goes() {
+        let dir = Dir::new();
+        let src = dir.0.join("subs.srt");
+        let names = Names::new(&src, &dir.0.join("subs.vtt"), Format::Srt, Format::Vtt);
+        let doc = parse::parse("1\n00:00:01,000 --> 00:00:02,000\nHi\n", &mut || false).unwrap();
+        let cancel = CancelToken::new();
+        cancel.cancel();
+        for to in [Format::Vtt, Format::Srt, Format::Txt] {
+            let (temp, file) = TempFile::create(&dir.0, to.output_ext()).unwrap();
+            let err = write_output(file, &doc, to, Encoding::Utf8, temp.path(), &names, &cancel)
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::WriteFailed, "{to:?}");
+            let err = publish::or_cancelled(&cancel, &src, err);
+            assert_eq!(err.kind, ErrorKind::Cancelled, "{to:?}");
+            drop(temp);
+            assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0, "{to:?}");
+        }
+    }
+
+    #[test]
     fn a_text_parse_refused_is_a_cancel_once_the_job_is_cancelled() {
         let src = Path::new("shows/subs.srt");
         let names = Names::new(src, Path::new("shows/subs.vtt"), Format::Srt, Format::Vtt);
