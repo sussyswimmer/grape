@@ -179,6 +179,27 @@ fn the_content_decides_between_srt_and_webvtt() {
 }
 
 #[test]
+fn webvtt_named_references_are_decoded_once() {
+    let dir = TestDir::new("references");
+    let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\
+               He said &quot;hi&quot; &hellip; caf&eacute; &Eacute;t&eacute; &amp; more\n";
+    let (out, _) = convert(&dir, "a.vtt", vtt.as_bytes(), Format::Srt);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.ends_with("\nHe said \"hi\" … café Été & more\n"),
+        "{out}"
+    );
+    // A WebVTT file named .srt, to WebVTT: decoded, then only &, < and >
+    // escaped again.
+    let (out, _) = convert(&dir, "b.srt", vtt.as_bytes(), Format::Vtt);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.ends_with("\nHe said \"hi\" … café Été &amp; more\n"),
+        "{out}"
+    );
+}
+
+#[test]
 fn a_file_without_cues_is_not_readable_subtitles() {
     let dir = TestDir::new("no-cues");
     for (name, bytes) in [

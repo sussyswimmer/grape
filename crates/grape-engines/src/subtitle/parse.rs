@@ -23,11 +23,13 @@
 //! - **Text** keeps italic, bold and underline from HTML-style, WebVTT and
 //!   ASS tags; other known tags are dropped with their text kept, `<rt>`
 //!   ruby text is put in parentheses, and unknown markup stays literal.
-//!   Character references are decoded in WebVTT only: SRT text is raw.
+//!   Character references are decoded in WebVTT only (see [`cue_lines`]);
+//!   SRT text is raw.
 //! - **Normalization:** cues are sorted by start, a cue that doesn't end
 //!   after it starts lasts 1 ms, and lines without visible text (and cues
 //!   left without lines) are dropped.
 
+use super::entities;
 use super::{Cancelled, Ticker};
 
 /// The most lines a subtitle text may have. Real files have tens of
@@ -307,10 +309,11 @@ fn push_lines(
 ) -> Result<(), Cancelled> {
     for line in text {
         ticker.tick()?;
-        let mut line = spans(line, webvtt);
-        if has_text(&line) {
-            line.shrink_to_fit();
-            lines.push(line);
+        for mut line in cue_lines(line, webvtt) {
+            if has_text(&line) {
+                line.shrink_to_fit();
+                lines.push(line);
+            }
         }
     }
     Ok(())
@@ -438,8 +441,9 @@ fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseE
     }
 }
 
-/// One line of cue text as spans. Only these are markup (names in any
-/// case); everything else is literal text:
+/// The cue lines one line of text reads as, in spans: one, or more where a
+/// WebVTT `&#10;` or `&#13;` breaks it. Only these are markup (tag names
+/// in any case); everything else is literal text:
 /// - `<i>`, `<b>`, `<u>` (also with WebVTT classes, `<i.loud>`) and their
 ///   end tags, and ASS `{\i1}`/`{\i0}` and the same for `b` and `u`, open
 ///   and close styles. Other ASS overrides (`{\an8}`, `{\pos(10,20)}`) are
@@ -449,9 +453,11 @@ fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseE
 ///   text kept. `<rt>` and `</rt>` become "(" and ")", so ruby text reads
 ///   "漢(かん)"; an `<rt>` still open at `</ruby>` or at the end of the line
 ///   gets its ")".
-/// - In WebVTT only: `&amp;`, `&lt;`, `&gt;`, `&nbsp;`, `&lrm;`, `&rlm;`
-///   and numeric references.
-fn spans(line: &str, webvtt: bool) -> Vec<Span> {
+/// - In WebVTT only, character references: by name from [`entities`]
+///   (case-sensitive, so `&Eacute;` is É and `&EACUTE;` stays text), or by
+///   number (`&#233;`, `&#xE9;`). `&#10;` and `&#13;` break the line, as a
+///   line of cue text can't hold one; `&#0;` stays text.
+fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
     let mut out = Spans::default();
     let mut rest = line;
     loop {
@@ -471,8 +477,11 @@ fn spans(line: &str, webvtt: bool) -> Vec<Span> {
         } else if rest.starts_with('{') {
             overrides(rest, &mut out)
         } else {
-            entity(rest).map(|(len, c)| {
-                out.text(c.encode_utf8(&mut [0; 4]));
+            reference(rest).map(|(len, reference)| {
+                match reference {
+                    Reference::Char(c) => out.text(c.encode_utf8(&mut [0; 4])),
+                    Reference::LineBreak => out.line_break(),
+                }
                 len
             })
         };
@@ -483,21 +492,31 @@ fn spans(line: &str, webvtt: bool) -> Vec<Span> {
         });
         rest = &rest[len..];
     }
-    if out.ruby_text {
-        out.text(")");
-    }
-    out.spans
+    out.line_break();
+    out.lines
 }
 
-/// The spans of one line as they are built.
+/// The spans of one line of text as they are built.
 #[derive(Default)]
 struct Spans {
+    /// The cue lines already ended by a line break.
+    lines: Vec<Vec<Span>>,
+    /// The cue line being built.
     spans: Vec<Span>,
     /// Inside `<rt>`, whose ")" is still to come.
     ruby_text: bool,
 }
 
 impl Spans {
+    /// Ends the cue line being built, closing an `<rt>` still open.
+    fn line_break(&mut self) {
+        if self.ruby_text {
+            self.text(")");
+            self.ruby_text = false;
+        }
+        self.lines.push(std::mem::take(&mut self.spans));
+    }
+
     /// Appends text, merged into the text before it.
     fn text(&mut self, text: &str) {
         if text.is_empty() {
@@ -612,9 +631,17 @@ fn overrides(rest: &str, out: &mut Spans) -> Option<usize> {
     Some(end + 3)
 }
 
+/// What a character reference stands for.
+#[derive(Debug, PartialEq, Eq)]
+enum Reference {
+    Char(char),
+    /// `&#10;` or `&#13;`.
+    LineBreak,
+}
+
 /// The WebVTT character reference at the start of `rest`: its length and
-/// the character, or `None` if it isn't one Grape decodes.
-fn entity(rest: &str) -> Option<(usize, char)> {
+/// what it stands for, or `None` if it isn't one Grape decodes.
+fn reference(rest: &str) -> Option<(usize, Reference)> {
     let body = &rest[1..];
     let len = body
         .find(|c: char| !(c.is_ascii_alphanumeric() || c == '#'))
@@ -622,28 +649,27 @@ fn entity(rest: &str) -> Option<(usize, char)> {
     if !body[len..].starts_with(';') {
         return None;
     }
-    let c = match body[..len].to_ascii_lowercase().as_str() {
-        "amp" => '&',
-        "lt" => '<',
-        "gt" => '>',
-        "nbsp" => '\u{A0}',
-        "lrm" => '\u{200E}',
-        "rlm" => '\u{200F}',
-        name => numeric(name)?,
+    let name = &body[..len];
+    let reference = match entities::named(name) {
+        Some(c) => Reference::Char(c),
+        None => numeric(name)?,
     };
-    Some((len + 2, c))
+    Some((len + 2, reference))
 }
 
-/// The character a numeric reference (`#65` or `#x41`, lowercased) names.
-/// `None` for a number that isn't a Unicode scalar value, and for NUL and
-/// line breaks, which a line of cue text can't hold.
-fn numeric(name: &str) -> Option<char> {
+/// What a numeric reference (`#65`, `#x41` or `#X41`) stands for. `None`
+/// for a number that isn't a Unicode scalar value, and for NUL.
+fn numeric(name: &str) -> Option<Reference> {
     let digits = name.strip_prefix('#')?;
-    let code = match digits.strip_prefix('x') {
+    let code = match digits.strip_prefix(['x', 'X']) {
         Some(hex) => in_radix(hex, 16),
         None => in_radix(digits, 10),
     }?;
-    char::from_u32(code).filter(|c| !matches!(c, '\0' | '\n' | '\r'))
+    match char::from_u32(code)? {
+        '\0' => None,
+        '\n' | '\r' => Some(Reference::LineBreak),
+        c => Some(Reference::Char(c)),
+    }
 }
 
 /// One or more digits in `radix` as a number; `None` otherwise or on
@@ -679,6 +705,13 @@ mod tests {
 
     fn text(s: &str) -> Span {
         Span::Text(s.to_owned())
+    }
+
+    /// The spans of a line of text that reads as one cue line.
+    fn spans(line: &str, webvtt: bool) -> Vec<Span> {
+        let mut lines = cue_lines(line, webvtt);
+        assert_eq!(lines.len(), 1, "{line}");
+        lines.remove(0)
     }
 
     /// Each cue as (start, end, its lines' text with tags left out).
@@ -1195,13 +1228,57 @@ mod tests {
             ),
             [text("& <b> a\u{A0}b \u{200E}\u{200F} ABC😀 & &lt;")]
         );
+        assert_eq!(
+            spans(
+                "He said &quot;hi&quot; &apos;ok&apos; &hellip; caf&eacute; &Eacute;t&eacute; \
+                 &copy; &euro; &mdash; &alpha;&Omega; &LT;&GT;&QUOT;",
+                true
+            ),
+            [text("He said \"hi\" 'ok' … café Été © € — αΩ <>\"")]
+        );
+    }
+
+    #[test]
+    fn the_named_references_are_the_html4_set_sorted_for_lookup() {
+        assert_eq!(entities::NAMED.len(), 252 + 5);
+        assert!(entities::NAMED.windows(2).all(|w| w[0].0 < w[1].0));
+        for (name, c) in entities::NAMED {
+            assert_eq!(entities::named(name), Some(c), "{name}");
+        }
+        assert_eq!(entities::named("Eacute"), Some('É'));
+        assert_eq!(entities::named("eacute"), Some('é'));
+        for name in ["EACUTE", "Amp", "Quot", "apos;", "", "bogus"] {
+            assert_eq!(entities::named(name), None, "{name}");
+        }
     }
 
     #[test]
     fn invalid_or_unknown_references_stay_literal() {
-        let literal =
-            "&#xD800; &#1114112; &#99999999999; &#; &#x; &#xZZ; &#0; &#10; &#xD; &bogus; &amp &;";
+        let literal = "&#xD800; &#1114112; &#99999999999; &#; &#x; &#xZZ; &#0; &#x0; \
+                       &bogus; &Amp; &EACUTE; &Quot; &amp &copy &;";
         assert_eq!(spans(literal, true), [text(literal)]);
+    }
+
+    #[test]
+    fn a_numeric_line_break_breaks_the_line() {
+        assert_eq!(
+            cue_lines("a&#10;b&#13;c&#xA;d&#XD;e", true),
+            [["a"], ["b"], ["c"], ["d"], ["e"]].map(|[t]| vec![text(t)])
+        );
+        // Styles carry on to the next line; an open <rt> is closed.
+        assert_eq!(
+            cue_lines("<i>a&#10;b</i> <ruby>漢<rt>か&#10;ん</rt></ruby>", true),
+            [
+                vec![Span::Open(Style::Italic), text("a")],
+                vec![text("b"), Span::Close(Style::Italic), text(" 漢(か)")],
+                vec![text("ん")],
+            ]
+        );
+        // The lines without text that a break leaves are dropped.
+        let vtt = "WEBVTT\n\n00:01.000 --> 00:02.000\nOne&#13;&#10;Two&#10;\n";
+        assert_eq!(plain(&parsed(vtt)), [cue(1000, 2000, &["One", "Two"])]);
+        // SRT text is raw.
+        assert_eq!(spans("One&#10;Two", false), [text("One&#10;Two")]);
     }
 
     #[test]

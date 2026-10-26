@@ -21,6 +21,7 @@
 //! file's writer also fails once the job is cancelled.
 
 pub(crate) mod decode;
+mod entities;
 pub(crate) mod parse;
 pub(crate) mod write;
 
