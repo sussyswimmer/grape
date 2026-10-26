@@ -119,7 +119,7 @@ Archives, M3/M4 (D27, D35; use scratch copies of files)
 
 PDF, M3/M4 (D29, D35; use scratch copies of files)
 - [ ] win: Shift-drop a one-page PDF on PNG → `doc.png`. A 3-page one on JPG → a `doc` folder with `doc 1.jpg` … `doc 3.jpg`, at 2550×3300 for Letter. During a long render Task Manager shows a second `Grape.exe` (the worker), and it's gone afterwards. `Get-FileHash` of each PDF is the same before and after.
-- [ ] win: PDF → TXT and → MD open in Notepad with the text. A scanned PDF → "… has no text to extract — it may be a scan."; a password-protected PDF → "… is password-protected."
+- [ ] win: PDF → TXT and → MD open in Notepad with the text. A scanned PDF → "… has no text to extract — it may be a scan.", in full on two lines with nothing cut off; a password-protected PDF → "… is password-protected."
 - [ ] win: an A0 poster PDF (or any page over 100 MP at 300 DPI) → PNG → "1 page drawn below 300 DPI", and the image opens.
 - [ ] win: Ctrl-drop a PDF on SPLIT → `doc Pages` with `doc 1.pdf` …, each opening in Edge.
 - [ ] win: Ctrl-drop three PDFs on MERGE PDF, **without** `GRAPE_PREVIEW_PANELS` → the panel opens. Reorder, Run → "Making … Merged.pdf…" then "Done / {first} Merged.pdf". The pages in Edge follow the panel's order, and the file is next to the new first file.
@@ -128,7 +128,7 @@ PDF, M3/M4 (D29, D35; use scratch copies of files)
 - [ ] win: rename `pdfium.dll` in `%LOCALAPPDATA%\Grape` and restart Grape → a PDF drop says "Grape's PDF library is missing / Reinstalling Grape brings it back."; Merge opens no panel; the log's `sidecars:` line says `none found (looked for ffmpeg, ffprobe, heif-enc, bsdtar, pdfium)`. Rename it back.
 - [ ] win: Quit from the tray during a long PDF render → nothing with the final name and no `.grape-tmp-…` left; no worker `Grape.exe` left in Task Manager.
 - [ ] mac (DMG): Shift-drop a 3-page PDF on PNG → a `doc` folder with `doc 1.png` … `doc 3.png` that open in Preview. This is the first time `libpdfium.dylib` loads from `Grape.app/Contents/Frameworks` and the worker runs on a Mac (D29's open item). If the toast says "Grape's PDF library is missing", copy the log's `sidecars:` line; if the job fails, copy the toast and the `jobs:` lines.
-- [ ] mac (DMG): PDF → TXT and → MD open in TextEdit with the text. Command-drop a PDF on SPLIT → `doc Pages`. Command-drop three PDFs on MERGE PDF → the panel opens without `GRAPE_PREVIEW_PANELS`; reorder, Run → `{first} Merged.pdf` with the pages in that order in Preview.
+- [ ] mac (DMG): PDF → TXT and → MD open in TextEdit with the text. A scanned PDF → "… has no text to extract — it may be a scan.", in full on two lines. Command-drop a PDF on SPLIT → `doc Pages`. Command-drop three PDFs on MERGE PDF → the panel opens without `GRAPE_PREVIEW_PANELS`; reorder, Run → `{first} Merged.pdf` with the pages in that order in Preview.
 - [ ] mac (DMG): a PDF with an author on METADATA → "Removed author…" / `doc No Metadata.pdf`; Preview → Tools → Show Inspector shows no author.
 - [ ] mac (DMG): Quit from the menu bar during a long PDF render → no second `Grape` process left in Activity Monitor, nothing with the final name and no `.grape-tmp-…` left.
 

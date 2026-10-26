@@ -81,6 +81,7 @@ These are Grape's values, in points/DIPs at 1× scale. The site's values were �
 - **[observed]** While a conversion runs, a placeholder shows "Making {name}…". When it finishes, a confirmation appears.
 - **[Grape]** In the real OS, show this as a small toast near the anchor plus the OS's own file appearance. The demo's ≈ 680 ms is fake latency; real jobs report progress.
 - **[Grape]** When a job left something out or removed metadata, the done toast's title says so ("2 links left out", "1 page drawn below 300 DPI", "Removed author and title", "No document metadata found") and the detail still names the output. A fallback that every output took, or a failure, takes the title instead; when only some outputs fell back, the detail says how many and the notes keep the title. Several outputs are "files", "folders" (Extract, Split) or "items" (mixed, or PDF → images, which may be either), and a PDF → images job is "Making doc…" while it runs, since one page gives `doc.jpg` and more a `doc` folder.
+- **[Grape]** An error's words take up to two lines in the toast, so a reason such as "— it may be a scan." isn't cut off.
 - **[Grape]** A drop this build can't run says "Not in this build yet" with "{FROM} to {TO} is coming." or "{Tool} on {FROM} is coming.". When a helper Grape ships is missing and is the only reason, it says "Grape's PDF library is missing" / "Reinstalling Grape brings it back." (D35).
 
 ## 7. Multiple files

@@ -115,6 +115,26 @@ body {
   line-height: 1.3;
 }
 
+/*
+ * An error's words can be long ("scan.pdf has no text to extract — it may
+ * be a scan."), and one line would cut off the reason. So an error's
+ * title, when it has no detail, and an error's detail (under "1 of 3
+ * done") take up to two lines each: three lines at most, which fit the pill.
+ */
+.toast[data-tone="error"] .toast-title:only-child,
+.toast[data-tone="error"] .toast-detail {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Under a title, a little tighter, so the three lines clear the pill's edge. */
+.toast[data-tone="error"] .toast-detail {
+  line-height: 1.2;
+}
+
 .toast-progress {
   position: absolute;
   left: 20px;
