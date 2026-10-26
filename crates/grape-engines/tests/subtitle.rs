@@ -144,6 +144,23 @@ fn an_srt_gets_a_bom_unless_its_source_was_plain_utf8() {
 }
 
 #[test]
+fn an_srt_from_a_utf16_or_windows_1252_source_gets_a_bom() {
+    let dir = TestDir::new("bom-encodings");
+    let text = "WEBVTT\r\n\r\n00:01.000 --> 00:02.000\r\nCaf\u{e9}\r\n";
+    let mut le = vec![0xFF, 0xFE];
+    le.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut be = vec![0xFE, 0xFF];
+    be.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+    let ansi = b"WEBVTT\r\n\r\n00:01.000 --> 00:02.000\r\nCaf\xE9\r\n".to_vec();
+    for (name, bytes) in [("le.vtt", le), ("be.vtt", be), ("ansi.vtt", ansi)] {
+        let (out, _) = convert(&dir, name, &bytes, Format::Srt);
+        assert!(out.starts_with(b"\xEF\xBB\xBF1\r\n"), "{name}: {out:?}");
+        let text = String::from_utf8(out[3..].to_vec()).unwrap();
+        assert!(text.contains("Caf\u{e9}\r\n"), "{name}: {text}");
+    }
+}
+
+#[test]
 fn utf16_and_windows_1252_sources_come_out_as_utf8() {
     let dir = TestDir::new("encodings");
     let text = "1\r\n00:00:01,000 --> 00:00:02,000\r\nCaf\u{e9} \u{2014} na\u{ef}ve\r\n";
@@ -179,6 +196,27 @@ fn the_content_decides_between_srt_and_webvtt() {
 }
 
 #[test]
+fn webvtt_named_references_are_decoded_once() {
+    let dir = TestDir::new("references");
+    let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\n\
+               He said &quot;hi&quot; &hellip; caf&eacute; &Eacute;t&eacute; &amp; more &copy\n";
+    let (out, _) = convert(&dir, "a.vtt", vtt.as_bytes(), Format::Srt);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.ends_with("\nHe said \"hi\" … café Été & more ©\n"),
+        "{out}"
+    );
+    // A WebVTT file named .srt, to WebVTT: decoded, then only &, < and >
+    // escaped again.
+    let (out, _) = convert(&dir, "b.srt", vtt.as_bytes(), Format::Vtt);
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.ends_with("\nHe said \"hi\" … café Été &amp; more ©\n"),
+        "{out}"
+    );
+}
+
+#[test]
 fn a_file_without_cues_is_not_readable_subtitles() {
     let dir = TestDir::new("no-cues");
     for (name, bytes) in [
@@ -207,7 +245,7 @@ fn a_subtitle_file_over_the_size_limit_is_refused_before_reading() {
     );
     // Sparse where the file system allows it, so the test stays fast.
     let file = fs::OpenOptions::new().write(true).open(&src).unwrap();
-    file.set_len(64 * 1024 * 1024 + 1).unwrap();
+    file.set_len(16 * 1024 * 1024 + 1).unwrap();
     drop(file);
     let before = SourceState::of(&src);
     let names_before = dir.names();
@@ -223,11 +261,45 @@ fn a_subtitle_file_over_the_size_limit_is_refused_before_reading() {
 #[test]
 fn a_file_at_the_size_limit_is_read() {
     let dir = TestDir::new("at-limit");
-    // Two cues, then a blank line of spaces up to exactly 64 MiB.
+    // Two cues, then lines of spaces, 1 KiB each, up to exactly 16 MiB.
     let mut bytes = SRT.as_bytes().to_vec();
-    bytes.resize(64 * 1024 * 1024, b' ');
+    let fill = (bytes.len()..16 * 1024 * 1024).map(|i| if i % 1024 == 0 { b'\n' } else { b' ' });
+    bytes.extend(fill.collect::<Vec<u8>>());
+    assert_eq!(bytes.len(), 16 * 1024 * 1024);
     let (out, _) = convert(&dir, "big.srt", &bytes, Format::Txt);
     assert!(String::from_utf8(out).unwrap().starts_with("Hello there"));
+}
+
+#[test]
+fn a_file_over_the_line_limit_is_refused_before_anything_is_written() {
+    let dir = TestDir::new("too-many-lines");
+    let bytes = vec![b'\n'; 1_000_001];
+    let err = fail(&dir, "lines.srt", &bytes, Format::Vtt);
+    assert_eq!(err.kind, ErrorKind::DecodeFailed);
+    assert_eq!(err.user_message, "lines.srt is too large to convert.");
+}
+
+#[test]
+fn a_file_with_a_line_over_64_kib_is_refused_before_anything_is_written() {
+    let dir = TestDir::new("long-line");
+    let mut bytes = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+    bytes.resize(bytes.len() + 64 * 1024 + 1, b'&');
+    let err = fail(&dir, "long.srt", &bytes, Format::Vtt);
+    assert_eq!(err.kind, ErrorKind::DecodeFailed);
+    assert_eq!(err.user_message, "long.srt is too large to convert.");
+    // A line of exactly 64 KiB converts.
+    bytes.pop();
+    let (out, _) = convert(&dir, "longest.srt", &bytes, Format::Vtt);
+    let amps = "&amp;".repeat(64 * 1024);
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .ends_with(&format!("\n{amps}\n")));
+    // Measured once read as UTF-8: 32 KiB and one byte of Windows-1252 "é"
+    // are over 64 KiB as UTF-8.
+    let mut ansi = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+    ansi.resize(ansi.len() + 32 * 1024 + 1, 0xE9);
+    let err = fail(&dir, "ansi.srt", &ansi, Format::Vtt);
+    assert_eq!(err.user_message, "ansi.srt is too large to convert.");
 }
 
 #[test]
@@ -289,6 +361,73 @@ fn a_cancelled_job_writes_nothing() {
     assert_eq!(err.kind, ErrorKind::Cancelled);
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
+}
+
+#[test]
+fn a_job_cancelled_while_writing_reports_it_and_leaves_nothing() {
+    for (name, bytes, to) in [
+        ("subs.srt", SRT, Format::Vtt),
+        ("subs.srt", SRT, Format::Txt),
+        ("talk.vtt", VTT, Format::Srt),
+    ] {
+        let dir = TestDir::new("cancel-writing");
+        let (src, job) = plan_one(&dir, name, bytes.as_bytes(), Operation::convert(to));
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+        let ctx = EngineCtx::default();
+        let token = ctx.cancel.clone();
+        // progress(0.5) comes once the text is parsed, just before the
+        // temp file is created and written.
+        let mut seen = Vec::new();
+        let err = run_job(&job, &ctx, &mut |f| {
+            seen.push(f);
+            if f == 0.5 {
+                token.cancel();
+            }
+        })
+        .unwrap_err();
+        assert_eq!(seen, [0.5], "{to:?}");
+        assert_eq!(err.kind, ErrorKind::Cancelled, "{to:?}: {err:?}");
+        assert_eq!(dir.names(), names_before, "{to:?}");
+        before.assert_unchanged();
+    }
+}
+
+#[test]
+fn a_read_only_source_converts_and_stays_untouched() {
+    let dir = TestDir::new("read-only-source");
+    let (src, job) = plan_one(
+        &dir,
+        "movie.srt",
+        SRT.as_bytes(),
+        Operation::convert(Format::Vtt),
+    );
+    let writable = fs::metadata(&src).unwrap().permissions();
+    let mut read_only = writable.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&src, read_only).unwrap();
+    // Restore write access before `TestDir` deletes the tree.
+    struct Unlock(std::path::PathBuf, fs::Permissions);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = fs::set_permissions(&self.0, self.1.clone());
+        }
+    }
+    let _unlock = Unlock(src.clone(), writable);
+    // Root (and CAP_DAC_OVERRIDE) ignores permission bits: check first.
+    if fs::OpenOptions::new().append(true).open(&src).is_ok() {
+        println!(
+            "note: skipped, this user can open a read-only file for writing (running as root?)"
+        );
+        return;
+    }
+    let before = SourceState::of(&src);
+
+    let outcome = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
+
+    assert_eq!(outcome.outputs, [dir.join("movie.vtt")]);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
 }
 
 #[test]

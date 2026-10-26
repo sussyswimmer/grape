@@ -9,8 +9,10 @@
 //!   decoding never fails.
 //! - Every U+0000 is removed, so a UTF-16 file that lost its BOM still
 //!   reads as text when it is mostly ASCII.
+//! - Input is decoded at most [`CHECK_BYTES`] at a time, UTF-8 cut only
+//!   where a character starts, with a cancel check before each piece.
 
-use crate::CancelToken;
+use super::Cancelled;
 
 /// The most input decoded between cancel checks.
 const CHECK_BYTES: usize = 1024 * 1024;
@@ -18,7 +20,8 @@ const CHECK_BYTES: usize = 1024 * 1024;
 /// What Windows-1252 bytes 0x80 to 0x9F decode to, from the WHATWG
 /// encoding standard's table. The five bytes the code page leaves
 /// undefined decode to the C1 control of the same value, as browsers do.
-const CP1252_80_9F: [char; 32] = [
+/// HTML reads the numeric references `&#128;` to `&#159;` the same way.
+pub(super) const CP1252_80_9F: [char; 32] = [
     '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8D}', 'Ž', '\u{8F}',
     '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9D}', 'ž', 'Ÿ',
 ];
@@ -52,67 +55,136 @@ impl Encoding {
 }
 
 /// Decodes `bytes` as the module docs describe and says which encoding it
-/// used. `None` only when `cancel` is set: it is checked before decoding
-/// and at least every [`CHECK_BYTES`] of input after that.
-pub(crate) fn decode(bytes: &[u8], cancel: &CancelToken) -> Option<(String, Encoding)> {
-    if cancel.is_cancelled() {
-        return None;
-    }
-    let (mut text, encoding) = if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
-        (
-            String::from_utf8_lossy(rest).into_owned(),
-            Encoding::Utf8Bom,
-        )
+/// used. `None` only when `is_cancelled` says so: it is asked before
+/// decoding and at least every [`CHECK_BYTES`] of input after that.
+pub(crate) fn decode(
+    bytes: &[u8],
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Option<(String, Encoding)> {
+    let decoded = if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        utf8_lossy(rest, is_cancelled).map(|text| (text, Encoding::Utf8Bom))
     } else if let Some(rest) = bytes.strip_prefix(&[0xFF, 0xFE]) {
-        (utf16(rest, u16::from_le_bytes, cancel)?, Encoding::Utf16Le)
+        utf16(rest, u16::from_le_bytes, is_cancelled).map(|text| (text, Encoding::Utf16Le))
     } else if let Some(rest) = bytes.strip_prefix(&[0xFE, 0xFF]) {
-        (utf16(rest, u16::from_be_bytes, cancel)?, Encoding::Utf16Be)
+        utf16(rest, u16::from_be_bytes, is_cancelled).map(|text| (text, Encoding::Utf16Be))
     } else {
-        match std::str::from_utf8(bytes) {
-            Ok(text) => (text.to_owned(), Encoding::Utf8),
-            Err(_) => (windows_1252(bytes, cancel)?, Encoding::Windows1252),
+        match utf8(bytes, is_cancelled) {
+            Ok(Some(text)) => Ok((text, Encoding::Utf8)),
+            Ok(None) => windows_1252(bytes, is_cancelled).map(|text| (text, Encoding::Windows1252)),
+            Err(Cancelled) => Err(Cancelled),
         }
     };
-    text.retain(|c| c != '\0');
-    Some((text, encoding))
+    decoded.ok()
+}
+
+/// `bytes` in pieces of at most [`CHECK_BYTES`], each cut just before a
+/// byte that starts a character (or at the end), so each decodes alone
+/// as it would within the whole. Even empty input is one (empty) piece.
+fn pieces(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut rest = Some(bytes);
+    std::iter::from_fn(move || {
+        let left = rest?;
+        if left.len() <= CHECK_BYTES {
+            rest = None;
+            return Some(left);
+        }
+        // A character has at most three continuation bytes (10xxxxxx), so
+        // one of these four starts one, unless the input is invalid there.
+        let end = (CHECK_BYTES - 3..=CHECK_BYTES)
+            .rev()
+            .find(|&at| left[at] & 0xC0 != 0x80)
+            .unwrap_or(CHECK_BYTES);
+        let (piece, tail) = left.split_at(end);
+        rest = Some(tail);
+        Some(piece)
+    })
+}
+
+/// Appends `piece` to `text` without its NULs.
+fn push_without_nuls(text: &mut String, piece: &str) {
+    for part in piece.split('\0') {
+        text.push_str(part);
+    }
+}
+
+/// Decodes valid UTF-8; `Ok(None)` if `bytes` isn't.
+fn utf8(bytes: &[u8], is_cancelled: &mut dyn FnMut() -> bool) -> Result<Option<String>, Cancelled> {
+    let mut text = String::with_capacity(bytes.len());
+    for piece in pieces(bytes) {
+        if is_cancelled() {
+            return Err(Cancelled);
+        }
+        let Ok(piece) = std::str::from_utf8(piece) else {
+            return Ok(None);
+        };
+        push_without_nuls(&mut text, piece);
+    }
+    Ok(Some(text))
+}
+
+/// Decodes UTF-8, with each invalid sequence as U+FFFD.
+fn utf8_lossy(bytes: &[u8], is_cancelled: &mut dyn FnMut() -> bool) -> Result<String, Cancelled> {
+    let mut text = String::with_capacity(bytes.len());
+    for piece in pieces(bytes) {
+        if is_cancelled() {
+            return Err(Cancelled);
+        }
+        push_without_nuls(&mut text, &String::from_utf8_lossy(piece));
+    }
+    Ok(text)
 }
 
 /// Decodes UTF-16 whose code units `unit` reads from byte pairs. Unpaired
 /// surrogates and an odd trailing byte become U+FFFD.
-fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16, cancel: &CancelToken) -> Option<String> {
+fn utf16(
+    bytes: &[u8],
+    unit: fn([u8; 2]) -> u16,
+    is_cancelled: &mut dyn FnMut() -> bool,
+) -> Result<String, Cancelled> {
     let (pairs, odd_byte) = bytes.as_chunks::<2>();
-    let units = pairs.iter().map(|&pair| unit(pair));
+    let mut chars = char::decode_utf16(pairs.iter().map(|&pair| unit(pair)));
     // A char takes at most four bytes, so this many is at most
     // `CHECK_BYTES` of input.
     let check_chars = CHECK_BYTES / 4;
     let mut text = String::with_capacity(bytes.len());
-    for (i, c) in char::decode_utf16(units).enumerate() {
-        if i.is_multiple_of(check_chars) && cancel.is_cancelled() {
-            return None;
+    loop {
+        if is_cancelled() {
+            return Err(Cancelled);
         }
-        text.push(c.unwrap_or(char::REPLACEMENT_CHARACTER));
+        let mut decoded = 0;
+        for c in chars.by_ref().take(check_chars) {
+            decoded += 1;
+            match c {
+                Ok('\0') => {}
+                Ok(c) => text.push(c),
+                Err(_) => text.push(char::REPLACEMENT_CHARACTER),
+            }
+        }
+        if decoded < check_chars {
+            break;
+        }
     }
     if !odd_byte.is_empty() {
         text.push(char::REPLACEMENT_CHARACTER);
     }
-    Some(text)
+    Ok(text)
 }
 
 /// Decodes Windows-1252 as the WHATWG standard does: ASCII, then
 /// [`CP1252_80_9F`], then 0xA0 to 0xFF as U+00A0 to U+00FF.
-fn windows_1252(bytes: &[u8], cancel: &CancelToken) -> Option<String> {
+fn windows_1252(bytes: &[u8], is_cancelled: &mut dyn FnMut() -> bool) -> Result<String, Cancelled> {
     // Bytes from 0x80 take two or three bytes in UTF-8.
     let mut text = String::with_capacity(bytes.len() + bytes.len() / 2);
     for chunk in bytes.chunks(CHECK_BYTES) {
-        if cancel.is_cancelled() {
-            return None;
+        if is_cancelled() {
+            return Err(Cancelled);
         }
-        text.extend(chunk.iter().map(|&b| match b {
+        text.extend(chunk.iter().filter(|&&b| b != 0).map(|&b| match b {
             0x80..=0x9F => CP1252_80_9F[usize::from(b - 0x80)],
             _ => char::from(b),
         }));
     }
-    Some(text)
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -122,7 +194,16 @@ mod tests {
     use super::*;
 
     fn decoded(bytes: &[u8]) -> (String, Encoding) {
-        decode(bytes, &CancelToken::new()).unwrap()
+        decode(bytes, &mut || false).unwrap()
+    }
+
+    /// A check that finds the job cancelled from its second call on.
+    fn cancelled_after_first() -> impl FnMut() -> bool {
+        let mut calls = 0;
+        move || {
+            calls += 1;
+            calls > 1
+        }
     }
 
     fn utf16le(text: &str) -> Vec<u8> {
@@ -250,30 +331,84 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_token_returns_none_for_every_encoding() {
-        let token = CancelToken::new();
-        token.cancel();
+    fn a_cancelled_job_returns_none_for_every_encoding() {
         for bytes in [
-            b"ascii".as_slice(),
+            b"".as_slice(),
+            b"ascii",
+            b"\xEF\xBB\xBF",
             b"\xEF\xBB\xBFx",
+            b"\xFF\xFE",
             b"\xFF\xFEx\0",
             b"\xFE\xFF\0x",
             b"\xE9",
         ] {
-            assert_eq!(decode(bytes, &token), None, "{bytes:?}");
+            assert_eq!(decode(bytes, &mut || true), None, "{bytes:?}");
         }
     }
 
     #[test]
     fn large_inputs_decode_across_cancel_checks() {
-        // Past several check points in each loop.
-        let text = "é".repeat(CHECK_BYTES);
-        let le = [vec![0xFF, 0xFE], utf16le(&text)].concat();
-        assert_eq!(decoded(&le), (text.clone(), Encoding::Utf16Le));
-        let latin = vec![0xE9; 2 * CHECK_BYTES + 1];
+        // Fixed sizes of a few MiB, whatever CHECK_BYTES is. Pieces of
+        // UTF-8 are cut inside 2-, 3- and 4-byte characters, and beside an
+        // invalid sequence, and must decode as the whole input does.
+        let mut invalid = vec![b'x'; (1 << 20) - 2];
+        invalid.extend_from_slice(b"\xE6\xBC\xFFy\xE6");
+        let texts = [
+            "é".repeat(1 << 20),
+            "漢".repeat(1 << 20),
+            format!("a{}", "😀".repeat(1 << 19)),
+        ];
+        for text in &texts {
+            assert_eq!(decoded(text.as_bytes()), (text.clone(), Encoding::Utf8));
+            let bom = [b"\xEF\xBB\xBF".as_slice(), text.as_bytes()].concat();
+            assert_eq!(decoded(&bom), (text.clone(), Encoding::Utf8Bom));
+            let le = [vec![0xFF, 0xFE], utf16le(text)].concat();
+            assert_eq!(decoded(&le), (text.clone(), Encoding::Utf16Le));
+        }
+        let bom = [b"\xEF\xBB\xBF".as_slice(), &invalid].concat();
+        let lossy = String::from_utf8_lossy(&invalid).into_owned();
+        assert_eq!(decoded(&bom), (lossy, Encoding::Utf8Bom));
+        let latin = vec![0xE9; 3 << 20];
         let (decoded_latin, encoding) = decoded(&latin);
         assert_eq!(encoding, Encoding::Windows1252);
         assert_eq!(decoded_latin.chars().count(), latin.len());
         assert!(decoded_latin.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn every_decoder_checks_again_within_a_mebibyte() {
+        // Just over 1 MiB of input: a second check must come within it.
+        let n = (1 << 20) + 4;
+        let ascii = vec![b'a'; n];
+        assert_eq!(utf8(&ascii, &mut cancelled_after_first()), Err(Cancelled));
+        assert_eq!(
+            utf8_lossy(&ascii, &mut cancelled_after_first()),
+            Err(Cancelled)
+        );
+        assert_eq!(
+            windows_1252(&vec![0xE9; n], &mut cancelled_after_first()),
+            Err(Cancelled)
+        );
+        let units = [b'a', 0].repeat(n / 2);
+        assert_eq!(
+            utf16(&units, u16::from_le_bytes, &mut cancelled_after_first()),
+            Err(Cancelled)
+        );
+        // UTF-16 checks by characters: four bytes each at most, for a
+        // character outside the BMP, so a mebibyte of them holds a check.
+        let emoji = utf16le(&"\u{1F600}".repeat(n / 4));
+        assert_eq!(emoji.len(), n);
+        assert_eq!(
+            utf16(&emoji, u16::from_le_bytes, &mut cancelled_after_first()),
+            Err(Cancelled)
+        );
+        // Not cancelled, each check is a call: none is skipped.
+        let mut calls = 0;
+        utf8(&ascii, &mut || {
+            calls += 1;
+            false
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
     }
 }
