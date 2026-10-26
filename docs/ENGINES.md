@@ -79,6 +79,9 @@ Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). N
 - **Styling:** `<i> <b> <u>`, balanced within each cue.
 - **TXT:** only the text, one line per subtitle line, with no timings or blank lines; a line identical to the one before is written once. No BOM.
 
+**Known limits**
+- **Cancelling:** after a cancel, the job can take longer to return than the 50 ms allowed between checks. Freeing a large parsed file, an fsync already under way and removing a large temp file add up to about 150 ms on the largest files. Measured in a release build: up to 147–177 ms for 16 MiB files dense with tags or a conversion with an 80 MiB output, and 57–81 ms for a realistic 16 MiB SRT.
+
 ## Metadata removal
 - Images: decode and re-encode without EXIF/XMP/IPTC. Apply the orientation first, so stripping it doesn't rotate the picture.
 - Media: `-map_metadata -1 -map_chapters -1 -c copy`.
