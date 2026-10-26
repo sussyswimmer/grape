@@ -266,7 +266,8 @@ impl Reader {
             }
             match timing_line(timing) {
                 Some((start_ms, end_ms)) => {
-                    let mut lines = Vec::new();
+                    // Most cues keep every line, so this is usually exact.
+                    let mut lines = Vec::with_capacity(text.len());
                     push_lines(&mut lines, text, self.webvtt, ticker)?;
                     self.cues.push(Cue {
                         start_ms,
@@ -300,7 +301,7 @@ fn find(
 }
 
 /// Appends `text`'s lines to a cue's `lines` as spans, leaving out those
-/// without visible text. Each is shrunk to fit, as most hold one span.
+/// without visible text. Each is shrunk to fit; most already are.
 fn push_lines(
     lines: &mut Vec<Vec<Span>>,
     text: &[&str],
@@ -458,7 +459,7 @@ fn normalize(mut cues: Vec<Cue>, ticker: &mut Ticker) -> Result<Vec<Cue>, ParseE
 ///   number (`&#233;`, `&#xE9;`). `&#10;` and `&#13;` break the line, as a
 ///   line of cue text can't hold one; `&#0;` stays text.
 fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
-    let mut out = Spans::default();
+    let mut out = Spans::new();
     let mut rest = line;
     loop {
         let special = if webvtt {
@@ -497,7 +498,6 @@ fn cue_lines(line: &str, webvtt: bool) -> Vec<Vec<Span>> {
 }
 
 /// The spans of one line of text as they are built.
-#[derive(Default)]
 struct Spans {
     /// The cue lines already ended by a line break.
     lines: Vec<Vec<Span>>,
@@ -508,6 +508,16 @@ struct Spans {
 }
 
 impl Spans {
+    /// Room for one line of one span, which is what most lines are, so
+    /// they need no shrinking.
+    fn new() -> Spans {
+        Spans {
+            lines: Vec::with_capacity(1),
+            spans: Vec::with_capacity(1),
+            ruby_text: false,
+        }
+    }
+
     /// Ends the cue line being built, closing an `<rt>` still open.
     fn line_break(&mut self) {
         if self.ruby_text {
