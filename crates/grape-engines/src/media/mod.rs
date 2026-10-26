@@ -9,6 +9,9 @@
 //! - [`run`] starts `ffmpeg` and `ffprobe` from [`crate::SidecarPaths`]
 //!   only, reads the output time from `-progress pipe:1`, kills the child
 //!   on cancel and lets at most two FFmpeg jobs run at once.
+//! - [`tags`] is the tools' second `ffprobe` (D26): which tags a source
+//!   has, by key, for what Remove Metadata reports and what the other
+//!   tools set again.
 //!
 //! **Offline and contained.** Both tools run with `-protocol_whitelist
 //! file` and `-format_whitelist` [`args::DEMUXERS`], and every path goes in
@@ -33,6 +36,8 @@
 pub(crate) mod args;
 pub(crate) mod probe;
 pub(crate) mod run;
+#[allow(dead_code)] // The tools (D26) run it from their first commit on.
+pub(crate) mod tags;
 
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};

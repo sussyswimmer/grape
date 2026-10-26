@@ -16,10 +16,12 @@ use std::time::Duration;
 use super::args::{file_url, DEMUXERS};
 
 /// The fields `-show_entries` asks for. Never tags: titles and comments
-/// could contain anything, and the planner doesn't need them.
-const ENTRIES: &str = "format=format_name,duration\
-    :stream=index,codec_type,codec_name,width,height,has_b_frames,pix_fmt,sample_rate,\
-    channels,channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
+/// could contain anything, and the planner doesn't need them (the tools
+/// read tag keys with their own probe, [`super::tags`]).
+const ENTRIES: &str = "format=format_name,duration,bit_rate\
+    :stream=index,codec_type,codec_name,codec_tag_string,width,height,has_b_frames,pix_fmt,\
+    color_transfer,avg_frame_rate,sample_rate,channels,channel_layout,sample_fmt,\
+    bits_per_sample,bits_per_raw_sample,bit_rate\
     :stream_disposition=attached_pic\
     :stream_side_data=rotation";
 
@@ -62,6 +64,59 @@ pub(crate) struct Probe {
     /// put them in order (`has_b_frames` above 0). FFmpeg then seeks to a
     /// little before the time asked for (`-ss`).
     pub(crate) b_frames: bool,
+    /// The container's average bitrate in bits per second, when known.
+    #[allow(dead_code)] // The tools (D26) read it from their first commit on.
+    pub(crate) bit_rate: Option<u64>,
+    /// Every stream, in index order. The tools map streams by their index,
+    /// so they keep every track but what they remove.
+    #[allow(dead_code)] // The tools (D26) read it from their first commit on.
+    pub(crate) streams: Vec<StreamInfo>,
+}
+
+/// One stream of the source, for the tools (D26).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // The tools (D26) read it from their first commit on.
+pub(crate) struct StreamInfo {
+    /// Its index: `-map 0:<index>`.
+    pub(crate) index: u32,
+    pub(crate) kind: StreamKind,
+    /// The codec, such as `"aac"`.
+    pub(crate) codec: String,
+    /// The codec tag as `ffprobe` prints it, lowercase, such as `"avc1"`,
+    /// `"tmcd"` or `"[0][0][0][0]"`.
+    pub(crate) tag: String,
+    /// Cover art: a picture shown for the file, not a video.
+    pub(crate) attached_pic: bool,
+    /// Bits per second, when the container says.
+    pub(crate) bit_rate: Option<u64>,
+    /// Audio: channel count, 0 for other kinds.
+    pub(crate) channels: u32,
+    /// Audio: see [`Audio::has_layout`].
+    pub(crate) has_layout: bool,
+    /// Audio: samples per second, 0 for other kinds.
+    pub(crate) sample_rate: u32,
+    /// Audio: see [`Audio::depth`].
+    pub(crate) depth: u32,
+    /// Audio: the decoded sample format, such as `"s16"` or `"fltp"`.
+    pub(crate) sample_fmt: String,
+    /// Video: the transfer function, such as `"arib-std-b67"` (HLG) or
+    /// `"smpte2084"` (PQ); empty when unknown.
+    pub(crate) color_transfer: String,
+    /// Video: the average frame rate as a fraction, when known.
+    pub(crate) avg_fps: Option<(u32, u32)>,
+}
+
+/// What kind of stream a [`StreamInfo`] is, as `ffprobe`'s `codec_type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamKind {
+    Video,
+    Audio,
+    Subtitle,
+    /// Data, such as a timecode or camera telemetry track; also a stream
+    /// of a kind `ffprobe` calls `"unknown"`.
+    Data,
+    /// A Matroska attachment, such as a font.
+    Attachment,
 }
 
 /// A video stream.
@@ -108,6 +163,7 @@ pub(crate) struct Audio {
 pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
     let mut format_name = None;
     let mut duration = None;
+    let mut bit_rate = None;
     let mut streams: BTreeMap<u32, Stream> = BTreeMap::new();
     for (n, line) in flat.lines().enumerate() {
         if line.is_empty() {
@@ -129,6 +185,8 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
             format_name = Some(value);
         } else if key == "format.duration" {
             duration = seconds(&value);
+        } else if key == "format.bit_rate" {
+            bit_rate = value.parse().ok();
         }
     }
     let format_name = format_name.ok_or("ffprobe printed no format.format_name")?;
@@ -163,12 +221,38 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
     let b_frames = streams
         .iter()
         .any(|(_, s)| s.codec_type == "video" && s.has_b_frames > 0);
+    let streams = streams
+        .iter()
+        .map(|(position, s)| StreamInfo {
+            index: s.index.unwrap_or(*position),
+            kind: match s.codec_type.as_str() {
+                "video" => StreamKind::Video,
+                "audio" => StreamKind::Audio,
+                "subtitle" => StreamKind::Subtitle,
+                "attachment" => StreamKind::Attachment,
+                _ => StreamKind::Data,
+            },
+            codec: s.codec_name.clone(),
+            tag: s.codec_tag.to_ascii_lowercase(),
+            attached_pic: s.attached_pic,
+            bit_rate: s.bit_rate,
+            channels: s.channels,
+            has_layout: s.channel_layout.as_deref() != Some("unknown"),
+            sample_rate: s.sample_rate,
+            depth: depth(s),
+            sample_fmt: s.sample_fmt.clone(),
+            color_transfer: s.color_transfer.clone(),
+            avg_fps: s.avg_fps,
+        })
+        .collect();
     Ok(Probe {
         format_name,
         duration,
         video,
         audio,
         b_frames,
+        bit_rate,
+        streams,
     })
 }
 
@@ -179,6 +263,7 @@ struct Stream {
     index: Option<u32>,
     codec_type: String,
     codec_name: String,
+    codec_tag: String,
     width: u32,
     height: u32,
     has_b_frames: u32,
@@ -188,6 +273,10 @@ struct Stream {
     channel_layout: Option<String>,
     bits_per_sample: u32,
     bits_per_raw_sample: u32,
+    sample_fmt: String,
+    color_transfer: String,
+    avg_fps: Option<(u32, u32)>,
+    bit_rate: Option<u64>,
     attached_pic: bool,
     rotation: Option<f64>,
 }
@@ -198,6 +287,7 @@ impl Stream {
             "index" => self.index = value.parse().ok(),
             "codec_type" => self.codec_type = value,
             "codec_name" => self.codec_name = value,
+            "codec_tag_string" => self.codec_tag = value,
             "width" => self.width = number(&value),
             "height" => self.height = number(&value),
             "has_b_frames" => self.has_b_frames = number(&value),
@@ -207,6 +297,10 @@ impl Stream {
             "channel_layout" => self.channel_layout = Some(value),
             "bits_per_sample" => self.bits_per_sample = number(&value),
             "bits_per_raw_sample" => self.bits_per_raw_sample = number(&value),
+            "sample_fmt" => self.sample_fmt = value,
+            "color_transfer" if value != "unknown" => self.color_transfer = value,
+            "avg_frame_rate" => self.avg_fps = fraction(&value),
+            "bit_rate" => self.bit_rate = value.parse().ok(),
             "disposition.attached_pic" => self.attached_pic = value == "1",
             // 6.1 and 9.0 print side_data_list.side_data.N.rotation; any
             // other nesting a later version picks still ends this way.
@@ -224,7 +318,7 @@ impl Stream {
 
 /// The value after `=`: a bare token as is, or a quoted string unescaped.
 /// `None` when the closing quote is missing or isn't the last character.
-fn unquote(raw: &str) -> Option<String> {
+pub(crate) fn unquote(raw: &str) -> Option<String> {
     let Some(quoted) = raw.strip_prefix('"') else {
         return Some(raw.to_owned());
     };
@@ -247,6 +341,14 @@ fn unquote(raw: &str) -> Option<String> {
 /// A non-negative integer field; 0 when missing or `"N/A"`.
 fn number(value: &str) -> u32 {
     value.parse().unwrap_or(0)
+}
+
+/// A rate as `ffprobe` prints it (`"30000/1001"`); `None` for `"0/0"`,
+/// `"N/A"` or a zero on either side.
+fn fraction(value: &str) -> Option<(u32, u32)> {
+    let (num, den) = value.split_once('/')?;
+    let (num, den) = (num.parse().ok()?, den.parse().ok()?);
+    (num > 0 && den > 0).then_some((num, den))
 }
 
 /// Seconds as `ffprobe` prints them (`"12.345000"`); `None` for `"N/A"`.
@@ -391,6 +493,199 @@ format.format_name="wav"
 format.duration="1.000000"
 "#;
 
+    // Golden text for the tools' fields (D26): the same probe's output for
+    // files made with FFmpeg 6.1.1, read by Grape's 9.0.2 ffprobe; 6.1.1's
+    // is the same unless a test says otherwise.
+
+    /// H.264, English and French AAC, SRT subtitles, a TrueType font
+    /// attachment and a JPEG attachment (cover art to the demuxer).
+    const MOVIE_MKV: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_name="h264"
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="[0][0][0][0]"
+streams.stream.0.width=160
+streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
+streams.stream.0.pix_fmt="yuv420p"
+streams.stream.0.color_transfer="unknown"
+streams.stream.0.avg_frame_rate="10/1"
+streams.stream.0.bit_rate="N/A"
+streams.stream.0.bits_per_raw_sample="8"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.1.index=1
+streams.stream.1.codec_name="aac"
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="[0][0][0][0]"
+streams.stream.1.sample_fmt="fltp"
+streams.stream.1.sample_rate="44100"
+streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
+streams.stream.1.bits_per_sample=0
+streams.stream.1.avg_frame_rate="0/0"
+streams.stream.1.bit_rate="N/A"
+streams.stream.1.bits_per_raw_sample="N/A"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.2.index=2
+streams.stream.2.codec_name="aac"
+streams.stream.2.codec_type="audio"
+streams.stream.2.codec_tag_string="[0][0][0][0]"
+streams.stream.2.sample_fmt="fltp"
+streams.stream.2.sample_rate="44100"
+streams.stream.2.channels=1
+streams.stream.2.channel_layout="mono"
+streams.stream.2.bits_per_sample=0
+streams.stream.2.avg_frame_rate="0/0"
+streams.stream.2.bit_rate="N/A"
+streams.stream.2.bits_per_raw_sample="N/A"
+streams.stream.2.disposition.attached_pic=0
+streams.stream.3.index=3
+streams.stream.3.codec_name="subrip"
+streams.stream.3.codec_type="subtitle"
+streams.stream.3.codec_tag_string="[0][0][0][0]"
+streams.stream.3.width="N/A"
+streams.stream.3.height="N/A"
+streams.stream.3.avg_frame_rate="0/0"
+streams.stream.3.bit_rate="N/A"
+streams.stream.3.bits_per_raw_sample="N/A"
+streams.stream.3.disposition.attached_pic=0
+streams.stream.4.index=4
+streams.stream.4.codec_name="ttf"
+streams.stream.4.codec_type="attachment"
+streams.stream.4.codec_tag_string="[0][0][0][0]"
+streams.stream.4.avg_frame_rate="0/0"
+streams.stream.4.bit_rate="N/A"
+streams.stream.4.bits_per_raw_sample="N/A"
+streams.stream.4.disposition.attached_pic=0
+streams.stream.5.index=5
+streams.stream.5.codec_name="mjpeg"
+streams.stream.5.codec_type="video"
+streams.stream.5.codec_tag_string="[0][0][0][0]"
+streams.stream.5.width=64
+streams.stream.5.height=64
+streams.stream.5.has_b_frames=0
+streams.stream.5.pix_fmt="yuvj444p"
+streams.stream.5.color_transfer="unknown"
+streams.stream.5.avg_frame_rate="0/0"
+streams.stream.5.bit_rate="N/A"
+streams.stream.5.bits_per_raw_sample="8"
+streams.stream.5.disposition.attached_pic=1
+format.format_name="matroska,webm"
+format.duration="1.023000"
+format.bit_rate="209485"
+"#;
+
+    /// H.264 and AAC with a timecode track (`-timecode`). 9.0.2 lists the
+    /// video and the timecode again in a stream group; 6.1.1 doesn't.
+    const TIMECODE_MOV: &str = r#"stream_groups.stream_group.0.streams.stream.0.index=0
+stream_groups.stream_group.0.streams.stream.0.codec_name="h264"
+stream_groups.stream_group.0.streams.stream.0.codec_type="video"
+stream_groups.stream_group.0.streams.stream.0.codec_tag_string="avc1"
+stream_groups.stream_group.0.streams.stream.0.width=160
+stream_groups.stream_group.0.streams.stream.0.height=120
+stream_groups.stream_group.0.streams.stream.0.has_b_frames=2
+stream_groups.stream_group.0.streams.stream.0.pix_fmt="yuv420p"
+stream_groups.stream_group.0.streams.stream.0.color_transfer="unknown"
+stream_groups.stream_group.0.streams.stream.0.avg_frame_rate="10/1"
+stream_groups.stream_group.0.streams.stream.0.bit_rate="35544"
+stream_groups.stream_group.0.streams.stream.0.bits_per_raw_sample="8"
+stream_groups.stream_group.0.streams.stream.1.index=2
+stream_groups.stream_group.0.streams.stream.1.codec_name="unknown"
+stream_groups.stream_group.0.streams.stream.1.codec_type="data"
+stream_groups.stream_group.0.streams.stream.1.codec_tag_string="tmcd"
+stream_groups.stream_group.0.streams.stream.1.avg_frame_rate="10240/1024"
+stream_groups.stream_group.0.streams.stream.1.bit_rate="32"
+stream_groups.stream_group.0.streams.stream.1.bits_per_raw_sample="N/A"
+streams.stream.0.index=0
+streams.stream.0.codec_name="h264"
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="avc1"
+streams.stream.0.width=160
+streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
+streams.stream.0.pix_fmt="yuv420p"
+streams.stream.0.color_transfer="unknown"
+streams.stream.0.avg_frame_rate="10/1"
+streams.stream.0.bit_rate="35544"
+streams.stream.0.bits_per_raw_sample="8"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.1.index=1
+streams.stream.1.codec_name="aac"
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="mp4a"
+streams.stream.1.sample_fmt="fltp"
+streams.stream.1.sample_rate="44100"
+streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
+streams.stream.1.bits_per_sample=0
+streams.stream.1.avg_frame_rate="0/0"
+streams.stream.1.bit_rate="70233"
+streams.stream.1.bits_per_raw_sample="N/A"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.2.index=2
+streams.stream.2.codec_name="unknown"
+streams.stream.2.codec_type="data"
+streams.stream.2.codec_tag_string="tmcd"
+streams.stream.2.avg_frame_rate="10240/1024"
+streams.stream.2.bit_rate="32"
+streams.stream.2.bits_per_raw_sample="N/A"
+streams.stream.2.disposition.attached_pic=0
+format.format_name="mov,mp4,m4a,3gp,3g2,mj2"
+format.duration="1.000000"
+format.bit_rate="132296"
+"#;
+
+    /// H.264 at 59.94 fps tagged HLG (`-color_trc arib-std-b67`), and
+    /// 24-bit PCM.
+    const HLG_MOV: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_name="h264"
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="avc1"
+streams.stream.0.width=160
+streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
+streams.stream.0.pix_fmt="yuv420p"
+streams.stream.0.color_transfer="arib-std-b67"
+streams.stream.0.avg_frame_rate="60000/1001"
+streams.stream.0.bit_rate="52963"
+streams.stream.0.bits_per_raw_sample="8"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.1.index=1
+streams.stream.1.codec_name="pcm_s24le"
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="in24"
+streams.stream.1.sample_fmt="s32"
+streams.stream.1.sample_rate="44100"
+streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
+streams.stream.1.bits_per_sample=24
+streams.stream.1.avg_frame_rate="0/0"
+streams.stream.1.bit_rate="1058400"
+streams.stream.1.bits_per_raw_sample="24"
+streams.stream.1.disposition.attached_pic=0
+format.format_name="mov,mp4,m4a,3gp,3g2,mj2"
+format.duration="1.001000"
+format.bit_rate="1130837"
+"#;
+
+    /// 32-bit float PCM.
+    const FLOAT_WAV: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_name="pcm_f32le"
+streams.stream.0.codec_type="audio"
+streams.stream.0.codec_tag_string="[3][0][0][0]"
+streams.stream.0.sample_fmt="flt"
+streams.stream.0.sample_rate="44100"
+streams.stream.0.channels=1
+streams.stream.0.channel_layout="mono"
+streams.stream.0.bits_per_sample=32
+streams.stream.0.avg_frame_rate="0/0"
+streams.stream.0.bit_rate="1411200"
+streams.stream.0.bits_per_raw_sample="N/A"
+streams.stream.0.disposition.attached_pic=0
+format.format_name="wav"
+format.duration="1.000000"
+format.bit_rate="1412112"
+"#;
+
     /// A GIF read from a pipe, where the demuxer can't sum the frame delays.
     const GIF_NO_DURATION: &str = r#"streams.stream.0.index=0
 streams.stream.0.codec_name="gif"
@@ -421,9 +716,10 @@ format.duration="N/A"
             "-format_whitelist",
             "mov,matroska,avi,asf,mp3,flac,ogg,wav,aiff,gif",
             "-show_entries",
-            "format=format_name,duration\
-             :stream=index,codec_type,codec_name,width,height,has_b_frames,pix_fmt,\
-             sample_rate,channels,channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample\
+            "format=format_name,duration,bit_rate\
+             :stream=index,codec_type,codec_name,codec_tag_string,width,height,has_b_frames,\
+             pix_fmt,color_transfer,avg_frame_rate,sample_rate,channels,channel_layout,\
+             sample_fmt,bits_per_sample,bits_per_raw_sample,bit_rate\
              :stream_disposition=attached_pic\
              :stream_side_data=rotation",
             "-of",
@@ -465,8 +761,142 @@ format.duration="N/A"
                     depth: 16,
                 }),
                 b_frames: true,
+                bit_rate: None,
+                streams: vec![
+                    StreamInfo {
+                        index: 0,
+                        kind: StreamKind::Video,
+                        codec: "h264".into(),
+                        tag: String::new(),
+                        attached_pic: false,
+                        bit_rate: None,
+                        channels: 0,
+                        has_layout: true,
+                        sample_rate: 0,
+                        depth: 16,
+                        sample_fmt: String::new(),
+                        color_transfer: String::new(),
+                        avg_fps: None,
+                    },
+                    StreamInfo {
+                        index: 1,
+                        kind: StreamKind::Audio,
+                        codec: "aac".into(),
+                        tag: String::new(),
+                        attached_pic: false,
+                        bit_rate: None,
+                        channels: 1,
+                        has_layout: true,
+                        sample_rate: 44100,
+                        depth: 16,
+                        sample_fmt: "fltp".into(),
+                        color_transfer: String::new(),
+                        avg_fps: None,
+                    },
+                ],
             }
         );
+    }
+
+    /// The stream that `streams` lists at `index`.
+    fn stream(probe: &Probe, index: u32) -> &StreamInfo {
+        probe.streams.iter().find(|s| s.index == index).unwrap()
+    }
+
+    #[test]
+    fn every_stream_is_listed_by_index() {
+        let probe = parse(MOVIE_MKV).unwrap();
+        let kinds: Vec<(u32, StreamKind, &str, bool)> = probe
+            .streams
+            .iter()
+            .map(|s| (s.index, s.kind, s.codec.as_str(), s.attached_pic))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (0, StreamKind::Video, "h264", false),
+                (1, StreamKind::Audio, "aac", false),
+                (2, StreamKind::Audio, "aac", false),
+                (3, StreamKind::Subtitle, "subrip", false),
+                (4, StreamKind::Attachment, "ttf", false),
+                (5, StreamKind::Video, "mjpeg", true),
+            ]
+        );
+        assert_eq!(probe.bit_rate, Some(209_485));
+        let video = stream(&probe, 0);
+        assert_eq!(video.avg_fps, Some((10, 1)));
+        assert_eq!(video.color_transfer, "");
+        assert_eq!(video.tag, "[0][0][0][0]");
+        // Matroska keeps no per-stream bitrate.
+        assert_eq!(video.bit_rate, None);
+        let audio = stream(&probe, 2);
+        assert_eq!(
+            (audio.channels, audio.sample_rate, audio.has_layout),
+            (1, 44100, true)
+        );
+        assert_eq!((audio.sample_fmt.as_str(), audio.avg_fps), ("fltp", None));
+        // The old fields still pick the first video that isn't cover art and
+        // the first audio.
+        assert_eq!(probe.video.unwrap().codec, "h264");
+        assert_eq!(probe.audio.unwrap().codec, "aac");
+    }
+
+    #[test]
+    fn data_tracks_and_stream_groups() {
+        let probe = parse(TIMECODE_MOV).unwrap();
+        assert_eq!(probe.streams.len(), 3, "stream groups repeat streams");
+        let timecode = stream(&probe, 2);
+        assert_eq!(
+            (
+                timecode.kind,
+                timecode.tag.as_str(),
+                timecode.codec.as_str()
+            ),
+            (StreamKind::Data, "tmcd", "unknown")
+        );
+        assert_eq!(stream(&probe, 0).tag, "avc1");
+        assert_eq!(stream(&probe, 1).bit_rate, Some(70_233));
+        assert_eq!(probe.bit_rate, Some(132_296));
+        // 6.1.1 prints no stream group.
+        let older: String = TIMECODE_MOV
+            .lines()
+            .filter(|l| !l.starts_with("stream_groups."))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(parse(&older).unwrap(), probe);
+        // A kind ffprobe doesn't know counts as data.
+        let unknown = TIMECODE_MOV.replace("codec_type=\"data\"", "codec_type=\"unknown\"");
+        assert_eq!(stream(&parse(&unknown).unwrap(), 2).kind, StreamKind::Data);
+    }
+
+    #[test]
+    fn hlg_and_frame_rates_and_depths() {
+        let probe = parse(HLG_MOV).unwrap();
+        let video = stream(&probe, 0);
+        assert_eq!(video.color_transfer, "arib-std-b67");
+        assert_eq!(video.avg_fps, Some((60000, 1001)));
+        assert_eq!(video.bit_rate, Some(52_963));
+        let pcm = stream(&probe, 1);
+        assert_eq!((pcm.depth, pcm.sample_fmt.as_str()), (24, "s32"));
+        assert_eq!(pcm.tag, "in24");
+        let wav = parse(FLOAT_WAV).unwrap();
+        let float = stream(&wav, 0);
+        assert_eq!(
+            (float.codec.as_str(), float.depth, float.sample_fmt.as_str()),
+            ("pcm_f32le", 32, "flt")
+        );
+        for (rate, fps) in [
+            ("30/1", Some((30, 1))),
+            ("30000/1001", Some((30000, 1001))),
+            ("0/0", None),
+            ("25/0", None),
+            ("N/A", None),
+            ("30", None),
+            ("-30/1", None),
+            ("99999999999/1", None),
+        ] {
+            assert_eq!(fraction(rate), fps, "{rate}");
+        }
     }
 
     #[test]

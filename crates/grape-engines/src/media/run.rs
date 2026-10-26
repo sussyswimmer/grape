@@ -40,7 +40,7 @@ const EXIT_POLL: Duration = Duration::from_millis(10);
 const TAIL_BYTES: usize = 16 * 1024;
 
 /// The most stdout [`probe`] accepts.
-const MAX_PROBE_OUTPUT: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_PROBE_OUTPUT: usize = 4 * 1024 * 1024;
 
 /// The longest `-progress` line that is parsed; longer ones are skipped.
 const MAX_LINE: usize = 4 * 1024;

@@ -752,6 +752,8 @@ mod tests {
             video,
             audio,
             b_frames: false,
+            bit_rate: None,
+            streams: Vec::new(),
         }
     }
 
