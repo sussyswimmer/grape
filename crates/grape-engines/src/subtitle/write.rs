@@ -667,6 +667,55 @@ mod tests {
         assert_eq!(txt(&doc), " ab\t\nabc\nab c\nab\n");
     }
 
+    // Streaming.
+
+    /// A writer that keeps what it is given, and the length of the
+    /// largest single write.
+    #[derive(Default)]
+    struct Pieces {
+        bytes: Vec<u8>,
+        largest: usize,
+    }
+
+    impl Write for Pieces {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.largest = self.largest.max(buf.len());
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn text_is_written_in_pieces_never_gathered_into_a_line_or_cue() {
+        // One cue of 16 different lines of 24 KiB, each with a character
+        // to escape (WebVTT) or a `-` or `>` (SRT) every few bytes.
+        let line = |i: usize| format!("{i:02}{}", "&<>-->".repeat(4096));
+        let doc = one_cue((0..16).map(|i| vec![text(&line(i))]).collect());
+        // WebVTT and SRT write an escape, a tag, a line break, a piece of
+        // the signature or of a timing line, held-back dashes (at most 64
+        // at a time) or the text between two characters they look for
+        // (here at most four bytes) at once: never more than 64 bytes,
+        // where a line gathered first would be 24 KiB.
+        let mut out = Pieces::default();
+        write_vtt(&doc, &mut out, &mut || false).unwrap();
+        assert_eq!(out.bytes, vtt(&doc).into_bytes());
+        assert!(out.largest <= 64, "{}", out.largest);
+        let mut out = Pieces::default();
+        write_srt(&doc, &mut out, false, &mut || false).unwrap();
+        assert_eq!(out.bytes, srt(&doc).into_bytes());
+        assert!(out.largest <= 64, "{}", out.largest);
+        // Plain text escapes nothing: each span's text is written as it
+        // is, so never more than one span at once.
+        let mut out = Pieces::default();
+        write_txt(&doc, &mut out, &mut || false).unwrap();
+        assert_eq!(out.bytes, txt(&doc).into_bytes());
+        assert!(out.largest <= line(0).len(), "{}", out.largest);
+    }
+
     // Cancellation.
 
     #[test]
