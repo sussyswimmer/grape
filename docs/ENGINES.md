@@ -64,7 +64,7 @@ Run FFmpeg with `-nostdin -hide_banner -y`, write to a temp name, parse `-progre
 Grape's own parser and writers (`grape-engines/src/subtitle/`, DECISIONS D20). No crate, no sidecar.
 
 **Reading**
-- **Size:** files over 16 MiB are refused unread, and files of over 1,000,000 lines before anything is written ("… is too large to convert").
+- **Size:** files over 16 MiB are refused unread, and files of over 1,000,000 lines or with a line longer than 64 KiB before anything is written ("… is too large to convert").
 - **Encoding:** a BOM first (UTF-8, UTF-16LE, UTF-16BE), then valid UTF-8, else Windows-1252 (WHATWG table). NUL characters are removed.
 - **Line breaks:** `\r\n`, `\n` or a lone `\r`. `\r\r\n` is one break, never a blank line: it is what a CRLF file's line ends become when converted again, and it counts as `\r\n` for the output.
 - **Format by content:** a file that starts with `WEBVTT` is WebVTT; anything else is read as SRT. Its header lines up to the first blank line are skipped (`Kind:`, `Language:`, `X-TIMESTAMP-MAP=`), and so are `NOTE`, `STYLE` and `REGION` blocks, up to their blank line or to a timing line, which starts a cue.

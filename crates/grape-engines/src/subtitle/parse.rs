@@ -5,7 +5,8 @@
 //!   trailing whitespace. `\r\r\n` is one break too, never a blank line:
 //!   it is what a CRLF file's line ends become when converted again. The
 //!   output keeps the first line break's kind (`\r\r\n` counts as `\r\n`).
-//!   A text of more than [`MAX_LINES`] lines is too large.
+//!   A text of more than [`MAX_LINES`] lines, or with a line longer than
+//!   [`MAX_LINE_BYTES`], is too large.
 //! - **WebVTT** is recognized by content: the text starts with `WEBVTT`
 //!   alone or followed by whitespace. Its header (up to the first blank
 //!   line, or up to a line with `-->`) is skipped, and so are its `NOTE`,
@@ -37,6 +38,11 @@ use super::{Cancelled, Ticker};
 /// thousands; this bounds the memory and time parsing takes, whatever the
 /// lines hold.
 pub(crate) const MAX_LINES: usize = 1_000_000;
+
+/// The longest line a subtitle text may have, in bytes of UTF-8. Real
+/// subtitle lines are under a few hundred bytes; this bounds the work
+/// and memory one line takes.
+pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// What separates the two timestamps of a timing line.
 const ARROW: &str = "-->";
@@ -111,7 +117,8 @@ pub(crate) enum ParseError {
     Cancelled,
     /// Not one cue had a valid timing line and visible text.
     NoCues,
-    /// The text has more than [`MAX_LINES`] lines.
+    /// The text has more than [`MAX_LINES`] lines, or a line longer than
+    /// [`MAX_LINE_BYTES`].
     TooLarge,
 }
 
@@ -147,7 +154,7 @@ pub(crate) fn parse(
     // `-->`, which starts the first cue.
     let mut in_header = webvtt;
     for (n, line) in split_lines(text).enumerate() {
-        if n == MAX_LINES {
+        if n == MAX_LINES || line.len() > MAX_LINE_BYTES {
             return Err(ParseError::TooLarge);
         }
         ticker.tick()?;
@@ -1544,6 +1551,36 @@ mod tests {
         srt.pop();
         srt.push('x');
         assert_eq!(parse(&srt, &mut || false), Err(ParseError::TooLarge));
+    }
+
+    #[test]
+    fn a_text_with_a_line_over_the_limit_is_too_large() {
+        let srt = |line: &str, nl: &str| {
+            format!("1{nl}00:00:01,000 --> 00:00:02,000{nl}{line}{nl}{nl}2{nl}00:00:03,000 --> 00:00:04,000{nl}Bye{nl}")
+        };
+        // The line break isn't part of the line.
+        let longest = "x".repeat(MAX_LINE_BYTES);
+        for nl in ["\n", "\r\n", "\r"] {
+            let doc = parsed(&srt(&longest, nl));
+            assert_eq!(doc.cues[0].lines, [vec![text(&longest)]]);
+        }
+        // One byte more, anywhere in the text: in a cue, a block that isn't
+        // read or a WebVTT header. Trailing spaces count too.
+        let over = "x".repeat(MAX_LINE_BYTES + 1);
+        let spaces = format!("x{}", " ".repeat(MAX_LINE_BYTES));
+        let note = format!("WEBVTT\n\nNOTE {over}\n\n00:01.000 --> 00:02.000\nHi\n");
+        let header = format!("WEBVTT {over}\n\n00:01.000 --> 00:02.000\nHi\n");
+        for text in [srt(&over, "\n"), srt(&spaces, "\r\n"), note, header] {
+            assert_eq!(parse(&text, &mut || false), Err(ParseError::TooLarge));
+        }
+        // Counted in bytes: 32K two-byte characters are 64 KiB.
+        let wide = "é".repeat(MAX_LINE_BYTES / 2);
+        assert_eq!(parsed(&srt(&wide, "\n")).cues.len(), 2);
+        let wider = format!("{wide}x");
+        assert_eq!(
+            parse(&srt(&wider, "\n"), &mut || false),
+            Err(ParseError::TooLarge)
+        );
     }
 
     // Cancellation.

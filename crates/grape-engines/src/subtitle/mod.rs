@@ -40,8 +40,8 @@ use decode::Encoding;
 use parse::{Document, ParseError};
 
 /// The largest subtitle file Grape reads. Real files are well under 1 MiB.
-/// With [`parse::MAX_LINES`] this bounds the memory a conversion takes,
-/// whatever the file holds.
+/// With [`parse::MAX_LINES`] and [`parse::MAX_LINE_BYTES`] this bounds the
+/// memory and time a conversion takes.
 pub(crate) const MAX_SOURCE: u64 = 16 * 1024 * 1024;
 
 /// How many units of work (lines read, looked at or written; cues) are
@@ -157,9 +157,10 @@ fn parse_failed(
     let err = match e {
         ParseError::Cancelled => crate::cancelled(src),
         ParseError::TooLarge => names.too_large(format!(
-            "parse {}: over the {} line limit for a subtitle file",
+            "parse {}: over the limit of {} lines of at most {} KiB for a subtitle file",
             src.display(),
-            parse::MAX_LINES
+            parse::MAX_LINES,
+            parse::MAX_LINE_BYTES / 1024
         )),
         ParseError::NoCues => GrapeError::new(
             ErrorKind::DecodeFailed,

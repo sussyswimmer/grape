@@ -261,9 +261,11 @@ fn a_subtitle_file_over_the_size_limit_is_refused_before_reading() {
 #[test]
 fn a_file_at_the_size_limit_is_read() {
     let dir = TestDir::new("at-limit");
-    // Two cues, then a blank line of spaces up to exactly 16 MiB.
+    // Two cues, then lines of spaces, 1 KiB each, up to exactly 16 MiB.
     let mut bytes = SRT.as_bytes().to_vec();
-    bytes.resize(16 * 1024 * 1024, b' ');
+    let fill = (bytes.len()..16 * 1024 * 1024).map(|i| if i % 1024 == 0 { b'\n' } else { b' ' });
+    bytes.extend(fill.collect::<Vec<u8>>());
+    assert_eq!(bytes.len(), 16 * 1024 * 1024);
     let (out, _) = convert(&dir, "big.srt", &bytes, Format::Txt);
     assert!(String::from_utf8(out).unwrap().starts_with("Hello there"));
 }
@@ -275,6 +277,23 @@ fn a_file_over_the_line_limit_is_refused_before_anything_is_written() {
     let err = fail(&dir, "lines.srt", &bytes, Format::Vtt);
     assert_eq!(err.kind, ErrorKind::DecodeFailed);
     assert_eq!(err.user_message, "lines.srt is too large to convert.");
+}
+
+#[test]
+fn a_file_with_a_line_over_64_kib_is_refused_before_anything_is_written() {
+    let dir = TestDir::new("long-line");
+    let mut bytes = b"1\n00:00:01,000 --> 00:00:02,000\n".to_vec();
+    bytes.resize(bytes.len() + 64 * 1024 + 1, b'&');
+    let err = fail(&dir, "long.srt", &bytes, Format::Vtt);
+    assert_eq!(err.kind, ErrorKind::DecodeFailed);
+    assert_eq!(err.user_message, "long.srt is too large to convert.");
+    // A line of exactly 64 KiB converts.
+    bytes.pop();
+    let (out, _) = convert(&dir, "longest.srt", &bytes, Format::Vtt);
+    let amps = "&amp;".repeat(64 * 1024);
+    assert!(String::from_utf8(out)
+        .unwrap()
+        .ends_with(&format!("\n{amps}\n")));
 }
 
 #[test]
