@@ -484,7 +484,11 @@ build_libvpx() {
   d=$(srcdir libvpx)
   b="$tdir/build-libvpx"
   note "libvpx"
-  args=(--prefix="$prefix" --disable-shared --enable-static --disable-examples
+  # libvpx compiles its configure line into the library (vpx_codec_build_config),
+  # so it gets a prefix that names no folder of this machine: /prefix, which
+  # make install puts under DESTDIR=$tdir, that is into $prefix. vpx.pc is
+  # pointed back at $prefix afterwards.
+  args=(--prefix=/prefix --disable-shared --enable-static --disable-examples
     --disable-tools --disable-docs --disable-unit-tests --disable-webm-io
     --disable-libyuv --disable-vp8 --disable-vp9-decoder --enable-vp9-encoder)
   case "$target" in
@@ -499,7 +503,8 @@ build_libvpx() {
       # use Win32 threads, as with MSVC, so no winpthreads in the exe.
       mkdir -p "$tdir/no-pthread"
       printf '#error "Grape builds libvpx with Win32 threads"\n' >"$tdir/no-pthread/pthread.h"
-      args+=(--as=nasm --extra-cflags="-I$tdir/no-pthread")
+      # (Relative to the build folder, again to keep paths out of the library.)
+      args+=(--as=nasm --extra-cflags=-I../no-pthread)
       ;;
     macos-arm64) vpx_target=arm64-darwin20-gcc ;;
     macos-x86_64)
@@ -515,8 +520,12 @@ build_libvpx() {
     fi
     run libvpx-configure "$d/configure" --target="$vpx_target" "${args[@]}"
     run libvpx-build make -j"$jobs"
-    run libvpx-install make install
+    run libvpx-install make install DESTDIR="$tdir"
   )
+  [ "$tdir/prefix" = "$prefix" ] || fail "libvpx's install folder isn't the prefix."
+  sed "s#^prefix=/prefix\$#prefix=$prefix#" "$prefix/lib/pkgconfig/vpx.pc" >"$tdir/vpx.pc"
+  grep -qx "prefix=$prefix" "$tdir/vpx.pc" || fail "couldn't point vpx.pc at the prefix."
+  mv -f "$tdir/vpx.pc" "$prefix/lib/pkgconfig/vpx.pc"
   if [ -n "$cross" ]; then
     grep -q '^#define HAVE_PTHREAD_H 0$' "$b/vpx_config.h" ||
       fail "libvpx would use winpthreads (HAVE_PTHREAD_H isn't 0)."
