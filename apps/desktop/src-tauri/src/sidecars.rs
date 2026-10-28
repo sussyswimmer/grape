@@ -647,7 +647,9 @@ mod tests {
                     ran,
                     Err(NotRunnable {
                         title: "Grape's image helper is missing".to_owned(),
-                        detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
+                        detail: Some(
+                            "Reinstall Grape to work with HEIC and AVIF files.".to_owned()
+                        ),
                     }),
                     "{coming}"
                 );
