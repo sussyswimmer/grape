@@ -413,10 +413,10 @@ pub fn run_job(
             }
             media::tools::run(job, src, dest, from, to, tool, &params, ctx, progress)
         }
-        (Some(from), [src], JobOutput::File(dest), Operation::Tool { tool, .. })
+        (Some(from), [src], JobOutput::File(dest), Operation::Tool { tool, params })
             if tool_engine(tool, from, sidecars) == Some(Engine::ImageTool) =>
         {
-            imagetool::run(job, src, dest, from, tool, ctx, progress)
+            imagetool::run(job, src, dest, from, tool, &params, ctx, progress)
         }
         // Split PDF and Remove Metadata (one input), Merge PDFs (all of
         // them): every input must be a PDF. The engine checks the shape.

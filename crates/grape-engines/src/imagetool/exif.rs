@@ -286,6 +286,63 @@ const STRUCTURAL: [u16; 24] = [
     0x0212, 0x0213, 0x0214, 0x8769, 0x8825, 0xA005, 0x9000, 0x9101, 0xA000, 0xA001, 0xA002, 0xA003,
 ];
 
+/// Sets the Exif IFD's PixelXDimension and PixelYDimension (0xA002,
+/// 0xA003) of `tiff` to `width` and `height`, in place, after Compress
+/// scaled the picture. A tag that isn't there, or a SHORT that can't hold
+/// the value, is left as it is.
+pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
+    let Some((order, first)) = header(tiff) else {
+        return;
+    };
+    let reader = Reader { tiff, order };
+    let Some(exif_ifd) = reader.ifd(first).and_then(|ifd| {
+        ifd.entries
+            .iter()
+            .find(|e| e.tag == 0x8769)
+            .map(|e| reader.pointer(e))
+    }) else {
+        return;
+    };
+    let Ok(start) = usize::try_from(exif_ifd) else {
+        return;
+    };
+    let Some(count) = tiff.get(start..start + 2).map(|b| order.u16(b)) else {
+        return;
+    };
+    for n in 0..usize::from(count.min(MAX_ENTRIES)) {
+        let at = start + 2 + n * 12;
+        let Some(entry) = tiff.get(at..at + 12) else {
+            return;
+        };
+        let (tag, kind, count) = (
+            order.u16(&entry[0..2]),
+            order.u16(&entry[2..4]),
+            order.u32(&entry[4..8]),
+        );
+        let value = match tag {
+            0xA002 => width,
+            0xA003 => height,
+            _ => continue,
+        };
+        let field = &mut tiff[at + 8..at + 12];
+        match (kind, count, order) {
+            (3, 1, _) => {
+                let Ok(v) = u16::try_from(value) else {
+                    continue;
+                };
+                let b = match order {
+                    Order::Little => v.to_le_bytes(),
+                    Order::Big => v.to_be_bytes(),
+                };
+                field[..2].copy_from_slice(&b);
+            }
+            (4, 1, Order::Little) => field.copy_from_slice(&value.to_le_bytes()),
+            (4, 1, Order::Big) => field.copy_from_slice(&value.to_be_bytes()),
+            _ => {}
+        }
+    }
+}
+
 /// The EXIF Remove Metadata writes back (D26, U2), as a big-endian TIFF:
 /// the Orientation when it isn't 1, and the DCF Adobe RGB tags
 /// (ColorSpace uncalibrated, Interop `R03`) when `adobe_rgb`. `None` when
@@ -606,6 +663,37 @@ pub(crate) mod tests {
         let exif = walk(&t);
         assert!(exif.dcf_adobe_rgb());
         assert!(exif.fields.is_empty(), "{:?}", exif.fields);
+    }
+
+    #[test]
+    fn compress_patches_the_pixel_dimensions_in_place() {
+        for order in *b"IM" {
+            let mut t = tiff(
+                order,
+                &[
+                    &[(0x8769, V::Ifd(1))],
+                    &[(0xA002, V::Long(4000)), (0xA003, V::Short(3000))],
+                ],
+                None,
+            );
+            let len = t.len();
+            patch_dimensions(&mut t, 2048, 1536);
+            assert_eq!(t.len(), len);
+            let r = Reader {
+                tiff: &t,
+                order: header(&t).unwrap().0,
+            };
+            let ifd = r.ifd(r.pointer(&r.ifd(8).unwrap().entries[0])).unwrap();
+            assert_eq!(r.order.u32(&ifd.entries[0].field), 2048);
+            assert_eq!(r.short(&ifd.entries[1]), Some(1536));
+        }
+        // No Exif IFD, or garbage: nothing happens.
+        let mut plain = tiff(b'I', &[&[(0x010F, V::Ascii("x"))]], None);
+        let before = plain.clone();
+        patch_dimensions(&mut plain, 1, 1);
+        assert_eq!(plain, before);
+        let mut junk = b"II*\0\xff\xff\xff\xff".to_vec();
+        patch_dimensions(&mut junk, 1, 1);
     }
 
     #[test]

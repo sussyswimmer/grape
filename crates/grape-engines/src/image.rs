@@ -236,6 +236,30 @@ pub(crate) fn decode(
     names: &Names,
     cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
+    decode_as(src, from, to, names, cancel, true)
+}
+
+/// [`decode`], but the pixels as stored, the EXIF orientation not applied:
+/// for Compress, which carries the EXIF as it is (D26).
+pub(crate) fn decode_stored(
+    src: &Path,
+    from: Format,
+    to: Format,
+    names: &Names,
+    cancel: &CancelToken,
+) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
+    decode_as(src, from, to, names, cancel, false)
+}
+
+/// [`decode`], applying the EXIF orientation if `upright`.
+fn decode_as(
+    src: &Path,
+    from: Format,
+    to: Format,
+    names: &Names,
+    cancel: &CancelToken,
+    upright: bool,
+) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
     let len = file
@@ -313,7 +337,11 @@ pub(crate) fn decode(
         move || -> Result<(DynamicImage, Option<Vec<u8>>), DecodeFailure> {
             let mut decoder = reader.into_decoder()?;
             // A malformed EXIF block is not worth failing the conversion for.
-            let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+            let orientation = if upright {
+                decoder.orientation().unwrap_or(Orientation::NoTransforms)
+            } else {
+                Orientation::NoTransforms
+            };
             let (width, height) = decoder.dimensions();
             let color = decoder.color_type();
             let icc = decoder

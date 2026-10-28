@@ -334,3 +334,179 @@ fn remove_metadata_strips_a_gif_and_keeps_its_frames() {
     );
     assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), plain);
 }
+
+/// A `w`×`h` photo-like picture: a gradient with fine texture, which a
+/// lower quality makes smaller.
+fn photo(w: u32, h: u32) -> RgbImage {
+    RgbImage::from_fn(w, h, |x, y| {
+        let n = (x.wrapping_mul(7919) ^ y.wrapping_mul(104_729)) % 23;
+        Rgb([
+            u8::try_from((x * 255 / w + n) % 256).unwrap(),
+            u8::try_from((y * 255 / h + 2 * n) % 256).unwrap(),
+            u8::try_from((128 + 3 * n) % 256).unwrap(),
+        ])
+    })
+}
+
+fn jpeg_of(img: &RgbImage, quality: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, quality)
+        .encode_image(img)
+        .unwrap();
+    out
+}
+
+/// A little-endian EXIF with orientation 6 and an Exif IFD whose
+/// PixelXDimension and PixelYDimension are `w` and `h`.
+fn camera_exif(w: u32, h: u32) -> Vec<u8> {
+    let mut t = b"Exif\0\0II*\0\x08\0\0\0".to_vec();
+    let entry = |t: &mut Vec<u8>, tag: u16, kind: u16, field: [u8; 4]| {
+        t.extend_from_slice(&tag.to_le_bytes());
+        t.extend_from_slice(&kind.to_le_bytes());
+        t.extend_from_slice(&1u32.to_le_bytes());
+        t.extend_from_slice(&field);
+    };
+    t.extend_from_slice(&2u16.to_le_bytes());
+    entry(&mut t, 0x0112, 3, [6, 0, 0, 0]);
+    // The Exif IFD after IFD0: 8 + 2 + 24 + 4 = 38.
+    entry(&mut t, 0x8769, 4, 38u32.to_le_bytes());
+    t.extend_from_slice(&0u32.to_le_bytes());
+    t.extend_from_slice(&2u16.to_le_bytes());
+    entry(&mut t, 0xA002, 4, w.to_le_bytes());
+    entry(&mut t, 0xA003, 4, h.to_le_bytes());
+    t.extend_from_slice(&0u32.to_le_bytes());
+    seg(0xE1, &t)
+}
+
+fn compress(
+    dir: &TestDir,
+    name: &str,
+    bytes: &[u8],
+    preset: grape_core::CompressPreset,
+) -> Result<JobOutcome, GrapeError> {
+    let op = Operation::Tool {
+        tool: ToolKey::Compress,
+        params: grape_core::ToolParams {
+            compress: preset,
+            ..grape_core::ToolParams::DEFAULT
+        },
+    };
+    run(dir, name, bytes, op)
+}
+
+/// The Exif IFD's pixel dimensions in a JPEG Grape wrote.
+fn exif_dimensions(jpeg: &[u8]) -> (u32, u32) {
+    let at = jpeg.windows(6).position(|w| w == b"Exif\0\0").unwrap() + 6;
+    let tiff = &jpeg[at..];
+    let u16le = |i: usize| u16::from_le_bytes([tiff[i], tiff[i + 1]]);
+    let u32le = |i: usize| u32::from_le_bytes([tiff[i], tiff[i + 1], tiff[i + 2], tiff[i + 3]]);
+    let exif_ifd = usize::try_from(u32le(8 + 2 + 12 + 8)).unwrap();
+    assert_eq!(u16le(exif_ifd + 2), 0xA002);
+    (u32le(exif_ifd + 2 + 8), u32le(exif_ifd + 2 + 12 + 8))
+}
+
+#[test]
+fn compress_shrinks_a_jpeg_and_carries_its_metadata() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let dir = TestDir::new("compress-jpeg");
+    let source = jpeg_of(&photo(2400, 1600), 95);
+    let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+    xmp.extend_from_slice(b"<x:xmpmeta>kept</x:xmpmeta>");
+    let src = with(
+        &source,
+        &[
+            camera_exif(2400, 1600),
+            seg(0xE1, &xmp),
+            seg(0xFE, b"kept comment"),
+        ],
+        b"",
+    );
+    // (preset, width, height)
+    for (preset, w, h) in [
+        (Small, 2048, 1365),
+        (Balanced, 2400, 1600),
+        (High, 2400, 1600),
+    ] {
+        let outcome = compress(&dir, "photo.jpg", &src, preset).unwrap();
+        assert_eq!(outcome.outputs, [dir.join("photo Compressed.jpg")]);
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::Compressed {
+                before: src.len() as u64,
+                after: out.len() as u64
+            }],
+            "{preset:?}"
+        );
+        assert!(out.len() * 10 <= src.len() * 9, "{preset:?}");
+        let img = image::load_from_memory(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (w, h), "{preset:?}");
+        // Stored as it was: the EXIF still turns it, and says its size.
+        assert_eq!(orientation(&out), Orientation::Rotate90);
+        assert_eq!(exif_dimensions(&out), (w, h));
+        for kept in [&b"<x:xmpmeta>kept"[..], b"kept comment"] {
+            assert!(out.windows(kept.len()).any(|x| x == kept), "{preset:?}");
+        }
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join("photo.jpg")).unwrap();
+    }
+}
+
+#[test]
+fn compress_leaves_a_compact_jpeg_alone_before_decoding() {
+    use grape_core::CompressPreset::{Balanced, Small};
+    let dir = TestDir::new("compress-jpeg-none");
+    // Quality 70 and under Small's 2048 px: nothing to gain.
+    let small = jpeg_of(&photo(800, 600), 70);
+    for (preset, message) in [
+        (Small, "pic.jpg is already as small as Grape makes it."),
+        (Balanced, "pic.jpg is already as small as Grape makes it."),
+    ] {
+        let err = compress(&dir, "pic.jpg", &small, preset).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        assert_eq!(err.user_message, message);
+        fs::remove_file(dir.join("pic.jpg")).unwrap();
+    }
+    // At 2400 px, Small would still scale it.
+    let big = jpeg_of(&photo(2400, 1600), 75);
+    let err = compress(&dir, "big.jpg", &big, Balanced).unwrap_err();
+    assert_eq!(err.user_message, "big.jpg is already compact. Try Small.");
+}
+
+#[test]
+fn compress_drops_xmp_that_describes_a_gain_map() {
+    let dir = TestDir::new("compress-jpeg-gainmap");
+    let mut xmp = b"http://ns.adobe.com/xap/1.0/\0".to_vec();
+    xmp.extend_from_slice(b"<x:xmpmeta>hdrgm</x:xmpmeta>");
+    let src = with(
+        &jpeg_of(&photo(1200, 800), 95),
+        &[seg(0xE1, &xmp)],
+        b"\xFF\xD8 a gain map",
+    );
+    let outcome = compress(&dir, "hdr.jpg", &src, grape_core::CompressPreset::Balanced).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(!out.windows(5).any(|w| w == b"hdrgm"));
+    assert!(!out.windows(10).any(|w| w == b"a gain map"));
+}
+
+#[test]
+fn compress_refuses_a_cmyk_jpeg() {
+    let dir = TestDir::new("compress-cmyk");
+    // A frame with 4 components; the rest only has to be well formed.
+    let mut src = vec![0xFF, 0xD8];
+    src.extend(seg(0xDB, &[0; 65]));
+    src.extend(seg(
+        0xC0,
+        &[
+            8, 0, 8, 0, 8, 4, 1, 0x11, 0, 2, 0x11, 0, 3, 0x11, 0, 4, 0x11, 0,
+        ],
+    ));
+    src.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+    src.extend_from_slice(&[0x12, 0x34, 0xFF, 0xD9]);
+    let err = compress(&dir, "print.jpg", &src, grape_core::CompressPreset::Small).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "print.jpg is a print (CMYK) JPEG, which Compress can't keep yet."
+    );
+}

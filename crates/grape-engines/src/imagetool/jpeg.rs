@@ -15,7 +15,7 @@
 //!   first EXIF was, when the picture needs it: an orientation other than
 //!   1, or Adobe RGB signalled the DCF way with no ICC profile.
 
-use std::io::{BufRead, Write};
+use std::io::{self, BufRead, Write};
 
 use super::exif;
 use super::strip::{read_exact, read_u8, Error, Found};
@@ -148,6 +148,148 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
         found.fields.insert(MetaField::Embedded);
     }
     Ok(found)
+}
+
+/// What Compress needs from a JPEG's segments ([`header`]).
+#[derive(Debug, Default)]
+pub(super) struct Header {
+    /// The frame's component count: 1 gray, 3 color, 4 CMYK or YCCK.
+    pub(super) components: u8,
+    pub(super) width: u16,
+    pub(super) height: u16,
+    /// The first luminance (table 0) quantization table, in zigzag order.
+    pub(super) luma: Option<[u16; 64]>,
+    /// The first EXIF's TIFF bytes.
+    pub(super) exif: Option<Vec<u8>>,
+    /// The segments Compress carries over besides EXIF and ICC, whole and
+    /// in order: XMP and extended XMP (APP1), APP13, COM.
+    pub(super) carried: Vec<Carried>,
+    /// MPF, or data after EOI: a gain map or a second image the XMP may
+    /// describe.
+    pub(super) extras: bool,
+}
+
+/// A segment Compress carries over.
+#[derive(Debug)]
+pub(super) struct Carried {
+    pub(super) segment: Vec<u8>,
+    pub(super) xmp: bool,
+}
+
+/// Reads the JPEG `r` for Compress: its header up to the first scan, then
+/// the rest up to EOI (checking it's whole), and whether anything follows.
+pub(super) fn header(r: &mut dyn BufRead) -> Result<Header, Error> {
+    let mut found = Header::default();
+    let mut soi = [0; 2];
+    read_exact(r, &mut soi)?;
+    if soi != [0xFF, 0xD8] {
+        return Err(Error::Broken("no SOI".into()));
+    }
+    let mut markers = 0;
+    let mut segments = 0;
+    loop {
+        let marker = next_marker(r, &mut markers)?;
+        match marker {
+            0xD8 => return Err(Error::Broken("a second SOI".into())),
+            0xD9 => return Err(Error::Broken("EOI before any scan".into())),
+            0x01 | 0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        let segment = read_segment(r, marker)?;
+        segments += 1;
+        if segments > MAX_HEADER_SEGMENTS {
+            return Err(Error::Broken("too many segments".into()));
+        }
+        let payload = &segment[4..];
+        match marker {
+            0xDA => break,
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                if payload.len() < 6 {
+                    return Err(Error::Broken("a short frame header".into()));
+                }
+                found.height = u16::from_be_bytes([payload[1], payload[2]]);
+                found.width = u16::from_be_bytes([payload[3], payload[4]]);
+                found.components = payload[5];
+            }
+            0xDB => {
+                if found.luma.is_none() {
+                    found.luma = luma_table(payload);
+                }
+            }
+            0xE1 if payload.starts_with(b"Exif\0") && payload.len() >= 6 => {
+                if found.exif.is_none() {
+                    found.exif = Some(payload[6..].to_vec());
+                }
+            }
+            0xE1 if payload.starts_with(XMP) || payload.starts_with(XMP_EXTENSION) => {
+                found.carried.push(Carried { segment, xmp: true });
+            }
+            0xED | 0xFE => found.carried.push(Carried {
+                segment,
+                xmp: false,
+            }),
+            0xE2 if payload.starts_with(b"MPF\0") => found.extras = true,
+            _ => {}
+        }
+    }
+    // The scans, up to EOI.
+    loop {
+        match copy_entropy(r, &mut io::sink(), &mut markers)? {
+            0xD9 => break,
+            0xD8 => return Err(Error::Broken("a second SOI".into())),
+            marker => {
+                read_segment(r, marker)?;
+            }
+        }
+    }
+    let rest = r.fill_buf().map_err(Error::Read)?;
+    found.extras |= rest.iter().any(|&b| b != 0x00 && b != 0xFF);
+    Ok(found)
+}
+
+/// The luminance table (table 0) of a DQT segment's `payload`, which may
+/// hold several tables of 8 or 16-bit entries.
+fn luma_table(mut payload: &[u8]) -> Option<[u16; 64]> {
+    while let Some((&pq_tq, rest)) = payload.split_first() {
+        let wide = pq_tq >> 4 == 1;
+        let size = if wide { 128 } else { 64 };
+        let entries = rest.get(..size)?;
+        if pq_tq & 0x0F == 0 {
+            let mut table = [0u16; 64];
+            for (i, value) in table.iter_mut().enumerate() {
+                *value = if wide {
+                    u16::from_be_bytes([entries[2 * i], entries[2 * i + 1]])
+                } else {
+                    u16::from(entries[i])
+                };
+            }
+            return Some(table);
+        }
+        payload = &rest[size..];
+    }
+    None
+}
+
+/// The IJG quality (1 to 100) whose standard luminance table is closest to
+/// `table`, by the ratio of their sums: how libjpeg's `-quality` scales it.
+pub(super) fn estimate_quality(table: &[u16; 64]) -> u8 {
+    // The JPEG standard's Annex K luminance table, in zigzag order.
+    const STANDARD: [u16; 64] = [
+        16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49, 35,
+        37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56, 80,
+        109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103, 99,
+    ];
+    let sum: u32 = table.iter().map(|&v| u32::from(v)).sum();
+    let standard: u32 = STANDARD.iter().map(|&v| u32::from(v)).sum();
+    // libjpeg: entry = (standard × scale + 50) / 100, with
+    // scale = 5000 / q below 50 and 200 − 2q from 50.
+    let scale = f64::from(sum) * 100.0 / f64::from(standard);
+    let quality = if scale <= 100.0 {
+        (200.0 - scale) / 2.0
+    } else {
+        5000.0 / scale
+    };
+    quality.round().clamp(1.0, 100.0) as u8
 }
 
 /// What becomes of a segment.
@@ -499,6 +641,47 @@ pub(super) mod tests {
         kept.extend_from_slice(&[0x9A, 0xFF, 0x00]);
         kept.extend(seg(0xDD, &[0, 8]));
         assert_eq!(out, jpeg(&[], &kept, &[]));
+    }
+
+    #[test]
+    fn the_quality_estimate_matches_libjpegs_scaling() {
+        const STANDARD: [u16; 64] = [
+            16, 11, 12, 14, 12, 10, 16, 14, 13, 14, 18, 17, 16, 19, 24, 40, 26, 24, 22, 22, 24, 49,
+            35, 37, 29, 40, 58, 51, 61, 60, 57, 51, 56, 55, 64, 72, 92, 78, 64, 68, 87, 69, 55, 56,
+            80, 109, 81, 87, 95, 98, 103, 104, 103, 62, 77, 113, 121, 112, 100, 120, 92, 101, 103,
+            99,
+        ];
+        // libjpeg's jpeg_quality_scaling and table, for each quality.
+        // (Under about 25 entries clip at 255 and it reads a little high:
+        // still far under any preset.)
+        for quality in [30u32, 50, 70, 75, 80, 85, 90, 95] {
+            let scale = if quality < 50 {
+                5000 / quality
+            } else {
+                200 - 2 * quality
+            };
+            let table = STANDARD
+                .map(|v| u16::try_from(((u32::from(v) * scale + 50) / 100).clamp(1, 255)).unwrap());
+            let estimate = i32::from(estimate_quality(&table));
+            assert!(
+                (estimate - i32::try_from(quality).unwrap()).abs() <= 1,
+                "{quality}: {estimate}"
+            );
+        }
+        // Quality 100's table is all 1s: it reads as 99.
+        assert_eq!(estimate_quality(&[1; 64]), 99);
+        // All 255s is as coarse as 8-bit tables go.
+        assert!(estimate_quality(&[255; 64]) <= 15);
+        // A DQT segment's payload: table 1 first, then table 0, 16-bit.
+        let mut payload = vec![0x01];
+        payload.extend_from_slice(&[9; 64]);
+        payload.push(0x10);
+        for i in 0..64u16 {
+            payload.extend_from_slice(&(i + 1).to_be_bytes());
+        }
+        let table = luma_table(&payload).unwrap();
+        assert_eq!((table[0], table[63]), (1, 64));
+        assert_eq!(luma_table(&[0x00, 1, 2]), None);
     }
 
     #[test]
