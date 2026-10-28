@@ -414,6 +414,12 @@ jobs:
           [ ! -e "$agent" ] || agent_before=yes
           start=0
           [ ! -f "$log" ] || start=$(stat -f %z "$log")
+          # LaunchServices sends an app's stderr to /dev/null, and a panic's
+          # message goes there. open --stderr keeps each launch's in a file.
+          err1="$RUNNER_TEMP/grape-1.err"
+          err2="$RUNNER_TEMP/grape-2.err"
+          : > "$err1"
+          : > "$err2"
           bad=0
           error() { echo "::error::$*"; bad=1; }
           # This launch's part of the log.
@@ -443,11 +449,14 @@ jobs:
             fi
             echo "Grape's log, $log:"
             if [ -f "$log" ]; then cat "$log"; else echo "(none)"; fi
+            for f in "$err1" "$err2"; do
+              if [ -s "$f" ]; then echo "Grape's stderr, $f:"; cat "$f"; fi
+            done
             exit "$status"
           }
           trap cleanup EXIT
 
-          out=$(open -n "$app" 2>&1) || die "open -n couldn't start Grape.app: $out (it needs a signed-in desktop session)."
+          out=$(open -n --stderr "$err1" "$app" 2>&1) || die "open -n couldn't start Grape.app: $out (it needs a signed-in desktop session)."
           # Setup's last line (lib.rs). A tray icon that can't be made ends
           # setup before it, with a panic.
           running='\]\[grape_app\]\[INFO\] Grape [^ ]+ is running$'
@@ -483,7 +492,7 @@ jobs:
             fi
           fi
 
-          open -n "$app" || error "The second open -n failed."
+          open -n --stderr "$err2" "$app" || error "The second open -n failed."
           handover='\]\[grape_app\]\[INFO\] second launch: opening Settings in the running instance$'
           for _ in $(seq 20); do
             if has "$handover" && [ "$(pids | wc -l | tr -d ' ')" -eq 1 ]; then break; fi
