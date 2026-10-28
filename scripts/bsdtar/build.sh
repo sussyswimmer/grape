@@ -386,6 +386,7 @@ fetch_tarball() {
   echo "Downloading libarchive $version ($want_size bytes) from $url"
   if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
     --silent --show-error --retry 3 --retry-all-errors --connect-timeout 30 \
+    --speed-limit 1024 --speed-time 60 \
     --output "$file" "$url"; then
     fail "couldn't download libarchive from $url."
   fi
