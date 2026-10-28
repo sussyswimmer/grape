@@ -158,9 +158,10 @@ enum Scan {
 /// this many, so its buffer stays small however wide the picture.
 const SPAN: usize = 1 << 16;
 
-/// The most bytes given to the encoder between two cancel checks: about
-/// 35 ms of its best compression.
-const ENCODE_STEP: usize = 256 * 1024;
+/// The most bytes given to the encoder between two cancel checks: up to
+/// about 25 ms of its best compression (noisy 8-bit gray, its slowest,
+/// takes 160 to 205 ms for 256 KiB).
+const ENCODE_STEP: usize = 32 * 1024;
 
 /// What the deflater holds, about.
 const DEFLATER: u64 = 1 << 20;
