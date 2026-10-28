@@ -316,8 +316,9 @@ fn inflate(data: &[u8], whole: bool, budget: &mut u64) -> Option<Vec<u8>> {
 }
 
 /// The bytes of an ImageMagick raw profile: a newline, the profile's
-/// name, its length, then the bytes in hex over many lines. Read in one
-/// pass; a profile cut short can end in half a byte, which goes.
+/// name, its length, then the bytes in hex over many lines, up to a NUL if
+/// there is one. Read in one pass; a profile cut short can end in half a
+/// byte, which goes.
 fn unhex_profile(body: &[u8]) -> Option<Vec<u8>> {
     let mut lines = body.splitn(4, |&b| b == b'\n');
     let _empty = lines.next()?;
@@ -332,6 +333,7 @@ fn unhex_profile(body: &[u8]) -> Option<Vec<u8>> {
             b'a'..=b'f' => b - b'a' + 10,
             b'A'..=b'F' => b - b'A' + 10,
             _ if b.is_ascii_whitespace() => continue,
+            0 => break,
             _ => return None,
         };
         match high.take() {
@@ -652,6 +654,13 @@ mod tests {
             let (field, blob) = text(b"zTXt", &ztxt, true, &mut 0, &mut { keep });
             assert_eq!((field, blob), (Some(MetaField::Other), None), "{keep}");
         }
+        // A NUL after the hex ends it, as the old decoder's dropped odd
+        // byte did.
+        let mut ended = b"Raw profile type exif\0".to_vec();
+        ended.extend_from_slice(&raw);
+        ended.extend_from_slice(b"\n\0");
+        let (field, blob) = text_of(b"tEXt", &ended, true);
+        assert_eq!((field, orientation(blob)), (None, Some(6)));
         // Not hex at all.
         let mut bad = b"Raw profile type exif\0".to_vec();
         bad.extend_from_slice(b"\nexif\n      4\nzz");
