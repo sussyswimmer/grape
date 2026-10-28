@@ -15,10 +15,11 @@
 //!   Interop `R03`), when that's how an IFD with no ICC profile said its
 //!   color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG and old-style JPEG (both tools); metadata inside
-//!   JPEG data (an APP1, APP13 or COM before a block's first scan, or in
-//!   its JPEGTables, or segments that run past the first [`MAX_SCAN`]
-//!   bytes read); ImageJ and OME files, whose layout is in their
-//!   description.
+//!   JPEG data (an APP1, APP13 or COM in its JPEGTables, or in a block:
+//!   up to its first scan when that's a sequential frame's only one, and
+//!   through every scan otherwise; or segments or scans that run past the
+//!   first [`MAX_SCAN`] bytes read before that); ImageJ and OME files,
+//!   whose layout is in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -324,15 +325,21 @@ impl JpegScan<'_> {
     }
 }
 
-/// Whether the JPEG stream `jpeg` has an APP1, APP13 or COM segment before
-/// its first scan, or may have: when `jpeg` is only the stream's first
-/// bytes (not `whole`) and they end before its first scan, what follows
-/// can't be seen. Anything that isn't a stream of segments says no: it's
-/// copied as it is.
+/// Whether the JPEG stream `jpeg` has an APP1, APP13 or COM segment, or
+/// may have: when `jpeg` is only the stream's first bytes (not `whole`)
+/// and they end too soon, what follows can't be seen. Its segments are
+/// read up to its first scan when that holds every component of a
+/// sequential frame, which then has no other scan, so only its end
+/// follows; otherwise past every scan, each to the marker after its coded
+/// data, to the end. Anything that isn't a stream of segments says no:
+/// it's copied as it is.
 fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
     let Some(mut rest) = jpeg.strip_prefix(&[0xFF, 0xD8]) else {
         return false;
     };
+    // The frame's components, and whether it's sequential (each component
+    // in one scan).
+    let mut frame: Option<(u8, bool)> = None;
     loop {
         // A marker, after any fill bytes.
         let fill = rest.iter().take_while(|&&b| b == 0xFF).count();
@@ -345,18 +352,43 @@ fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
         rest = &rest[fill + 1..];
         match marker {
             0xE1 | 0xED | 0xFE => return true,
-            0xDA | 0xD9 => return false,
-            0x01 | 0xD0..=0xD7 => {}
-            _ => {
-                let Some(len) = rest.get(..2) else {
-                    return !whole;
-                };
-                let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
-                let Some(next) = rest.get(len..) else {
-                    return !whole;
-                };
-                rest = next;
+            0xD9 => return false,
+            0x01 | 0xD0..=0xD7 => continue,
+            _ => {}
+        }
+        let Some(len) = rest.get(..2) else {
+            return !whole;
+        };
+        let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
+        let (Some(segment), Some(next)) = (rest.get(..len), rest.get(len..)) else {
+            return !whole;
+        };
+        rest = next;
+        match marker {
+            // A frame header: SOF0 to SOF15 but DHT, JPG and DAC.
+            0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                let sequential = matches!(marker, 0xC0 | 0xC1 | 0xC3 | 0xC9 | 0xCB);
+                frame = segment.get(7).map(|&n| (n, sequential));
             }
+            0xDA => {
+                let (Some((components, sequential)), Some(&n)) = (frame, segment.get(2)) else {
+                    // A scan with no frame: not a stream Grape knows.
+                    return false;
+                };
+                if sequential && n == components {
+                    return false;
+                }
+                // The next marker: a 0xFF that isn't a stuffed one (0xFF 0)
+                // or a restart marker, which coded data holds.
+                let Some(at) = rest
+                    .windows(2)
+                    .position(|w| w[0] == 0xFF && !matches!(w[1], 0 | 0xD0..=0xD7))
+                else {
+                    return !whole;
+                };
+                rest = &rest[at..];
+            }
+            _ => {}
         }
     }
 }
@@ -995,11 +1027,76 @@ mod tests {
                 Err(e) => panic!("{e:?}"),
             }
         }
-        // APP1 after the first scan isn't looked for.
+        // A scan with no frame before it isn't a stream Grape knows.
         assert!(!segments_hold_metadata(
             b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1",
             false
         ));
+    }
+
+    /// A segment: `marker` and `body`, with its length.
+    fn segment(marker: u8, body: &[u8]) -> Vec<u8> {
+        let len = (body.len() as u16 + 2).to_be_bytes();
+        [&[0xFF, marker], &len[..], body].concat()
+    }
+
+    /// A frame header (SOF `marker`) of `n` components, 8 × 8.
+    fn frame(marker: u8, n: u8) -> Vec<u8> {
+        let mut body = vec![8, 0, 8, 0, 8, n];
+        for c in 1..=n {
+            body.extend([c, 0x11, 0]);
+        }
+        segment(marker, &body)
+    }
+
+    /// A scan of `n` components and its coded data, which holds a stuffed
+    /// 0xFF and a restart marker.
+    fn scan(n: u8) -> Vec<u8> {
+        let mut body = vec![n];
+        for c in 1..=n {
+            body.extend([c, 0]);
+        }
+        body.extend([0, 63, 0]);
+        [
+            segment(0xDA, &body),
+            b"\x12\xFF\x00\x34\xFF\xD0\x56".to_vec(),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn metadata_between_a_jpegs_scans_is_refused() {
+        let app1 = segment(0xE1, b"Exif\0\0MM\0*");
+        let tables = segment(0xC4, &[0; 17]);
+        let (soi, eoi) = (b"\xFF\xD8".to_vec(), b"\xFF\xD9".to_vec());
+        // Progressive: scans until the end.
+        let progressive =
+            |between: &[u8]| [&soi, &frame(0xC2, 1), &scan(1), between, &scan(1), &eoi].concat();
+        assert!(segments_hold_metadata(&progressive(&app1), true));
+        assert!(!segments_hold_metadata(&progressive(&tables), true));
+        // The first scan's coded data running past what was read.
+        let cut = [soi.clone(), frame(0xC2, 1), scan(1)].concat();
+        assert!(segments_hold_metadata(&cut, false));
+        assert!(!segments_hold_metadata(&cut, true));
+        // Sequential, its first scan of one of three components.
+        let partial = [&soi[..], &frame(0xC0, 3), &scan(1), &app1, &scan(2), &eoi].concat();
+        assert!(segments_hold_metadata(&partial, true));
+        // Sequential, its first scan of every component: only the end
+        // follows, so nothing past it is read, however long the data.
+        let only = [&soi[..], &frame(0xC0, 3), &scan(3), &app1, &eoi].concat();
+        assert!(!segments_hold_metadata(&only, true));
+        assert!(!segments_hold_metadata(&only, false));
+        // Through the plan: refused, or kept as it is.
+        let Err(Error::Refused(why)) = plan(&jpeg_page(progressive(&app1), None)) else {
+            panic!("not refused")
+        };
+        assert_eq!(why, IN_DATA);
+        let file = jpeg_page(progressive(&tables), None);
+        let (out, found) = strip(&file);
+        assert!(found.is_empty());
+        let block = read(&out).pages[0].blocks[0];
+        let range = block.offset as usize..(block.offset + block.len) as usize;
+        assert_eq!(out[range], progressive(&tables));
     }
 
     #[test]
