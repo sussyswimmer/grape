@@ -2012,11 +2012,31 @@ pub(crate) mod tests {
 
     /// Not a test: the helper the tests start. The test binary runs only
     /// this "test" (`--exact … --ignored`) with [`FAKE`] set to a mode.
+    ///
+    /// The request is read first. A probe is answered as [`FakeCodec`]
+    /// answers it (so `no-heic-encoder` still can't write HEIC) with none of
+    /// the mode's misbehavior, before or after `serve`: a job that probes
+    /// first ([`Encoder::check_encode`]) still reaches the decode or encode
+    /// its mode is for. `probe-<mode>` is the other way round: `<mode>` on
+    /// the probe only, and every other request served as `ok`.
     #[test]
     #[ignore = "a fake image helper, run by the tests below"]
     fn fake_helper() {
         let Ok(mode) = std::env::var(FAKE) else {
             return;
+        };
+        let mut request = Vec::new();
+        io::stdin()
+            .lock()
+            .take(proto::MAX_REQUEST_BYTES + 1)
+            .read_to_end(&mut request)
+            .unwrap();
+        let probe = serde_json::from_slice::<serde_json::Value>(&request)
+            .is_ok_and(|request| request["op"]["kind"] == "probe");
+        let (mode, misbehave) = match mode.strip_prefix("probe-") {
+            Some(on_probe) if probe => (on_probe.to_string(), true),
+            Some(_) => ("ok".to_string(), false),
+            None => (mode, !probe),
         };
         let say = |line: &str| {
             let mut out = io::stdout().lock();
@@ -2026,6 +2046,7 @@ pub(crate) mod tests {
         };
         let wait = || thread::sleep(Duration::from_secs(60));
         match mode.as_str() {
+            _ if !misbehave => {}
             "crash" => {
                 say(r#"{"progress":0.5}"#);
                 std::process::exit(3);
@@ -2072,7 +2093,9 @@ pub(crate) mod tests {
             _ => {}
         }
         let codec = FakeCodec { mode: mode.clone() };
-        let done = proto::serve(&codec, io::stdin().lock(), io::stdout());
+        // What's past the request's cap too, so `serve` refuses a long one.
+        let input = Cursor::new(request).chain(io::stdin().lock());
+        let done = proto::serve(&codec, input, io::stdout());
         // After the last line: spoil what was written, for the parent's
         // checks.
         let here = std::env::current_dir().unwrap();
@@ -2088,6 +2111,7 @@ pub(crate) mod tests {
             .into_iter()
             .find(|name| here.join(name).is_file());
         match mode.as_str() {
+            _ if !misbehave => {}
             "bad-pixels" => append(proto::names::PIXELS),
             "bad-output" => append(output.unwrap()),
             // The same length, but the other format's ftyp.
@@ -4142,7 +4166,7 @@ pub(crate) mod tests {
         assert_eq!(contain.calls.load(Ordering::SeqCst), 1);
 
         // A probe that fails isn't kept: the next job asks again.
-        let (launch, contain) = contained("crash");
+        let (launch, contain) = contained("probe-crash");
         for calls in 1..=2 {
             let err = check(&launch, HeifFormat::Heic).unwrap_err();
             assert_eq!(
@@ -4163,6 +4187,146 @@ pub(crate) mod tests {
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::Cancelled);
         assert_eq!(contain.calls.load(Ordering::SeqCst), 0);
+        tool.check();
+    }
+
+    #[test]
+    fn a_failed_probe_reads_as_an_encodes_failure() {
+        let tool = Tool::new();
+        for (mode, kind, message) in [
+            (
+                "probe-crash",
+                ErrorKind::DecodeFailed,
+                "Grape's image helper stopped unexpectedly.",
+            ),
+            // A done line with no caps.
+            (
+                "probe-lie",
+                ErrorKind::DecodeFailed,
+                "Grape's image helper stopped unexpectedly.",
+            ),
+            (
+                "probe-protocol",
+                ErrorKind::NotYetSupported,
+                "Grape's image helper doesn't match this version of Grape.",
+            ),
+            (
+                "probe-over-heap",
+                ErrorKind::DecodeFailed,
+                "photo.heic needs too much memory, so Grape stopped.",
+            ),
+        ] {
+            let encoder = Encoder::new(fresh(mode), tool.limits(), HeifFormat::Heic);
+            let err = encoder
+                .check_encode(&tool.names(), &CancelToken::new())
+                .unwrap_err();
+            assert_eq!(
+                (err.kind, err.user_message.as_str()),
+                (kind, message),
+                "{mode}"
+            );
+            // Anything but the probe is served as `ok`.
+            let (result, _) = encode_with(
+                &encoder,
+                &rgb_image(3, 2),
+                None,
+                Some(50),
+                &tool,
+                &CancelToken::new(),
+            );
+            assert_eq!(fake_quality(&result.unwrap()), Some(50), "{mode}");
+            tool.check();
+        }
+    }
+
+    /// A job that probes first reaches what its fake's mode is for: the
+    /// modes leave the probe alone.
+    #[test]
+    fn the_fakes_modes_leave_the_probe_alone() {
+        let tool = Tool::new();
+        let names = tool.names();
+        for mode in [
+            "ok",
+            "slow",
+            "slow-encode",
+            "noencoder",
+            "error-encode",
+            "error-tooLarge",
+            "crash",
+            "protocol",
+            "over-heap",
+            "huge-image",
+            "over-pixels",
+            "two-channels",
+            "huge-icc",
+            "lie",
+            "noisy",
+            "bad-pixels",
+            "bad-output",
+            "other-output",
+            "wrong-size",
+            "done-then-fail",
+        ] {
+            let encoder = Encoder::new(fresh(mode), tool.limits(), HeifFormat::Heic);
+            encoder
+                .check_encode(&names, &CancelToken::new())
+                .unwrap_or_else(|err| panic!("{mode}: {err:?}"));
+            tool.check();
+        }
+
+        // The encode's own check, not the probe, finds the other format's
+        // file.
+        let launch = fresh("other-output");
+        let encoder = Encoder::new(launch, tool.limits(), HeifFormat::Heic);
+        encoder.check_encode(&names, &CancelToken::new()).unwrap();
+        let (result, _) = encode_with(
+            &encoder,
+            &rgb_image(3, 2),
+            None,
+            Some(50),
+            &tool,
+            &CancelToken::new(),
+        );
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.user_message,
+            "Grape's image helper stopped unexpectedly."
+        );
+        assert_eq!(err.detail, "HEIF helper: its output isn't HEIC");
+        tool.check();
+
+        // The decode's own peak, not the probe, refuses the huge image.
+        let rows = gradient(3, 2, 3);
+        let src = tool.dir.0.join("photo.heic");
+        fs::write(&src, fake_heic(3, 2, 3, &rows, None)).unwrap();
+        let launch = fresh("huge-image");
+        Encoder::new(launch.clone(), tool.limits(), HeifFormat::Heic)
+            .check_encode(&names, &CancelToken::new())
+            .unwrap();
+        // 12 bytes a pixel: 1.5 GiB for its 512 MiB of RGBA.
+        let peak =
+            |width: u32, height: u32, _: ColorType| u64::from(width) * u64::from(height) * 12;
+        let err = Decoder::new(launch, tool.limits())
+            .decode_within(
+                &src,
+                &names,
+                &peak,
+                &CancelToken::new(),
+                (0.0, 0.5),
+                &mut |_| {},
+            )
+            .unwrap_err();
+        assert_eq!(
+            (err.kind, err.user_message.as_str()),
+            (
+                ErrorKind::DecodeFailed,
+                "photo.heic is too large to convert."
+            )
+        );
+        assert!(
+            err.detail.contains("16384x8192 Rgba8 needs about 1536 MiB"),
+            "{err:?}"
+        );
         tool.check();
     }
 
