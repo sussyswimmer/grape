@@ -13,7 +13,7 @@
 
 #![warn(missing_docs)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 
 pub mod file_actions;
@@ -202,6 +202,46 @@ pub struct DisplayBounds {
     pub scale: f64,
 }
 
+/// How a drag out of the float shelf ended, on Windows and macOS. What a
+/// target reports is a hint: some targets don't report what they did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DragOutcome {
+    /// Dropped, and the target says it copied the files.
+    Copied,
+    /// Dropped, and the target says it linked to them (shortcuts on
+    /// Windows, aliases on macOS).
+    Linked,
+    /// Cancelled with Esc, let go where nothing takes files, or refused by
+    /// the target. On macOS also a drop on one of Grape's own windows (the
+    /// webview there answers every drop with a copy and ignores it), and a
+    /// drag whose button was let go before AppKit began it.
+    Cancelled,
+    /// No mouse button was down by the time the drag would have started,
+    /// so it didn't: it would have dropped at once, wherever the pointer
+    /// was.
+    ButtonUp,
+    /// None of the items can be dragged: nothing was asked for, or nothing
+    /// is there any more (Windows lists them in its `DragOut::skipped`).
+    NothingToDrag,
+}
+
+/// One item of a drag out of the float shelf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DragItem {
+    /// The file or folder.
+    pub path: PathBuf,
+    /// A folder, as the shelf recorded it when the item was dropped there,
+    /// so the macOS drag never looks at the disk to tell. Windows ignores
+    /// it.
+    pub folder: bool,
+}
+
+impl AsRef<Path> for DragItem {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
 /// Watches the OS for file drags and modifier changes.
 ///
 /// Implementations must never block the user's input: hook callbacks and
@@ -306,6 +346,16 @@ mod tests {
     #[test]
     fn haptic_tick_never_fails() {
         haptic_tick();
+    }
+
+    #[test]
+    fn a_drag_item_is_its_path() {
+        let item = DragItem {
+            path: PathBuf::from("/a/Invoices"),
+            folder: true,
+        };
+        let path: &Path = item.as_ref();
+        assert_eq!(path, Path::new("/a/Invoices"));
     }
 
     #[test]

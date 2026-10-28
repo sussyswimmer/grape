@@ -529,8 +529,8 @@ mod win {
     use std::time::{Duration, Instant};
 
     use anyhow::Context as _;
-    use grape_platform::windows::{self as platform, DragOutcome};
-    use grape_platform::{DisplayBounds, Rect};
+    use grape_platform::windows as platform;
+    use grape_platform::{DisplayBounds, DragOutcome, Rect};
     use tauri::utils::config::BackgroundThrottlingPolicy;
     use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 

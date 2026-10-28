@@ -1,6 +1,8 @@
 //! The pure rules under the macOS layer: Cocoa's bottom-left coordinates to
 //! Grape's top-left points and back, the screen under a point, the text and
-//! arguments the file actions use, and how Move judges each item.
+//! arguments the file actions use, how Move judges each item, and the float
+//! shelf's drag out (what it offers, how it ended, whose drag it is, its
+//! icons and frames).
 //!
 //! No AppKit here, so these build and are tested on every OS, not only on a
 //! Mac. The `macos` module is the only caller outside the tests.
@@ -16,7 +18,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::file_actions::TerminalApp;
-use crate::{DisplayBounds, Rect};
+use crate::{DisplayBounds, DragOutcome, Rect};
 
 /// A rectangle in Cocoa's global space: points, origin at the bottom-left of
 /// the primary screen, y growing upwards.
@@ -341,6 +343,108 @@ pub(crate) fn heif_decode_bytes(width: u32, height: u32, depth: Option<i64>) -> 
         4 + 4
     };
     (u64::from(width) * u64::from(height)).saturating_mul(per_pixel)
+}
+
+/// AppKit's `NSDragOperation` bits, as plain numbers so every OS tests the
+/// rules below. A drag out of the shelf only ever offers the first two.
+pub(crate) const DRAG_COPY: usize = 1;
+/// An alias (Finder) or a link.
+pub(crate) const DRAG_LINK: usize = 2;
+/// "Whatever the target likes": Finder moves on the same volume.
+pub(crate) const DRAG_GENERIC: usize = 4;
+/// A private arrangement between source and target.
+pub(crate) const DRAG_PRIVATE: usize = 8;
+/// The target takes the files away.
+pub(crate) const DRAG_MOVE: usize = 16;
+/// The Dock's Trash: the source would delete them.
+pub(crate) const DRAG_DELETE: usize = 32;
+
+/// What a drag out of the shelf offers, in every dragging context: copy or
+/// link, never Generic, Private, Move or Delete (golden rule 2). Nothing
+/// once the drag is `stale` (its button was let go before AppKit began
+/// it), so nothing can drop it.
+pub(crate) fn drag_mask(stale: bool) -> usize {
+    if stale {
+        0
+    } else {
+        DRAG_COPY | DRAG_LINK
+    }
+}
+
+/// How a drag out ended, from the operation AppKit reports and whether the
+/// drop landed on one of Grape's own windows. Grape's webviews answer every
+/// drop with a copy and ignore it, so a drop there is cancelled. Otherwise
+/// Copy wins (as on Windows), then Link; anything else is cancelled.
+pub(crate) fn drag_outcome(operation: usize, on_grape: bool) -> DragOutcome {
+    if on_grape {
+        DragOutcome::Cancelled
+    } else if operation & DRAG_COPY != 0 {
+        DragOutcome::Copied
+    } else if operation & DRAG_LINK != 0 {
+        DragOutcome::Linked
+    } else {
+        DragOutcome::Cancelled
+    }
+}
+
+/// The names of the bits in `operation` that a drag out never offers, for
+/// a log line: "Generic|Move", say, or a hex rest. Empty when there are
+/// none.
+pub(crate) fn unexpected_operation(operation: usize) -> String {
+    let mut names: Vec<String> = [
+        (DRAG_GENERIC, "Generic"),
+        (DRAG_PRIVATE, "Private"),
+        (DRAG_MOVE, "Move"),
+        (DRAG_DELETE, "Delete"),
+    ]
+    .into_iter()
+    .filter(|(bit, _)| operation & bit != 0)
+    .map(|(_, name)| name.to_owned())
+    .collect();
+    let known = DRAG_COPY | DRAG_LINK | DRAG_GENERIC | DRAG_PRIVATE | DRAG_MOVE | DRAG_DELETE;
+    let rest = operation & !known;
+    if rest != 0 {
+        names.push(format!("{rest:#x}"));
+    }
+    names.join("|")
+}
+
+/// Whether Grape started a drag out of the shelf during the press that
+/// began when its count of them was `at_press`: the count is `now` and
+/// differs. Counts wrap, so any difference counts.
+pub(crate) fn own_drag_in_press(at_press: u64, now: u64) -> bool {
+    at_press != now
+}
+
+/// The type whose icon a drag item shows (`NSWorkspace.iconForFileType`):
+/// `public.folder` for a folder, the extension for a file that has one in
+/// UTF-8, else `public.data`. Never looks at the disk.
+pub(crate) fn drag_icon_type(path: &Path, folder: bool) -> String {
+    if folder {
+        return "public.folder".to_owned();
+    }
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if !ext.is_empty() => ext.to_owned(),
+        _ => "public.data".to_owned(),
+    }
+}
+
+/// The dragging frames of `count` items, in the dragging view's own
+/// (unflipped) coordinates: each a `size` square centered on `at`, the
+/// pointer, and item `i` moved `3 × min(i, 4)` points right and down, so a
+/// few show as a small stack.
+pub(crate) fn drag_item_frames(count: usize, at: (f64, f64), size: f64) -> Vec<CocoaRect> {
+    (0..count)
+        .map(|index| {
+            let offset = 3.0 * index.min(4) as f64;
+            CocoaRect {
+                x: at.0 - size / 2.0 + offset,
+                y: at.1 - size / 2.0 - offset,
+                width: size,
+                height: size,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -691,5 +795,112 @@ mod tests {
             assert_eq!(opens, MacTerminal::Terminal);
             assert!(note.is_some());
         }
+    }
+
+    #[test]
+    fn a_drag_out_offers_copy_or_link_and_nothing_else() {
+        let mask = drag_mask(false);
+        assert_eq!(mask, DRAG_COPY | DRAG_LINK);
+        for never in [DRAG_GENERIC, DRAG_PRIVATE, DRAG_MOVE, DRAG_DELETE] {
+            assert_eq!(mask & never, 0, "{never}");
+        }
+        // Stale: nothing can drop it.
+        assert_eq!(drag_mask(true), 0);
+    }
+
+    #[test]
+    fn a_drag_out_ends_copied_linked_or_cancelled() {
+        assert_eq!(drag_outcome(DRAG_COPY, false), DragOutcome::Copied);
+        assert_eq!(
+            drag_outcome(DRAG_COPY | DRAG_LINK, false),
+            DragOutcome::Copied
+        );
+        assert_eq!(drag_outcome(DRAG_LINK, false), DragOutcome::Linked);
+        assert_eq!(drag_outcome(0, false), DragOutcome::Cancelled);
+        for other in [DRAG_GENERIC, DRAG_PRIVATE, DRAG_MOVE, DRAG_DELETE] {
+            assert_eq!(
+                drag_outcome(other, false),
+                DragOutcome::Cancelled,
+                "{other}"
+            );
+        }
+        // On one of Grape's own windows nothing happened, whatever wry said.
+        for operation in [0, DRAG_COPY, DRAG_LINK, DRAG_COPY | DRAG_LINK, DRAG_MOVE] {
+            assert_eq!(
+                drag_outcome(operation, true),
+                DragOutcome::Cancelled,
+                "{operation}"
+            );
+        }
+    }
+
+    #[test]
+    fn unexpected_operations_are_named_for_the_log() {
+        assert_eq!(unexpected_operation(0), "");
+        assert_eq!(unexpected_operation(DRAG_COPY | DRAG_LINK), "");
+        assert_eq!(
+            unexpected_operation(DRAG_GENERIC | DRAG_MOVE),
+            "Generic|Move"
+        );
+        assert_eq!(
+            unexpected_operation(DRAG_PRIVATE | DRAG_DELETE | DRAG_COPY),
+            "Private|Delete"
+        );
+        assert_eq!(unexpected_operation(64 | DRAG_COPY), "0x40");
+    }
+
+    #[test]
+    fn a_press_is_grapes_own_once_the_count_moved() {
+        assert!(!own_drag_in_press(0, 0));
+        assert!(!own_drag_in_press(7, 7));
+        assert!(own_drag_in_press(7, 8));
+        assert!(own_drag_in_press(u64::MAX, 0));
+    }
+
+    #[test]
+    fn drag_icons_come_from_the_type_never_the_file() {
+        assert_eq!(
+            drag_icon_type(Path::new("/a/Invoices"), true),
+            "public.folder"
+        );
+        assert_eq!(drag_icon_type(Path::new("/a/b.c.d"), true), "public.folder");
+        assert_eq!(drag_icon_type(Path::new("/a/photo.JPG"), false), "JPG");
+        assert_eq!(drag_icon_type(Path::new("/a/README"), false), "public.data");
+        assert_eq!(
+            drag_icon_type(Path::new("/a/.bashrc"), false),
+            "public.data"
+        );
+        assert_eq!(
+            drag_icon_type(Path::new("/a/trailing."), false),
+            "public.data"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_extension_that_isnt_utf8_gets_the_data_icon() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = Path::new("/a").join(OsStr::from_bytes(b"photo.jp\xe9"));
+        assert_eq!(drag_icon_type(&path, false), "public.data");
+    }
+
+    #[test]
+    fn drag_frames_stack_from_the_pointer() {
+        let frames = drag_item_frames(7, (100.0, 200.0), 48.0);
+        assert_eq!(frames.len(), 7);
+        // The first is centered on the pointer.
+        assert_eq!(frames[0], cocoa(76.0, 176.0, 48.0, 48.0));
+        // Then 3 points right and down (y goes up in Cocoa) each.
+        assert_eq!(frames[1], cocoa(79.0, 173.0, 48.0, 48.0));
+        assert_eq!(frames[4], cocoa(88.0, 164.0, 48.0, 48.0));
+        // From the fifth on they sit on the fifth.
+        assert_eq!(frames[5], frames[4]);
+        assert_eq!(frames[6], frames[4]);
+        for frame in &frames {
+            assert!((frame.width - 48.0).abs() < 1e-9 && (frame.height - 48.0).abs() < 1e-9);
+        }
+        assert!(drag_item_frames(0, (0.0, 0.0), 48.0).is_empty());
     }
 }

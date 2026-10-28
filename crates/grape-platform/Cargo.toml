@@ -77,7 +77,11 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "NSURL",
 ] }
 # `libc` only types NSRunningApplication's `processIdentifier` (pid_t); the
-# libc crate is already in the build.
+# libc crate is already in the build. The float shelf's drag out (D43) adds
+# `NSDragging`, `NSDraggingItem` and `NSDraggingSession` (the source
+# protocol, the items, the session and the call that begins it),
+# `NSGraphicsContext` (the type of the drag event constructor's `context`
+# parameter) and `NSImage` (the drag image): bindings only, no new package.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
     "libc",
@@ -86,8 +90,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSApplication",
     "NSButton",
     "NSControl",
+    "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
     "NSEvent",
+    "NSGraphicsContext",
     "NSHapticFeedback",
+    "NSImage",
     "NSOpenPanel",
     "NSPanel",
     "NSPasteboard",

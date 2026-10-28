@@ -258,7 +258,7 @@ fn cocoa_frame(mtm: MainThreadMarker, frame: Rect) -> Result<NSRect, PlatformErr
 ///
 /// # Safety
 /// `ns_window` must be null or a live `NSWindow` pointer.
-unsafe fn retain_window(
+pub(super) unsafe fn retain_window(
     ns_window: *mut c_void,
 ) -> Result<(Retained<NSWindow>, MainThreadMarker), PlatformError> {
     let null = PlatformError::Os {
