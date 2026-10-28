@@ -9,21 +9,23 @@
 //!    entries, on even offsets: the entries sorted by tag, with the block
 //!    offsets and counts, the SubIFDs (330) and the pointers to the Exif,
 //!    GPS and Interop IFDs written fresh. A value that entries copy from
-//!    the same place in the source is written once, as a block is. The
-//!    region is laid out before it's written, so every pointer is known
-//!    when it's written.
+//!    the same place in the source, or that fields share
+//!    ([`Data::Shared`]), is written once, as a block is. The region is
+//!    laid out before it's written, so every pointer is known when it's
+//!    written.
 //! 4. A seek back to the header for the first IFD's offset.
 //!
 //! Nothing else from the source reaches the output. A classic file that
 //! would need an offset past 4 GiB is [`Error::TooLarge`], and so is one
-//! that would copy more bytes from the source than the source has (values
-//! that overlap): so an output outgrows its source only by the offsets,
-//! counts, IFDs and padding Grape writes. Reads and writes go through the
-//! caller's `Cancellable` source and temp file, and the token is checked
-//! before each block.
+//! whose blocks and fields' values, each counted once, would come to more
+//! bytes than the source has (values that overlap): so an output outgrows
+//! its source only by the offsets, counts, IFDs and padding Grape writes.
+//! Reads and writes go through the caller's `Cancellable` source and temp
+//! file, and the token is checked before each block.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, SeekFrom, Write};
+use std::sync::Arc;
 
 use super::super::strip::{read_exact, Error, In, Out};
 use super::read::{seek, type_size, Block, Entry, Layout, Order, Value};
@@ -47,6 +49,9 @@ pub(crate) struct Field {
 pub(crate) enum Data {
     /// These bytes, in the file's byte order.
     Bytes(Vec<u8>),
+    /// These bytes, in the file's byte order, which other fields may hold
+    /// too (the same `Arc`): written once however many do.
+    Shared(Arc<Vec<u8>>),
     /// `len` bytes at `offset` in the source, copied as they are.
     Source { offset: u64, len: u64 },
 }
@@ -70,6 +75,7 @@ impl Field {
     fn len(&self) -> u64 {
         match &self.value {
             Data::Bytes(bytes) => bytes.len() as u64,
+            Data::Shared(bytes) => bytes.len() as u64,
             Data::Source { len, .. } => *len,
         }
     }
@@ -111,13 +117,22 @@ enum Made {
     Ifds(Vec<usize>),
 }
 
+/// Where a value that entries repeat comes from, so it's written once.
+#[derive(PartialEq, Eq, Hash)]
+enum Key {
+    /// Bytes at (offset, len) in the source.
+    Source(u64, u64),
+    /// Bytes fields share, by where they're held.
+    Shared(*const Vec<u8>),
+}
+
 /// Where an entry's value goes.
 enum Place {
     /// In the entry.
     Inline,
     /// Here, after the IFD.
     Here(u64),
-    /// Where an earlier entry's copy of the same source bytes went.
+    /// Where an earlier entry's copy of the same bytes went.
     There(u64),
 }
 
@@ -202,8 +217,9 @@ pub(crate) fn write(
     }
 
     // The IFDs, laid out before they're written. A value copied from the
-    // source is written once however many entries copy it, as blocks are.
-    let mut copied: HashMap<(u64, u64), u64> = HashMap::new();
+    // source, or shared, is written once however many entries hold it, as
+    // blocks are.
+    let mut copied: HashMap<Key, u64> = HashMap::new();
     let mut pos = out.at;
     for node in &mut nodes {
         pos += pos % 2;
@@ -216,18 +232,19 @@ pub(crate) fn write(
                 _ => None,
             };
             let len = field.map_or_else(|| type_size(*kind).unwrap_or(8) * count, Field::len);
-            let source = match field.map(|f| &f.value) {
-                Some(&Data::Source { offset, len }) => Some((offset, len)),
+            let key = match field.map(|f| &f.value) {
+                Some(&Data::Source { offset, len }) => Some(Key::Source(offset, len)),
+                Some(Data::Shared(bytes)) => Some(Key::Shared(Arc::as_ptr(bytes))),
                 _ => None,
             };
             if len <= layout.word() {
                 values.push(Place::Inline);
-            } else if let Some(&at) = source.and_then(|key| copied.get(&key)) {
+            } else if let Some(&at) = key.as_ref().and_then(|key| copied.get(key)) {
                 values.push(Place::There(at));
             } else {
                 pos += pos % 2;
                 values.push(Place::Here(pos));
-                if let Some(key) = source {
+                if let Some(key) = key {
                     copied.insert(key, pos);
                 }
                 if field.is_some() {
@@ -239,8 +256,9 @@ pub(crate) fn write(
         node.values = values;
     }
     fits(layout, pos)?;
-    // Blocks never overlap, so only values that overlap each other or a
-    // block could take more than the source holds: a file made to grow.
+    // Blocks never overlap, and each block and value is counted once, so
+    // only values that overlap each other or a block could take more than
+    // the source holds: a file made to grow.
     if taken > layout.len {
         return Err(Error::TooLarge(format!(
             "values that copy {taken} bytes of a {}-byte file",
@@ -382,6 +400,7 @@ fn value(
     match made {
         Made::Field(n) => match &node.dir.fields[*n].value {
             Data::Bytes(bytes) => w.write_all(bytes).map_err(Error::Write),
+            Data::Shared(bytes) => w.write_all(bytes).map_err(Error::Write),
             Data::Source { offset, len } => copy(r, w, *offset, *len, buf),
         },
         Made::Offsets => numbers(&mut node.offsets.iter().copied()),

@@ -5,7 +5,8 @@
 //!
 //! - **Kept:** the layout, color, resolution and page tags ([`kept`]), ICC
 //!   and Orientation among them; Photoshop's resources, filtered
-//!   ([`irb`](super::irb)).
+//!   ([`irb`](super::irb)): a block that IFDs share is filtered once, and
+//!   held and written once.
 //! - **Dropped and reported:** every other tag ([`field`]), and the Exif
 //!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
 //!   once). Padding, and values that are blank as far as they're read, go
@@ -21,7 +22,8 @@
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use super::super::exif;
 use super::super::strip::{read_exact, Error, Found, In, Out};
@@ -128,6 +130,7 @@ impl Plan {
             order,
             found: Found::default(),
             reported: HashSet::new(),
+            irbs: HashMap::new(),
         };
         let pages = pages
             .into_iter()
@@ -166,6 +169,8 @@ impl Plan {
         if !same_shape(&self.pages, &out.pages) {
             return wrong("has other IFDs or blocks".into());
         }
+        // Photoshop's resources that IFDs share are read once.
+        let mut irbs = HashSet::new();
         for ifd in out.ifds() {
             let dcf = ifd.exif.as_ref().is_some_and(dcf_only);
             if let Some(entry) = ifd.entries.iter().find(|e| {
@@ -173,7 +178,7 @@ impl Plan {
             }) {
                 return wrong(format!("keeps tag {}", entry.tag));
             }
-            if let Some(entry) = ifd.get(34377) {
+            if let Some(entry) = ifd.get(34377).filter(|e| irbs.insert(e.value)) {
                 let irb = read_value(r, entry, MAX_IRB)?.unwrap_or_default();
                 if irb::filter(&irb).kept != irb {
                     return wrong("keeps a Photoshop resource it drops".into());
@@ -186,6 +191,7 @@ impl Plan {
             order: out.layout.order,
             found: Found::default(),
             reported: HashSet::new(),
+            irbs: HashMap::new(),
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -338,6 +344,9 @@ struct Walk<'r> {
     /// The Exif, GPS and Interop IFDs reported, by offset: one that IFDs
     /// share is reported once.
     reported: HashSet<u64>,
+    /// Photoshop's resources filtered, by where they are: a block that
+    /// IFDs share is read and filtered once, and its field shared.
+    irbs: HashMap<(u64, u64), Option<Field>>,
 }
 
 impl Walk<'_> {
@@ -446,15 +455,27 @@ impl Walk<'_> {
     }
 
     /// Photoshop's resources, kept down to the ones that describe the
-    /// picture; `None` when none is left.
+    /// picture; `None` when none is left. Resources that an earlier IFD
+    /// points at too are the field it got.
     fn irb(&mut self, entry: &Entry) -> Result<Option<Field>, Error> {
-        if let Value::At { len, .. } = entry.value {
-            if len > MAX_IRB {
-                return Err(Error::TooLarge(format!(
-                    "{len} bytes of Photoshop resources"
-                )));
-            }
+        let Value::At { offset, len } = entry.value else {
+            return self.filter_irb(entry);
+        };
+        if len > MAX_IRB {
+            return Err(Error::TooLarge(format!(
+                "{len} bytes of Photoshop resources"
+            )));
         }
+        if let Some(field) = self.irbs.get(&(offset, len)) {
+            return Ok(field.clone());
+        }
+        let field = self.filter_irb(entry)?;
+        self.irbs.insert((offset, len), field.clone());
+        Ok(field)
+    }
+
+    /// Reads and filters the resources `entry` holds, for [`Walk::irb`].
+    fn filter_irb(&mut self, entry: &Entry) -> Result<Option<Field>, Error> {
         let Some(irb) = read_value(self.r, entry, MAX_IRB)? else {
             // Resources that can't be read go whole, as a broken block does.
             self.found
@@ -471,7 +492,7 @@ impl Walk<'_> {
             tag: 34377,
             kind: 7,
             count: filtered.kept.len() as u64,
-            value: Data::Bytes(filtered.kept),
+            value: Data::Shared(Arc::new(filtered.kept)),
         }))
     }
 }
@@ -703,6 +724,52 @@ mod tests {
         for page in &back.pages {
             assert_eq!(value(&out, page, 34675).unwrap(), profile);
         }
+    }
+
+    #[test]
+    fn photoshop_resources_pages_share_are_filtered_and_written_once() {
+        // Three pages whose resources are the first page's: a 64 KiB path
+        // and IPTC, most of a 66 KB file.
+        let path = res(2000, "Path 1", &[7; 64 * 1024]);
+        let block = [path.clone(), res(1028, "", b"\x1c\x02\x05\0\x06secret")].concat();
+        let pages = (0..3)
+            .map(|n| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                let irb = if n == 0 { block.clone() } else { vec![0] };
+                page.tags.push((34377, V::Bytes(1, irb)));
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'M', false, pages).build();
+        let tiff = read(&file);
+        let Value::At { offset, len } = tiff.pages[0].get(34377).unwrap().value else {
+            panic!("inline resources")
+        };
+        for page in &tiff.pages[1..] {
+            set_entry(&mut file, page.at, 34377, len, offset);
+        }
+        let (out, found) = strip(&file);
+        assert_eq!(found, [Iptc].into());
+        assert!(out.len() < file.len(), "{} of {}", out.len(), file.len());
+        let back = read(&out);
+        for page in &back.pages {
+            assert_eq!(value(&out, page, 34377).unwrap(), path);
+        }
+        // The plan holds them once.
+        let plan = plan(&file).unwrap();
+        let held: Vec<&Data> = plan
+            .pages
+            .iter()
+            .flat_map(|dir| dir.fields.iter().filter(|f| f.tag == 34377))
+            .map(|f| &f.value)
+            .collect();
+        let [Data::Shared(first), rest @ ..] = &held[..] else {
+            panic!("{held:?}")
+        };
+        assert_eq!(rest.len(), 2);
+        assert!(rest
+            .iter()
+            .all(|d| matches!(d, Data::Shared(b) if Arc::ptr_eq(b, first))));
     }
 
     #[test]

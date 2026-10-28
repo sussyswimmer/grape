@@ -160,7 +160,7 @@ pub(crate) struct Entry {
 }
 
 /// Where an entry's value is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Value {
     /// In the entry itself: the first `len` of `bytes`, in the file's order.
     Inline { bytes: [u8; 8], len: u8 },
