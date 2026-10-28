@@ -429,17 +429,28 @@ fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
                 if sequential && n == components {
                     return false;
                 }
-                // The next marker: a 0xFF that isn't a stuffed one (0xFF 0)
-                // or a restart marker, which coded data holds.
-                let Some(at) = rest
-                    .windows(2)
-                    .position(|w| w[0] == 0xFF && !matches!(w[1], 0 | 0xD0..=0xD7))
-                else {
+                let Some(at) = coded_end(rest) else {
                     return !whole;
                 };
                 rest = &rest[at..];
             }
             _ => {}
+        }
+    }
+}
+
+/// Where the marker after a scan's coded data `coded` starts, its fill
+/// bytes (0xFF) included: the first 0xFF that, after any fill bytes, isn't
+/// a stuffed one (0xFF 0) or a restart marker, which coded data holds, as
+/// jpeg.rs reads them; `None` when `coded` ends first.
+fn coded_end(coded: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    loop {
+        let at = from + coded.get(from..)?.iter().position(|&b| b == 0xFF)?;
+        let fill = coded[at..].iter().take_while(|&&b| b == 0xFF).count();
+        match coded.get(at + fill)? {
+            0 | 0xD0..=0xD7 => from = at + fill + 1,
+            _ => return Some(at),
         }
     }
 }
@@ -1213,6 +1224,24 @@ mod tests {
         let block = read(&out).pages[0].blocks[0];
         let range = block.offset as usize..(block.offset + block.len) as usize;
         assert_eq!(out[range], progressive(&tables));
+    }
+
+    #[test]
+    fn fill_bytes_in_a_scan_dont_end_it() {
+        let app1 = segment(0xE1, b"Exif\0\0MM\0*");
+        let (soi, eoi) = (b"\xFF\xD8".to_vec(), b"\xFF\xD9".to_vec());
+        // Coded data with fill bytes before a restart marker, and before
+        // the marker after it.
+        let filled = [scan(1), b"\x78\xFF\xFF\xD0\x9A\xFF\xFF".to_vec()].concat();
+        let progressive =
+            |between: &[u8]| [&soi[..], &frame(0xC2, 1), &filled, between, &scan(1), &eoi].concat();
+        assert!(segments_hold_metadata(&progressive(&app1), true));
+        assert!(!segments_hold_metadata(&progressive(b""), true));
+        // Fill bytes to the end of what was read: what follows can't be
+        // seen.
+        let cut = [&soi[..], &frame(0xC2, 1), &scan(1), b"\xFF\xFF"].concat();
+        assert!(segments_hold_metadata(&cut, false));
+        assert!(!segments_hold_metadata(&cut, true));
     }
 
     #[test]
