@@ -178,6 +178,19 @@ Audio and video, M3 (D22, D24; win; the CI installer carries Grape's own FFmpeg,
 - [ ] win: start converting a long video to WEBM, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
 - [ ] win: with Windows Security → Ransomware protection → Controlled folder access on, convert a video in Documents → either it works or the toast says Grape couldn't save; never a half-written file.
 
+Media tools, M4 (D26; win; the CI installer, which carries Grape's own FFmpeg; use scratch copies of files, and check each original with `Get-FileHash` before and after. Compress, Audio Channels and Normalize Volume open their panels in a normal run on these formats)
+- [ ] win: Ctrl-drop a 320k MP3 with cover art on COMPRESS, Balanced → `song Compressed.mp3` plays in Media Player with its cover and title, and the toast says how much smaller it is. Compress that output again → "… is already as small as Grape makes it." (or "… is already compact. Try Small."), and no new file appears.
+- [ ] win: Compress a 24-bit WAV → `take Compressed.flac` plays in Media Player. Compress an MP3 at High, then at Small → Small's file is the smaller.
+- [ ] win: Compress a phone video (a portrait MOV or MP4), Small → it plays upright in Media Player and Photos, at 720p, and Photos shows the same date as the original. Balanced on a 4K video → 1080p.
+- [ ] win: Compress an iPhone HDR video (HLG, or Dolby Vision) → it plays; note whether the colors look washed out next to the original. An HDR10 video (a PQ one, from a camera or a download) → "… is HDR10 video, which Compress can't keep yet.", and nothing is written.
+- [ ] win: Compress an MKV with two audio languages and subtitles → the output still has both languages and the subtitles (switch them in VLC or Media Player).
+- [ ] win: Ctrl-drop three MP3s on COMPRESS → one panel, then three outputs.
+- [ ] win: Remove Metadata on an MP3 with cover art and tags → `song No Metadata.mp3` plays; Explorer → Properties → Details shows no title, artist or album, and the toast lists what went. On a phone video → it plays, and Properties (or Photos) shows no location or camera.
+- [ ] win: Remove Audio on an MP4 with sound → `clip Muted.mp4` plays silent, the picture the same; on a video without sound → "… has no sound to remove."
+- [ ] win: Audio Channels → Mono on a stereo MP3 → `song Mono.mp3` plays in both ears; Stereo on a mono file → `… Stereo.…`; Mono on a mono file → "… is already mono."
+- [ ] win: Normalize Volume at −16 on a quiet podcast MP3 → `… Normalized.mp3` is louder and doesn't distort; on a loud song → quieter or about the same, never clipping; on its own output → "… is already at −16 LUFS."
+- [ ] win: start Compress on a long video, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
+
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
 - [ ] win: Alt-drop one file on COPY PATH → the toast says "Copied the path" and shows it. Paste into Notepad → the full path, unquoted. With three files → three lines.

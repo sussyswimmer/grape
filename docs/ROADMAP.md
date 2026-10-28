@@ -81,6 +81,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-26:* Extract Archive (ZIP, TAR and GZIP; RAR with Grape's bsdtar), Split PDF, Merge PDFs and Remove Metadata on PDFs run (D35), and Merge PDFs' panel opens in a normal build when PDFium is found. Remove Metadata's toast says what it removed. Compress, Audio Channels and Normalize Volume wait for lane B's FFmpeg tools (D26); `GRAPE_PREVIEW_PANELS=1` still opens their panels. Not run on the PC or a Mac yet: `TESTING.md` → "Archives, M3/M4" and "PDF, M3/M4".
 
+*Status 2026-10-28:* lane B's FFmpeg tools run (D26): Remove Audio on MP4, MOV and MKV; Remove Metadata and Compress on MP3, M4A, WAV, FLAC, MP4, MOV and MKV; Audio Channels and Normalize Volume on MP3, M4A, WAV and FLAC (25 tool pairs with `ffmpeg` and `ffprobe`). So Compress, Audio Channels and Normalize Volume open their panels in a normal build on those formats. Tested with `engines-it` on Linux against Grape's 9.0.2 build and FFmpeg 6.1.1; not on the PC or a Mac yet: `TESTING.md` → "Media tools, M4". Next: the image tools (JPG and PNG Compress; JPG, PNG, WebP and GIF Remove Metadata).
+
 ## M5: File actions on Windows (lane A)
 - [ ] copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.
 - [ ] share (Windows share sheet), float shelf (OLE drag-out works).
