@@ -6,5 +6,19 @@
 	     (ActivationPolicy::Accessory takes over once the app runs). -->
 	<key>LSUIElement</key>
 	<true/>
+	<!-- The reason macOS shows under its "would like to access files in
+	     your … folder" prompt, which comes the first time a drop reads or
+	     writes there (docs/PLATFORM_MACOS.md, "Folder prompts"). Grape's
+	     own words; one plain sentence each. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Grape reads the files you drop on its wheel from your Desktop and saves the converted copy next to them.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Grape reads the files you drop on its wheel from your Documents folder and saves the converted copy next to them.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Grape reads the files you drop on its wheel and saves the converted copy next to them, or in Downloads/Grape when it can't save next to a file.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Grape reads the files you drop on its wheel from this drive and saves the converted copy next to them.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Grape reads the files you drop on its wheel from this network drive and saves the converted copy next to them.</string>
 </dict>
 </plist>
