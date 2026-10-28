@@ -347,6 +347,11 @@ enum State {
     /// A drag with no wheel yet.
     Dragging {
         held: Modifiers,
+        /// The keys held since the drag started, never released since. One
+        /// of them isn't a key-down, so it opens no wheel
+        /// (`docs/INTERACTION_SPEC.md` §2): a released key drops out, and
+        /// pressing it again opens one.
+        baseline: Modifiers,
         cursor: Option<(i32, i32)>,
     },
     /// The wheel is open.
@@ -566,6 +571,7 @@ impl<E: Env> WheelController<E> {
                 } else {
                     State::Dragging {
                         held: modifiers,
+                        baseline: modifiers,
                         cursor: None,
                     }
                 };
@@ -652,14 +658,19 @@ impl<E: Env> WheelController<E> {
         match &mut self.state {
             State::Dragging {
                 held: was_held,
+                baseline,
                 cursor,
             } => {
                 if held == *was_held {
                     return Vec::new();
                 }
                 *was_held = held;
+                *baseline &= held;
+                // `mode` needs exactly one held key: it opens the wheel only
+                // if it went down during the drag.
+                let pressed = (held & *baseline).is_empty();
                 match (mode, *cursor) {
-                    (Some(mode), Some(cursor)) => self.open(mode, held, cursor, now),
+                    (Some(mode), Some(cursor)) if pressed => self.open(mode, held, cursor, now),
                     _ => Vec::new(),
                 }
             }
@@ -1489,6 +1500,53 @@ mod tests {
         assert!(run.opens().is_empty());
         run.signals(vec![keys(NONE), keys(Modifiers::SHIFT)]);
         assert_eq!(run.opens().len(), 1);
+    }
+
+    #[test]
+    fn releasing_one_of_two_keys_held_before_the_drag_opens_nothing() {
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ctrl: true,
+            ..NONE
+        };
+        let mut run = Run::new();
+        run.signals(vec![
+            DragSignal::Started {
+                modifiers: ctrl_shift,
+            },
+            moved(400, 300),
+            // Ctrl up: Shift is left, but it was held since the start.
+            keys(Modifiers::SHIFT),
+        ]);
+        assert!(run.opens().is_empty());
+        // Released and pressed again during the drag: that's a key-down.
+        run.signals(vec![keys(NONE), keys(Modifiers::SHIFT)]);
+        let opens = run.opens();
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].mode, WheelMode::Conversions);
+    }
+
+    #[test]
+    fn a_key_pressed_during_the_drag_opens_once_a_held_one_is_released() {
+        // Shift held from the start, Ctrl pressed during the drag: two keys,
+        // no mode. Shift up leaves Ctrl, which went down during the drag.
+        let mut run = Run::new();
+        run.signals(vec![
+            DragSignal::Started {
+                modifiers: Modifiers::SHIFT,
+            },
+            moved(400, 300),
+            keys(Modifiers {
+                shift: true,
+                ctrl: true,
+                ..NONE
+            }),
+        ]);
+        assert!(run.opens().is_empty());
+        run.signals(vec![keys(Modifiers::CTRL)]);
+        let opens = run.opens();
+        assert_eq!(opens.len(), 1);
+        assert_eq!(opens[0].mode, WheelMode::Tools);
     }
 
     #[test]

@@ -62,6 +62,7 @@ Drag + wheel, M1 spike (win; use scratch copies of files)
 - [ ] win: Esc mid-drag → the ring hides; Explorer cancels its drag too. The file is untouched.
 - [ ] win: press Esc mid-drag before tapping any key, keep holding and tap Shift → no ring.
 - [ ] win: hold Shift *before* starting the drag → no ring, and dropping into another folder moves the scratch file as Explorer always does.
+- [ ] win: hold Ctrl+Shift *before* starting the drag, then let go of Ctrl → still no ring (Shift was held from the start). Let go of Shift and tap it again → the Conversions ring opens.
 - [ ] win: drag from a browser, an editor or the taskbar → no ring.
 - [ ] win: the log's `painted N ms after the key` stays under 100 ms.
 - [ ] win: the log never shows `wry's drop handler saw` (that would mean Grape's drop target missed a window).
