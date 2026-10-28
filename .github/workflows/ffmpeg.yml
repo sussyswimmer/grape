@@ -125,7 +125,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential nasm meson ninja-build pkg-config \
             python3 curl ca-certificates xz-utils bzip2 \
-            gcc-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
+            gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
+          # libvpx has C++ sources (vp9's ratectrl_rtc.cc), so its build needs
+          # g++ as well; FFmpeg's -static link leaves no libstdc++ DLL either
+          # way (build.sh checks the exe's imports).
           # Only the win32 thread model keeps winpthreads out of the exe
           # (build.sh checks it too).
           if update-alternatives --list x86_64-w64-mingw32-gcc > /dev/null 2>&1; then
