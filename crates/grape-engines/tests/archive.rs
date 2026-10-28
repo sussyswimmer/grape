@@ -162,6 +162,7 @@ fn extract_archive_runs_and_counts_what_it_left_out() {
 fn rar_runs_only_with_bsdtar() {
     let rar = SidecarPaths {
         bsdtar: Some(PathBuf::from("bsdtar")),
+        svg_worker: None,
         ..SidecarPaths::default()
     };
     for to in [Format::Zip, Format::Tar, Format::Gz] {

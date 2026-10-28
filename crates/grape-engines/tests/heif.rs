@@ -98,6 +98,9 @@ fn sidecars() -> SidecarPaths {
     contain_like_the_app();
     SidecarPaths {
         heif: Some(helper()),
+        // SVG → HEIC and AVIF (D39): the SVG worker draws, the helper
+        // encodes.
+        svg_worker: Some(PathBuf::from(env!("CARGO_BIN_EXE_grape-svg-worker"))),
         ..SidecarPaths::default()
     }
 }
@@ -970,4 +973,35 @@ fn cancel_ends_a_large_avif_encode_quickly() {
         "the helper took {took:?} to stop"
     );
     assert!(!ran.dest.exists());
+}
+
+#[test]
+fn an_svg_converts_to_heic_and_avif() {
+    let _turn = serial();
+    // 300 × 200, its left half red and its right half blue (D39).
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200">
+        <rect width="150" height="200" fill="#ff0000"/>
+        <rect x="150" width="150" height="200" fill="#0000ff"/></svg>"##;
+    for format in [Format::Heic, Format::Avif] {
+        let dir = TestDir::new("heif-it-svg");
+        // A Mac without a HEVC encoder says so for HEIC; AVIF always
+        // encodes.
+        let Some(out) = encoded(convert(&dir, "flag.svg", svg, format)) else {
+            assert_eq!(format, Format::Heic);
+            continue;
+        };
+        let bytes = fs::read(out).unwrap();
+        assert_eq!(sniff(&bytes), sniff_of(format), "{format:?}");
+        let back_dir = TestDir::new("heif-it-svg");
+        let back = decoded(convert(
+            &back_dir,
+            &format!("back.{}", format.key()),
+            &bytes,
+            Format::Png,
+        ))
+        .to_rgb8();
+        assert_eq!(back.dimensions(), (300, 200), "{format:?}");
+        assert_near(&back.get_pixel(20, 100).0, &[255, 0, 0], 40, "left");
+        assert_near(&back.get_pixel(280, 100).0, &[0, 0, 255], 40, "right");
+    }
 }

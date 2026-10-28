@@ -54,11 +54,11 @@ use std::io::{self, BufWriter, Read};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use ::image::{ColorType, DynamicImage, RgbImage, RgbaImage};
+use ::image::{ColorType, DynamicImage, RgbaImage};
 use grape_core::{Format, Job};
 use grape_heif_proto::{
-    self as proto, FailKind, Failure, HeifFormat, ImageInfo, Message, Op, PixelHeader, PixelLimits,
-    PixelWriter, Request, Sniff,
+    self as proto, FailKind, Failure, HeifFormat, ImageInfo, Message, Op, PixelHeader, PixelWriter,
+    Request, Sniff,
 };
 
 use crate::cancel::Cancellable;
@@ -174,7 +174,7 @@ impl Limits {
 
 impl Launch {
     /// `<helper> --grape-heif-worker`, contained by the app's hook.
-    fn heif_helper(program: &Path) -> Launch {
+    pub(crate) fn heif_helper(program: &Path) -> Launch {
         Launch {
             program: program.to_path_buf(),
             args: vec![OsString::from(proto::WORKER_FLAG)],
@@ -768,48 +768,25 @@ fn write_input(
 }
 
 /// Reads `pixels.rgba`, which must be exactly what the `image` line
-/// announced (and [`image::pixels_fit`] approved), into one buffer.
+/// announced (and [`image::pixels_fit`] approved), into one buffer
+/// ([`helper::read_pixel_file`]).
 fn read_decoded(
     work: &WorkDir,
     info: &ImageInfo,
     cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    let path = work.path().join(proto::names::PIXELS);
-    let file = File::open(&path)
-        .map_err(|e| helper_stopped(&format!("its pixel file: {}", io_detail(&e))))?;
-    let len = file
-        .metadata()
-        .map_err(|e| helper_stopped(&format!("its pixel file: {}", io_detail(&e))))?
-        .len();
-    // Nothing larger than what was approved is ever allocated.
-    let limits = PixelLimits {
-        max_pixels: u64::from(info.width) * u64::from(info.height),
-        max_side: info.width.max(info.height),
-        max_icc_bytes: info.icc_bytes,
+    let announced = helper::Announced {
+        width: info.width,
+        height: info.height,
+        channels: info.channels,
+        icc_bytes: info.icc_bytes,
     };
-    let pixels = proto::read_pixels(Cancellable::new(file, cancel), len, &limits).map_err(|e| {
-        if cancel.is_cancelled() {
-            cancelled()
-        } else {
-            helper_stopped(&format!("its pixel file: {e}"))
-        }
-    })?;
-    let icc_len = pixels.icc.as_ref().map_or(0, Vec::len);
-    if (pixels.width, pixels.height, pixels.channels) != (info.width, info.height, info.channels)
-        || u32::try_from(icc_len).ok() != Some(info.icc_bytes)
-    {
-        return Err(helper_stopped(
-            "its pixel file doesn't match its image line",
-        ));
-    }
-    let (width, height) = (pixels.width, pixels.height);
-    // `from_raw` takes the buffer as it is: one copy, as pixels_fit counted.
-    let img = match pixels.channels {
-        4 => RgbaImage::from_raw(width, height, pixels.data).map(DynamicImage::ImageRgba8),
-        _ => RgbImage::from_raw(width, height, pixels.data).map(DynamicImage::ImageRgb8),
-    };
-    let img = img.ok_or_else(|| helper_stopped("its pixels don't fill the image"))?;
-    Ok((img, pixels.icc))
+    helper::read_pixel_file(&work.path().join(proto::names::PIXELS), &announced, cancel).map_err(
+        |e| match e {
+            helper::PixelFileError::Cancelled => cancelled(),
+            helper::PixelFileError::Bad(detail) => helper_stopped(&detail),
+        },
+    )
 }
 
 /// The helper's output (`out.heic` or `out.avif`) must be the `bytes` it
@@ -1194,7 +1171,9 @@ pub(crate) mod tests {
     use std::thread;
 
     use ::image::codecs::png::PngEncoder;
-    use ::image::{ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader};
+    use ::image::{
+        ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader, RgbImage,
+    };
     use grape_core::{plan, JobOutput, Operation, Settings};
     use grape_heif_proto::{Caps, Codec, FormatCaps, PixelSink, Pixels};
 
@@ -1999,6 +1978,7 @@ pub(crate) mod tests {
     fn the_dispatch_needs_the_helper() {
         let with_heif = SidecarPaths {
             heif: Some(PathBuf::from("grape-heif")),
+            svg_worker: None,
             ..SidecarPaths::default()
         };
         let none = SidecarPaths::default();
@@ -2017,6 +1997,10 @@ pub(crate) mod tests {
             // pdf::create, D37 and D41.
             assert!(runs(heif, Format::Pdf, &with_heif), "{heif:?}");
             assert!(!runs(heif, Format::Pdf, &none), "{heif:?}");
+        }
+        // SVG → HEIC or AVIF needs the SVG worker too (D39).
+        for to in HEIF {
+            assert!(!runs(Format::Svg, to, &with_heif), "{to:?}");
         }
         for (from, to) in [(Format::Heic, Format::Avif), (Format::Avif, Format::Heic)] {
             assert!(runs(from, to, &with_heif));

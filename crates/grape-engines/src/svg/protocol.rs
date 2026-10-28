@@ -31,7 +31,6 @@ pub(crate) const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// The longest line the parent reads from the worker. A longer one is not a
 /// message and is skipped.
-#[allow(dead_code)] // The parent's, which isn't wired yet.
 pub(crate) const MAX_LINE_BYTES: usize = 64 * 1024;
 
 /// The worker's pixel file in the work folder, created new by the worker.
@@ -93,7 +92,6 @@ pub(crate) struct Limits {
     pub(crate) max_heap_bytes: u64,
 }
 
-#[allow(dead_code)] // The parent's, which isn't wired yet.
 impl Limits {
     /// D39's limits, with a raster canvas's caps (16,384 a side, 64 MP).
     pub(crate) const DEFAULT: Limits = Limits {

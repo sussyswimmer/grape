@@ -1,7 +1,7 @@
 //! Helper processes: the plumbing an engine shares when it runs one of
 //! Grape's own helper programs (the image helper for HEIC and AVIF,
-//! DECISIONS D33, D41). Lane A's module, taken from the PDF worker's
-//! runner (`pdf/run.rs`).
+//! DECISIONS D33, D41, and the SVG worker, D39). Lane A's module, taken
+//! from the PDF worker's runner (`pdf/run.rs`).
 //!
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
@@ -18,6 +18,9 @@
 //!   can't block the job, and stdout is read as JSON lines on another.
 //! - [`Running`]: the engine polls it for messages and the exit status. It
 //!   kills and reaps the helper when dropped, then ends its containment.
+//! - [`read_pixel_file`]: a helper's `pixels.rgba` (grape-heif-proto's raw
+//!   pixel file), read into one buffer no larger than what its `image`
+//!   line announced and the engine approved.
 //!
 //! The containment hook is process-wide, not an [`crate::EngineCtx`] field
 //! (heic-spec J15): the app sets it once at startup, and the tests of an
@@ -34,10 +37,14 @@ use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
+use ::image::{DynamicImage, RgbImage, RgbaImage};
+use grape_heif_proto::PixelLimits;
 use serde::de::DeserializeOwned;
 
 use crate::archive::folder::remove_tree;
+use crate::cancel::Cancellable;
 use crate::output::unique_suffix;
+use crate::CancelToken;
 
 /// `DETACHED_PROCESS`: a console-subsystem helper gets no console at all,
 /// so Windows starts no `conhost.exe` for it. Its stdio are pipes, so it
@@ -72,18 +79,20 @@ pub trait Contained: Send {
     fn peak_memory(&self) -> Option<u64>;
 }
 
-/// Removes the image helper's work folders (`grape-heif-{pid}-…`, J4)
-/// that a Grape that crashed, was killed or lost power left in the OS temp
-/// folder, with the raw pixels of someone's photo in them. The app calls
-/// it once at startup, off its main thread: Grape runs once per user, so no other
-/// Grape's job can be using one then. This process's own folders are left
-/// alone. Returns how many were removed.
+/// Removes the helpers' work folders (the image helper's
+/// `grape-heif-{pid}-…`, J4, and the SVG worker's `grape-svg-{pid}-…`,
+/// D39) that a Grape that crashed, was killed or lost power left in the OS
+/// temp folder, with the raw pixels of someone's picture in them. The app
+/// calls it once at startup, off its main thread: Grape runs once per
+/// user, so no other Grape's job can be using one then. This process's own
+/// folders are left alone. Returns how many were removed.
 pub fn remove_stale_work_dirs() -> usize {
-    remove_stale(
-        &std::env::temp_dir(),
-        crate::heif::WORK_PREFIX,
-        std::process::id(),
-    )
+    let parent = std::env::temp_dir();
+    let own = std::process::id();
+    [crate::heif::WORK_PREFIX, crate::svg::WORK_PREFIX]
+        .into_iter()
+        .map(|prefix| remove_stale(&parent, prefix, own))
+        .sum()
 }
 
 /// Removes every folder (never a link or a file) in `parent` named
@@ -361,6 +370,76 @@ pub(crate) fn read_line(
             return Ok(Some(()));
         }
     }
+}
+
+/// What a helper's pixel file must hold: what its `image` line announced
+/// and the engine approved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Announced {
+    /// The width in pixels.
+    pub(crate) width: u32,
+    /// The height in pixels.
+    pub(crate) height: u32,
+    /// 3 (RGB) or 4 (RGBA, straight alpha).
+    pub(crate) channels: u8,
+    /// The ICC profile's size, 0 for none.
+    pub(crate) icc_bytes: u32,
+}
+
+/// Why [`read_pixel_file`] failed.
+#[derive(Debug)]
+pub(crate) enum PixelFileError {
+    /// The job was cancelled while it read.
+    Cancelled,
+    /// The file is missing, short, long, malformed or not what was
+    /// announced: the helper broke its word. The detail, for the log.
+    Bad(String),
+}
+
+/// Reads a helper's pixel file at `path`, which must be exactly
+/// `announced`, into one buffer: nothing larger than what was announced
+/// (and the engine approved) is ever allocated, and `from_raw` takes the
+/// buffer as it is. Reading stops once `cancel` is set.
+pub(crate) fn read_pixel_file(
+    path: &Path,
+    announced: &Announced,
+    cancel: &CancelToken,
+) -> Result<(DynamicImage, Option<Vec<u8>>), PixelFileError> {
+    let bad = |detail: String| PixelFileError::Bad(detail);
+    let file = fs::File::open(path).map_err(|e| bad(format!("its pixel file: {:?}", e.kind())))?;
+    let len = file
+        .metadata()
+        .map_err(|e| bad(format!("its pixel file: {:?}", e.kind())))?
+        .len();
+    let limits = PixelLimits {
+        max_pixels: u64::from(announced.width) * u64::from(announced.height),
+        max_side: announced.width.max(announced.height),
+        max_icc_bytes: announced.icc_bytes,
+    };
+    let pixels = grape_heif_proto::read_pixels(Cancellable::new(file, cancel), len, &limits)
+        .map_err(|e| {
+            if cancel.is_cancelled() {
+                PixelFileError::Cancelled
+            } else {
+                bad(format!("its pixel file: {e}"))
+            }
+        })?;
+    let icc_len = pixels.icc.as_ref().map_or(0, Vec::len);
+    if (pixels.width, pixels.height, pixels.channels)
+        != (announced.width, announced.height, announced.channels)
+        || u32::try_from(icc_len).ok() != Some(announced.icc_bytes)
+    {
+        return Err(bad(
+            "its pixel file doesn't match its image line".to_string()
+        ));
+    }
+    let (width, height) = (pixels.width, pixels.height);
+    let img = match pixels.channels {
+        4 => RgbaImage::from_raw(width, height, pixels.data).map(DynamicImage::ImageRgba8),
+        _ => RgbImage::from_raw(width, height, pixels.data).map(DynamicImage::ImageRgb8),
+    };
+    let img = img.ok_or_else(|| bad("its pixels don't fill the image".to_string()))?;
+    Ok((img, pixels.icc))
 }
 
 /// A helper's working folder: new, empty, private (0700 on Unix), and

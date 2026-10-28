@@ -613,6 +613,7 @@ fn heic_needs_the_helper_even_in_a_mix() {
     assert!(!supports_with(&job.op, &formats, &SidecarPaths::default()));
     let with_heif = SidecarPaths {
         heif: Some(PathBuf::from("grape-heif")),
+        svg_worker: None,
         ..SidecarPaths::default()
     };
     assert!(supports_with(&job.op, &formats, &with_heif));
@@ -642,12 +643,19 @@ fn heic_needs_the_helper_even_in_a_mix() {
 fn which_images_go_to_pdf_and_into_create_pdf() {
     let with_heif = SidecarPaths {
         heif: Some(PathBuf::from("grape-heif")),
+        svg_worker: None,
+        ..SidecarPaths::default()
+    };
+    // SVG only with Grape's SVG worker (D39).
+    let with_svg = SidecarPaths {
+        svg_worker: Some(PathBuf::from("grape")),
         ..SidecarPaths::default()
     };
     let to_pdf = Operation::convert(Format::Pdf);
     let create = Operation::tool(ToolKey::CreatePdf);
     // Over every format: images → PDF and Create PDF need no sidecar for
-    // these, and HEIC and AVIF only Grape's image helper. BMP and AVIF
+    // these, HEIC and AVIF only Grape's image helper, and SVG only Grape's
+    // SVG worker. BMP and AVIF
     // convert to PDF, but FORMAT_MATRIX gives them no tools, so Create PDF
     // takes neither (D41: AVIF → PDF is a conversion only).
     let to_pdf_from = |sidecars: &SidecarPaths| -> Vec<Format> {
@@ -674,6 +682,9 @@ fn which_images_go_to_pdf_and_into_create_pdf() {
         sorted(to_pdf_from(&SidecarPaths::default())),
         sorted(expected.clone())
     );
+    let mut svg_expected = expected.clone();
+    svg_expected.push(Format::Svg);
+    assert_eq!(sorted(to_pdf_from(&with_svg)), sorted(svg_expected));
     expected.extend([Format::Heic, Format::Avif]);
     assert_eq!(sorted(to_pdf_from(&with_heif)), sorted(expected));
     let mut expected = vec![Format::Jpg, Format::Png, Format::Webp, Format::Tiff];
@@ -681,8 +692,13 @@ fn which_images_go_to_pdf_and_into_create_pdf() {
         sorted(combines(&SidecarPaths::default())),
         sorted(expected.clone())
     );
+    let mut svg_expected = expected.clone();
+    svg_expected.push(Format::Svg);
+    assert_eq!(sorted(combines(&with_svg)), sorted(svg_expected));
     expected.push(Format::Heic);
     assert_eq!(sorted(combines(&with_heif)), sorted(expected));
+    assert!(!supports(&to_pdf, Some(Format::Svg)));
+    assert!(!supports(&create, Some(Format::Svg)));
     for from in raster {
         assert!(supports(&to_pdf, Some(from)), "{from:?}");
     }

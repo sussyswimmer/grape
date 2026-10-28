@@ -803,6 +803,7 @@ fn run_job_reaches_bsdtar_through_the_sidecars() {
     let ctx = EngineCtx {
         sidecars: crate::SidecarPaths {
             bsdtar: Some(bsdtar_path()),
+            svg_worker: None,
             ..crate::SidecarPaths::default()
         },
         ..EngineCtx::default()

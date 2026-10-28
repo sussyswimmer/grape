@@ -1,5 +1,6 @@
-//! Executes `grape_core` job plans: images, the FFmpeg sidecar, PDF,
-//! archives and subtitles (v2: documents).
+//! Executes `grape_core` job plans: images (SVG drawn in Grape's SVG
+//! worker), the FFmpeg sidecar, PDF, archives and subtitles (v2:
+//! documents).
 //!
 //! The public contract is the one in `docs/design/m1-drag-wheel.md` §E.1:
 //! the app builds a [`grape_core::Selection`] with [`build_selection`]
@@ -28,7 +29,7 @@ pub mod pdf;
 mod publish;
 mod selection;
 mod subtitle;
-#[doc(hidden)] // Public only for the worker entry, `svg::worker_main` (D39).
+#[doc(hidden)] // Public only for the worker entry, `svg::worker_main` and `svg::WORKER_FLAG` (D39).
 pub mod svg;
 
 pub use archive::LeftOut;
@@ -71,6 +72,9 @@ pub struct SidecarPaths {
     /// The `bsdtar` sidecar that reads RAR archives (D27): `bsdtar.exe` next
     /// to Grape's executable on Windows, `Contents/MacOS/bsdtar` on macOS.
     pub bsdtar: Option<PathBuf>,
+    /// The program started as `<svg_worker> --grape-svg-worker` (D39):
+    /// Grape's own executable, on every system. It draws every SVG.
+    pub svg_worker: Option<PathBuf>,
 }
 
 /// A shared cancel flag. Clones share the flag, so the app keeps one clone
@@ -134,8 +138,8 @@ pub enum Note {
     /// Archive items that weren't carried over (D27). At least one count
     /// is above zero.
     LeftOut(LeftOut),
-    /// PDF → images: this many pages were drawn below 300 DPI because they
-    /// were too large (D29).
+    /// This many pages were drawn below 300 DPI because they were too
+    /// large: PDF → images (D29), and SVG pages in a PDF (D39).
     PagesScaled(u32),
     /// Remove Metadata: what it found with a value and removed, sorted and
     /// without repeats. Empty when the file had none (the output is still
@@ -148,6 +152,13 @@ pub enum Note {
         /// The output's size.
         after: u64,
     },
+    /// SVG (D39): this many distinct images an SVG links to, or embeds
+    /// past a limit or in a type Grape doesn't draw, were left out. Above
+    /// zero; summed over the SVGs of a PDF.
+    ImagesLeftOut(u32),
+    /// SVG → an image (D39): the SVG was drawn smaller than its size (or
+    /// twice it) to fit the target's limits.
+    DrawnSmaller,
 }
 
 /// A kind of metadata Remove Metadata reports. In the order the toast
@@ -251,8 +262,8 @@ impl GrapeError {
 }
 
 /// Can this build execute `op` for an input of format `from`, with no
-/// sidecars? So never for RAR, PDF, HEIC or AVIF, which need theirs. The
-/// app asks [`supports_with`], with the sidecars it found.
+/// sidecars? So never for RAR, PDF, HEIC, AVIF or SVG, which need theirs.
+/// The app asks [`supports_with`], with the sidecars it found.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
     supports_with(op, std::slice::from_ref(&from), &SidecarPaths::default())
 }
@@ -269,10 +280,13 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// among each other (104) with `ffmpeg` and `ffprobe`; with `heif` (D41),
 /// HEIC and AVIF to and from JPG, PNG, WebP, TIFF and BMP (20) and HEIC to
 /// AVIF and back (2); JPG, PNG, WebP, TIFF and BMP to PDF (5), and HEIC and
-/// AVIF to PDF with `heif` (2). Tools (none for AVIF): Extract Archive on
-/// ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs and Remove
-/// Metadata on PDFs with `pdfium` and `pdf_worker`; Create PDF on JPG, PNG,
-/// WebP and TIFF (and HEIC with `heif`); with `ffmpeg` and `ffprobe` (D26),
+/// AVIF to PDF with `heif` (2); with `svg_worker` (D39), SVG to JPG, PNG,
+/// WebP, TIFF, BMP and PDF (6), and to HEIC and AVIF with `heif` too (2).
+/// With every sidecar, that is every v1 pair. Tools (none for AVIF):
+/// Extract Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF,
+/// Merge PDFs and Remove Metadata on PDFs with `pdfium` and `pdf_worker`;
+/// Create PDF on JPG, PNG, WebP and TIFF (and HEIC with `heif`, SVG with
+/// `svg_worker`); with `ffmpeg` and `ffprobe` (D26),
 /// Remove Audio on MP4, MOV and MKV, Remove Metadata and Compress on MP3,
 /// M4A, WAV, FLAC, MP4, MOV and MKV, and Audio Channels and Normalize
 /// Volume on MP3, M4A, WAV and FLAC; with no sidecar (D26), Remove Metadata
@@ -305,6 +319,8 @@ enum Engine {
     Media,
     /// HEIC and AVIF, in a helper process ([`heif`]).
     Heif,
+    /// SVG drawn in Grape's SVG worker ([`svg`]).
+    Svg,
     /// Images → PDF in Grape's own process (`pdf::create`).
     PdfCreate,
     /// Grape's own image tools ([`imagetool`]).
@@ -327,6 +343,8 @@ fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engin
         Some(Engine::PdfCreate)
     } else if media::supports(from, to) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
+    } else if svg::supports(from, to, sidecars) {
+        Some(Engine::Svg)
     } else if heif::supports(from, to) && sidecars.heif.is_some() {
         Some(Engine::Heif)
     } else {
@@ -364,7 +382,10 @@ fn format_of(path: &Path) -> Option<Format> {
 /// file behind on error or cancel.
 ///
 /// The inputs' formats come from their file names, as on the wheel; the
-/// decoders then trust the content. A job this build can't run with
+/// decoders then trust the content (a `.svg`, `.heic` or `.avif` that is a
+/// PNG converts as one). An SVG is drawn in Grape's SVG worker
+/// (`svg_worker`), for every target and for Create PDF. A job this build
+/// can't run with
 /// `ctx.sidecars` (see [`supports_with`]), or whose inputs and output don't
 /// have the shape its operation plans (one input and a file for most
 /// conversions; pages for PDF → JPG or PNG; a folder for Extract Archive
@@ -397,6 +418,7 @@ pub fn run_job(
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
                 Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Heif) => heif::convert(job, src, dest, from, to, ctx, progress),
+                Some(Engine::Svg) => svg::convert(job, src, dest, to, ctx, progress),
                 Some(Engine::PdfCreate) => {
                     pdf::create::convert(job, src, dest, from, ctx, progress)
                 }

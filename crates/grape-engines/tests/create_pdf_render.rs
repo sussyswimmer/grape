@@ -1,6 +1,7 @@
 //! Images → PDF and Create PDF, drawn by a real PDFium (feature `pdf-it`,
 //! D37): every page is rendered at its point size, one pixel a point, and
-//! compared with the upright decode of its image. `GRAPE_TEST_PDFIUM` must
+//! compared with the upright decode of its image; an SVG's page (D39) at
+//! 300 DPI, compared with the same drawing as an image. `GRAPE_TEST_PDFIUM` must
 //! name the PDFium library; without it these tests fail rather than skip.
 //! PDFium is bound once, in this test binary, and the pages are drawn one
 //! test at a time.
@@ -90,6 +91,35 @@ fn draw(path: &Path) -> Vec<Drawn> {
         });
     }
     drawn
+}
+
+/// Draws the first page of the PDF at `path` at `width` × `height` pixels.
+fn draw_at(path: &Path, width: i32, height: i32) -> Drawn {
+    let bytes = fs::read(path).unwrap();
+    let pdfium = pdfium();
+    let document = pdfium.load_pdf_from_byte_slice(&bytes, None).unwrap();
+    let page = document.pages().get(0).unwrap();
+    let config = PdfRenderConfig::new()
+        .set_fixed_size(width, height)
+        .set_format(PdfBitmapFormat::BGRA)
+        .set_reverse_byte_order(true)
+        .clear_before_rendering(true)
+        .set_clear_color(PdfColor::WHITE);
+    let bitmap = page.render_with_config(&config).unwrap();
+    let raw = bitmap.as_raw_bytes();
+    let (w, h) = (width as u32, height as u32);
+    let stride = raw.len() / h as usize;
+    let pixels = RgbImage::from_fn(w, h, |x, y| {
+        let at = y as usize * stride + x as usize * 4;
+        let a = u32::from(raw[at + 3]);
+        let over = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        Rgb([over(raw[at]), over(raw[at + 1]), over(raw[at + 2])])
+    });
+    Drawn {
+        width_pt: page.width().value,
+        height_pt: page.height().value,
+        pixels,
+    }
 }
 
 /// The mean absolute difference of two images of the same size.
@@ -407,5 +437,53 @@ fn a_page_over_200_inches_is_scaled_down_whole() {
         assert!(r < 50 && b > 200, "column {x} isn't blue: {r} {b}");
     }
     before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
+fn an_svg_page_draws_as_the_svg_at_300_dpi() {
+    // The same drawing twice: 96 × 64 CSS px (a 72 × 48 pt page, drawn at
+    // 300 DPI: 300 × 200 px), and 300 × 200 CSS px (an image of 300 × 200
+    // px). Grape's SVG worker draws both (D39).
+    let body = r##"viewBox="0 0 96 64">
+        <rect width="96" height="64" fill="#f4f0e8"/>
+        <circle cx="30" cy="32" r="20" fill="#d03030" fill-opacity="0.8"/>
+        <path d="M50 10 L90 54 L50 54 Z" fill="#2050c0"/></svg>"##;
+    let page_svg =
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="96" height="64" {body}"#);
+    let image_svg =
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200" {body}"#);
+    let ctx = EngineCtx {
+        sidecars: grape_engines::SidecarPaths {
+            svg_worker: Some(PathBuf::from(env!("CARGO_BIN_EXE_grape-svg-worker"))),
+            ..grape_engines::SidecarPaths::default()
+        },
+        ..EngineCtx::default()
+    };
+    let dir = TestDir::new("create-render-svg");
+    let (page_src, page_job) = plan_one(
+        &dir,
+        "page.svg",
+        page_svg.as_bytes(),
+        Operation::convert(Format::Pdf),
+    );
+    let (image_src, image_job) = plan_one(
+        &dir,
+        "image.svg",
+        image_svg.as_bytes(),
+        Operation::convert(Format::Png),
+    );
+    let sources = [SourceState::of(&page_src), SourceState::of(&image_src)];
+    run_job(&page_job, &ctx, &mut |_| {}).unwrap();
+    run_job(&image_job, &ctx, &mut |_| {}).unwrap();
+    let drawn = draw_at(&planned_file(&page_job), 300, 200);
+    // The page is the SVG's own size: 96 CSS px = 72 pt.
+    assert_eq!((drawn.width_pt, drawn.height_pt), (72.0, 48.0));
+    let expected = upright(&planned_file(&image_job));
+    let error = mean_error(&drawn.pixels, &expected);
+    assert!(error < 1.0, "{error}");
+    for source in &sources {
+        source.assert_unchanged();
+    }
     assert_no_leftovers(&dir.path);
 }

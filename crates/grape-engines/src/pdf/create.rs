@@ -1,19 +1,22 @@
 //! Images → PDF and the Create PDF tool (DECISIONS D37), in Grape's own
 //! process: no PDF worker and no PDFium, because no PDF is parsed. The
 //! only untrusted input is the images, which the raster engine decodes
-//! with its own limits ([`image::decode`]) and Grape's image helper decodes
-//! in its own process ([`heif::Decoder`]): HEIC and AVIF (D33, D41).
+//! with its own limits ([`image::decode`]), Grape's image helper decodes
+//! in its own process ([`heif::Decoder`]): HEIC and AVIF (D33, D41), and
+//! Grape's SVG worker draws in its own process ([`svg::Renderer`], D39).
 //!
 //! - **One page per image,** in the job's input order: JPG, PNG, WebP,
-//!   TIFF and BMP always, HEIC and AVIF with the helper ([`reads`]); Create
-//!   PDF takes the same but BMP and AVIF, which FORMAT_MATRIX gives no
-//!   tools ([`combines`]). The page is the
+//!   TIFF and BMP always, HEIC and AVIF with the helper, SVG with the
+//!   worker ([`reads`]); Create PDF takes the same but BMP and AVIF, which
+//!   FORMAT_MATRIX gives no tools ([`combines`]). The page is the
 //!   upright image at one pixel a point (72 dpi), scaled down uniformly
 //!   when its longer side is over [`MAX_SIDE`] (Acrobat's 200 inches); the
-//!   pixels are never resampled ([`page_size`]). No image object has a side
-//!   over [`MAX_IMAGE_SIDE`] pixels: a longer picture (a long screenshot)
-//!   is stored losslessly as strips, each with its own soft mask, drawn
-//!   edge to edge on its one page ([`tiles`]).
+//!   pixels are never resampled ([`page_size`]). An SVG's page is its own
+//!   size (96 CSS px = 72 pt, held to the same bound), drawn at 300 DPI or
+//!   as near as the worker's caps allow ([`svg_page`]). No image object
+//!   has a side over [`MAX_IMAGE_SIDE`] pixels: a longer picture (a long
+//!   screenshot) is stored losslessly as strips, each with its own soft
+//!   mask, drawn edge to edge on its one page ([`tiles`]).
 //! - **How each image is stored** (the writer takes "a JPEG to pass
 //!   through" or "upright pixels and an ICC profile" from any decoder):
 //!   1. a JPEG whose content is JPEG and whose frame and color transform
@@ -23,8 +26,8 @@
 //!   2. HEIC, AVIF, lossy WebP and a JPEG that can't pass through are
 //!      re-encoded as JPEG at quality 90 from their upright pixels, alpha
 //!      kept as a soft mask;
-//!   3. PNG, BMP, TIFF and lossless WebP are stored losslessly: 8-bit gray
-//!      or RGB, Flate with PNG predictors ([`flate`]), alpha as a soft
+//!   3. PNG, BMP, TIFF, lossless WebP and SVG are stored losslessly: 8-bit
+//!      gray or RGB, Flate with PNG predictors ([`flate`]), alpha as a soft
 //!      mask, and pure black-and-white gray at 1 bit a pixel.
 //!
 //!   A gray or RGB ICC profile that describes the pixels written becomes an
@@ -58,8 +61,11 @@
 //!   removed. The PDF carries no Info dictionary, no XMP, no dates and no
 //!   `/ID`: nothing in it names the source, its folder, the user or the
 //!   time.
+//! - **Notes:** the references SVGs left out, summed
+//!   ([`crate::Note::ImagesLeftOut`]), and the SVG pages drawn below 300
+//!   DPI ([`crate::Note::PagesScaled`]).
 //! - **Errors:** a file that can't be read stops the whole PDF; the message
-//!   names that file the way the raster and HEIC/AVIF engines do. A write
+//!   names that file the way the raster, HEIC/AVIF and SVG engines do. A write
 //!   failure names the destination folder. No detail written here holds a
 //!   path, a name or file contents; but details passed through from
 //!   [`image::decode`] and [`publish`] name the source's path or the
@@ -68,7 +74,8 @@
 //! - **Cancel** is checked before each input, every [`flate::CANCEL_ROWS`]
 //!   rows, at every write into a stream's buffer and of the file.
 //!   **Progress** for input `i` of `n`: decoded at `(i + 0.5) / n` (the
-//!   image helper's own fractions within `[i / n, (i + 0.5) / n]`), written
+//!   image helper's and the SVG worker's own fractions within
+//!   `[i / n, (i + 0.5) / n]`), written
 //!   at `(i + 1) / n`, and 1.0 once the PDF is published.
 
 use std::fs::File;
@@ -89,12 +96,16 @@ use crate::heif::{self, Decoded};
 use crate::image;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
-use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, SidecarPaths};
+use crate::svg::{self, Drawn};
+use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note, SidecarPaths};
 
 const MIB: u64 = 1024 * 1024;
 
 /// The longest side a page may have, in points: Acrobat's 200 inches.
 pub(crate) const MAX_SIDE: f64 = 14_400.0;
+
+/// Points per CSS pixel: 96 CSS px = 72 pt = 1 inch.
+pub(crate) const POINTS_PER_CSS_PIXEL: f64 = 0.75;
 
 /// The longest side, in pixels, of an image object Grape writes: JPEG's
 /// own limit, so no reader meets a larger image from Grape than a JPEG can
@@ -129,17 +140,40 @@ const COMBINES: [Format; 4] = [Format::Jpg, Format::Png, Format::Webp, Format::T
 
 /// True when this build puts an input of format `from` on a PDF page:
 /// JPG, PNG, WebP, TIFF and BMP always, HEIC and AVIF with the helper
-/// ([`heif::HEIF`]).
+/// ([`heif::HEIF`]), SVG with the SVG worker (D39).
 pub(crate) fn reads(from: Format, sidecars: &SidecarPaths) -> bool {
-    image::RASTER.contains(&from) || (heif::HEIF.contains(&from) && sidecars.heif.is_some())
+    image::RASTER.contains(&from)
+        || (heif::HEIF.contains(&from) && sidecars.heif.is_some())
+        || (from == Format::Svg && sidecars.svg_worker.is_some())
 }
 
 /// True when Create PDF takes an input of format `from` in this build:
-/// JPG, PNG, WebP and TIFF always, HEIC with the helper ([`COMBINES`]).
-/// Never AVIF: FORMAT_MATRIX gives it no tools in v1, so AVIF → PDF is a
-/// conversion only.
+/// JPG, PNG, WebP and TIFF always, HEIC with the helper and SVG with the
+/// SVG worker ([`COMBINES`]). Never AVIF: FORMAT_MATRIX gives it no tools
+/// in v1, so AVIF → PDF is a conversion only.
 pub(crate) fn combines(from: Format, sidecars: &SidecarPaths) -> bool {
-    COMBINES.contains(&from) || (from == Format::Heic && sidecars.heif.is_some())
+    COMBINES.contains(&from)
+        || (from == Format::Heic && sidecars.heif.is_some())
+        || (from == Format::Svg && sidecars.svg_worker.is_some())
+}
+
+/// The helper processes that put a HEIC, an AVIF or an SVG on a page.
+#[derive(Default)]
+pub(crate) struct Helpers {
+    /// Grape's image helper, for HEIC and AVIF.
+    pub(crate) heif: Option<heif::Decoder>,
+    /// Grape's SVG worker.
+    pub(crate) svg: Option<svg::Renderer>,
+}
+
+impl Helpers {
+    /// The ones the app found, with Grape's limits.
+    pub(crate) fn from_sidecars(sidecars: &SidecarPaths) -> Helpers {
+        Helpers {
+            heif: heif::Decoder::from_sidecars(sidecars),
+            svg: svg::Renderer::from_sidecars(sidecars),
+        }
+    }
 }
 
 /// Converts `src` (of format `from`, by its name) to a one-page PDF at
@@ -152,11 +186,24 @@ pub(crate) fn convert(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
-    if !image::RASTER.contains(&from) && !heif::HEIF.contains(&from) {
+    let helpers = Helpers::from_sidecars(&ctx.sidecars);
+    convert_with(job, src, dest, from, ctx, progress, &helpers)
+}
+
+/// [`convert`] with these helpers.
+pub(crate) fn convert_with(
+    job: &Job,
+    src: &Path,
+    dest: &Path,
+    from: Format,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+    helpers: &Helpers,
+) -> Result<JobOutcome, GrapeError> {
+    if !image::RASTER.contains(&from) && !heif::HEIF.contains(&from) && from != Format::Svg {
         return Err(crate::not_yet_supported(job, Some(from)));
     }
-    let helper = heif::Decoder::from_sidecars(&ctx.sidecars);
-    write_pdf(job, &[(src, from)], dest, ctx, progress, helper.as_ref())
+    write_pdf(job, &[(src, from)], dest, ctx, progress, helpers)
 }
 
 /// Create PDF: one page per input, in the job's order, at `dest`.
@@ -166,17 +213,30 @@ pub(crate) fn combine(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
+    let helpers = Helpers::from_sidecars(&ctx.sidecars);
+    combine_with(job, dest, ctx, progress, &helpers)
+}
+
+/// [`combine`] with these helpers.
+pub(crate) fn combine_with(
+    job: &Job,
+    dest: &Path,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+    helpers: &Helpers,
+) -> Result<JobOutcome, GrapeError> {
     let mut inputs = Vec::with_capacity(job.inputs.len());
     for src in &job.inputs {
         match crate::format_of(src) {
-            Some(from) if COMBINES.contains(&from) || from == Format::Heic => {
+            Some(from)
+                if COMBINES.contains(&from) || matches!(from, Format::Heic | Format::Svg) =>
+            {
                 inputs.push((src.as_path(), from));
             }
             from => return Err(crate::not_yet_supported(job, from)),
         }
     }
-    let helper = heif::Decoder::from_sidecars(&ctx.sidecars);
-    write_pdf(job, &inputs, dest, ctx, progress, helper.as_ref())
+    write_pdf(job, &inputs, dest, ctx, progress, helpers)
 }
 
 /// Progress passed on only forwards.
@@ -194,15 +254,39 @@ impl Forward<'_> {
     }
 }
 
+/// What the toast hears about the pages written.
+#[derive(Debug, Default)]
+struct Tally {
+    /// The references SVGs left out, summed.
+    left_out: u32,
+    /// SVG pages drawn below 300 DPI.
+    scaled_pages: u32,
+}
+
+impl Tally {
+    /// The notes, in the toast's order.
+    fn notes(&self) -> Vec<Note> {
+        let mut notes = Vec::new();
+        if self.left_out > 0 {
+            notes.push(Note::ImagesLeftOut(self.left_out));
+        }
+        if self.scaled_pages > 0 {
+            notes.push(Note::PagesScaled(self.scaled_pages));
+        }
+        notes
+    }
+}
+
 /// Writes one page per input into a temp file in `dest`'s folder and
-/// publishes it there. `helper` decodes HEIC and AVIF inputs.
+/// publishes it there. `helpers` decode HEIC and AVIF inputs and draw
+/// SVGs.
 fn write_pdf(
     job: &Job,
     inputs: &[(&Path, Format)],
     dest: &Path,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
-    helper: Option<&heif::Decoder>,
+    helpers: &Helpers,
 ) -> Result<JobOutcome, GrapeError> {
     let cancel = &ctx.cancel;
     let Some(&(first, first_from)) = inputs.first() else {
@@ -224,6 +308,7 @@ fn write_pdf(
         report: progress,
         last: 0.0,
     };
+    let mut tally = Tally::default();
     let n = inputs.len() as f32;
     for (i, &(src, from)) in inputs.iter().enumerate() {
         if cancel.is_cancelled() {
@@ -239,9 +324,10 @@ fn write_pdf(
                 from,
                 &input,
                 cancel,
-                helper,
+                helpers,
                 span,
                 &mut helper_progress,
+                &mut tally,
             )?
         };
         forward.to(span.1);
@@ -266,8 +352,9 @@ fn write_pdf(
     if cancel.is_cancelled() {
         return Err(cancelled());
     }
-    let outcome = publish::finalize(&temp, job, first, dest, dir, &names)?;
+    let mut outcome = publish::finalize(&temp, job, first, dest, dir, &names)?;
     drop(temp);
+    outcome.notes = tally.notes();
     forward.to(1.0);
     Ok(outcome)
 }
@@ -278,7 +365,8 @@ enum Storage {
     /// Re-encoded as JPEG (HEIC, AVIF, lossy WebP, a JPEG that can't pass
     /// through).
     Lossy,
-    /// Flate with PNG predictors.
+    /// Flate with PNG predictors (and SVG: vector art's flat colors and
+    /// hard edges, which JPEG smears).
     Lossless,
 }
 
@@ -291,31 +379,38 @@ enum Picture {
         pass: Passthrough,
         icc: Option<Vec<u8>>,
     },
-    /// Upright decoded pixels, their ICC profile if it describes them, and
-    /// how to store them.
+    /// Upright decoded pixels, their ICC profile if it describes them, how
+    /// to store them, and the page in points (`None`: [`page_size`] of the
+    /// pixels; an SVG's own size otherwise).
     Pixels {
         img: DynamicImage,
         icc: Option<Vec<u8>>,
         storage: Storage,
+        page: Option<(f64, f64)>,
     },
 }
 
 /// Decodes `src`: HEIC and AVIF through the helper, HEIC or AVIF by the
 /// content whatever the name (one that isn't HEIF at all through the
-/// raster engine, as HEIC → JPG does), the rest through the raster engine.
-/// A HEIC's or an AVIF's page is stored lossy: they're a photo codec's
-/// output.
+/// raster engine, as HEIC → JPG does), SVG through the SVG worker (one
+/// whose content is a raster image through the raster engine, rule 3),
+/// the rest through the raster engine. A HEIC's or an AVIF's page is
+/// stored lossy: they're a photo codec's output. An SVG's is lossless, on
+/// a page of its own size; what it left out and whether it was drawn
+/// below 300 DPI go in `tally`.
+#[allow(clippy::too_many_arguments)] // The input, the helpers and the run.
 fn read(
     src: &Path,
     from: Format,
     names: &Names,
     cancel: &CancelToken,
-    helper: Option<&heif::Decoder>,
+    helpers: &Helpers,
     span: (f32, f32),
     progress: &mut dyn FnMut(f32),
+    tally: &mut Tally,
 ) -> Result<Picture, GrapeError> {
     if heif::HEIF.contains(&from) {
-        let Some(helper) = helper else {
+        let Some(helper) = &helpers.heif else {
             return Err(GrapeError::new(
                 ErrorKind::NotYetSupported,
                 "Grape's image helper is missing.",
@@ -323,8 +418,28 @@ fn read(
             ));
         };
         match helper.decode(src, names, FIT, cancel, span, progress)? {
-            Decoded::Pixels(img, icc) => return pixels(img, icc, Storage::Lossy, names),
+            Decoded::Pixels(img, icc) => return pixels(img, icc, Storage::Lossy, None, names),
             Decoded::NotHeif => {}
+        }
+    }
+    if from == Format::Svg {
+        let Some(worker) = &helpers.svg else {
+            return Err(GrapeError::new(
+                ErrorKind::NotYetSupported,
+                "Grape's SVG helper is missing.",
+                "SidecarPaths::svg_worker is None",
+            ));
+        };
+        match worker.render(src, names, svg::Mode::Page, FIT, cancel, span, progress)? {
+            Drawn::Svg(drawn) => {
+                tally.left_out = tally.left_out.saturating_add(drawn.left_out);
+                if drawn.scaled {
+                    tally.scaled_pages = tally.scaled_pages.saturating_add(1);
+                }
+                let page = svg_page(drawn.css);
+                return pixels(drawn.img, None, Storage::Lossless, Some(page), names);
+            }
+            Drawn::Raster => {}
         }
     }
     raster(src, from, names, cancel)
@@ -349,19 +464,20 @@ fn raster(
                 drop(img);
                 Ok(Picture::Jpeg { bytes, pass, icc })
             }
-            None => pixels(img, icc, Storage::Lossy, names),
+            None => pixels(img, icc, Storage::Lossy, None, names),
         },
-        Content::LossyWebp => pixels(img, icc, Storage::Lossy, names),
-        Content::Other => pixels(img, icc, Storage::Lossless, names),
+        Content::LossyWebp => pixels(img, icc, Storage::Lossy, None, names),
+        Content::Other => pixels(img, icc, Storage::Lossless, None, names),
     }
 }
 
-/// `img` and its profile, if what writing them holds fits the working set
-/// ([`page_memory`]).
+/// `img` and its profile on `page`, if what writing them holds fits the
+/// working set ([`page_memory`]).
 fn pixels(
     img: DynamicImage,
     icc: Option<Vec<u8>>,
     storage: Storage,
+    page: Option<(f64, f64)>,
     names: &Names,
 ) -> Result<Picture, GrapeError> {
     let icc = icc.filter(|profile| image::icc_fits(profile, &img));
@@ -377,7 +493,12 @@ fn pixels(
             image::WORKING_SET_LIMIT / MIB
         )));
     }
-    Ok(Picture::Pixels { img, icc, storage })
+    Ok(Picture::Pixels {
+        img,
+        icc,
+        storage,
+        page,
+    })
 }
 
 /// The most memory writing `img` as a page holds at once: the decoded
@@ -547,7 +668,12 @@ fn swaps_sides(orientation: Orientation) -> bool {
 /// a point, scaled down uniformly when the longer side is over
 /// [`MAX_SIDE`]; a shorter side that would then be under 1 pt is 1 pt.
 pub(crate) fn page_size(width: u32, height: u32) -> (f64, f64) {
-    let (w, h) = (f64::from(width), f64::from(height));
+    page_points(f64::from(width), f64::from(height))
+}
+
+/// A page of `w` × `h` points, scaled down uniformly when the longer side
+/// is over [`MAX_SIDE`], each side at least 1 pt.
+fn page_points(w: f64, h: f64) -> (f64, f64) {
     let long = w.max(h);
     let scale = if long > MAX_SIDE {
         MAX_SIDE / long
@@ -555,6 +681,12 @@ pub(crate) fn page_size(width: u32, height: u32) -> (f64, f64) {
         1.0
     };
     ((w * scale).max(1.0), (h * scale).max(1.0))
+}
+
+/// An SVG's page: its own size, `css` CSS pixels at 0.75 pt each (a 210 mm
+/// SVG makes an A4-wide page), held as [`page_size`] holds a picture's.
+pub(crate) fn svg_page(css: (f64, f64)) -> (f64, f64) {
+    page_points(css.0 * POINTS_PER_CSS_PIXEL, css.1 * POINTS_PER_CSS_PIXEL)
 }
 
 /// The `cm` matrix `[a b c d e f]` that maps an image's unit square onto a
@@ -685,11 +817,19 @@ fn write_page<W: Write>(
             let drawn = [(image, placement(pass.orientation, page))];
             finish_page(pdf, &drawn, page).map_err(write)
         }
-        Picture::Pixels { img, icc, storage } => {
+        Picture::Pixels {
+            img,
+            icc,
+            storage,
+            page,
+        } => {
             let size = img.dimensions();
             let gray = is_gray(img.color());
             let scan = scan(&img, storage == Storage::Lossless, cancel)?;
-            let page = page_size(size.0, size.1);
+            let page = match page {
+                Some((w, h)) => page_points(w, h),
+                None => page_size(size.0, size.1),
+            };
             let profile = icc.as_ref().map(|_| pdf.reserve());
             let space = color_space(gray, profile);
             let lossy = match storage {
@@ -1158,6 +1298,7 @@ mod tests {
             img,
             icc: None,
             storage: Storage::Lossless,
+            page: None,
         }
     }
 
@@ -1166,6 +1307,7 @@ mod tests {
             img,
             icc: None,
             storage: Storage::Lossy,
+            page: None,
         }
     }
 
@@ -1405,6 +1547,7 @@ mod tests {
             img: DynamicImage::ImageRgb8(gradient(2, 2)),
             icc: Some(profile.clone()),
             storage: Storage::Lossless,
+            page: None,
         }]);
         let (doc, pages) = pages(&bytes);
         let space = pages[0]
@@ -1918,7 +2061,10 @@ mod tests {
             Some(mode) => fake(mode),
             None => nowhere(),
         };
-        let decoder = heif::Decoder::new(launch, limits);
+        let helpers = Helpers {
+            heif: Some(heif::Decoder::new(launch, limits)),
+            svg: None,
+        };
         let inputs: Vec<(&Path, Format)> = job
             .inputs
             .iter()
@@ -1931,7 +2077,7 @@ mod tests {
             &dest(job),
             &EngineCtx::default(),
             &mut |p| seen.push(p),
-            Some(&decoder),
+            &helpers,
         );
         assert!(
             listing(&dir.0.join("work")).is_empty(),
@@ -2255,6 +2401,7 @@ mod tests {
         // conversion only, with the helper.
         let with_heif = SidecarPaths {
             heif: Some(std::path::PathBuf::from("grape-heif")),
+            svg_worker: None,
             ..SidecarPaths::default()
         };
         assert!(reads(Format::Avif, &with_heif));

@@ -1,7 +1,7 @@
 //! Which conversions this build runs: [`supports`] and [`run_job`] decide
 //! from the same table, so a pair is offered exactly when it can run.
-//! [`supports`] assumes no sidecars; the PDF, RAR, audio and video pairs
-//! need theirs ([`supports_with`]).
+//! [`supports`] assumes no sidecars; the PDF, RAR, HEIC, AVIF, SVG, audio
+//! and video pairs need theirs ([`supports_with`]).
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -78,7 +78,8 @@ fn supports_the_raster_subtitle_and_archive_pairs() {
     ));
 }
 
-/// Every sidecar a full install has; any path will do, nothing runs here.
+/// Every sidecar a full install has but the image helper (which ships on
+/// Windows only); any path will do, nothing runs here.
 fn all_sidecars() -> SidecarPaths {
     let some = || Some(PathBuf::from("x"));
     SidecarPaths {
@@ -87,8 +88,19 @@ fn all_sidecars() -> SidecarPaths {
         pdfium: some(),
         pdf_worker: some(),
         bsdtar: some(),
+        svg_worker: some(),
         ..SidecarPaths::default()
     }
+}
+
+/// The v1 SVG pairs that run with the SVG worker alone: every target the
+/// matrix gives SVG but HEIC and AVIF, which need the image helper too
+/// (D39).
+fn svg_pairs() -> usize {
+    targets(Format::Svg)
+        .iter()
+        .filter(|&&to| !matches!(to, Format::Heic | Format::Avif))
+        .count()
 }
 
 /// The `(from, to)` pairs over every format that run with `sidecars`.
@@ -117,7 +129,7 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
         .into_iter()
         .filter(|&(from, to)| supports_with(&Operation::convert(to), &[Some(from)], &all))
         .collect();
-    assert_eq!(with.len(), 42 + 104);
+    assert_eq!(with.len(), 42 + svg_pairs() + 104);
     for to in [Format::Jpg, Format::Png, Format::Txt, Format::Md] {
         assert!(with.contains(&(Format::Pdf, to)), "{to:?}");
         assert!(
@@ -138,22 +150,23 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
 #[test]
 fn nothing_runs_outside_the_v1_matrix_and_tools() {
     let all = all_sidecars();
-    // Over every pair of formats, only the 42 + 104 v1 pairs run.
+    // Over every pair of formats, only the 42 + SVG's + 104 v1 pairs run.
     let v1 = pairs(Features::V1_ONLY);
     let runnable = runnable_pairs(&all);
-    assert_eq!(runnable.len(), 42 + 104);
+    assert_eq!(runnable.len(), 42 + svg_pairs() + 104);
     for pair in &runnable {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
     // Over every tool and format, exactly these seven, Create PDF on four
-    // image formats, and the D26 tools run, each offered on the wheel for
-    // one item or for several.
+    // image formats and SVG, and the D26 tools run, each offered on the
+    // wheel for one item or for several.
     let tools = runnable_tools(&all);
     assert_eq!(
         tools.len(),
-        7 + 4 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len(),
+        7 + 4 + 1 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len(),
         "{tools:?}"
     );
+    assert!(tools.contains(&(ToolKey::CreatePdf, Format::Svg)));
     for pair in [
         (ToolKey::ExtractArchive, Format::Zip),
         (ToolKey::ExtractArchive, Format::Tar),
@@ -199,7 +212,11 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
                 .all(|&(_, format)| format != Format::Pdf),
             "{without:?}"
         );
-        assert_eq!(runnable_pairs(&without).len(), 38 + 104, "{without:?}");
+        assert_eq!(
+            runnable_pairs(&without).len(),
+            38 + svg_pairs() + 104,
+            "{without:?}"
+        );
     }
     // RAR needs bsdtar.
     let no_bsdtar = SidecarPaths {
@@ -210,6 +227,37 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         .iter()
         .all(|&(from, _)| from != Format::Rar));
     assert!(!runnable_tools(&no_bsdtar).contains(&(ToolKey::ExtractArchive, Format::Rar)));
+    // SVG needs its worker.
+    let no_svg_worker = SidecarPaths {
+        svg_worker: None,
+        ..all.clone()
+    };
+    assert!(runnable_pairs(&no_svg_worker)
+        .iter()
+        .all(|&(from, _)| from != Format::Svg));
+    assert!(!runnable_tools(&no_svg_worker).contains(&(ToolKey::CreatePdf, Format::Svg)));
+}
+
+#[test]
+fn every_v1_pair_runs_with_every_sidecar() {
+    // With the image helper too, the matrix's v1 pairs are exactly what
+    // runs: nothing is missing, nothing extra.
+    let every = SidecarPaths {
+        heif: Some(PathBuf::from("x")),
+        ..all_sidecars()
+    };
+    let mut v1 = pairs(Features::V1_ONLY);
+    let mut runnable = runnable_pairs(&every);
+    v1.sort_by_key(|&(from, to)| (from.key(), to.key()));
+    runnable.sort_by_key(|&(from, to)| (from.key(), to.key()));
+    assert_eq!(runnable, v1);
+    // SVG's every target among them, HEIC and AVIF with both helpers.
+    for &to in targets(Format::Svg) {
+        assert!(runnable.contains(&(Format::Svg, to)), "{to:?}");
+    }
+    for to in [Format::Heic, Format::Avif] {
+        assert!(!runnable_pairs(&all_sidecars()).contains(&(Format::Svg, to)));
+    }
 }
 
 /// Grape's own image tools (D26), which need no sidecar.
@@ -271,10 +319,11 @@ fn media_tools_run_only_with_both_ffmpeg_sidecars() {
         ),
     ] {
         let tools = runnable_tools(&without);
-        // The seven, Create PDF on four image formats, the image tools.
+        // The seven, Create PDF on four image formats and SVG, the image
+        // tools.
         assert_eq!(
             tools.len(),
-            7 + 4 + IMAGE_TOOLS.len(),
+            7 + 4 + 1 + IMAGE_TOOLS.len(),
             "without {name}: {tools:?}"
         );
         for pair in MEDIA_TOOLS {
@@ -303,6 +352,7 @@ fn absent_sidecars(dir: &TestDir) -> SidecarPaths {
     SidecarPaths {
         ffmpeg: Some(missing("no-ffmpeg")),
         ffprobe: Some(missing("no-ffprobe")),
+        svg_worker: Some(missing("no-svg-worker")),
         ..SidecarPaths::default()
     }
 }
@@ -318,19 +368,19 @@ fn audio_and_video_run_only_with_both_ffmpeg_sidecars() {
             .count()
     };
     // The 35 that need no sidecar: raster, images → PDF, subtitle and
-    // archive pairs.
+    // archive pairs. `both` has the SVG worker too.
     assert_eq!(count(&SidecarPaths::default()), 35);
-    assert_eq!(count(&both), 35 + 104);
+    assert_eq!(count(&both), 35 + svg_pairs() + 104);
     let only_ffmpeg = SidecarPaths {
         ffprobe: None,
         ..both.clone()
     };
-    assert_eq!(count(&only_ffmpeg), 35);
+    assert_eq!(count(&only_ffmpeg), 35 + svg_pairs());
     let only_ffprobe = SidecarPaths {
         ffmpeg: None,
         ..both.clone()
     };
-    assert_eq!(count(&only_ffprobe), 35);
+    assert_eq!(count(&only_ffprobe), 35 + svg_pairs());
     // Every media pair in the matrix, and nothing else, is added.
     for from in [
         Format::Mp3,
@@ -386,6 +436,35 @@ fn a_media_job_without_its_sidecars_is_not_in_this_build() {
     assert_eq!(err.user_message, "WAV to MP3 isn't in this build yet.");
     assert_eq!(dir.names(), names_before);
     before.assert_unchanged();
+}
+
+#[test]
+fn an_svg_job_whose_worker_is_gone_fails_cleanly() {
+    let dir = TestDir::new("svg-missing");
+    let svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'/>";
+    for to in [Format::Png, Format::Pdf] {
+        let (src, job) = plan_one(&dir, "logo.svg", svg, Operation::convert(to));
+        let before = SourceState::of(&src);
+        let names_before = dir.names();
+        let ctx = EngineCtx {
+            sidecars: absent_sidecars(&dir),
+            ..EngineCtx::default()
+        };
+
+        let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{to:?}");
+        assert_eq!(err.user_message, "Grape's SVG helper couldn't start.");
+        assert_eq!(dir.names(), names_before);
+        before.assert_unchanged();
+        std::fs::remove_file(&src).unwrap();
+    }
+    // Without the worker, SVG isn't in this build.
+    let (src, job) = plan_one(&dir, "logo.svg", svg, Operation::convert(Format::Png));
+    let err = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported);
+    assert_eq!(err.user_message, "SVG to PNG isn't in this build yet.");
+    std::fs::remove_file(&src).unwrap();
 }
 
 #[test]
