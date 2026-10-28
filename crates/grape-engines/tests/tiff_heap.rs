@@ -180,17 +180,22 @@ fn path(size: u32) -> Vec<u8> {
     block
 }
 
-/// A classic TIFF of `pages` gray 8 × 8 pages, a 64-byte strip each, then
-/// the bytes `irb`: page `n`'s Photoshop resources (34377) are the bytes
-/// `at(n)` gives, as an offset into `irb` and a length.
-fn photoshop(pages: u32, irb: &[u8], at: impl Fn(u32) -> (u32, u32)) -> Vec<u8> {
+/// A classic TIFF of `ifds` gray 8 × 8 IFDs, a 64-byte strip each, then
+/// the bytes `irb`: IFD `n`'s Photoshop resources (34377) are the bytes
+/// `at(n)` gives, as an offset into `irb` and a length. The IFDs are a
+/// chain of pages, or with `subs`, a page and its SubIFDs (330).
+fn photoshop(ifds: u32, irb: &[u8], subs: bool, at: impl Fn(u32) -> (u32, u32)) -> Vec<u8> {
     let ifd = 2 + 12 * 8 + 4;
-    let strips = 8 + pages * ifd;
-    let base = strips + 64 * pages;
+    // The page's SubIFDs entry, and where each IFD is.
+    let extra = if subs { 12 } else { 0 };
+    let place = |n: u32| if n == 0 { 8 } else { 8 + n * ifd + extra };
+    let array = place(ifds);
+    let strips = array + if subs { 4 * (ifds - 1) } else { 0 };
+    let base = strips + 64 * ifds;
     let mut file = b"II*\0\x08\0\0\0".to_vec();
-    for n in 0..pages {
+    for n in 0..ifds {
         let (offset, len) = at(n);
-        let entries: [(u16, u16, u32, u32); 8] = [
+        let mut entries = vec![
             (256, 4, 1, 8),
             (257, 4, 1, 8),
             (258, 3, 1, 8),
@@ -198,19 +203,30 @@ fn photoshop(pages: u32, irb: &[u8], at: impl Fn(u32) -> (u32, u32)) -> Vec<u8> 
             (273, 4, 1, strips + 64 * n),
             (278, 4, 1, 8),
             (279, 4, 1, 64),
-            (34377, 7, len, base + offset),
         ];
-        file.extend(8u16.to_le_bytes());
-        for (tag, kind, count, value) in entries {
-            file.extend(tag.to_le_bytes());
-            file.extend(kind.to_le_bytes());
-            file.extend(count.to_le_bytes());
-            file.extend(value.to_le_bytes());
+        if subs && n == 0 {
+            let heads = if ifds == 2 { place(1) } else { array };
+            entries.push((330, 4, ifds - 1, heads));
         }
-        let next = if n + 1 < pages { 8 + (n + 1) * ifd } else { 0 };
+        entries.push((34377, 7, len, base + offset));
+        file.extend((entries.len() as u16).to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            file.extend(u16::to_le_bytes(tag));
+            file.extend(u16::to_le_bytes(kind));
+            file.extend(u32::to_le_bytes(count));
+            file.extend(u32::to_le_bytes(value));
+        }
+        let next = if !subs && n + 1 < ifds {
+            place(n + 1)
+        } else {
+            0
+        };
         file.extend(next.to_le_bytes());
     }
-    file.extend((0..64 * pages).map(|i| (i % 251) as u8));
+    if subs && ifds > 2 {
+        file.extend((1..ifds).flat_map(|n| place(n).to_le_bytes()));
+    }
+    file.extend((0..64 * ifds).map(|i| (i % 251) as u8));
     file.extend_from_slice(irb);
     file
 }
@@ -225,7 +241,7 @@ fn pages_that_share_photoshops_resources_hold_them_once() {
     let (_, job) = plan_one(
         &dir,
         "paths.tif",
-        &photoshop(32, &path(size), |_| (0, 12 + size)),
+        &photoshop(32, &path(size), false, |_| (0, 12 + size)),
         Operation::tool(ToolKey::RemoveMetadata),
     );
     let peak = peak(&job);
@@ -235,20 +251,24 @@ fn pages_that_share_photoshops_resources_hold_them_once() {
 
 #[test]
 fn the_self_check_holds_no_photoshop_resources_of_its_own() {
-    // Four pages, each with its own 3 MiB block: the plan holds the four,
-    // and the self-check reads and filters one at a time beside them.
+    // Four IFDs, each with its own 3 MiB block: the plan holds the four,
+    // and the self-check reads and filters one at a time beside them,
+    // whether they're pages or a page and its SubIFDs, which the
+    // self-check walks with their page.
     let _turn = turn();
-    let (pages, size) = (4, 3 << 20);
-    let irb: Vec<u8> = (0..pages).flat_map(|_| path(size - 12)).collect();
+    let (ifds, size) = (4, 3 << 20);
+    let irb: Vec<u8> = (0..ifds).flat_map(|_| path(size - 12)).collect();
     let dir = TestDir::new("tiff-heap-irbs");
-    let (_, job) = plan_one(
-        &dir,
-        "pages.tif",
-        &photoshop(pages, &irb, |n| (n * size, size)),
-        Operation::tool(ToolKey::RemoveMetadata),
-    );
-    let blocks = peak(&job) as f64 / f64::from(size);
-    assert!(blocks < 6.5, "{blocks:.2} blocks");
+    for subs in [false, true] {
+        let (_, job) = plan_one(
+            &dir,
+            &format!("ifds-{subs}.tif"),
+            &photoshop(ifds, &irb, subs, |n| (n * size, size)),
+            Operation::tool(ToolKey::RemoveMetadata),
+        );
+        let blocks = peak(&job) as f64 / f64::from(size);
+        assert!(blocks < 6.5, "{subs}: {blocks:.2} blocks");
+    }
 }
 
 #[test]
@@ -263,7 +283,7 @@ fn pages_that_name_photoshops_resources_each_their_own_way_hold_16_mib_at_most()
     let (_, job) = plan_one(
         &dir,
         "lengths.tif",
-        &photoshop(pages, &irb, |n| (0, 12 + size + 2 * n)),
+        &photoshop(pages, &irb, false, |n| (0, 12 + size + 2 * n)),
         Operation::tool(ToolKey::RemoveMetadata),
     );
     let (peak, result) = peak_of(&job);

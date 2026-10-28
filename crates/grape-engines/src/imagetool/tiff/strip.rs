@@ -222,8 +222,8 @@ impl Plan {
                 }
             }
         }
-        // And the report finds nothing. The walk holds none of the
-        // resources it filters: each page's go with it. The output's are
+        // And the report finds nothing. The walk keeps none of the
+        // resources it filters, a page's or its SubIFDs'. The output's are
         // the plan's, so they're within its cap already.
         let mut walk = Walk {
             r,
@@ -496,8 +496,8 @@ struct Walk<'r> {
     /// it's kept.
     irbs: HashMap<(u64, u64), Option<Field>>,
     /// Whether the fields it makes are kept for the plan; the self-check
-    /// only needs what the report says, so a block that a later IFD shares
-    /// gives that IFD no field.
+    /// only needs what the report says, so it makes none, and holds no
+    /// filtered resources while it walks a page's SubIFDs.
     keep: bool,
     /// What's left of the bytes of Photoshop's resources it may read, each
     /// block once ([`MAX_IRB`]).
@@ -633,8 +633,9 @@ impl Walk<'_> {
     }
 
     /// Photoshop's resources, kept down to the ones that describe the
-    /// picture; `None` when none is left. Resources that an earlier IFD
-    /// points at too are the field it got, if it's kept.
+    /// picture; `None` when none is left, or when the walk keeps no
+    /// fields. Resources that an earlier IFD points at too are the field
+    /// it got.
     fn irb(&mut self, entry: &Entry) -> Result<Option<Field>, Error> {
         let Value::At { offset, len } = entry.value else {
             return self.filter_irb(entry);
@@ -647,12 +648,12 @@ impl Walk<'_> {
             Error::TooLarge(format!("over {MAX_IRB} bytes of Photoshop resources"))
         })?;
         let field = self.filter_irb(entry)?;
-        let held = if self.keep { field.clone() } else { None };
-        self.irbs.insert((offset, len), held);
+        self.irbs.insert((offset, len), field.clone());
         Ok(field)
     }
 
-    /// Reads and filters the resources `entry` holds, for [`Walk::irb`].
+    /// Reads and filters the resources `entry` holds, for [`Walk::irb`]:
+    /// the field, if the walk keeps it.
     fn filter_irb(&mut self, entry: &Entry) -> Result<Option<Field>, Error> {
         let Some(irb) = read_value(self.r, entry, MAX_IRB)? else {
             // Resources that can't be read go whole, as a broken block does.
@@ -663,7 +664,7 @@ impl Walk<'_> {
         };
         let filtered = irb::filter(&irb);
         self.found.fields.extend(filtered.fields);
-        if filtered.kept.is_empty() {
+        if filtered.kept.is_empty() || !self.keep {
             return Ok(None);
         }
         Ok(Some(Field {
