@@ -15,6 +15,9 @@
 mod compress;
 pub(crate) mod exif;
 mod gif;
+// Remove Metadata runs it next.
+#[cfg_attr(not(test), allow(dead_code))]
+mod heic;
 // The HEIC tools that use it come next.
 #[cfg_attr(not(test), allow(dead_code))]
 mod isobmff;
