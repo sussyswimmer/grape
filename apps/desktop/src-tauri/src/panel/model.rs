@@ -816,7 +816,7 @@ mod tests {
     }
 
     /// What Grape finds in a full install: FFmpeg and ffprobe, PDFium, the
-    /// worker and bsdtar.
+    /// PDF worker, bsdtar and the SVG worker (Grape itself, D39).
     fn installed() -> SidecarPaths {
         SidecarPaths {
             ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
@@ -824,6 +824,7 @@ mod tests {
             pdfium: Some(PathBuf::from("pdfium.dll")),
             pdf_worker: Some(PathBuf::from("Grape.exe")),
             bsdtar: Some(PathBuf::from("bsdtar.exe")),
+            svg_worker: Some(PathBuf::from("Grape.exe")),
             ..SidecarPaths::default()
         }
     }

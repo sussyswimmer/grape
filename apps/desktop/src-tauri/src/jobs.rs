@@ -364,10 +364,11 @@ struct Helper {
 /// The helpers the engines need. PDFium ships wherever a build has one
 /// (D29). FFmpeg (`ffmpeg` and `ffprobe`, Grape's own build, D24) and
 /// bsdtar (D27) ship in every installer and DMG through the per-OS
-/// sidecars overlay (D25). The image helper, for HEIC and AVIF, ships on
-/// Windows (`grape-heif.exe`, D33, D41); on macOS it's Grape itself, so
-/// it's never missing there. Grape ships for no other OS, so there every
-/// drop that needs a helper is "coming".
+/// sidecars overlay (D25). The image helper, for HEIC and AVIF (SVG to
+/// HEIC and AVIF included, D39), ships on Windows (`grape-heif.exe`, D33,
+/// D41); on macOS it's Grape itself, so it's never missing there. The SVG
+/// worker (D39) is Grape itself on every OS, so it has no row. Grape ships
+/// for no other OS, so there every drop that needs a helper is "coming".
 const HELPERS: [Helper; 4] = [
     Helper {
         title: "Grape's PDF library is missing",
@@ -720,11 +721,13 @@ fn unchanged_words(jobs: &[Job]) -> &'static str {
     }
 }
 
-/// The done toast's title when the jobs' notes say more than "Done":
-/// what was left out, pages drawn below 300 DPI, what Remove Metadata
-/// removed, or how much smaller Compress made the files. macOS metadata
-/// left out of an archive isn't mentioned (it's never the user's content);
-/// the log counts it. Only the jobs that wrote something have notes.
+/// The done toast's title when the jobs' notes say more than "Done", the
+/// first of: what an archive left out, the images an SVG left out (D39),
+/// pages drawn below 300 DPI (PDF → images, and SVG pages in a PDF), an
+/// SVG drawn smaller to fit (D39), what Remove Metadata removed, or how
+/// much smaller Compress made the files. macOS metadata left out of an
+/// archive isn't mentioned (it's never the user's content); the log counts
+/// it. Only the jobs that wrote something have notes.
 fn noted(jobs: &[Job], results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
     let notes: Vec<&Note> = results
         .iter()
@@ -732,6 +735,7 @@ fn noted(jobs: &[Job], results: &[Result<JobOutcome, GrapeError>]) -> Option<Str
         .flat_map(|outcome| &outcome.notes)
         .collect();
     let (mut links, mut specials, mut copies, mut scaled) = (0u32, 0u32, 0u32, 0u32);
+    let (mut images, mut smaller_drawn) = (0u32, false);
     let mut removed: Option<Vec<MetaField>> = None;
     // Summed over the drop's jobs in u128, so no sum of u64s overflows.
     let mut sizes: Option<(u128, u128)> = None;
@@ -743,6 +747,8 @@ fn noted(jobs: &[Job], results: &[Result<JobOutcome, GrapeError>]) -> Option<Str
                 copies = copies.saturating_add(left.copies);
             }
             Note::PagesScaled(pages) => scaled = scaled.saturating_add(*pages),
+            Note::ImagesLeftOut(left) => images = images.saturating_add(*left),
+            Note::DrawnSmaller => smaller_drawn = true,
             Note::MetadataRemoved(fields) => removed.get_or_insert_with(Vec::new).extend(fields),
             Note::Compressed { before, after } => {
                 let (all_before, all_after) = sizes.get_or_insert((0, 0));
@@ -766,11 +772,23 @@ fn noted(jobs: &[Job], results: &[Result<JobOutcome, GrapeError>]) -> Option<Str
     if let Some(what) = left_out {
         return Some(format!("{what} left out"));
     }
+    // "3 images left out": the linked files and refused embedded images
+    // the drop's SVGs didn't draw. The widest there can be, "4294967295
+    // images left out", is 178.5 px of the title's 246 in the title's 13 px
+    // semibold, measured with Inter ([`REMOVED_MAX`]).
+    if images > 0 {
+        return Some(format!("{} left out", count(images, "image", "images")));
+    }
     if scaled > 0 {
         return Some(format!(
             "{} drawn below 300 DPI",
             count(scaled, "page", "pages")
         ));
+    }
+    // An SVG drawn smaller than its size to fit the target's limits: 122.1
+    // px in Inter.
+    if smaller_drawn {
+        return Some("Drawn smaller to fit".to_owned());
     }
     if let Some(fields) = removed {
         // A PDF keeps page-level XMP and its images' metadata, so for a
@@ -946,6 +964,8 @@ fn log_notes(notes: &[Note]) -> String {
                 left.links, left.specials, left.mac_metadata, left.copies
             ),
             Note::PagesScaled(pages) => format!("; {pages} page(s) below 300 DPI"),
+            Note::ImagesLeftOut(images) => format!("; {images} image(s) left out"),
+            Note::DrawnSmaller => "; drawn smaller".to_owned(),
             Note::MetadataRemoved(fields) => format!("; removed {fields:?}"),
             Note::Compressed { before, after } => format!("; {before} -> {after} bytes"),
             other => format!("; {other:?}"),
@@ -1060,8 +1080,8 @@ mod tests {
     }
 
     /// What Grape finds in a full install on every OS: FFmpeg and ffprobe,
-    /// PDFium, the worker and bsdtar. (The image helper is
-    /// [`with_heic_helper`].)
+    /// PDFium, the PDF worker, bsdtar and the SVG worker (Grape itself,
+    /// D39). (The image helper is [`with_heic_helper`].)
     fn installed() -> SidecarPaths {
         SidecarPaths {
             ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
@@ -1069,6 +1089,7 @@ mod tests {
             pdfium: Some(PathBuf::from("pdfium.dll")),
             pdf_worker: Some(PathBuf::from("Grape.exe")),
             bsdtar: Some(PathBuf::from("bsdtar.exe")),
+            svg_worker: Some(PathBuf::from("Grape.exe")),
             ..SidecarPaths::default()
         }
     }
@@ -1237,6 +1258,9 @@ mod tests {
         let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
         let avif = [SelectionItem::file("/a/photo.avif")];
         let png = [SelectionItem::file("/a/photo.png")];
+        // SVG → HEIC and AVIF (D39): the SVG worker is there (Grape
+        // itself), so only the image helper is missing.
+        let svg = [SelectionItem::file("/a/logo.svg")];
         for (op, items, coming) in [
             (&to_png, &heic[..], "HEIC to PNG is coming."),
             (&to_heic, &png[..], "PNG to HEIC is coming."),
@@ -1245,6 +1269,8 @@ mod tests {
             (&to_avif, &heic[..], "HEIC to AVIF is coming."),
             (&to_heic, &avif[..], "AVIF to HEIC is coming."),
             (&to_pdf, &avif[..], "AVIF to PDF is coming."),
+            (&to_heic, &svg[..], "SVG to HEIC is coming."),
+            (&to_avif, &svg[..], "SVG to AVIF is coming."),
         ] {
             let why = check_runnable(op, items, &installed()).unwrap_err();
             if cfg!(windows) {
@@ -1603,14 +1629,21 @@ mod tests {
                 "{from}"
             );
         }
-        // SVG waits for its decoder, whatever is installed (AVIF needs the
-        // image helper, as HEIC does: `a_heic_in_a_pdf_needs_the_image_helper`).
+        // An SVG is drawn by its worker, Grape itself (D39), and its page
+        // written in Grape's process: no PDFium, no image helper. (AVIF
+        // needs the image helper, as HEIC does:
+        // `a_heic_in_a_pdf_needs_the_image_helper`.)
+        let svg = [SelectionItem::file("/a/logo.svg")];
+        assert_eq!(check_runnable(&to_pdf, &svg, &installed()), Ok(()));
+        let svg_only = SidecarPaths {
+            svg_worker: Some(PathBuf::from("Grape.exe")),
+            ..none()
+        };
+        assert_eq!(check_runnable(&to_pdf, &svg, &svg_only), Ok(()));
+        // Without the worker (Grape couldn't tell where it runs from, so
+        // nothing was found) it's coming: no helper Grape ships is missing.
         assert_eq!(
-            check_runnable(
-                &to_pdf,
-                &[SelectionItem::file("/a/logo.svg")],
-                &with_heic_helper()
-            ),
+            check_runnable(&to_pdf, &svg, &none()),
             Err(NotRunnable {
                 title: "Not in this build yet".to_owned(),
                 detail: Some("SVG to PDF is coming.".to_owned()),
@@ -1636,14 +1669,26 @@ mod tests {
             SelectionItem::file("/a/4.tiff"),
         ];
         assert_eq!(check_runnable(&create, &mixed, &installed()), Ok(()));
-        // One input it can't read yet stops the whole PDF, and names it.
+        // SVGs too (D39), each a page drawn by the SVG worker.
         let with_svg = [
+            SelectionItem::file("/a/1.svg"),
+            SelectionItem::file("/a/2.jpg"),
+        ];
+        assert_eq!(check_runnable(&create, &with_svg, &installed()), Ok(()));
+        let svgs = [
+            SelectionItem::file("/a/1.svg"),
+            SelectionItem::file("/a/2.svgz"),
+        ];
+        assert_eq!(check_runnable(&create, &svgs, &installed()), Ok(()));
+        // One input it can't read stops the whole PDF, and names it: an
+        // SVG without its worker.
+        let three = [
             SelectionItem::file("/a/1.jpg"),
             SelectionItem::file("/a/2.svg"),
             SelectionItem::file("/a/3.png"),
         ];
         assert_eq!(
-            check_runnable(&create, &with_svg, &with_heic_helper()),
+            check_runnable(&create, &three, &none()),
             Err(NotRunnable {
                 title: "Not in this build yet".to_owned(),
                 detail: Some("Create PDF on SVG is coming.".to_owned()),
@@ -1716,8 +1761,8 @@ mod tests {
                 "{op:?}"
             );
         }
-        // A HEIC and an SVG: even with the helper the SVG can't go in, so
-        // the SVG names the toast and the helper is never blamed.
+        // A HEIC and an SVG: the SVG's worker is Grape itself (D39), so
+        // the missing image helper is what's named where it ships.
         let with_svg = [
             SelectionItem::file("/a/IMG_0001.HEIC"),
             SelectionItem::file("/a/logo.svg"),
@@ -1727,9 +1772,68 @@ mod tests {
             ..HELPERS[2]
         }];
         assert_eq!(
+            check_runnable(&create, &with_svg, &with_heic_helper()),
+            Ok(())
+        );
+        assert_eq!(
+            runnable_with(&create, &with_svg, &installed(), &shipped),
+            Err(missing.clone())
+        );
+        // Without the SVG worker too, even with the helper the SVG can't
+        // go in, so the SVG names the toast and the helper is never
+        // blamed.
+        assert_eq!(
             runnable_with(&create, &with_svg, &none(), &shipped),
             Err(coming("Create PDF on SVG is coming."))
         );
+    }
+
+    #[test]
+    fn svg_runs_with_its_worker_on_every_os() {
+        // D39: the SVG worker is Grape itself on every OS, so SVG to the
+        // five rasters and to PDF needs nothing else; `.svgz` is an SVG.
+        let svg = [SelectionItem::file("/a/logo.svg")];
+        let svgz = [SelectionItem::file("/a/Logo.SVGZ")];
+        let svg_only = SidecarPaths {
+            svg_worker: Some(PathBuf::from("Grape.exe")),
+            ..none()
+        };
+        for to in [
+            Format::Jpg,
+            Format::Png,
+            Format::Webp,
+            Format::Tiff,
+            Format::Bmp,
+            Format::Pdf,
+        ] {
+            let op = Operation::Convert { to };
+            for sidecars in [installed(), svg_only.clone()] {
+                assert_eq!(check_runnable(&op, &svg, &sidecars), Ok(()), "{to:?}");
+                assert_eq!(check_runnable(&op, &svgz, &sidecars), Ok(()), "{to:?}");
+            }
+        }
+        // With the image helper, every target the matrix gives SVG runs:
+        // HEIC and AVIF too.
+        for &to in grape_core::targets(Format::Svg) {
+            let op = Operation::Convert { to };
+            assert_eq!(
+                check_runnable(&op, &svg, &with_heic_helper()),
+                Ok(()),
+                "{to:?}"
+            );
+        }
+        // Several SVGs to PNG, and an SVG beside a PNG to JPG.
+        let several = [
+            SelectionItem::file("/a/1.svg"),
+            SelectionItem::file("/a/2.svg"),
+            SelectionItem::file("/a/3.png"),
+        ];
+        let to_jpg = Operation::Convert { to: Format::Jpg };
+        assert_eq!(check_runnable(&to_jpg, &several, &installed()), Ok(()));
+        // SVG has no single-file tools (FORMAT_MATRIX), so none runs.
+        let why =
+            check_runnable(&Operation::tool(ToolKey::Compress), &svg, &installed()).unwrap_err();
+        assert_eq!(why.detail.as_deref(), Some("Compress on SVG is coming."));
     }
 
     #[test]
@@ -1875,6 +1979,127 @@ mod tests {
             finished(&jobs, &one, &settings()).title,
             "1 page drawn below 300 DPI"
         );
+    }
+
+    fn svg_job(output: &str, used_fallback: bool) -> Job {
+        Job {
+            op: Operation::Convert { to: Format::Png },
+            ..job("/a/logo.svg", output, used_fallback)
+        }
+    }
+
+    #[test]
+    fn done_says_what_an_svg_left_out_and_drew_smaller() {
+        // D39: the images an SVG left out (linked files, refused embedded
+        // data), singular and plural, and an SVG drawn smaller to fit.
+        let jobs = [svg_job("/a/logo.png", false)];
+        let cases = [
+            (vec![Note::ImagesLeftOut(1)], "1 image left out"),
+            (vec![Note::ImagesLeftOut(3)], "3 images left out"),
+            (vec![Note::DrawnSmaller], "Drawn smaller to fit"),
+            // Both: what was left out leads; the log has the rest.
+            (
+                vec![Note::ImagesLeftOut(1), Note::DrawnSmaller],
+                "1 image left out",
+            ),
+        ];
+        for (notes, title) in cases {
+            let report = finished(&jobs, &[noting("/a/logo.png", notes)], &settings());
+            assert_eq!(report.tone, ToastTone::Done);
+            assert_eq!(report.title, title);
+            assert_eq!(report.detail.as_deref(), Some("logo.png"));
+            assert_eq!(report.reveal, Some(PathBuf::from("/a/logo.png")));
+        }
+        // Two jobs add up, and one drawn smaller is enough to say so.
+        let two = [svg_job("/a/1.png", false), svg_job("/a/2.png", false)];
+        let results = [
+            noting("/a/1.png", vec![Note::ImagesLeftOut(1)]),
+            noting("/a/2.png", vec![Note::ImagesLeftOut(2)]),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.title, "3 images left out");
+        assert_eq!(report.detail.as_deref(), Some("2 files"));
+        let results = [
+            wrote("/a/1.png"),
+            noting("/a/2.png", vec![Note::DrawnSmaller]),
+        ];
+        assert_eq!(
+            finished(&two, &results, &settings()).title,
+            "Drawn smaller to fit"
+        );
+        // The widest count still fits the title (its 246 px hold
+        // `REMOVED_MAX` characters of the widest words).
+        let most = [noting("/a/logo.png", vec![Note::ImagesLeftOut(u32::MAX)])];
+        let title = finished(&jobs, &most, &settings()).title;
+        assert_eq!(title, "4294967295 images left out");
+        assert!(title.chars().count() <= REMOVED_MAX, "{title}");
+        // Every output fell back: the folder takes the title, and the notes
+        // are only logged.
+        let fell = [svg_job("/home/max/Downloads/Grape/logo.png", true)];
+        let results = [noting(
+            "/home/max/Downloads/Grape/logo.png",
+            vec![Note::ImagesLeftOut(2), Note::DrawnSmaller],
+        )];
+        let report = finished(&fell, &results, &settings());
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+    }
+
+    #[test]
+    fn an_svg_in_a_pdf_says_what_it_left_out_then_its_pages() {
+        // SVG → PDF and Create PDF (D39): the images left out lead, then
+        // the SVG pages drawn below 300 DPI.
+        let jobs = [Job {
+            op: Operation::Convert { to: Format::Pdf },
+            ..job("/a/logo.svg", "/a/logo.pdf", false)
+        }];
+        let cases = [
+            (
+                vec![Note::ImagesLeftOut(2), Note::PagesScaled(1)],
+                "2 images left out",
+            ),
+            (vec![Note::PagesScaled(1)], "1 page drawn below 300 DPI"),
+            (vec![Note::PagesScaled(3)], "3 pages drawn below 300 DPI"),
+        ];
+        for (notes, title) in cases {
+            let report = finished(&jobs, &[noting("/a/logo.pdf", notes)], &settings());
+            assert_eq!(report.title, title);
+            assert_eq!(report.detail.as_deref(), Some("logo.pdf"));
+        }
+    }
+
+    #[test]
+    fn the_notes_title_goes_in_d39s_order() {
+        // An archive's left-out, then images left out, then pages below
+        // 300 DPI, then drawn smaller, then what Remove Metadata removed,
+        // then Compress's size: the first a drop has is the title.
+        let jobs = [job("/a/x", "/a/y", false)];
+        let order = [
+            (left_out(1, 0, 0, 0), "1 link left out"),
+            (Note::ImagesLeftOut(1), "1 image left out"),
+            (Note::PagesScaled(1), "1 page drawn below 300 DPI"),
+            (Note::DrawnSmaller, "Drawn smaller to fit"),
+            (
+                Note::MetadataRemoved(vec![MetaField::Location]),
+                "Removed location",
+            ),
+            (
+                Note::Compressed {
+                    before: 100,
+                    after: 50,
+                },
+                "50% smaller",
+            ),
+        ];
+        for first in 0..order.len() {
+            // Every later note, given before it, still loses.
+            let notes: Vec<Note> = order[first..]
+                .iter()
+                .rev()
+                .map(|(note, _)| note.clone())
+                .collect();
+            let report = finished(&jobs, &[noting("/a/y", notes)], &settings());
+            assert_eq!(report.title, order[first].1);
+        }
     }
 
     #[test]
@@ -2397,6 +2622,16 @@ mod tests {
             Note::MetadataRemoved(vec![MetaField::Location]),
         ];
         assert_eq!(log_notes(&notes), "; 1000 -> 380 bytes; removed [Location]");
+        // D39's two, as counts and kinds.
+        let svg = [
+            Note::ImagesLeftOut(3),
+            Note::DrawnSmaller,
+            Note::PagesScaled(1),
+        ];
+        assert_eq!(
+            log_notes(&svg),
+            "; 3 image(s) left out; drawn smaller; 1 page(s) below 300 DPI"
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Finds the sidecar programs Grape ships (FFmpeg, ffprobe, bsdtar and,
-//! on Windows, `grape-heif`), the PDFium library and the image helper (for
-//! HEIC and AVIF) once at startup, and hands a copy to every job as
-//! [`SidecarPaths`].
+//! on Windows, `grape-heif`), the PDFium library, the image helper (for
+//! HEIC and AVIF) and the SVG worker once at startup, and hands a copy to
+//! every job as [`SidecarPaths`].
 //!
 //! The programs sit next to Grape's own executable, without the
 //! target-triple suffix they have in `binaries/`: the installer puts them
@@ -36,6 +36,10 @@
 //! AVIF output, `main.rs`), like the PDF worker, so it's always there and
 //! isn't logged as a sidecar.
 //! Other systems have none.
+//!
+//! The SVG worker (D39, `SidecarPaths::svg_worker`) is Grape's own
+//! executable on every system, started as `Grape --grape-svg-worker`
+//! (`main.rs`), like the PDF worker: always there, and not logged.
 //!
 //! A sidecar that isn't there stays `None`, and nothing looks for it
 //! anywhere else.
@@ -155,8 +159,9 @@ pub fn for_jobs(app: &AppHandle) -> SidecarPaths {
 }
 
 /// Every sidecar for the executable `exe`: the programs in its folder
-/// ([`resolve`]), PDFium and the PDF worker ([`resolve_pdf`]), and the
-/// image helper where `heif_at` says.
+/// ([`resolve`]), PDFium and the PDF worker ([`resolve_pdf`]), the image
+/// helper where `heif_at` says, and `exe` itself as the SVG worker, on
+/// every system.
 fn resolve_all(
     exe: &Path,
     suffix: &str,
@@ -174,6 +179,7 @@ fn resolve_all(
     SidecarPaths {
         pdfium: pdf.pdfium,
         pdf_worker: pdf.pdf_worker,
+        svg_worker: Some(exe.to_path_buf()),
         ..programs
     }
 }
@@ -606,12 +612,13 @@ mod tests {
         );
     }
 
-    /// D41, on this system's own rules: an install where every file but
-    /// `grape-heif` is there. On Windows an AVIF drop (or a PNG to AVIF)
-    /// names the missing image helper; on macOS it runs, because the
-    /// helper is Grape itself; elsewhere AVIF is coming.
+    /// D41 and D39, on this system's own rules: an install where every
+    /// file but `grape-heif` is there. On Windows an AVIF drop (or a PNG to
+    /// AVIF, or an SVG to HEIC or AVIF) names the missing image helper; on
+    /// macOS it runs, because the helper is Grape itself; elsewhere it's
+    /// coming. SVG to PNG runs everywhere: its worker is Grape itself.
     #[test]
-    fn an_avif_drop_without_grape_heif_on_this_system() {
+    fn an_avif_or_svg_drop_without_grape_heif_on_this_system() {
         use grape_core::{Format, Operation, SelectionItem};
 
         use crate::jobs::{check_runnable, NotRunnable};
@@ -622,10 +629,17 @@ mod tests {
         });
         let avif = [SelectionItem::file("/a/photo.avif")];
         let png = [SelectionItem::file("/a/photo.png")];
+        let svg = [SelectionItem::file("/a/logo.svg")];
+        for to in [Format::Png, Format::Pdf] {
+            let ran = check_runnable(&Operation::Convert { to }, &svg, &paths);
+            assert_eq!(ran, Ok(()), "{to:?}");
+        }
         for (to, items, coming) in [
             (Format::Png, &avif, "AVIF to PNG is coming."),
             (Format::Avif, &png, "PNG to AVIF is coming."),
             (Format::Pdf, &avif, "AVIF to PDF is coming."),
+            (Format::Heic, &svg, "SVG to HEIC is coming."),
+            (Format::Avif, &svg, "SVG to AVIF is coming."),
         ] {
             let ran = check_runnable(&Operation::Convert { to }, items, &paths);
             if cfg!(windows) {
@@ -659,6 +673,43 @@ mod tests {
         let paths = resolve_all(&exe, "", None, None, only(&everywhere));
         assert_eq!(paths.heif, None);
         assert!(!HeifAt::is_sidecar(None));
+    }
+
+    /// D39: the SVG worker is Grape's own executable on every system, found
+    /// or not, whatever else is there, and it's never a sidecar the log
+    /// names.
+    #[test]
+    fn grape_itself_is_the_svg_worker_on_every_system() {
+        let win = Path::new("install").join("Grape.exe");
+        let mac = Path::new("Grape.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("Grape");
+        let linux = Path::new("target").join("debug").join("grape");
+        let cases = [
+            (&win, ".exe", WIN_HEIF, WINDOWS),
+            (&mac, "", MAC_HEIF, MACOS),
+            (&linux, "", None, None),
+        ];
+        for (exe, suffix, heif_at, pdfium_at) in cases {
+            // Nothing else there, and everything else there: a stray
+            // `grape-svg-worker` beside it is never looked at.
+            for is_file in [false, true] {
+                let paths = resolve_all(exe, suffix, heif_at, pdfium_at, |_| is_file);
+                assert_eq!(paths.svg_worker.as_deref(), Some(exe.as_path()), "{exe:?}");
+                assert_eq!(paths.svg_worker, paths.pdf_worker, "{exe:?}");
+            }
+        }
+        // Not logged: the summary lists the same names with or without it.
+        let paths = resolve_all(&win, ".exe", WIN_HEIF, WINDOWS, |_| false);
+        assert_eq!(
+            summary_of(&paths, true, true),
+            "none found (looked for ffmpeg, ffprobe, grape-heif, bsdtar, pdfium)"
+        );
+        // This system's own rules give it too.
+        let exe = Path::new("install").join(format!("Grape{EXE_SUFFIX}"));
+        let paths = resolve_all(&exe, EXE_SUFFIX, HEIF_AT, PDFIUM_AT, |_| false);
+        assert_eq!(paths.svg_worker, Some(exe));
     }
 
     #[test]

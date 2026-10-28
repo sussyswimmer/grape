@@ -7,15 +7,16 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 use grape_engines::pdf::{heap, worker_main, WORKER_FLAG as PDF_WORKER_FLAG};
+use grape_engines::svg::WORKER_FLAG as SVG_WORKER_FLAG;
 use grape_heif_proto::WORKER_FLAG as HEIF_WORKER_FLAG;
 
 /// The system allocator, with every change reported to the workers' heap
 /// bookkeeping (`grape_engines::pdf::heap`, DECISIONS D29), which ends a
 /// worker past its bound. Only the workers arm the bound, the PDF worker
-/// (D29) and the Mac image helper worker (D41): in the app itself this
-/// costs one atomic load per call. It is the same as in
-/// `crates/grape-engines/src/bin/grape-pdf-worker.rs`: change both
-/// together.
+/// (D29), the SVG worker (D39) and the Mac image helper worker (D41): in
+/// the app itself this costs one atomic load per call. It is the same as
+/// in `crates/grape-engines/src/bin/grape-pdf-worker.rs` and
+/// `grape-svg-worker.rs`: change all three together.
 struct WorkerHeap;
 
 // SAFETY: every method hands its arguments to `System` unchanged and
@@ -89,6 +90,12 @@ fn main() -> ExitCode {
     if first_arg_is(std::env::args_os(), HEIF_WORKER_FLAG) {
         return heif_worker();
     }
+    // `Grape --grape-svg-worker` is the SVG worker (D39), on every OS: one
+    // SVG drawn by resvg, the same way. It arms its own 2 GiB heap bound
+    // from the request.
+    if first_arg_is(std::env::args_os(), SVG_WORKER_FLAG) {
+        return grape_engines::svg::worker_main();
+    }
     if let Err(err) = grape_app::run() {
         // Release builds have no console, so stderr goes nowhere. The log
         // file catches it too, if the logger was already running.
@@ -100,8 +107,9 @@ fn main() -> ExitCode {
 }
 
 /// True when the first argument after the program's own name is `flag`,
-/// exactly: [`PDF_WORKER_FLAG`] or [`HEIF_WORKER_FLAG`]. Anything else, or
-/// the flag later on, starts the app.
+/// exactly: [`PDF_WORKER_FLAG`], [`HEIF_WORKER_FLAG`] or
+/// [`SVG_WORKER_FLAG`]. Anything else, or the flag later on, starts the
+/// app.
 fn first_arg_is(mut args: impl Iterator<Item = OsString>, flag: &str) -> bool {
     args.nth(1).is_some_and(|first| first == flag)
 }
@@ -164,13 +172,18 @@ mod tests {
         first_arg_is(args(list), HEIF_WORKER_FLAG)
     }
 
+    fn is_svg_worker(list: &[&str]) -> bool {
+        first_arg_is(args(list), SVG_WORKER_FLAG)
+    }
+
     #[test]
     fn the_flag_first_makes_the_pdf_worker() {
         assert_eq!(PDF_WORKER_FLAG, "--grape-pdf-worker");
         assert!(is_pdf_worker(&["Grape.exe", "--grape-pdf-worker"]));
         assert!(is_pdf_worker(&["grape", "--grape-pdf-worker", "x"]));
-        // The image helper's flag isn't the PDF worker's.
+        // The other workers' flags aren't the PDF worker's.
         assert!(!is_pdf_worker(&["Grape", "--grape-heif-worker"]));
+        assert!(!is_pdf_worker(&["Grape", "--grape-svg-worker"]));
     }
 
     #[test]
@@ -178,13 +191,34 @@ mod tests {
         assert_eq!(HEIF_WORKER_FLAG, "--grape-heif-worker");
         assert!(is_heif_worker(&["Grape", "--grape-heif-worker"]));
         assert!(is_heif_worker(&["Grape.exe", "--grape-heif-worker", "x"]));
-        // The PDF flag isn't the image helper worker's.
+        // The other workers' flags aren't the image helper worker's.
         assert!(!is_heif_worker(&["Grape", "--grape-pdf-worker"]));
+        assert!(!is_heif_worker(&["Grape", "--grape-svg-worker"]));
+    }
+
+    #[test]
+    fn the_flag_first_makes_the_svg_worker_on_every_os() {
+        assert_eq!(SVG_WORKER_FLAG, "--grape-svg-worker");
+        assert!(is_svg_worker(&["Grape.exe", "--grape-svg-worker"]));
+        assert!(is_svg_worker(&["Grape", "--grape-svg-worker", "x"]));
+        // The other workers' flags aren't the SVG worker's.
+        assert!(!is_svg_worker(&["Grape", "--grape-pdf-worker"]));
+        assert!(!is_svg_worker(&["Grape", "--grape-heif-worker"]));
+        // Only as the first argument.
+        assert!(!is_svg_worker(&[
+            "Grape",
+            "--at-login",
+            "--grape-svg-worker"
+        ]));
     }
 
     #[test]
     fn anything_else_starts_the_app() {
-        for flag in ["--grape-pdf-worker", "--grape-heif-worker"] {
+        for flag in [
+            "--grape-pdf-worker",
+            "--grape-heif-worker",
+            "--grape-svg-worker",
+        ] {
             let upper = flag.to_uppercase();
             let with_value = format!("{flag}=");
             let cases: [&[&str]; 7] = [
@@ -300,6 +334,7 @@ mod tests {
         let odd = OsString::from_vec(vec![0x2d, 0x2d, 0xff]);
         let list = vec![OsString::from("grape"), odd];
         assert!(!first_arg_is(list.clone().into_iter(), PDF_WORKER_FLAG));
-        assert!(!first_arg_is(list.into_iter(), HEIF_WORKER_FLAG));
+        assert!(!first_arg_is(list.clone().into_iter(), HEIF_WORKER_FLAG));
+        assert!(!first_arg_is(list.into_iter(), SVG_WORKER_FLAG));
     }
 }
