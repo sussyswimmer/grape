@@ -859,7 +859,7 @@ fn copied_cover(dir: &TestDir, name: &str, video: [&[&str]; 2], cover: &Path) ->
 }
 
 #[test]
-fn remove_metadata_drops_an_mkvs_cover_copied_as_a_video_track() {
+fn remove_metadata_drops_a_cover_copied_as_a_video_track() {
     use grape_engines::MetaField::CoverArt;
     use grape_engines::Note;
     let dir = TestDir::new("tools-strip-copied-cover");
@@ -887,6 +887,28 @@ fn remove_metadata_drops_an_mkvs_cover_copied_as_a_video_track() {
     args.extend(["-c:v:0", "libx264", "-pix_fmt:v:0", "yuv420p", "-c:v:1"]);
     args.extend(["copy", "-c:a", "aac", "-t", "1", "-f", "matroska", s(&two)]);
     ffmpeg(&args);
+    // Each copied on into an MP4 or a MOV, whose muxer keeps no MIME type
+    // but which counts the frames.
+    let copy = |mkv: &Path, muxer: &str| {
+        let path = mkv.with_extension(muxer);
+        ffmpeg(&[
+            "-i",
+            s(mkv),
+            "-map",
+            "0",
+            "-c",
+            "copy",
+            "-f",
+            muxer,
+            s(&path),
+        ]);
+        path
+    };
+    let (covered_mp4, motion_mov, two_mp4) = (
+        copy(&covered, "mp4"),
+        copy(&motion, "mov"),
+        copy(&two, "mp4"),
+    );
 
     let mut failures = Vec::new();
     // (source, its second video's codec, whether it's a cover)
@@ -894,6 +916,9 @@ fn remove_metadata_drops_an_mkvs_cover_copied_as_a_video_track() {
         (&covered, "png", true),
         (&motion, "png", true),
         (&two, "mjpeg", false),
+        (&covered_mp4, "png", true),
+        (&motion_mov, "png", true),
+        (&two_mp4, "mjpeg", false),
     ] {
         let what = src.display();
         assert_eq!(kinds(src), ["video", "audio", "video"], "{what}");

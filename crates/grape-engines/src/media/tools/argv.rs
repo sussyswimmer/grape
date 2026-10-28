@@ -217,7 +217,8 @@ pub(super) fn strip(
 
 /// The streams [`strip`] keeps, in the source's order:
 ///
-/// - MP4 and MOV: every video that isn't cover art, every audio track and
+/// - MP4 and MOV: every video that isn't cover art (nor a cover a copy
+///   turned into a video track, [`copied_covers`]), every audio track and
 ///   every `mov_text` subtitle;
 /// - M4A: every audio track;
 /// - MKV: every video that isn't cover art (an image attachment is cover
@@ -244,7 +245,9 @@ pub(super) fn stripped<'a>(
         let video = s.kind == StreamKind::Video && !s.attached_pic;
         let audio = s.kind == StreamKind::Audio;
         match to {
-            Format::Mp4 | Format::Mov => video || audio || is_mov_text(s),
+            Format::Mp4 | Format::Mov => {
+                (video && !covers.contains(&s.index)) || audio || is_mov_text(s)
+            }
             Format::M4a => audio,
             Format::Mkv => {
                 (video && !covers.contains(&s.index))
@@ -257,22 +260,28 @@ pub(super) fn stripped<'a>(
     })
 }
 
-/// The video tracks [`stripped`] leaves out of an MKV as cover art: each
-/// image attachment a copy turned into a video track, which comes back
-/// without the cover-art mark but with the attachment's MIME type
-/// ([`Tags::image_tracks`]) and one frame. Only a still image
-/// ([`STILL_CODECS`]) and only beside a video that isn't one, so a cover
-/// that is the only video stays, and a camera's MJPEG track, which carries
-/// no MIME type, is video.
+/// The video tracks [`stripped`] leaves out of an MP4, MOV or MKV as cover
+/// art: each image attachment a copy turned into a video track, which comes
+/// back without the cover-art mark, a still image ([`STILL_CODECS`]) of one
+/// frame. How that shows: an MP4 or MOV counts the frames
+/// ([`StreamInfo::frames`]); an MKV doesn't, but the track keeps the
+/// attachment's MIME type ([`Tags::image_tracks`]). A track of more than one
+/// frame is always video, and so is a camera's MJPEG track, which has no
+/// MIME type. Only beside a video that isn't one, so a cover that is the
+/// only video stays.
 pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> {
-    if to != Format::Mkv {
+    if !matches!(to, Format::Mp4 | Format::Mov | Format::Mkv) {
         return Vec::new();
     }
+    let one_frame = |s: &StreamInfo| match s.frames {
+        Some(frames) => frames == 1,
+        None => tags.image_tracks.contains(&s.index),
+    };
     let (covers, videos): (Vec<&StreamInfo>, Vec<&StreamInfo>) = probe
         .streams
         .iter()
         .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
-        .partition(|s| is_still(s) && tags.image_tracks.contains(&s.index));
+        .partition(|s| is_still(s) && one_frame(s));
     if videos.is_empty() {
         return Vec::new();
     }
@@ -1105,6 +1114,7 @@ pub(super) mod tests {
             sample_fmt: String::new(),
             color_transfer: String::new(),
             avg_fps: None,
+            frames: None,
         }
     }
 
@@ -1427,7 +1437,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn strip_leaves_out_an_mkvs_cover_a_copy_made_a_video_track() {
+    fn strip_leaves_out_a_cover_a_copy_made_a_video_track() {
         let indexes = |to, probe: &Probe, tags: &Tags| -> Vec<u32> {
             stripped(to, probe, tags).map(|s| s.index).collect()
         };
@@ -1478,13 +1488,39 @@ pub(super) mod tests {
         );
         assert_eq!(indexes(Format::Mkv, &alone, &copied), [0, 2]);
         assert!(copied_covers(Format::Mkv, &alone, &copied).is_empty());
-        // Only an MKV: an M4A leaves out every video by its own rule.
-        let mp4 = probe_of("mov,mp4,m4a,3gp,3g2,mj2", mkv(["h264", "png"]).streams);
-        assert_eq!(indexes(Format::Mp4, &mp4, &copied), [0, 1, 2]);
-        assert_eq!(indexes(Format::M4a, &mp4, &copied), [1]);
-        for to in [Format::Mp4, Format::M4a] {
-            assert!(copied_covers(to, &mp4, &copied).is_empty(), "{to:?}");
+        // Matroska counts no frames; a count is all the evidence there is
+        // elsewhere, and a track of more than one frame is video.
+        let none = Tags::default();
+        let typed = |frames| {
+            let mut probe = mkv(["h264", "png"]);
+            probe.streams[2].frames = frames;
+            probe
+        };
+        assert_eq!(indexes(Format::Mkv, &typed(Some(2)), &copied), [0, 1, 2]);
+        assert_eq!(indexes(Format::Mkv, &typed(Some(1)), &none), [0, 1]);
+        // An MP4 or MOV, whose muxer keeps no MIME type, counts the frames.
+        for (codec, frames, left_out) in [
+            ("png", Some(1), true),
+            ("mjpeg", Some(1), true),
+            ("mjpeg", Some(50), false),
+            ("png", None, false),
+            ("h264", Some(1), false),
+        ] {
+            let mut probe = probe_of("mov,mp4,m4a,3gp,3g2,mj2", mkv(["h264", codec]).streams);
+            probe.streams[2].frames = frames;
+            let kept: &[u32] = if left_out { &[0, 1] } else { &[0, 1, 2] };
+            for to in [Format::Mp4, Format::Mov] {
+                assert_eq!(
+                    indexes(to, &probe, &none),
+                    kept,
+                    "{to:?} {codec} {frames:?}"
+                );
+            }
         }
+        // An M4A leaves out every video by its own rule.
+        let m4a = probe_of("mov,mp4,m4a,3gp,3g2,mj2", typed(Some(1)).streams);
+        assert_eq!(indexes(Format::M4a, &m4a, &none), [1]);
+        assert!(copied_covers(Format::M4a, &m4a, &none).is_empty());
     }
 
     #[test]
