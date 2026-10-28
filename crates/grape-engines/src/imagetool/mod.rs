@@ -7,6 +7,7 @@
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`], and [`tiff`]'s rewrite).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
+//! - [`isobmff`]: a HEIF file's boxes and items, for the HEIC tools (D28).
 //!
 //! The content decides which code runs, not the name ([`Kind`]): a PNG
 //! named `.jpg` is stripped and compressed as a PNG, and keeps its name.
@@ -14,6 +15,9 @@
 mod compress;
 pub(crate) mod exif;
 mod gif;
+// The HEIC tools that use it come next.
+#[cfg_attr(not(test), allow(dead_code))]
+mod isobmff;
 mod jpeg;
 mod png;
 mod png_compress;
