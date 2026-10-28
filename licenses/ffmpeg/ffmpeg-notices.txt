@@ -4172,6 +4172,7 @@ Text:
 ==============================================================================
 [117] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau
 Files:
+  dav1d-1.5.4/src/arm/asm.S  macos-arm64
   dav1d-1.5.4/src/arm/cpu.c  macos-arm64 (read, not built yet)
   dav1d-1.5.4/src/arm/cpu.h  macos-arm64 (read, not built yet)
 Text:
