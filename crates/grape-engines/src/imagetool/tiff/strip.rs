@@ -100,12 +100,9 @@ pub(crate) struct Plan {
 
 impl Plan {
     /// Walks the TIFF `r` (`len` bytes) and plans its rewrite, or refuses
-    /// it ([module docs](self)).
+    /// it ([module docs](self)); the walk refuses DNG and old-style JPEG.
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
         let tiff = Tiff::read(r, len)?;
-        if let Some(why) = tiff.refusal() {
-            return Err(Error::Refused(why.into()));
-        }
         let order = tiff.layout.order;
         for ifd in tiff.ifds() {
             if let Some(entry) = ifd.get(270) {
@@ -802,6 +799,17 @@ mod tests {
             };
             assert!(said.starts_with(why), "{said}");
         }
+        // An old-style JPEG whose data is only at 513, with no strips.
+        let mut page = gray(1, 1, 1, Vec::new());
+        page.tags.extend([
+            (259, V::Short(vec![6])),
+            (513, V::Long(vec![0])),
+            (514, V::Long(vec![0])),
+        ]);
+        let Err(Error::Refused(said)) = plan(&Builder::new(b'I', false, vec![page]).build()) else {
+            panic!("not refused")
+        };
+        assert!(said.starts_with("uses an old kind"), "{said}");
     }
 
     #[test]

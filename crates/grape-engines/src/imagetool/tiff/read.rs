@@ -21,6 +21,9 @@
 //!   worked out only for uncompressed data. A block of 0 bytes stays empty
 //!   (GDAL's sparse tiles); blocks that are the same bytes are fine, and any
 //!   other overlap, between blocks or with an IFD, is [`Error::Broken`].
+//! - **Refused:** a DNG, or an old-style JPEG, in any image IFD:
+//!   [`Error::Refused`] as soon as the walk reads that IFD, before its
+//!   strips or tiles, which an old-style JPEG may not have.
 //! - **Caps:** [`MAX_IFDS`] image IFDs, [`MAX_ENTRIES`] entries in an IFD
 //!   and [`MAX_ALL_ENTRIES`] in all (a shared IFD's each time it's
 //!   shared), [`MAX_BLOCKS`] blocks, SubIFDs [`MAX_DEPTH`] deep. Over one,
@@ -330,22 +333,6 @@ impl Tiff {
         all
     }
 
-    /// Why neither TIFF tool can change this file, if one can't: the end
-    /// of a sentence that starts with its name.
-    pub(crate) fn refusal(&self) -> Option<&'static str> {
-        let order = self.layout.order;
-        let ifds = self.ifds();
-        if ifds.iter().any(|ifd| ifd.get(50706).is_some()) {
-            Some("is a camera raw (DNG) file, which Grape can't change yet.")
-        } else if ifds.iter().any(|ifd| {
-            ifd.uint(259, order) == Some(6) || ifd.get(513).is_some() || ifd.get(514).is_some()
-        }) {
-            Some("uses an old kind of TIFF compression that Grape can't rewrite yet.")
-        } else {
-            None
-        }
-    }
-
     /// Fails when two blocks overlap without being the same bytes, or a
     /// block or an IFD overlaps an IFD; otherwise gives the blocks that
     /// appear more than once.
@@ -394,6 +381,18 @@ impl Tiff {
             }
         }
         Ok(shared)
+    }
+}
+
+/// Why neither TIFF tool can change a file with the image IFD `ifd`, if
+/// one can't: the end of a sentence that starts with its name.
+fn refusal(ifd: &Ifd, order: Order) -> Option<&'static str> {
+    if ifd.get(50706).is_some() {
+        Some("is a camera raw (DNG) file, which Grape can't change yet.")
+    } else if ifd.uint(259, order) == Some(6) || ifd.get(513).is_some() || ifd.get(514).is_some() {
+        Some("uses an old kind of TIFF compression that Grape can't rewrite yet.")
+    } else {
+        None
     }
 }
 
@@ -543,6 +542,10 @@ impl Walk<'_> {
             exif: None,
             gps: None,
         };
+        // Before its blocks: an old-style JPEG may have none.
+        if let Some(why) = refusal(&ifd, self.layout.order) {
+            return Err(Error::Refused(why.into()));
+        }
         self.blocks(&mut ifd)?;
         if let Some(subs) = ifd.get(330).cloned() {
             if depth >= MAX_DEPTH {
@@ -864,7 +867,6 @@ mod tests {
             let value = read_value(&mut r, &date, 64).unwrap().unwrap();
             assert_eq!(value, b"2024:05:01 10:20:30\0");
             assert_eq!(read_value(&mut r, &date, 19).unwrap(), None);
-            assert_eq!(tiff.refusal(), None);
         }
     }
 
@@ -1310,8 +1312,34 @@ mod tests {
             let mut page = gray(1, 1, 1, vec![B::data(b"y")]);
             page.subs = vec![vec![sub]];
             let file = Builder::new(b'I', false, vec![page]).build();
-            let tiff = read(&file).unwrap();
-            assert!(tiff.refusal().unwrap().contains(refused), "{tag}");
+            let Err(Error::Refused(why)) = read(&file) else {
+                panic!("{tag} not refused")
+            };
+            assert!(why.contains(refused), "{tag}");
+        }
+    }
+
+    #[test]
+    fn an_old_style_jpeg_with_no_strips_is_refused_not_broken() {
+        // JPEGInterchangeFormat and its length, and no 273 or 324.
+        let page = Page {
+            tags: vec![
+                (256, V::Long(vec![8])),
+                (257, V::Long(vec![8])),
+                (258, V::Short(vec![8])),
+                (259, V::Short(vec![6])),
+                (262, V::Short(vec![1])),
+                (513, V::Long(vec![0])),
+                (514, V::Long(vec![0])),
+            ],
+            ..Page::default()
+        };
+        for big in [false, true] {
+            let file = Builder::new(b'M', big, vec![page.clone()]).build();
+            let Err(Error::Refused(why)) = read(&file) else {
+                panic!("{:?}", read(&file))
+            };
+            assert!(why.contains("old kind"), "{why}");
         }
     }
 
