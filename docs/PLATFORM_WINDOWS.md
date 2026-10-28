@@ -199,7 +199,7 @@ Grape converts HEIC and AVIF to and from JPG, PNG, WEBP, TIFF and BMP, and into 
 ## Distribution
 - Installer: Tauri **NSIS** bundle (per-user install, no admin needed) plus a portable `.zip`. Keep MSI for later.
 - Code signing: unsigned builds trigger SmartScreen ("Windows protected your PC"). Free option for open source: **SignPath Foundation** (free signing for OSS projects that meet its criteria). Alternatives: Azure Trusted Signing (paid, identity checks). Log in DECISIONS when chosen.
-- Launch at login: `tauri-plugin-autostart` (HKCU Run key).
+- Launch at login: `tauri-plugin-autostart` (HKCU Run key). Its auto-launch 0.6 writes HKLM's Run key instead when Grape runs elevated (UAC off, or the built-in Administrator; CI's runner does), and the plugin can't be told otherwise. The per-user uninstaller removes only HKCU's value, so there a "Grape" startup entry pointing at the removed exe stays until it's turned off in Task Manager → Startup apps. Known limit; a normal user's launch is never elevated (the per-user installer doesn't elevate).
 - Builds: GitHub Actions `windows-latest` (x64) and `windows-11-arm` (ARM64) runners. See ROADMAP M7.
 
 ## Releasing
