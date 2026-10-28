@@ -430,7 +430,8 @@ pub(super) fn frontmost_other_app(
 /// active: if the user went to another app meanwhile, that one keeps it.
 /// From macOS 14 activation is cooperative, so Grape yields to `app` first
 /// and then asks on its behalf.
-/// Never `NSApp.hide`: that would hide the overlay and the toast too.
+/// Never `NSApp.hide`: that would hide Settings too, and Grape would stay
+/// hidden until something unhides it.
 pub(super) fn hand_back(mtm: MainThreadMarker, app: &NSRunningApplication) {
     let grape = NSApplication::sharedApplication(mtm);
     if !grape.isActive() {
