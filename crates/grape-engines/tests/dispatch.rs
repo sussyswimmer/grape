@@ -260,14 +260,15 @@ fn every_v1_pair_runs_with_every_sidecar() {
     }
 }
 
-/// Grape's own image tools (D26), which need no sidecar.
-const IMAGE_TOOLS: [(ToolKey, Format); 6] = [
+/// Grape's own image tools (D26, D28), which need no sidecar.
+const IMAGE_TOOLS: [(ToolKey, Format); 7] = [
     (ToolKey::Compress, Format::Jpg),
     (ToolKey::Compress, Format::Png),
     (ToolKey::RemoveMetadata, Format::Jpg),
     (ToolKey::RemoveMetadata, Format::Png),
     (ToolKey::RemoveMetadata, Format::Webp),
     (ToolKey::RemoveMetadata, Format::Gif),
+    (ToolKey::RemoveMetadata, Format::Tiff),
 ];
 
 /// The tools that run with `ffmpeg` and `ffprobe` (D26).

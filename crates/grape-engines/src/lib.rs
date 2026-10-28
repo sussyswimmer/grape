@@ -289,10 +289,10 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// `svg_worker`); with `ffmpeg` and `ffprobe` (D26),
 /// Remove Audio on MP4, MOV and MKV, Remove Metadata and Compress on MP3,
 /// M4A, WAV, FLAC, MP4, MOV and MKV, and Audio Channels and Normalize
-/// Volume on MP3, M4A, WAV and FLAC; with no sidecar (D26), Remove Metadata
-/// on JPG, PNG, WebP and GIF and Compress on JPG and PNG. Pure: it doesn't
-/// check that the sidecar files are there; [`run_job`] fails cleanly if one
-/// is missing.
+/// Volume on MP3, M4A, WAV and FLAC; with no sidecar (D26, D28), Remove
+/// Metadata on JPG, PNG, WebP, GIF and TIFF and Compress on JPG and PNG.
+/// Pure: it doesn't check that the sidecar files are there; [`run_job`]
+/// fails cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
         && formats.iter().all(|from| match (op, *from) {
@@ -364,7 +364,7 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
         Some(Engine::PdfCreate)
     } else if media::tools::runs_tool(tool, from) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
-    } else if imagetool::runs_tool(tool, from) {
+    } else if imagetool::runs_tool(tool, from, sidecars.heif.is_some()) {
         Some(Engine::ImageTool)
     } else {
         None

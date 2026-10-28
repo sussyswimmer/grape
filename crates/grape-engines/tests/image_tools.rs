@@ -335,6 +335,199 @@ fn remove_metadata_strips_a_gif_and_keeps_its_frames() {
     assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), plain);
 }
 
+/// The samples of a page the tiff crate decoded, as bytes.
+fn tiff_samples(page: tiff::decoder::DecodingResult) -> Vec<u8> {
+    use tiff::decoder::DecodingResult::*;
+    match page {
+        U8(v) => v,
+        U16(v) => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+        _ => panic!("another sample type"),
+    }
+}
+
+/// Every page of a TIFF, decoded by the tiff crate.
+fn tiff_pages(bytes: &[u8]) -> Vec<Vec<u8>> {
+    let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes)).unwrap();
+    let mut pages = vec![tiff_samples(decoder.read_image().unwrap())];
+    while decoder.more_images() {
+        decoder.next_image().unwrap();
+        pages.push(tiff_samples(decoder.read_image().unwrap()));
+    }
+    pages
+}
+
+/// A two-page TIFF from the tiff crate, classic or BigTIFF: an LZW RGB
+/// page with a camera's and an editor's metadata, an Exif IFD and a GPS
+/// IFD, then a Deflate 16-bit gray page with a description.
+fn tagged_tiff(big: bool) -> Vec<u8> {
+    use tiff::encoder::{colortype, Compression, DeflateLevel, Rational, TiffEncoder, TiffKind};
+    use tiff::tags::Tag;
+    fn pages<K: TiffKind>(mut e: TiffEncoder<&mut Cursor<Vec<u8>>, K>) {
+        e = e.with_compression(Compression::Lzw);
+        let mut exif = e.extra_directory().unwrap();
+        exif.write_tag(Tag::Unknown(0x9003), "2024:05:01 10:20:30")
+            .unwrap();
+        exif.write_tag(Tag::Unknown(0x927C), &b"secret maker note"[..])
+            .unwrap();
+        let exif = exif.finish_with_offsets().unwrap().offset;
+        let mut gps = e.extra_directory().unwrap();
+        gps.write_tag(Tag::Unknown(1), "N").unwrap();
+        gps.write_tag(Tag::Unknown(2), Rational { n: 48, d: 1 })
+            .unwrap();
+        let gps = gps.finish_with_offsets().unwrap().offset;
+        let rgb = photo(40, 30).into_raw();
+        let mut first = e.new_image::<colortype::RGB8>(40, 30).unwrap();
+        let tags = first.encoder();
+        for (tag, text) in [
+            (Tag::ImageDescription, "secret description"),
+            (Tag::Make, "secret make"),
+            (Tag::Software, "secret software"),
+            (Tag::DateTime, "2024:05:01 10:20:30"),
+            (Tag::Artist, "secret artist"),
+            (Tag::Copyright, "secret copyright"),
+        ] {
+            tags.write_tag(tag, text).unwrap();
+        }
+        tags.write_tag(Tag::Orientation, 6u16).unwrap();
+        tags.write_tag(Tag::IccProfile, &b"an ICC profile"[..])
+            .unwrap();
+        tags.write_tag(Tag::Unknown(700), &b"<x:xmpmeta>secret</x:xmpmeta>"[..])
+            .unwrap();
+        tags.write_tag(Tag::ExifDirectory, exif).unwrap();
+        tags.write_tag(Tag::GpsDirectory, gps).unwrap();
+        first.write_data(&rgb).unwrap();
+        e = e.with_compression(Compression::Deflate(DeflateLevel::Best));
+        let gray: Vec<u16> = (0..20 * 10).map(|i| i * 300).collect();
+        let mut second = e.new_image::<colortype::Gray16>(20, 10).unwrap();
+        second
+            .encoder()
+            .write_tag(Tag::ImageDescription, "secret page two")
+            .unwrap();
+        second.write_data(&gray).unwrap();
+    }
+    let mut out = Cursor::new(Vec::new());
+    if big {
+        pages(TiffEncoder::new_big(&mut out).unwrap());
+    } else {
+        pages(TiffEncoder::new(&mut out).unwrap());
+    }
+    out.into_inner()
+}
+
+#[test]
+fn remove_metadata_strips_every_page_of_a_tiff_and_keeps_its_pixels() {
+    use tiff::tags::Tag;
+    use MetaField::*;
+    let dir = TestDir::new("strip-tiff");
+    for (big, name) in [(false, "scan.tif"), (true, "big.TIFF")] {
+        let src = tagged_tiff(big);
+        let outcome = strip(&dir, name, &src).unwrap();
+        let (stem, ext) = name.split_once('.').unwrap();
+        assert_eq!(
+            outcome.outputs,
+            [dir.join(&format!("{stem} No Metadata.{ext}"))]
+        );
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![
+                Location,
+                Camera,
+                Author,
+                Comment,
+                Copyright,
+                Software,
+                CreationDate,
+                ModDate,
+                Xmp
+            ])]
+        );
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(tiff_pages(&out), tiff_pages(&src), "{name}");
+        let mut decoder = tiff::decoder::Decoder::new(Cursor::new(&out)).unwrap();
+        assert_eq!(decoder.get_tag_u32(Tag::Orientation).unwrap(), 6);
+        assert!(decoder.find_tag(Tag::IccProfile).unwrap().is_some());
+        for gone in [
+            Tag::Software,
+            Tag::ExifDirectory,
+            Tag::GpsDirectory,
+            Tag::Unknown(700),
+        ] {
+            assert!(decoder.find_tag(gone).unwrap().is_none(), "{gone:?}");
+        }
+        assert_eq!(out[..4], src[..4]);
+        for secret in [&b"secret"[..], b"2024:05"] {
+            assert!(
+                !out.windows(secret.len()).any(|w| w == secret),
+                "{secret:?} left in {name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
+    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::tags::Tag;
+    let dir = TestDir::new("strip-tiff-refused");
+    let one = |tag: Tag, value: &[u8]| {
+        let mut out = Cursor::new(Vec::new());
+        let mut e = TiffEncoder::new(&mut out).unwrap();
+        let mut image = e.new_image::<colortype::Gray8>(2, 2).unwrap();
+        image.encoder().write_tag(tag, value).unwrap();
+        image.write_data(&[1, 2, 3, 4]).unwrap();
+        out.into_inner()
+    };
+    // A strip of JPEG data (compression 7): a progressive JPEG whose first
+    // scan runs past the first 64 KiB, so what follows can't be seen.
+    let progressive = {
+        let jpeg = [
+            &b"\xFF\xD8\xFF\xC2\0\x0B\x08\0\x08\0\x08\x01\x01\x11\0"[..],
+            b"\xFF\xDA\0\x08\x01\x01\0\0\x3F\0",
+            &[0x55; 70_000],
+            b"\xFF\xD9",
+        ]
+        .concat();
+        let mut out = Cursor::new(Vec::new());
+        let mut e = TiffEncoder::new(&mut out).unwrap();
+        let width = u32::try_from(jpeg.len()).unwrap();
+        let mut image = e.new_image::<colortype::Gray8>(width, 1).unwrap();
+        image.encoder().write_tag(Tag::Compression, 7u16).unwrap();
+        image.write_data(&jpeg).unwrap();
+        out.into_inner()
+    };
+    for (name, bytes, kind, message) in [
+        (
+            "raw.tif",
+            one(Tag::Unknown(50706), &[1, 4, 0, 0]),
+            ErrorKind::NotYetSupported,
+            "raw.tif is a camera raw (DNG) file, which Grape can't change yet.",
+        ),
+        (
+            "stack.tif",
+            one(Tag::ImageDescription, b"ImageJ=1.54f\nimages=2\n\0"),
+            ErrorKind::NotYetSupported,
+            "stack.tif keeps its layout in its description, so Remove Metadata would break it.",
+        ),
+        (
+            "scans.tif",
+            progressive,
+            ErrorKind::NotYetSupported,
+            "scans.tif has JPEG data Grape can't check for metadata yet.",
+        ),
+        (
+            "cut.tif",
+            tagged_tiff(false)[..1000].to_vec(),
+            ErrorKind::DecodeFailed,
+            "cut.tif isn't a readable TIFF image.",
+        ),
+    ] {
+        let err = strip(&dir, name, &bytes).unwrap_err();
+        assert_eq!(err.kind, kind, "{name}: {}", err.detail);
+        assert_eq!(err.user_message, message);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
 /// A `w`×`h` photo-like picture: a gradient with fine texture, which a
 /// lower quality makes smaller.
 fn photo(w: u32, h: u32) -> RgbImage {
@@ -688,6 +881,20 @@ fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
         compress_op(grape_core::CompressPreset::High),
         1,
     );
+    // A TIFF: before its walk, and while its strips are copied.
+    let mut tiff = Cursor::new(Vec::new());
+    tiff::encoder::TiffEncoder::new(&mut tiff)
+        .unwrap()
+        .write_image::<tiff::encoder::colortype::RGB8>(600, 600, &photo(600, 600).into_raw())
+        .unwrap();
+    for nth in [1, 4] {
+        cancelled_at(
+            "scan.tif",
+            tiff.get_ref(),
+            Operation::tool(ToolKey::RemoveMetadata),
+            nth,
+        );
+    }
 }
 
 #[test]
@@ -710,6 +917,10 @@ fn the_content_decides_what_each_tool_reads() {
     let webp = riff(&[riff_chunk(b"VP8L", b"\x2f\0\0\0\0")]);
     let out = strip(&dir, "pic.png", &webp).unwrap();
     assert!(fs::read(&out.outputs[0]).unwrap().starts_with(b"RIFF"));
+    // A TIFF named .jpg is stripped as a TIFF.
+    let out = strip(&dir, "scan.jpg", &tagged_tiff(false)).unwrap();
+    assert!(out.outputs[0].to_string_lossy().ends_with(".jpg"));
+    assert_eq!(tiff_pages(&fs::read(&out.outputs[0]).unwrap()).len(), 2);
     // Compress reads only JPEG and PNG: a GIF named .jpg can't be read.
     let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
     let err = compress(&dir, "anim.jpg", gif, grape_core::CompressPreset::Small).unwrap_err();

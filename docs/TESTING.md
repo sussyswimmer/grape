@@ -75,7 +75,7 @@ Wheel look and image conversions, M3 first slice (win; use scratch copies of fil
 - [ ] win: the tick is audible on the very first wheel after launch, with no click first. If it's silent, nothing else breaks.
 - [ ] win: hover the rounded outer corners of a segment → the highlight ends where the drawn corner ends; dropping in the cut-off corner area selects nothing (the log says `no segment (cancel)`).
 - [ ] win: a selection with 7 or more segments uses the smaller label style, and labels stay inside their segments.
-- The app runs `grape-engines` jobs for the 20 raster pairs, the 4 subtitle pairs ("Subtitles, M3"), archives and PDF ("Archives, M3/M4" and "PDF, M3/M4"), HEIC ("HEIC, D33"), AVIF ("AVIF, D41"), SVG ("SVG, M3/M4"), images to PDF with Create PDF ("Images to PDF and Create PDF, M3/M4"), audio and video with Grape's FFmpeg ("Sidecars, M3") and D26's tools ("Media tools, M4", "Image tools, M4", "Tool panels, M4"); every other conversion and tool shows an info toast instead:
+- The app runs `grape-engines` jobs for the 20 raster pairs, the 4 subtitle pairs ("Subtitles, M3"), archives and PDF ("Archives, M3/M4" and "PDF, M3/M4"), HEIC ("HEIC, D33"), AVIF ("AVIF, D41"), SVG ("SVG, M3/M4"), images to PDF with Create PDF ("Images to PDF and Create PDF, M3/M4"), audio and video with Grape's FFmpeg ("Sidecars, M3"), D26's tools ("Media tools, M4", "Image tools, M4", "Tool panels, M4") and D28's ("Image tools, slice 2, M4 (D28)"); every other conversion and tool shows an info toast instead:
 - [ ] win: Shift-drop `photo.png` on JPG → the toast reads "Making photo.jpg…" then "Done / photo.jpg"; `photo.jpg` appears next to the original and opens in Photos. `Get-FileHash` of `photo.png` is the same before and after.
 - [ ] win: do it again → `photo 2.jpg`; the first `photo.jpg` is untouched.
 - [ ] win: convert between every pair of JPG, PNG, WEBP, TIFF and BMP (20 pairs) → each output opens and has the same width and height.
@@ -270,6 +270,13 @@ Image tools, M4 (D26; win and mac; any CI installer or DMG, nothing extra needed
 - [ ] win: Compress a PNG screenshot → `… Compressed.png` looks pixel-identical (zoom in) and is smaller; Compress that output again → "Nothing to change" over "… is already as small as Grape makes it."
 - [ ] win: an animated PNG on COMPRESS → "… is animated. Compress works on still PNGs for now."
 - [ ] win: Ctrl-drop three JPGs on COMPRESS → one panel, then three outputs.
+
+Image tools, slice 2, M4 (D28) (win and mac; any CI installer or DMG, nothing extra needed; use scratch copies of files, and check each original with `Get-FileHash`, or `shasum -a 256` on a Mac, before and after. Remove Metadata on TIFF runs; the Compress items come with Compress on TIFF, WebP and HEIC, and the HEIC items with Remove Metadata on HEIC)
+- [ ] A 10-page scanner TIFF (LZW) on REMOVE METADATA → `… No Metadata.tif` shows every page in Photos, Paint, Explorer's preview, Preview and Quick Look; Explorer → Properties → Details is empty but for the DPI, which is still there.
+- [ ] A 1-bit G4 scan on REMOVE METADATA → the scanner's model and date go; the pages and the DPI stay.
+- [ ] A Photoshop TIFF with layers and a clipping path on REMOVE METADATA → the path is still there in Photoshop or GIMP; the toast says embedded media went; it looks the same.
+- [ ] A GeoTIFF on REMOVE METADATA → QGIS shows no CRS.
+- [ ] A camera's DNG renamed `.tif` on REMOVE METADATA → "… is a camera raw (DNG) file, which Grape can't change yet." and nothing written; an ImageJ stack → "… keeps its layout in its description, so Remove Metadata would break it."
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

@@ -22,6 +22,11 @@ pub(crate) const MAX_IFDS: usize = 8;
 /// broken.
 pub(crate) const MAX_ENTRIES: u16 = 1024;
 
+/// The most bytes of an EXIF block a stripper reads: of a bigger one, only
+/// this much is walked (its first IFD is at the start), and the rest is
+/// reported as Other.
+pub(crate) const MAX_EXIF: usize = 1 << 20;
+
 /// What [`walk`] found in an EXIF block.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Exif {
@@ -46,7 +51,7 @@ impl Exif {
 
 /// Which IFD an entry is in, for [`classify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ifd {
+pub(super) enum Ifd {
     Zero,
     Exif,
     Gps,
@@ -232,7 +237,7 @@ impl Reader<'_> {
 }
 
 /// The size of one value of TIFF field type `kind`.
-fn type_size(kind: u16) -> Option<usize> {
+pub(super) fn type_size(kind: u16) -> Option<usize> {
     match kind {
         1 | 2 | 6 | 7 => Some(1),
         3 | 8 => Some(2),
@@ -245,7 +250,7 @@ fn type_size(kind: u16) -> Option<usize> {
 /// Whether a value says nothing: no bytes, or only NULs, and for text
 /// (BYTE, ASCII, UNDEFINED) only NULs and spaces. UserComment's 8-byte
 /// character code doesn't count.
-fn is_empty(tag: u16, kind: u16, value: &[u8]) -> bool {
+pub(super) fn is_empty(tag: u16, kind: u16, value: &[u8]) -> bool {
     let value = if tag == 0x9286 {
         value.get(8..).unwrap_or_default()
     } else {
@@ -258,7 +263,7 @@ fn is_empty(tag: u16, kind: u16, value: &[u8]) -> bool {
 /// The kind of metadata a tag in IFD `ifd` is (D26's table), or `None`
 /// for a tag that only describes the picture or the file's structure,
 /// which isn't reported.
-fn classify(ifd: Ifd, tag: u16) -> Option<MetaField> {
+pub(super) fn classify(ifd: Ifd, tag: u16) -> Option<MetaField> {
     use MetaField::*;
     if STRUCTURAL.contains(&tag) {
         return None;

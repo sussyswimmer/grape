@@ -20,7 +20,9 @@ src/
   image.rs          image crate (raster). publish_pixels and pixels_fit serve heif.rs and svg/; decode_stored serves Compress
   imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
                     strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
-                    and png_compress.rs (PNG, lossless)
+                    and png_compress.rs (PNG, lossless), scale.rs (Compress's scaling and its peak); mod.rs sniffs the
+                    content, which decides the code that runs. tiff/ (D28): read.rs (a TIFF's model, by seeking),
+                    write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
@@ -46,7 +48,7 @@ tests/              real conversions on fixtures generated in each test (no fixt
 Pure functions in `media/args.rs`: `passes(src, to, &Probe, out, palette) -> Result<Vec<Pass>, Missing>`, from what `ffprobe` said (`media/probe.rs`). Unit-test the exact argv, and keep the invariants: both whitelists, `file:` URLs, a forced `-f`, and only the temp path as output. The arguments are in `docs/ENGINES.md`. Hardware encoders come later: then an `EncoderCaps`, probed once with a test encode, picks them, with x264 as the fallback.
 
 ## Gotchas
-- EXIF orientation: conversions apply it and drop the EXIF; Compress keeps the stored pixels and carries the EXIF, Orientation included (`decode_stored`), so it never turns them itself; Remove Metadata writes back an Orientation-only EXIF. No tool may turn a photo.
+- EXIF orientation: conversions apply it and drop the EXIF; Compress keeps the stored pixels and carries the EXIF, Orientation included (`decode_stored`), so it never turns them itself; Remove Metadata writes back an Orientation-only EXIF, except on a TIFF, which keeps its Orientation tag (274) and gets the DCF Adobe RGB Exif back when its color needs it. No tool may turn a photo.
 - PDF → images: 300 DPI; one page writes a file, several pages write a folder named per the naming rules.
 - GIF output: two-pass palette. Warn for clips over 30 s, because GIFs get huge.
 - Archives: reject entries with `..` or absolute paths (zip-slip). Cap total extracted size (decompression bombs).

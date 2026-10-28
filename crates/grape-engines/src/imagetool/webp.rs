@@ -17,17 +17,12 @@
 
 use std::io::{BufRead, SeekFrom};
 
-use super::exif;
+use super::exif::{self, MAX_EXIF};
 use super::strip::{more_after, read_exact, Error, Found, Out};
 use crate::MetaField;
 
 /// The most chunks in a file (an animation has one per frame).
 const MAX_CHUNKS: usize = 1 << 20;
-
-/// The most bytes of an EXIF chunk read: of a bigger one, only this much
-/// is walked (its first IFD is at the start), and the rest is reported as
-/// Other.
-const MAX_EXIF: usize = 1 << 20;
 
 /// An ANMF frame's header: its position, size, duration and flags.
 const FRAME_HEADER: u64 = 16;
