@@ -38,7 +38,7 @@ use grape_core::{Format, Job};
 use image::{ColorType as ImageColor, DynamicImage, GenericImageView};
 use png::{BitDepth, ColorType, Compression, Filter};
 
-use super::strip::{read_exact, Error};
+use super::strip::{self, read_exact, Error};
 use crate::cancel::Cancellable;
 use crate::headers::PNG_TEXT_ENTRY;
 use crate::image::PNG_METADATA_LIMIT;
@@ -517,6 +517,7 @@ pub(crate) fn run(
         let e = match e {
             Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
             Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
+            Error::Refused(why) => strip::refused(&names, src, &why),
             Error::Read(e) | Error::Write(e) => {
                 names.read_failed(format!("read {}: {e}", src.display()))
             }

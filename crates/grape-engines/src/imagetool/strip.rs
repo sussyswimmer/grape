@@ -18,7 +18,7 @@ use super::{gif, jpeg, png, webp, Kind};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
-use crate::{EngineCtx, GrapeError, JobOutcome, MetaField, Note};
+use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
 
 /// What a stripper found in what it dropped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -33,6 +33,10 @@ pub(crate) enum Error {
     Broken(String),
     /// The file is past one of the caps that bound what Grape holds of it.
     TooLarge(String),
+    /// The file is one Grape won't change yet: the end of a sentence that
+    /// starts with its name, such as "is a camera raw (DNG) file, which
+    /// Grape can't change yet."
+    Refused(String),
     /// Reading the source failed (or was cancelled).
     Read(io::Error),
     /// Writing the temp file failed (or was cancelled).
@@ -137,6 +141,7 @@ pub(crate) fn run(
         let e = match e {
             Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
             Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
+            Error::Refused(why) => refused(&names, src, &why),
             Error::Read(e) => names.read_failed(format!("read {}: {e}", src.display())),
             Error::Write(e) => names.write_failed(format!("write {}: {e}", temp.path().display())),
         };
@@ -159,6 +164,15 @@ pub(crate) fn run(
         .notes
         .push(Note::MetadataRemoved(found.fields.into_iter().collect()));
     Ok(outcome)
+}
+
+/// The error for a file the tool won't change: "`source` `why`" (D28).
+pub(crate) fn refused(names: &Names, src: &Path, why: &str) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::NotYetSupported,
+        format!("{} {why}", names.source),
+        format!("{}: refused: {why}", src.display()),
+    )
 }
 
 /// A read error, or the cancel that caused it.

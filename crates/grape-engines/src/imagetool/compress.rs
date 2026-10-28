@@ -40,7 +40,7 @@ use image::{ColorType, DynamicImage, GenericImageView, ImageEncoder};
 use super::exif;
 use super::jpeg::{self, Header};
 use super::scale;
-use super::strip::Error;
+use super::strip::{self, Error};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -127,6 +127,7 @@ pub(crate) fn run(
         let e = match e {
             Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
             Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
+            Error::Refused(why) => strip::refused(&names, src, &why),
             Error::Read(e) | Error::Write(e) => {
                 names.read_failed(format!("read {}: {e}", src.display()))
             }
