@@ -17,10 +17,15 @@ src/
   publish.rs        shared by every engine: destination folder, no-clobber finalize, user-message names
   output.rs         temp files and the no-clobber hard link
   cancel.rs         Cancellable reader/writer
-  image.rs          image crate (raster); later ravif, resvg. publish_pixels and pixels_fit serve heif.rs
+  image.rs          image crate (raster); later ravif, resvg. publish_pixels and pixels_fit serve heif.rs; decode_stored serves Compress
+  imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
+                    strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
+                    and png_compress.rs (PNG, lossless)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
-  media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22)
+  media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
+                    tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
+                    tools/argv.rs (the five FFmpeg tools, D26)
   pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement)
   heif.rs           HEIC through a helper process (D33; lane A's module by agreement)
   helper.rs         helper-process plumbing, WorkDir and the containment hook set_contain (lane A's)

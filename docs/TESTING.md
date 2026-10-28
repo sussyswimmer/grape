@@ -191,6 +191,18 @@ Media tools, M4 (D26; win; the CI installer, which carries Grape's own FFmpeg; u
 - [ ] win: Normalize Volume at −16 on a quiet podcast MP3 → `… Normalized.mp3` is louder and doesn't distort; on a loud song → quieter or about the same, never clipping; on its own output → "… is already at −16 LUFS."
 - [ ] win: start Compress on a long video, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
 
+Image tools, M4 (D26; win; any CI installer, nothing extra needed; use scratch copies of files, and check each original with `Get-FileHash` before and after)
+- [ ] win: Ctrl-drop a phone photo (JPG) on REMOVE METADATA → `photo No Metadata.jpg` opens in Photos the same way up as the original, looks the same, and Explorer → Properties → Details shows no camera, date taken or location; the toast lists what went (location, camera, dates, …).
+- [ ] win: the same on a PNG screenshot, a WebP and an animated GIF (it still animates).
+- [ ] win: a JPG with no metadata → the toast says nothing was found, and the output opens.
+- [ ] win: a file named `.jpg` that's really a PNG → Remove Metadata writes `… No Metadata.jpg`, and it opens.
+- [ ] win: Ctrl-drop a large phone photo on COMPRESS, Small → the panel; `photo Compressed.jpg` is at most 2048 px on its long side, the same way up in Photos, with its date taken and camera still in Properties; the toast says how much smaller it is.
+- [ ] win: Compress the same photo at Balanced and High → each is smaller than the original; Compress the Small output again at Small → "… is already as small as Grape makes it." and no new file.
+- [ ] win: an iPhone HDR photo saved as JPG (with a gain map), Compress → it opens; note whether it still looks HDR in Photos (the gain map is dropped, so it shouldn't).
+- [ ] win: Compress a PNG screenshot → `… Compressed.png` looks pixel-identical (zoom in) and is smaller; Compress that output again → "… is already as small as Grape makes it."
+- [ ] win: an animated PNG on COMPRESS → "… is animated. Compress works on still PNGs for now."
+- [ ] win: Ctrl-drop three JPGs on COMPRESS → one panel, then three outputs.
+
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.
 - [ ] win: Alt-drop one file on COPY PATH → the toast says "Copied the path" and shows it. Paste into Notepad → the full path, unquoted. With three files → three lines.
