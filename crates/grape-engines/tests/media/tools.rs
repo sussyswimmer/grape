@@ -333,6 +333,10 @@ fn movie_mkv(dir: &TestDir, name: &str) -> PathBuf {
         s(&font),
         "-metadata:s:t",
         "mimetype=application/x-truetype-font",
+        // `-attach` names it after the last `/` only: on Windows the
+        // name would be the whole path.
+        "-metadata:s:t",
+        "filename=font.ttf",
         "-t",
         "1",
         "-f",
