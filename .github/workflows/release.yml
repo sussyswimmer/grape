@@ -400,11 +400,11 @@ jobs:
           cat "$bundle.sha256" >> SHA256SUMS.txt
           rm "$bundle.sha256"
           sha256sum -c SHA256SUMS.txt
-      # Grape's own FFmpeg as the installer and the DMG carry it (D24, D45),
-      # for building Grape from source: the run's two FFmpeg artifacts, each
-      # checked against its SHA256SUMS and against the hash the ffmpeg
-      # workflow reported, as the build jobs check them, then zipped as they
-      # are (the programs, BUILDINFO, SHA256SUMS and licenses/ffmpeg/).
+      # Grape's own FFmpeg builds (D24, D45), for building Grape from source:
+      # the run's two FFmpeg artifacts, each checked against its SHA256SUMS
+      # and against the hash the ffmpeg workflow reported, as the build jobs
+      # check them, then zipped as they are (the programs, BUILDINFO,
+      # SHA256SUMS and licenses/ffmpeg/).
       - uses: actions/download-artifact@v8
         with:
           name: ffmpeg-x86_64-pc-windows-msvc

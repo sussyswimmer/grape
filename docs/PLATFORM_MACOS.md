@@ -172,7 +172,7 @@ A released version comes from GitHub Releases instead, as `Grape-macOS-universal
 - Auto-update: `tauri-plugin-updater` with signed update manifests on GitHub Releases. It's the *only* allowed network call (rule 3), and it's opt-in.
 
 ## Releasing
-A version tag builds the DMG with the Windows installer and puts both on one draft release (D45). `release.yml`'s `build-macos` job calls `.github/workflows/macos-app.yml`, the same build and checks as CI's DMG, from the tag, with PDFium fetched fresh. With `release: true` it names the DMG `Grape-macOS-universal.dmg`, and the release job adds its line to `SHA256SUMS.txt`. The draft also gets `grape-ffmpeg-macos-universal.zip`, Grape's FFmpeg as the DMG carries it, for building Grape from source.
+A version tag builds the DMG with the Windows installer and puts both on one draft release (D45). `release.yml`'s `build-macos` job calls `.github/workflows/macos-app.yml`, the same build and checks as CI's DMG, from the tag, with PDFium fetched fresh. With `release: true` it names the DMG `Grape-macOS-universal.dmg`, and the release job adds its line to `SHA256SUMS.txt`. The draft also gets `grape-ffmpeg-macos-universal.zip`, the run's Mac FFmpeg build as the `ffmpeg` workflow made it, for building Grape from source. Grape.app's copies differ by their signature: the bundler signs them again ("Sidecars", above).
 - The steps are in `PLATFORM_WINDOWS.md` → "Releasing". The Mac's checks on the draft are `TESTING.md` → "Release, M9".
 - Until those pass, Maxwell deletes the DMG from the draft, with the notes' macOS section and the sentences about the Mac or the DMG, before publishing.
 
