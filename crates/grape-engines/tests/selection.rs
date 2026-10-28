@@ -359,7 +359,7 @@ fn a_drop_that_cant_fall_back_leaves_the_fallback_unread() {
     assert_eq!(sel.dirs[&missing.fallback_dir], DirSnapshot::default());
 
     // A writable output folder is tried first, so a source folder that
-    // isn't writable doesn't matter.
+    // isn't writable doesn't matter: it isn't even read.
     let out = dir.join("Converted");
     fs::create_dir(&out).unwrap();
     let to_out = Settings {
@@ -368,7 +368,7 @@ fn a_drop_that_cant_fall_back_leaves_the_fallback_unread() {
     };
     let gone = dir.join("gone").join("photo.png");
     let sel = build_selection(std::slice::from_ref(&gone), &to_out);
-    assert!(!sel.dirs[&dir.join("gone")].writable);
+    assert!(!sel.dirs.contains_key(&dir.join("gone")));
     assert_eq!(sel.dirs[&fallback], DirSnapshot::default());
     let job = plan(&sel, &jpg, &to_out).unwrap().jobs.remove(0);
     assert!(!job.used_fallback);
@@ -481,6 +481,18 @@ fn eager_fallback(fallback: &Path) -> DirSnapshot {
     DirSnapshot::new(Vec::<String>::new(), writable)
 }
 
+/// A source folder's snapshot as `build_selection` reads one: its names
+/// and the probe, or nothing when it can't be listed.
+fn eager_dir(dir: &Path) -> DirSnapshot {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return DirSnapshot::default();
+    };
+    let names: Vec<String> = entries
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    DirSnapshot::new(names, probe(dir))
+}
+
 /// Creates a file in `dir` and deletes it again, as the real probe does.
 fn probe(dir: &Path) -> bool {
     let path = dir.join(".grape-probe-by-hand");
@@ -542,7 +554,7 @@ fn the_lazy_fallback_plans_exactly_like_the_eager_one() {
         Operation::tool(ToolKey::CreatePdf),
         Operation::convert(Format::Png),
     ];
-    let (mut plans, mut read, mut unread, mut fell_back) = (0, 0, 0, 0);
+    let (mut plans, mut read, mut unread, mut fell_back, mut sources_unread) = (0, 0, 0, 0, 0);
     for fallback in &fallbacks {
         let inside = fallback.join("inside.png");
         let drops = [
@@ -579,7 +591,19 @@ fn the_lazy_fallback_plans_exactly_like_the_eager_one() {
                 } else if eager_snapshot != DirSnapshot::default() {
                     unread += 1;
                 }
-                let eager = lazy.clone().with_dir(fallback.clone(), eager_snapshot);
+                let mut eager = lazy.clone().with_dir(fallback.clone(), eager_snapshot);
+                // The eager code also read every source's folder, whatever
+                // the output.
+                let parents = paths
+                    .iter()
+                    .filter_map(|path| path.parent())
+                    .filter(|parent| !parent.as_os_str().is_empty() && *parent != fallback);
+                for parent in parents {
+                    if !eager.dirs.contains_key(parent) {
+                        eager = eager.with_dir(parent, eager_dir(parent));
+                        sources_unread += 1;
+                    }
+                }
                 for op in &ops {
                     let planned = plan(&lazy, op, &settings);
                     assert_eq!(
@@ -595,11 +619,12 @@ fn the_lazy_fallback_plans_exactly_like_the_eager_one() {
             }
         }
     }
-    // Both sides were reached: read and left unread, and plans that fell back.
+    // Both sides were reached: read and left unread, plans that fell back,
+    // and sources' folders a chosen output folder left unread.
     assert_eq!(plans, 6 * 4 * 9 * 3);
     assert!(
-        read > 0 && unread > 0 && fell_back > 0,
-        "{read} {unread} {fell_back}"
+        read > 0 && unread > 0 && fell_back > 0 && sources_unread > 0,
+        "{read} {unread} {fell_back} {sources_unread}"
     );
     for folder in [&dir.path, &photos, &more, &downloads, &grape, &converted] {
         assert_no_leftovers(folder);
