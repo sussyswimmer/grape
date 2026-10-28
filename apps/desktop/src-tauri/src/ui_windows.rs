@@ -46,7 +46,7 @@ pub fn prepare_overlay(app: &AppHandle) -> anyhow::Result<()> {
         .context("the overlay window from tauri.conf.json is missing")?;
 
     #[cfg(target_os = "windows")]
-    windows_overlay::harden(&overlay);
+    windows_overlay::harden(&overlay, "overlay");
     #[cfg(target_os = "macos")]
     mac_overlay::harden(&overlay, grape_platform::macos::WindowRole::Overlay);
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -65,7 +65,7 @@ pub fn prepare_toast(app: &AppHandle) -> anyhow::Result<()> {
         .get_webview_window(crate::toast::TOAST)
         .context("the toast window from tauri.conf.json is missing")?;
     #[cfg(target_os = "windows")]
-    windows_overlay::harden(&toast);
+    windows_overlay::harden(&toast, "toast");
     #[cfg(target_os = "macos")]
     mac_overlay::harden(&toast, grape_platform::macos::WindowRole::Toast);
     refuse_drops(app, &toast);
@@ -210,33 +210,34 @@ pub fn flash_overlay(app: &AppHandle) {
 mod windows_overlay {
     use tauri::WebviewWindow;
 
-    fn raw_hwnd(overlay: &WebviewWindow) -> Option<isize> {
-        match overlay.hwnd() {
+    fn raw_hwnd(window: &WebviewWindow, name: &str) -> Option<isize> {
+        match window.hwnd() {
             Ok(hwnd) => Some(hwnd.0 as isize),
             Err(err) => {
-                log::error!("could not get the overlay's window handle: {err}");
+                log::error!("could not get the {name}'s window handle: {err}");
                 None
             }
         }
     }
 
-    /// Installs the style subclass (feature `overlay-subclass`, on by
-    /// default) and logs the resulting extended style. Failures are logged,
-    /// not fatal: Grape still runs, the overlay may just show in Alt-Tab.
-    pub fn harden(overlay: &WebviewWindow) {
-        let Some(hwnd) = raw_hwnd(overlay) else {
+    /// Installs the overlay's style subclass (feature `overlay-subclass`,
+    /// on by default) on the overlay or the toast, `name` in the log, and
+    /// logs the resulting extended style. Failures are logged, not fatal:
+    /// Grape still runs, the window may just show in Alt-Tab.
+    pub fn harden(window: &WebviewWindow, name: &str) {
+        let Some(hwnd) = raw_hwnd(window, name) else {
             return;
         };
 
         #[cfg(feature = "overlay-subclass")]
         match grape_platform::windows::harden_overlay(hwnd) {
-            Ok(()) => log::info!("overlay: style subclass installed"),
-            Err(err) => log::error!("overlay: could not install the style subclass: {err}"),
+            Ok(()) => log::info!("{name}: style subclass installed"),
+            Err(err) => log::error!("{name}: could not install the style subclass: {err}"),
         }
         #[cfg(not(feature = "overlay-subclass"))]
-        log::warn!("overlay: the overlay-subclass feature is off; tao's styles only");
+        log::warn!("{name}: the overlay-subclass feature is off; tao's styles only");
 
-        log_hwnd_ex_style(hwnd, "at startup");
+        log_hwnd_ex_style(hwnd, name, "at startup");
     }
 
     /// The tool panel: the shelf's subclass (feature `overlay-subclass`):
@@ -270,18 +271,18 @@ mod windows_overlay {
     /// `overlay ex-style (shown): 0x08080088 TOOLWINDOW|NOACTIVATE|TOPMOST|LAYERED`.
     #[cfg(debug_assertions)]
     pub fn log_ex_style(overlay: &WebviewWindow, when: &str) {
-        if let Some(hwnd) = raw_hwnd(overlay) {
-            log_hwnd_ex_style(hwnd, when);
+        if let Some(hwnd) = raw_hwnd(overlay, "overlay") {
+            log_hwnd_ex_style(hwnd, "overlay", when);
         }
     }
 
-    fn log_hwnd_ex_style(hwnd: isize, when: &str) {
+    fn log_hwnd_ex_style(hwnd: isize, name: &str, when: &str) {
         match grape_platform::windows::ex_style(hwnd) {
             Ok(style) => log::info!(
-                "overlay ex-style ({when}): {}",
+                "{name} ex-style ({when}): {}",
                 grape_platform::windows::describe_ex_style(style)
             ),
-            Err(err) => log::warn!("overlay ex-style ({when}): unreadable: {err}"),
+            Err(err) => log::warn!("{name} ex-style ({when}): unreadable: {err}"),
         }
     }
 }

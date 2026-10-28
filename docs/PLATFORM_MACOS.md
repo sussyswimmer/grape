@@ -155,6 +155,8 @@ Grape reads RAR archives with `bsdtar`, a separate program it builds from libarc
 
 Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silicon + Intel) Grape.app. It's ad-hoc signed but not notarized (D18; notarization needs a Developer ID, D4), so macOS will refuse to open it at first.
 
+Before uploading it, CI runs Grape.app's SVG and PDF workers on its Mac runner, the Intel half's too when the runner has Rosetta. Then it starts the Grape.app the DMG is built from through LaunchServices, as Finder does, checks setup's log lines and that a second copy started with `open -n` hands over to the first, and stops it (`macos-app.yml`, which the release runs too). The runner is Apple silicon, so only the app's Apple silicon half is started. So a build that won't start on Apple silicon turns CI red, and the run's log says why. The DMG is still uploaded when the build and the checks before the launch passed; a release's DMG goes on the draft only when every check passed (since 2026-10-28; not yet run on GitHub).
+
 1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-macOS-universal` and unzip it.
 2. Open the `.dmg` and drag **Grape** into **Applications**.
 3. Launch Grape once. macOS won't open it. Close the message with **Done**, **OK** or **Cancel**, whichever it shows. Don't click **Move to Trash**.
