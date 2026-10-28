@@ -29,7 +29,9 @@ To try a commit that isn't released yet, CI builds the same installer on every r
 
 ### macOS
 
-Not released yet. CI builds a preview DMG on every run. It's ad-hoc signed and not notarized, and nobody has tried it on a Mac yet. To try it anyway: [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build".
+Released versions come from the [Releases page](https://github.com/sussyswimmer/grape/releases) as `Grape-macOS-universal.dmg`, for macOS 13 Ventura or later on Apple silicon and Intel. No release has it yet: it's published only once it has passed the checks on a real Mac. It's ad-hoc signed and not notarized, so macOS blocks the first open; the release notes and [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build" show how to open it anyway.
+
+Until then, CI builds the same DMG on every run as a preview, and nobody has tried it on a Mac yet: [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build".
 
 ## Build from source
 
@@ -89,7 +91,7 @@ CI runs these checks on Windows on every push and pull request, runs clippy and 
 
 ## Releasing
 
-A version tag (`vX.Y.Z`) runs the Release workflow. It checks that the tag matches the version in the repo, builds `Grape-Setup-x64.exe` and `SHA256SUMS.txt`, and makes a draft GitHub Release. Nothing is published until the draft is checked and published by hand. The steps are in [docs/PLATFORM_WINDOWS.md](docs/PLATFORM_WINDOWS.md) → "Releasing".
+A version tag (`vX.Y.Z`) runs the Release workflow. It checks that the tag matches the version in the repo, builds `Grape-Setup-x64.exe` for Windows and `Grape-macOS-universal.dmg` for macOS from the same tag, and makes a draft GitHub Release with both, `SHA256SUMS.txt`, the GPL sources and Grape's own FFmpeg builds. Nothing is published until the draft is checked and published by hand. The steps are in [docs/PLATFORM_WINDOWS.md](docs/PLATFORM_WINDOWS.md) → "Releasing".
 
 ## Offline, always
 

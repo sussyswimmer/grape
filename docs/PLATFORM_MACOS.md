@@ -153,7 +153,7 @@ Grape reads RAR archives with `bsdtar`, a separate program it builds from libarc
 
 ## Running a CI build
 
-Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silicon + Intel) Grape.app. It's ad-hoc signed but not notarized (D18; notarization comes with M9), so macOS will refuse to open it at first.
+Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silicon + Intel) Grape.app. It's ad-hoc signed but not notarized (D18; notarization needs a Developer ID, D4), so macOS will refuse to open it at first.
 
 1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-macOS-universal` and unzip it.
 2. Open the `.dmg` and drag **Grape** into **Applications**.
@@ -162,11 +162,19 @@ Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silic
    - Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Grape.app`, then open Grape normally.
 5. Grape appears in the menu bar (no Dock icon). Quit it from its menu.
 
+A released version comes from GitHub Releases instead, as `Grape-macOS-universal.dmg` (README → "Install", and "Releasing" below), with no zip around it. The steps are the same from step 2. A CI build is for a commit that isn't released yet.
+
 ## Distribution
 - **Direct download first:** a DMG signed with **Developer ID**, hardened runtime, **notarized** and stapled. Every sidecar binary must be signed with the same identity and hardened runtime, or notarization fails. `libpdfium.dylib` needs the same identity too, for library validation. Today's ad-hoc DMG has the hardened runtime off (PDFium, above; D29).
+- **Until a Developer ID exists,** releases carry the same ad-hoc DMG as CI, `Grape-macOS-universal.dmg` (D45), and the release notes give the first-open steps above.
 - Entitlements: none needed for drag/modifier polling. Add `com.apple.security.cs.disable-library-validation` **only** if a sidecar loads unsigned dylibs (avoid this).
 - Mac App Store is **later**. The sandbox complicates writing outputs next to sources: a dropped file grants access to that file, not its folder. It would need security-scoped bookmarks or a user-chosen output folder. Tracked in `DECISIONS.md`.
 - Auto-update: `tauri-plugin-updater` with signed update manifests on GitHub Releases. It's the *only* allowed network call (rule 3), and it's opt-in.
+
+## Releasing
+A version tag builds the DMG with the Windows installer and puts both on one draft release (D45). `release.yml`'s `build-macos` job calls `.github/workflows/macos-app.yml`, the same build and checks as CI's DMG, from the tag, with PDFium fetched fresh. With `release: true` it names the DMG `Grape-macOS-universal.dmg`, and the release job adds its line to `SHA256SUMS.txt`. The draft also gets `grape-ffmpeg-macos-universal.zip`, Grape's FFmpeg as the DMG carries it, for building Grape from source.
+- The steps are in `PLATFORM_WINDOWS.md` → "Releasing". The Mac's checks on the draft are `TESTING.md` → "Release, M9".
+- Until those pass, Maxwell deletes the DMG from the draft, with the notes' macOS section and the sentences about the Mac or the DMG, before publishing.
 
 ## Mac QA must-checks
 - Drag from Finder, the Desktop, Downloads stack, Spotlight results, and the Finder sidebar.
