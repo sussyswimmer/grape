@@ -188,28 +188,17 @@ pub(crate) mod tests {
     use std::io::Read;
 
     use flate2::read::ZlibDecoder;
+    use lopdf::filters::png::{decode_frame, decode_row, FilterType};
 
     use super::*;
 
-    /// Reverses [`filter`]: the row from its filtered bytes and the row
-    /// above.
-    pub(crate) fn unfilter(filtered: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
-        let kind = filtered[0];
-        let data = &filtered[1..];
-        let mut row = vec![0u8; data.len()];
-        for i in 0..data.len() {
-            let a = if i >= bpp { row[i - bpp] } else { 0 };
-            let b = prev[i];
-            let c = if i >= bpp { prev[i - bpp] } else { 0 };
-            let predicted = match kind {
-                0 => 0,
-                1 => a,
-                2 => b,
-                3 => u8::try_from((u16::from(a) + u16::from(b)) / 2).unwrap(),
-                _ => paeth(a, b, c),
-            };
-            row[i] = data[i].wrapping_add(predicted);
-        }
+    /// Reverses [`filter`] with lopdf's own PNG predictor decoder, which
+    /// shares no code with this module: the row from its filtered bytes
+    /// and the row above.
+    fn unfilter(filtered: &[u8], prev: &[u8], bpp: usize) -> Vec<u8> {
+        let kind = FilterType::try_from(filtered[0]).unwrap();
+        let mut row = filtered[1..].to_vec();
+        decode_row(kind, bpp, prev, &mut row);
         row
     }
 
@@ -249,6 +238,37 @@ pub(crate) mod tests {
                     "kind {kind} bpp {bpp} len {len}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn paeth_rows_decode_in_a_real_reader_ties_and_all() {
+        // Samples from 0 to 3, so the predictor's three distances often
+        // tie: each tie-break must be PNG's (left, then above, then upper
+        // left), or a reader decodes another row.
+        let mut rng = Lcg(5);
+        for bpp in 1..=4usize {
+            let len = 64 * bpp;
+            let rows: Vec<Vec<u8>> = (0..32)
+                .map(|_| {
+                    (0..len)
+                        .map(|_| u8::try_from(rng.next() % 4).unwrap())
+                        .collect()
+                })
+                .collect();
+            let mut filtered = Vec::new();
+            let mut prev = vec![0u8; len];
+            for row in &rows {
+                let mut out = vec![0u8; len + 1];
+                filter(4, row, &prev, bpp, &mut out);
+                filtered.extend_from_slice(&out);
+                prev.clone_from(row);
+            }
+            assert_eq!(
+                decode_frame(&filtered, bpp, len).unwrap(),
+                rows.concat(),
+                "bpp {bpp}"
+            );
         }
     }
 
@@ -297,12 +317,17 @@ pub(crate) mod tests {
             .read_to_end(&mut filtered)
             .unwrap();
         assert_eq!(filtered.len() as u64, shape.filtered_len());
-        let mut prev = vec![0u8; width * bpp];
-        for (y, chunk) in filtered.chunks(width * bpp + 1).enumerate() {
-            let row = unfilter(chunk, &prev, bpp);
-            assert_eq!(row, rows[y], "row {y}");
-            prev = row;
-        }
+        // lopdf's decoder gives the rows back.
+        assert_eq!(
+            decode_frame(&filtered, bpp, width * bpp).unwrap(),
+            rows.concat()
+        );
+        // More than one filter type was chosen (rows of noise and ramps).
+        let kinds: std::collections::BTreeSet<u8> = filtered
+            .chunks(width * bpp + 1)
+            .map(|chunk| chunk[0])
+            .collect();
+        assert!(kinds.len() >= 2, "{kinds:?}");
     }
 
     #[test]

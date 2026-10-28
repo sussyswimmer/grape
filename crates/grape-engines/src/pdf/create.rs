@@ -1115,7 +1115,6 @@ mod tests {
     use super::*;
     use crate::heif::tests::{fake, fake_heic, nowhere};
     use crate::output::unique_suffix;
-    use crate::pdf::flate::tests::unfilter;
     use crate::pdf::writer::tests::xref;
 
     fn names() -> Names {
@@ -1212,17 +1211,20 @@ mod tests {
         dict.get(key).unwrap().as_i64().unwrap()
     }
 
-    /// A Flate stream with PNG predictors back to its rows.
-    fn rows_of(data: &[u8], row_len: usize, bpp: usize) -> Vec<u8> {
-        let mut filtered = Vec::new();
-        ZlibDecoder::new(data).read_to_end(&mut filtered).unwrap();
-        let mut prev = vec![0u8; row_len];
-        let mut rows = Vec::new();
-        for chunk in filtered.chunks(row_len + 1) {
-            assert_eq!(chunk.len(), row_len + 1);
-            prev = unfilter(chunk, &prev, bpp);
-            rows.extend_from_slice(&prev);
-        }
+    /// An image stream (`dict`, `data`) back to its rows, by lopdf: its
+    /// own Flate and PNG predictor decoders, read from the stream's
+    /// `/DecodeParms`, which share no code with Grape's.
+    fn rows_of(dict: &Dictionary, data: &[u8]) -> Vec<u8> {
+        assert_eq!(name(dict, b"Filter"), "FlateDecode");
+        let rows = lopdf::Stream::new(dict.clone(), data.to_vec())
+            .decompressed_content()
+            .unwrap();
+        let parms = dict.get(b"DecodeParms").unwrap().as_dict().unwrap();
+        let columns =
+            int(parms, b"Columns") * int(parms, b"Colors") * int(parms, b"BitsPerComponent");
+        let row_len = usize::try_from(columns).unwrap().div_ceil(8);
+        let height = usize::try_from(int(dict, b"Height")).unwrap();
+        assert_eq!(rows.len(), row_len * height);
         rows
     }
 
@@ -1274,7 +1276,7 @@ mod tests {
         assert_eq!(int(parms, b"Colors"), 3);
         assert_eq!(int(parms, b"Columns"), 5);
         assert!(page.mask.is_none());
-        assert_eq!(rows_of(&page.data, 15, 3), img.into_raw());
+        assert_eq!(rows_of(&page.image, &page.data), img.into_raw());
         assert_eq!(page.content, "q 5 0 0 3 0 0 cm /Im0 Do Q");
         // Every offset points at its object; the trailer names only the
         // size and the root.
@@ -1319,13 +1321,13 @@ mod tests {
         assert_eq!(name(&first.image, b"ColorSpace"), "DeviceGray");
         assert_eq!(int(&first.image, b"BitsPerComponent"), 8);
         let gray: Vec<u8> = gray_alpha.pixels().map(|p| p.0[0]).collect();
-        assert_eq!(rows_of(&first.data, 4, 1), gray);
+        assert_eq!(rows_of(&first.image, &first.data), gray);
         let (mask, mask_data) = first.mask.as_ref().unwrap();
         assert_eq!(name(mask, b"ColorSpace"), "DeviceGray");
         assert_eq!((int(mask, b"Width"), int(mask, b"Height")), (4, 2));
         assert_eq!(int(mask, b"BitsPerComponent"), 8);
         let alpha: Vec<u8> = gray_alpha.pixels().map(|p| p.0[1]).collect();
-        assert_eq!(rows_of(mask_data, 4, 1), alpha);
+        assert_eq!(rows_of(mask, mask_data), alpha);
 
         // Pure black and white: 1 bit a pixel, rows padded to a byte.
         let second = &pages[1];
@@ -1334,7 +1336,7 @@ mod tests {
         let parms = second.image.get(b"DecodeParms").unwrap().as_dict().unwrap();
         assert_eq!(int(parms, b"BitsPerComponent"), 1);
         assert_eq!(int(parms, b"Columns"), 9);
-        let packed = rows_of(&second.data, 2, 1);
+        let packed = rows_of(&second.image, &second.data);
         for (y, row) in packed.chunks(2).enumerate() {
             for x in 0..9 {
                 let bit = row[x / 8] >> (7 - x % 8) & 1;
@@ -1423,9 +1425,9 @@ mod tests {
         assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
         let decoded = ::image::load_from_memory(&pages[0].data).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (64, 48));
-        let (_, mask) = pages[0].mask.as_ref().unwrap();
+        let (mask, mask_data) = pages[0].mask.as_ref().unwrap();
         let alpha: Vec<u8> = rgba.pixels().map(|p| p.0[3]).collect();
-        assert_eq!(rows_of(mask, 64, 1), alpha);
+        assert_eq!(rows_of(mask, mask_data), alpha);
         // Opaque: no mask.
         assert!(pages[1].mask.is_none());
     }
@@ -1454,7 +1456,7 @@ mod tests {
         let bytes = pdf_of(vec![lossy(img)]);
         let (_, pages) = pages(&bytes);
         assert_eq!(name(&pages[0].image, b"Filter"), "FlateDecode");
-        assert_eq!(rows_of(&pages[0].data, 24, 3), noise.into_raw());
+        assert_eq!(rows_of(&pages[0].image, &pages[0].data), noise.into_raw());
     }
 
     #[test]
@@ -1473,11 +1475,17 @@ mod tests {
         let (_, pages) = pages(&bytes);
         // Opaque 16-bit alpha: no mask.
         assert!(pages[0].mask.is_none());
-        assert_eq!(rows_of(&pages[0].data, 210, 3), rgb.as_raw().clone());
-        assert_eq!(rows_of(&pages[1].data, 210, 3), rgb.as_raw().clone());
+        assert_eq!(
+            rows_of(&pages[0].image, &pages[0].data),
+            rgb.as_raw().clone()
+        );
+        assert_eq!(
+            rows_of(&pages[1].image, &pages[1].data),
+            rgb.as_raw().clone()
+        );
         assert_eq!(name(&pages[2].image, b"ColorSpace"), "DeviceGray");
         let luma = DynamicImage::ImageLuma16(DynamicImage::ImageRgb8(rgb).to_luma16()).to_luma8();
-        assert_eq!(rows_of(&pages[2].data, 70, 1), luma.into_raw());
+        assert_eq!(rows_of(&pages[2].image, &pages[2].data), luma.into_raw());
     }
 
     #[test]
@@ -1579,10 +1587,10 @@ mod tests {
             assert_eq!(name(dict, b"ColorSpace"), "DeviceGray");
             let parms = dict.get(b"DecodeParms").unwrap().as_dict().unwrap();
             assert_eq!(int(parms, b"Columns"), 3);
-            gray.extend(rows_of(data, 3, 1));
+            gray.extend(rows_of(dict, data));
             let (mask, mask_data) = mask.as_ref().unwrap();
             assert_eq!((int(mask, b"Width"), int(mask, b"Height")), (3, 35_000));
-            alpha.extend(rows_of(mask_data, 3, 1));
+            alpha.extend(rows_of(mask, mask_data));
         }
         assert_eq!(gray, tall.pixels().map(|p| p.0[0]).collect::<Vec<_>>());
         assert_eq!(alpha, tall.pixels().map(|p| p.0[1]).collect::<Vec<_>>());
@@ -1605,11 +1613,7 @@ mod tests {
             assert!(mask.is_none());
             let left = u32::try_from(k).unwrap() * 35_000;
             let part = DynamicImage::ImageRgb8(wide.clone()).crop_imm(left, 0, 35_000, 2);
-            assert_eq!(
-                rows_of(data, 105_000, 3),
-                part.to_rgb8().into_raw(),
-                "strip {k}"
-            );
+            assert_eq!(rows_of(dict, data), part.to_rgb8().into_raw(), "strip {k}");
         }
     }
 
@@ -1910,7 +1914,8 @@ mod tests {
         assert_eq!(pages[0].media_box, [0.0, 0.0, 60.0, 40.0]);
         assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
         let alpha: Vec<u8> = rgba.chunks(4).map(|p| p[3]).collect();
-        assert_eq!(rows_of(&pages[0].mask.as_ref().unwrap().1, 60, 1), alpha);
+        let (mask, mask_data) = pages[0].mask.as_ref().unwrap();
+        assert_eq!(rows_of(mask, mask_data), alpha);
         assert_eq!(pages[1].media_box, [0.0, 0.0, 3.0, 5.0]);
         assert_eq!(name(&pages[1].image, b"Filter"), "FlateDecode");
         for (path, bytes) in paths.iter().zip(before) {
@@ -1957,7 +1962,10 @@ mod tests {
         result.unwrap();
         let (_, pages) = pages(&fs::read(dir.0.join("photo.pdf")).unwrap());
         assert_eq!(name(&pages[0].image, b"Filter"), "FlateDecode");
-        assert_eq!(rows_of(&pages[0].data, 12, 3), photo.to_rgb8().into_raw());
+        assert_eq!(
+            rows_of(&pages[0].image, &pages[0].data),
+            photo.to_rgb8().into_raw()
+        );
     }
 
     #[test]
