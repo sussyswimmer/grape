@@ -93,7 +93,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-22:* copy, copyPath, terminal and move are built, with toasts. CI's Windows runner checks the clipboard contents and a real shell move. The picker, the terminals and undo still need the PC (`TESTING.md` → "File actions, M5").
 
-*Status 2026-10-25:* Share (the share sheet) and the float shelf are built too (D21). Their tests pass on Linux and their Windows code passes clippy; the Windows-only tests run on CI's Windows runner, and they check the Share file lookups and the shelf's drag data but never open the sheet or start a drag. Neither has run on the PC yet; `TESTING.md` → "File actions, M5" starts with the Recycle Bin check. Float is Windows-only for now: on a Mac it still says "Not in this build yet".
+*Status 2026-10-25:* Share (the share sheet) and the float shelf are built too (D21). Their tests pass on Linux and their Windows code passes clippy; the Windows-only tests run on CI's Windows runner, and they check the Share file lookups and the shelf's drag data but never open the sheet or start a drag. Neither has run on the PC yet; `TESTING.md` → "File actions, M5" starts with the Recycle Bin check. *Update 2026-10-28:* Float runs on the Mac too (D43, M8 below).
 
 ## M6: Settings + polish (lane A)
 *Status 2026-10-24:* the first slice is built (D19): keys with swap-on-conflict, output location and fallback folder, sounds, haptics on macOS, and launch at login, all saved and applied at once. CI checks it; nothing has run on the PC or a Mac yet (`TESTING.md` → "Settings, M6").
@@ -119,9 +119,12 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 *Started early, 2026-10-23 (DECISIONS D18).* CI builds a downloadable universal DMG on every run (`PLATFORM_MACOS.md` → "Running a CI build"). The platform layer and the app wiring are built and pass CI on macOS. Nothing has run on a real Mac yet: `TESTING.md` → "macOS, first build" lists what to check.
 - [x] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), display bounds in points, AppKit file actions (Share is AirDrop), haptics.
 - [x] The app on macOS: `ActivationPolicy::Accessory`, the overlay and toast shown without focus, drops through wry, and the two macOS controller rules (D18).
+- [x] The float shelf on the Mac (D43): the shared shelf at the floating level, shown without focus, with an AppKit dragging session for the drag out (copy or alias, never a move), so all six file actions run on both OSes.
 - [ ] Overlay over full-screen apps confirmed on a Mac (`tauri-nspanel` if needed).
 - [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds. *(`fetch-sidecars.sh` is written (D25; M3's sidecar item) and runs in CI's Sidecars job; not run on a Mac by hand yet. ImageIO for HEIC is built too (D33): the HEIC worker is Grape itself, `Grape --grape-heif-worker`; CI's `heif-it-macos` decodes libheif's fixtures with it, and Mac encoding is manual QA. Not run on a Mac yet.)*
 - [ ] The full `TESTING.md` QA checklist passes on a Mac.
+
+*Status 2026-10-28:* Float on the Mac is built (D43): Control-drop on FLOAT opens the same shelf as on Windows, and items drag out with an AppKit dragging session as a copy or an alias, never a move. It passes Mac clippy from Linux; its macOS tests, which never build the window or start a drag, run on CI's macOS runner and haven't run there yet. Nothing has run on a Mac (`TESTING.md` → "Float on the Mac, D43", which starts with the Dock's Trash).
 
 ## M9: Ship Grape for Mac
 - [ ] Universal DMG, signed + notarized if a Developer ID is available (DECISIONS D4), otherwise unsigned with README instructions.
