@@ -135,9 +135,8 @@ fn remove_metadata_on_a_tiff_of_a_million_strips_holds_two_models_and_a_half_at_
     // The model holds 16 bytes a strip. The self-check holds the plan's
     // and the output's, and little else; when the output's strips are out
     // of the file's order, the overlap check's sorted references to them
-    // too (half a model), and when strips repeat, the plan's list of
-    // those (half a model at most).
-    let cases: [(&str, At, f64); 5] = [
+    // too (half a model).
+    let cases: [(&str, At, f64); 6] = [
         ("scan.tif", |i, _| i, 2.25),
         // Last first: the source's strips are sorted, the output's aren't.
         ("reversed.tif", |i, n| n - 1 - i, 2.25),
@@ -147,6 +146,9 @@ fn remove_metadata_on_a_tiff_of_a_million_strips_holds_two_models_and_a_half_at_
         ("pairs.tif", |i, _| i / 2, 2.75),
         // Two bytes in turn: the output's strips are out of order too.
         ("turns.tif", |i, _| i % 2, 2.75),
+        // Each byte two strips, half the file apart: half a million
+        // repeats, and the output's strips out of order.
+        ("twice.tif", |i, n| i % (n / 2), 2.75),
     ];
     for (name, at, most) in cases {
         let (_, job) = plan_one(

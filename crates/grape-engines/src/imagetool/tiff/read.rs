@@ -327,44 +327,19 @@ impl Tiff {
         all
     }
 
-    /// The blocks listed more than once, sorted, so that a writer writes
-    /// them once: worked out when asked, so that a model read only to be
-    /// checked never holds them.
-    pub(crate) fn shared(&self) -> Vec<Block> {
-        let mut shared: Vec<Block> = Vec::new();
-        let mut last = None;
-        for block in self.in_order() {
-            if last == Some(block) && shared.last() != Some(block) {
-                shared.push(*block);
-            }
-            last = Some(block);
-        }
-        shared.shrink_to_fit();
-        shared
+    /// Every block with bytes, IFD by IFD.
+    fn listed(&self) -> impl Iterator<Item = &Block> {
+        self.ifds()
+            .into_iter()
+            .flat_map(|ifd| &ifd.blocks)
+            .filter(|b| b.len > 0)
     }
 
-    /// Every block with bytes, in the file's order, one that's listed more
-    /// than once that many times in a row: where they're listed when
-    /// that's their order already, as writers lay them out (Grape's output
-    /// among them); otherwise through a sorted list of references to them,
-    /// never a copy.
-    fn in_order(&self) -> Box<dyn Iterator<Item = &Block> + '_> {
-        let listed = || {
-            self.ifds()
-                .into_iter()
-                .flat_map(|ifd| &ifd.blocks)
-                .filter(|b| b.len > 0)
-        };
-        if listed()
-            .zip(listed().skip(1))
-            .all(|(a, b)| a == b || apart(a, b))
-        {
-            return Box::new(listed());
-        }
-        let mut sorted: Vec<&Block> = Vec::with_capacity(listed().count());
-        sorted.extend(listed());
-        sorted.sort_unstable();
-        Box::new(sorted.into_iter())
+    /// The blocks listed more than once, sorted ([`repeats`]): worked out
+    /// when asked, so that a model read only to be checked never holds
+    /// them.
+    pub(crate) fn shared(&self) -> Vec<Block> {
+        repeats(|| self.listed())
     }
 
     /// Fails when two blocks overlap without being the same bytes, or a
@@ -388,12 +363,52 @@ impl Tiff {
         // An Exif, GPS or Interop IFD that IFDs share is listed for each.
         ifds.sort_unstable();
         ifds.dedup();
-        if ifds.windows(2).all(|w| w[1].0 >= w[0].1) && clear_of(self.in_order(), &ifds) {
+        let ifds_apart = ifds.windows(2).all(|w| w[1].0 >= w[0].1);
+        if ifds_apart && clear_of(in_order(|| self.listed()), &ifds) {
             Ok(())
         } else {
             Err(Error::Broken("blocks or IFDs overlap".into()))
         }
     }
+}
+
+/// The blocks that `listed` (blocks with bytes, given afresh each call)
+/// holds more than once, sorted, so that a writer writes each once.
+pub(crate) fn repeats<'a, I>(listed: impl Fn() -> I) -> Vec<Block>
+where
+    I: Iterator<Item = &'a Block> + 'a,
+{
+    let mut shared: Vec<Block> = Vec::new();
+    let mut last = None;
+    for block in in_order(listed) {
+        if last == Some(block) && shared.last() != Some(block) {
+            shared.push(*block);
+        }
+        last = Some(block);
+    }
+    shared.shrink_to_fit();
+    shared
+}
+
+/// The blocks `listed` gives, in the file's order, one that's listed more
+/// than once that many times in a row: as they're listed when that's
+/// their order already, as writers lay them out (Grape's output among
+/// them); otherwise through a sorted list of references to them, never a
+/// copy.
+fn in_order<'a, I>(listed: impl Fn() -> I) -> Box<dyn Iterator<Item = &'a Block> + 'a>
+where
+    I: Iterator<Item = &'a Block> + 'a,
+{
+    if listed()
+        .zip(listed().skip(1))
+        .all(|(a, b)| a == b || apart(a, b))
+    {
+        return Box::new(listed());
+    }
+    let mut sorted: Vec<&Block> = Vec::with_capacity(listed().count());
+    sorted.extend(listed());
+    sorted.sort_unstable();
+    Box::new(sorted.into_iter())
 }
 
 /// Whether block `b` starts where block `a` ends, or after.

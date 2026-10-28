@@ -4,7 +4,7 @@
 //! 1. The header, with a placeholder for the first IFD's offset.
 //! 2. Every image IFD's blocks, in IFD order, each on an even offset,
 //!    copied from the source. A block listed more than once is written
-//!    once; an empty one stays 0 bytes at 0.
+//!    once ([`repeats`] finds them); an empty one stays 0 bytes at 0.
 //! 3. Every IFD, each followed by its values that don't fit in their
 //!    entries, on even offsets: the entries sorted by tag, with the block
 //!    offsets and counts, the SubIFDs (330) and the pointers to the Exif,
@@ -28,7 +28,7 @@ use std::io::{self, SeekFrom, Write};
 use std::sync::Arc;
 
 use super::super::strip::{read_exact, Error, In, Out};
-use super::read::{seek, type_size, Block, Entry, Layout, Order, Value};
+use super::read::{repeats, seek, type_size, Block, Entry, Layout, Order, Value};
 use crate::CancelToken;
 
 /// The buffer blocks and values are copied through.
@@ -153,15 +153,11 @@ struct Node<'d> {
 
 /// Writes `pages`, the main chain, into `w` (a new, empty file) as a TIFF
 /// of `layout`'s byte order and kind, copying values and blocks from the
-/// source `r` ([module docs](self)). `shared` holds the source's blocks
-/// that are listed more than once, sorted ([`Tiff::shared`]).
-///
-/// [`Tiff::shared`]: super::read::Tiff::shared
+/// source `r` ([module docs](self)).
 pub(crate) fn write(
     r: &mut dyn In,
     w: &mut dyn Out,
     layout: Layout,
-    shared: &[Block],
     pages: &[Dir],
     cancel: &CancelToken,
 ) -> Result<(), Error> {
@@ -186,8 +182,12 @@ pub(crate) fn write(
     out.put(&o.bytes(0, word))?;
 
     let mut buf = vec![0; COPY];
-    // Where each shared block went; 0 until it's written, since no block
-    // is written at 0.
+    // The blocks listed more than once, and where each went: 0 until it's
+    // written, since no block is written at 0.
+    let shared = repeats(|| {
+        let images = nodes.iter().filter_map(|node| node.dir.image.as_ref());
+        images.flat_map(|image| &image.blocks).filter(|b| b.len > 0)
+    });
     let mut placed = vec![0; shared.len()];
     // The bytes taken from the source: each block and value once.
     let mut taken: u64 = 0;
@@ -544,15 +544,7 @@ mod tests {
         let pages: Vec<Dir> = tiff.pages.iter().map(everything).collect();
         let mut out = Cursor::new(Vec::new());
         let mut r = Cursor::new(file);
-        write(
-            &mut r,
-            &mut out,
-            tiff.layout,
-            &tiff.shared(),
-            &pages,
-            &CancelToken::new(),
-        )
-        .unwrap();
+        write(&mut r, &mut out, tiff.layout, &pages, &CancelToken::new()).unwrap();
         out.into_inner()
     }
 
@@ -820,7 +812,6 @@ mod tests {
                 &mut Cursor::new(&file),
                 &mut out,
                 tiff.layout,
-                &tiff.shared(),
                 &pages,
                 &CancelToken::new(),
             );
@@ -850,7 +841,6 @@ mod tests {
                 &mut Cursor::new(&file),
                 &mut Cursor::new(Vec::new()),
                 tiff.layout,
-                &tiff.shared(),
                 &[dir],
                 &CancelToken::new(),
             );
@@ -902,7 +892,6 @@ mod tests {
             &mut Cursor::new(&file),
             &mut out,
             tiff.layout,
-            &tiff.shared(),
             &[dir],
             &CancelToken::new(),
         )
@@ -926,7 +915,6 @@ mod tests {
             &mut Cursor::new(&file),
             &mut out,
             tiff.layout,
-            &tiff.shared(),
             &pages,
             &cancel,
         );

@@ -96,8 +96,6 @@ fn field(tag: u16) -> Option<MetaField> {
 #[derive(Debug)]
 pub(crate) struct Plan {
     layout: Layout,
-    /// The source's blocks listed more than once, sorted.
-    shared: Vec<Block>,
     pages: Vec<Dir>,
     found: Found,
 }
@@ -119,15 +117,22 @@ impl Plan {
                 }
             }
         }
-        let shared = tiff.shared();
-        let mut jpeg = JpegScan {
-            shared: &shared,
-            scanned: vec![false; shared.len()],
-            tables: HashSet::new(),
-        };
-        for ifd in tiff.ifds() {
-            if ifd.uint(259, order) == Some(7) && jpeg.holds_metadata(r, ifd)? {
-                return Err(Error::Refused(IN_DATA.into()));
+        let jpegs: Vec<&Ifd> = tiff
+            .ifds()
+            .into_iter()
+            .filter(|ifd| ifd.uint(259, order) == Some(7))
+            .collect();
+        if !jpegs.is_empty() {
+            let shared = tiff.shared();
+            let mut scan = JpegScan {
+                shared: &shared,
+                scanned: vec![false; shared.len()],
+                tables: HashSet::new(),
+            };
+            for ifd in jpegs {
+                if scan.holds_metadata(r, ifd)? {
+                    return Err(Error::Refused(IN_DATA.into()));
+                }
             }
         }
         let Tiff { layout, pages } = tiff;
@@ -144,7 +149,6 @@ impl Plan {
             .collect::<Result<_, _>>()?;
         Ok(Plan {
             layout,
-            shared,
             pages,
             found: walk.found,
         })
@@ -158,7 +162,7 @@ impl Plan {
         w: &mut dyn Out,
         cancel: &CancelToken,
     ) -> Result<Found, Error> {
-        write::write(r, w, self.layout, &self.shared, &self.pages, cancel)?;
+        write::write(r, w, self.layout, &self.pages, cancel)?;
         Ok(self.found.clone())
     }
 
