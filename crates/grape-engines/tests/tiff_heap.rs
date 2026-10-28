@@ -1,5 +1,5 @@
 //! The heap Remove Metadata on TIFF holds at its peak (D28): TIFFs of a
-//! million strips, and of pages that share Photoshop's resources, through
+//! million strips, and of pages with Photoshop's resources, through
 //! `run_job`, under an allocator that counts. The tests take turns, so
 //! nothing else allocates meanwhile.
 #![allow(clippy::unwrap_used)]
@@ -164,15 +164,24 @@ fn remove_metadata_on_a_tiff_of_a_million_strips_holds_two_models_and_a_half_at_
     }
 }
 
-/// A classic TIFF of `pages` gray 8 × 8 pages, a 64-byte strip each, whose
-/// Photoshop resources (34377) are one block they all point at: a path
-/// (2000) of `path` bytes.
-fn one_irb(pages: u32, path: u32) -> Vec<u8> {
+/// Photoshop's resources (34377): one path (2000) of `size` bytes.
+fn path(size: u32) -> Vec<u8> {
+    let mut block = b"8BIM\x07\xD0\0\0".to_vec();
+    block.extend(size.to_be_bytes());
+    block.extend((0..size).map(|i| (i % 251) as u8));
+    block
+}
+
+/// A classic TIFF of `pages` gray 8 × 8 pages, a 64-byte strip each, then
+/// the bytes `irb`: page `n`'s Photoshop resources (34377) are the bytes
+/// `at(n)` gives, as an offset into `irb` and a length.
+fn photoshop(pages: u32, irb: &[u8], at: impl Fn(u32) -> (u32, u32)) -> Vec<u8> {
     let ifd = 2 + 12 * 8 + 4;
     let strips = 8 + pages * ifd;
-    let irb = strips + 64 * pages;
+    let base = strips + 64 * pages;
     let mut file = b"II*\0\x08\0\0\0".to_vec();
     for n in 0..pages {
+        let (offset, len) = at(n);
         let entries: [(u16, u16, u32, u32); 8] = [
             (256, 4, 1, 8),
             (257, 4, 1, 8),
@@ -181,7 +190,7 @@ fn one_irb(pages: u32, path: u32) -> Vec<u8> {
             (273, 4, 1, strips + 64 * n),
             (278, 4, 1, 8),
             (279, 4, 1, 64),
-            (34377, 7, 12 + path, irb),
+            (34377, 7, len, base + offset),
         ];
         file.extend(8u16.to_le_bytes());
         for (tag, kind, count, value) in entries {
@@ -194,9 +203,7 @@ fn one_irb(pages: u32, path: u32) -> Vec<u8> {
         file.extend(next.to_le_bytes());
     }
     file.extend((0..64 * pages).map(|i| (i % 251) as u8));
-    file.extend(b"8BIM\x07\xD0\0\0");
-    file.extend(path.to_be_bytes());
-    file.extend((0..path).map(|i| (i % 251) as u8));
+    file.extend_from_slice(irb);
     file
 }
 
@@ -205,15 +212,33 @@ fn pages_that_share_photoshops_resources_hold_them_once() {
     // 32 pages, one 1 MiB path: the plan holds it once, and the self-check
     // reads it once more.
     let _turn = turn();
-    let path = 1 << 20;
+    let size = 1 << 20;
     let dir = TestDir::new("tiff-heap-irb");
     let (_, job) = plan_one(
         &dir,
         "paths.tif",
-        &one_irb(32, path),
+        &photoshop(32, &path(size), |_| (0, 12 + size)),
         Operation::tool(ToolKey::RemoveMetadata),
     );
     let peak = peak(&job);
-    let paths = peak as f64 / f64::from(path);
-    assert!(peak < 4 * path as usize, "{paths:.2} paths");
+    let paths = peak as f64 / f64::from(size);
+    assert!(peak < 4 * size as usize, "{paths:.2} paths");
+}
+
+#[test]
+fn the_self_check_holds_no_photoshop_resources_of_its_own() {
+    // Four pages, each with its own 3 MiB block: the plan holds the four,
+    // and the self-check reads and filters one at a time beside them.
+    let _turn = turn();
+    let (pages, size) = (4, 3 << 20);
+    let irb: Vec<u8> = (0..pages).flat_map(|_| path(size - 12)).collect();
+    let dir = TestDir::new("tiff-heap-irbs");
+    let (_, job) = plan_one(
+        &dir,
+        "pages.tif",
+        &photoshop(pages, &irb, |n| (n * size, size)),
+        Operation::tool(ToolKey::RemoveMetadata),
+    );
+    let blocks = peak(&job) as f64 / f64::from(size);
+    assert!(blocks < 6.5, "{blocks:.2} blocks");
 }

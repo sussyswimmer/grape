@@ -142,6 +142,7 @@ impl Plan {
             found: Found::default(),
             reported: HashSet::new(),
             irbs: HashMap::new(),
+            keep: true,
         };
         let pages = pages
             .into_iter()
@@ -195,13 +196,15 @@ impl Plan {
                 }
             }
         }
-        // And the report finds nothing.
+        // And the report finds nothing. The walk holds none of the
+        // resources it filters: each page's go with it.
         let mut walk = Walk {
             r,
             order: out.layout.order,
             found: Found::default(),
             reported: HashSet::new(),
             irbs: HashMap::new(),
+            keep: false,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -406,8 +409,13 @@ struct Walk<'r> {
     /// share is reported once.
     reported: HashSet<u64>,
     /// Photoshop's resources filtered, by where they are: a block that
-    /// IFDs share is read and filtered once, and its field shared.
+    /// IFDs share is read and filtered once, and its field shared, when
+    /// it's kept.
     irbs: HashMap<(u64, u64), Option<Field>>,
+    /// Whether the fields it makes are kept for the plan; the self-check
+    /// only needs what the report says, so a block that a later IFD shares
+    /// gives that IFD no field.
+    keep: bool,
 }
 
 impl Walk<'_> {
@@ -521,7 +529,7 @@ impl Walk<'_> {
 
     /// Photoshop's resources, kept down to the ones that describe the
     /// picture; `None` when none is left. Resources that an earlier IFD
-    /// points at too are the field it got.
+    /// points at too are the field it got, if it's kept.
     fn irb(&mut self, entry: &Entry) -> Result<Option<Field>, Error> {
         let Value::At { offset, len } = entry.value else {
             return self.filter_irb(entry);
@@ -535,7 +543,8 @@ impl Walk<'_> {
             return Ok(field.clone());
         }
         let field = self.filter_irb(entry)?;
-        self.irbs.insert((offset, len), field.clone());
+        let held = if self.keep { field.clone() } else { None };
+        self.irbs.insert((offset, len), held);
         Ok(field)
     }
 
