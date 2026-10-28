@@ -100,8 +100,9 @@ impl HeapCap {
 static HEAP: HeapCap = HeapCap::new();
 
 /// Arms the process's heap bound at `limit` bytes, counting from zero: the
-/// worker does this once it has read its request (and the app's test that
-/// its allocator is installed does it with no real bound).
+/// PDF worker does this once it has read its request, the Mac image helper
+/// worker before it reads one (and the app's test that its allocator is
+/// installed does it with no real bound).
 pub fn arm(limit: u64) {
     HEAP.arm(limit);
 }

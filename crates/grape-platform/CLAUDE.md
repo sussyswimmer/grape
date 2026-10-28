@@ -11,7 +11,7 @@ src/
   tracker.rs          the pure candidate-drag rules (threshold or start_now, baseline keys, Esc, missed release)
   avif.rs             the Mac worker's AVIF encoder (D41), behind `avif-encode`: rav1e through ravif (quality 80 by default, speed 6, 8-bit, 4:4:4, at most 8 threads), RGB ICC converted to sRGB with moxcms first, other pixels handed over uncopied; an RGBA picture's color and alpha encodes take turns (ravif without its `threading` feature, rav1e with its own: never turn ravif's on, a test reads Cargo.lock for it); safe Rust and OS-neutral, so it's tested on every OS
   file_actions.rs     copy, copy path, terminal (TerminalApp), move, share (ShareOutcome: opened + skipped), reveal, pick_folder (Settings): the API the app calls, per-OS dispatch
-  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move, the HEIC worker's decoder budget); tested on every OS
+  mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move, the image helper worker's decoder budget); tested on every OS
   win_rules.rs        pure Windows rules (Terminal: wt, or PowerShell for a `;` path or by choice; Share: what's skipped, `\\?\` stripped, the sheet's title, the anchor's frame; the tool panel's hand-back plan); tested on every OS
   macos/
     drag.rs           the drag thread: pressedMouseButtons + modifierFlags + drag-pasteboard changeCount/types; starts at once on a file drag session, holds an App Nap activity
