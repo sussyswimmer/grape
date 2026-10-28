@@ -7,6 +7,7 @@
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`]).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
+//! - [`tiff`]: a TIFF's model, for the TIFF tools (D28).
 //!
 //! The content decides which code runs, not the name ([`Kind`]): a PNG
 //! named `.jpg` is stripped and compressed as a PNG, and keeps its name.
@@ -19,6 +20,9 @@ mod png;
 mod png_compress;
 mod scale;
 mod strip;
+// The TIFF tools that use it come next.
+#[cfg_attr(not(test), allow(dead_code))]
+mod tiff;
 mod webp;
 
 use std::fs::File;

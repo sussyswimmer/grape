@@ -31,6 +31,8 @@ pub(crate) struct Found {
 pub(crate) enum Error {
     /// The file isn't what its first bytes say: truncated, or broken.
     Broken(String),
+    /// The file is past one of the caps that bound what Grape holds of it.
+    TooLarge(String),
     /// Reading the source failed (or was cancelled).
     Read(io::Error),
     /// Writing the temp file failed (or was cancelled).
@@ -41,6 +43,11 @@ pub(crate) enum Error {
 pub(crate) trait Out: Write + Seek {}
 
 impl<T: Write + Seek> Out for T {}
+
+/// What a stripper that seeks reads from: TIFF's walks its IFDs.
+pub(crate) trait In: BufRead + Seek {}
+
+impl<T: BufRead + Seek> In for T {}
 
 /// Reads exactly `buf.len()` bytes; the end of the file is [`Error::Broken`].
 pub(crate) fn read_exact(r: &mut dyn BufRead, buf: &mut [u8]) -> Result<(), Error> {
@@ -129,6 +136,7 @@ pub(crate) fn run(
     let found = found.map_err(|e| {
         let e = match e {
             Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
+            Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
             Error::Read(e) => names.read_failed(format!("read {}: {e}", src.display())),
             Error::Write(e) => names.write_failed(format!("write {}: {e}", temp.path().display())),
         };

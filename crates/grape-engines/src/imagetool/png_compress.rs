@@ -516,6 +516,7 @@ pub(crate) fn run(
     let broken = |e: Error| {
         let e = match e {
             Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
+            Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
             Error::Read(e) | Error::Write(e) => {
                 names.read_failed(format!("read {}: {e}", src.display()))
             }

@@ -1911,6 +1911,7 @@ dependencies = [
  "serde_json",
  "tar",
  "thiserror 2.0.21",
+ "tiff",
  "unicode-normalization",
  "zip",
  "zune-jpeg",
