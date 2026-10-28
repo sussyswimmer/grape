@@ -10,8 +10,11 @@
 //! reveal (working, info, error) ignores the mouse and the click goes to
 //! the window under it; a revealable one keeps the click, and `open -R`
 //! then activates Finder. On Windows it refuses drops (DECISIONS D13). On
-//! macOS wry accepts a drop on it as a copy and nothing happens, so the
-//! file is never moved (D18).
+//! macOS wry accepts a drop on a toast that takes the mouse as a copy and
+//! nothing happens. A toast that ignores the mouse most likely isn't the
+//! drag's destination at all: the drop goes to the window under it, whose
+//! app does what it would without Grape (Finder moves on the same volume),
+//! as if Grape weren't there (D18). Grape never moves the file either way.
 
 use std::collections::HashMap;
 use std::path::PathBuf;

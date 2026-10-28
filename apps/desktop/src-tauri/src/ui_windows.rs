@@ -157,8 +157,10 @@ fn unhide(_app: &AppHandle) {}
 /// failures are logged.
 ///
 /// On macOS nothing is replaced: wry answers every file drag with Copy and
-/// never touches the file (DECISIONS D18), so a file dropped on Settings or
-/// the toast is ignored, never moved.
+/// never touches the file (DECISIONS D18), so a file dropped on Settings,
+/// the panel or a toast that takes the mouse is ignored, never moved. A
+/// toast that ignores the mouse most likely lets the drop through to the
+/// window under it, as if Grape weren't there.
 fn refuse_drops(app: &AppHandle, window: &tauri::WebviewWindow) {
     #[cfg(target_os = "windows")]
     {
