@@ -274,8 +274,9 @@ fn the_self_check_holds_no_photoshop_resources_of_its_own() {
 #[test]
 fn pages_that_name_photoshops_resources_each_their_own_way_hold_16_mib_at_most() {
     // 40 pages that name one block of a 1 MiB path, each 2 bytes more of
-    // it (the padding after it): each is read and filtered on its own,
-    // until 16 MiB of them have been, and the file is too large.
+    // it (the padding after it): each is read and filtered on its own, so
+    // the second already reads more than the file holds, and the file is
+    // too large.
     let _turn = turn();
     let (pages, size) = (40, 1 << 20);
     let irb = [path(size), vec![0; 2 * pages as usize]].concat();

@@ -6,8 +6,9 @@
 //! - **Kept:** the layout, color, resolution and page tags ([`kept`]), ICC
 //!   and Orientation among them; Photoshop's resources, filtered
 //!   ([`irb`](super::irb)): a block that IFDs share is filtered once, and
-//!   held and written once; past [`MAX_IRB`] of them read in all, the file
-//!   is too large.
+//!   held and written once; with a block past [`MAX_IRB`], past that much
+//!   of them kept in all, or more of them read than the file holds
+//!   (blocks that overlap), the file is too large.
 //! - **Dropped and reported:** every other tag ([`field`]), and the Exif
 //!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
 //!   once). Padding, and blank values of up to [`MAX_JUDGED`] bytes, go
@@ -48,9 +49,8 @@ const JUDGE_BUDGET: u64 = 16 << 20;
 /// that entries share is read once.
 const MAX_BLANKS: usize = 4_096;
 
-/// The most bytes of Photoshop's resources read from one file, each block
-/// once however many IFDs name it: what the plan holds of them, filtered,
-/// is never more.
+/// The most bytes of Photoshop's resources the plan holds, filtered, each
+/// block once however many IFDs name it; and the longest block it reads.
 const MAX_IRB: u64 = 16 << 20;
 
 /// How much of each JPEG block (and of its tables) is read for segments.
@@ -167,6 +167,7 @@ impl Plan {
             irbs: HashMap::new(),
             keep: true,
             irb_left: MAX_IRB,
+            irb_read: len,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
         };
@@ -233,6 +234,7 @@ impl Plan {
             irbs: HashMap::new(),
             keep: false,
             irb_left: u64::MAX,
+            irb_read: u64::MAX,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
         };
@@ -499,9 +501,13 @@ struct Walk<'r> {
     /// only needs what the report says, so it makes none, and holds no
     /// filtered resources while it walks a page's SubIFDs.
     keep: bool,
-    /// What's left of the bytes of Photoshop's resources it may read, each
-    /// block once ([`MAX_IRB`]).
+    /// What's left of the bytes of Photoshop's resources it may keep,
+    /// filtered, each block once ([`MAX_IRB`]).
     irb_left: u64,
+    /// What's left of the bytes of Photoshop's resources it may read, each
+    /// block once: what the file holds, which only blocks that overlap
+    /// come to more than.
+    irb_read: u64,
     /// The values it read and judged blank, by where they are and their
     /// tag and type (what blank means for them), at most [`MAX_BLANKS`].
     blanks: HashSet<(Value, u16, u16)>,
@@ -643,11 +649,22 @@ impl Walk<'_> {
         if let Some(field) = self.irbs.get(&(offset, len)) {
             return Ok(field.clone());
         }
+        if len > MAX_IRB {
+            return Err(Error::TooLarge(format!(
+                "{len} bytes of Photoshop resources"
+            )));
+        }
         // Blocks that overlap count each time, however little they differ.
-        self.irb_left = self.irb_left.checked_sub(len).ok_or_else(|| {
-            Error::TooLarge(format!("over {MAX_IRB} bytes of Photoshop resources"))
+        self.irb_read = self.irb_read.checked_sub(len).ok_or_else(|| {
+            Error::TooLarge("Photoshop resources that overlap, more to read than it holds".into())
         })?;
         let field = self.filter_irb(entry)?;
+        let kept = field.as_ref().map_or(0, |f| f.count);
+        self.irb_left = self.irb_left.checked_sub(kept).ok_or_else(|| {
+            Error::TooLarge(format!(
+                "over {MAX_IRB} bytes of Photoshop resources to keep"
+            ))
+        })?;
         self.irbs.insert((offset, len), field.clone());
         Ok(field)
     }
@@ -951,18 +968,59 @@ mod tests {
             .all(|d| matches!(d, Data::Shared(b) if Arc::ptr_eq(b, first))));
     }
 
+    /// A TIFF of `pages` pages, each with its own Photoshop resources,
+    /// `irb`.
+    fn own_irbs(pages: usize, irb: &[u8]) -> Vec<u8> {
+        let pages = (0..pages)
+            .map(|_| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                page.tags.push((34377, V::Bytes(1, irb.to_vec())));
+                page
+            })
+            .collect();
+        Builder::new(b'I', false, pages).build()
+    }
+
     #[test]
-    fn photoshop_resources_past_16_mib_in_all_are_too_large() {
-        // Three pages whose resources are one block of a 6 MiB path, with
-        // padding after it: named the same way, it's read once; each page
-        // naming 2 more bytes of it, it's read three times, past 16 MiB.
+    fn photoshop_resources_kept_past_16_mib_in_all_are_too_large() {
+        // Three pages, each with its own 6 MiB path: 18 MiB to keep.
         let path = res(2000, "", &[7; 6 << 20]);
+        assert!(matches!(plan(&own_irbs(3, &path)), Err(Error::TooLarge(_))));
+        // As much read, but a thumbnail, which goes: nothing to keep.
+        let thumbnail = res(1036, "", &[7; 6 << 20]);
+        let (out, found) = strip(&own_irbs(3, &thumbnail));
+        assert_eq!(found, [Thumbnail].into());
+        assert!(read(&out).pages.iter().all(|p| p.get(34377).is_none()));
+        // 40 pages, each with its own resolution, a path and a 500 KB
+        // thumbnail: 20 MiB read, under 1 MiB kept.
+        let kept = [
+            res(1005, "", &[0, 72, 0, 0, 0, 1, 0, 1]),
+            res(2000, "", &[7; 22_000]),
+        ]
+        .concat();
+        let irb = [kept.clone(), res(1036, "", &[7; 500_000])].concat();
+        let (out, found) = strip(&own_irbs(40, &irb));
+        assert_eq!(found, [Thumbnail].into());
+        let back = read(&out);
+        assert_eq!(back.pages.len(), 40);
+        for page in &back.pages {
+            assert_eq!(value(&out, page, 34377).unwrap(), kept);
+        }
+    }
+
+    #[test]
+    fn photoshop_resources_that_overlap_are_read_up_to_the_files_size() {
+        // Three pages whose resources are one block of a 6 MiB thumbnail,
+        // which goes, with padding after it: named the same way, it's
+        // read once; each page naming 2 more bytes of it, it's read three
+        // times, more than the file holds, though nothing is kept.
+        let thumbnail = res(1036, "", &[7; 6 << 20]);
         for (step, fine) in [(0, true), (2, false)] {
             let pages = (0..3)
                 .map(|n| {
                     let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
                     let irb = if n == 0 {
-                        [path.clone(), vec![0; 4]].concat()
+                        [thumbnail.clone(), vec![0; 4]].concat()
                     } else {
                         vec![0]
                     };
@@ -976,17 +1034,20 @@ mod tests {
                 panic!("inline resources")
             };
             for (n, page) in (0..).zip(&tiff.pages) {
-                let len = path.len() as u64 + n * step;
+                let len = thumbnail.len() as u64 + n * step;
                 set_entry(&mut file, page.at, 34377, len, offset);
             }
             if fine {
                 let (out, found) = strip(&file);
-                assert!(found.is_empty());
+                assert_eq!(found, [Thumbnail].into());
                 assert!(out.len() < file.len());
             } else {
                 assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
             }
         }
+        // One block over 16 MiB is too large to read.
+        let file = own_irbs(1, &res(2000, "", &[7; 16 << 20]));
+        assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
     }
 
     #[test]
