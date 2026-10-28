@@ -2,14 +2,15 @@
 //! on (`docs/PLATFORM_MACOS.md` → "Launch at login").
 //!
 //! By default macOS relaunches every app that was running at logout when
-//! the user logs back in with "Reopen windows when logging back in" ticked.
-//! Grape's LaunchAgent starts it at login too, so the two would race: the
-//! second copy hands over to the first, and Settings could open. Apple's
-//! remedy for an app launched "via some other mechanism (e.g. launchd)" is
-//! `-[NSApplication disableRelaunchOnLogin]`. Those calls change a counter
-//! that's relaunched at zero only, so [`set_relaunch_on_login`] keeps at
-//! most one disable in effect and pairs it with exactly one enable
-//! (`mac_rules::relaunch_call`).
+//! the user logs back in with "Reopen windows when logging back in" ticked
+//! (whether loginwindow does so for an `LSUIElement` app like Grape is a
+//! Mac check). Grape's LaunchAgent starts it at login too, so the two would
+//! race: the second copy hands over to the first, and Settings could open.
+//! Apple's remedy for an app launched "via some other mechanism (e.g.
+//! launchd)" is `-[NSApplication disableRelaunchOnLogin]`. Those calls
+//! change a counter that's relaunched at zero only, so
+//! [`set_relaunch_on_login`] keeps at most one disable in effect and pairs
+//! it with exactly one enable (`mac_rules::relaunch_call`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
