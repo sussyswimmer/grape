@@ -35,6 +35,9 @@
 //!   volume's root never moves, and each item is judged right after its own
 //!   move); the same panel for Settings' folders; and the haptic tick behind
 //!   [`crate::haptic_tick`].
+//! - `login`: [`set_relaunch_on_login`], which keeps macOS's own relaunch
+//!   at login off while Grape's launch at login is on (its LaunchAgent
+//!   starts Grape then), with the AppKit calls paired.
 //! - `heif`: the image helper worker's codec, [`heif::ImageIo`] (DECISIONS
 //!   D33, D41): ImageIO behind `grape_heif_proto::Codec` for HEIC and AVIF
 //!   (AVIF written by [`crate::avif`]), run only in the worker process
@@ -58,11 +61,13 @@ mod display;
 mod drag;
 mod drag_out;
 pub mod heif;
+mod login;
 mod window;
 
 pub use activations::follow_app_activations;
 pub use display::refresh_screens;
 pub use drag_out::{drag_out, DragStart};
+pub use login::set_relaunch_on_login;
 pub use window::{
     describe_window, frame_and_show, hand_back_activation, harden_window, hide_panel, hide_shelf,
     show_panel, show_shelf, show_toast, window_frame, PanelShown, WindowRole,

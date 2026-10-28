@@ -847,6 +847,11 @@ impl SettingsState {
             picking: AtomicBool::new(false),
         };
         state.first_launch_at_login(app, &facts);
+        // Once launch at login is on, macOS mustn't also relaunch Grape at
+        // login (it's off by default only for apps that never asked).
+        if launch_state(app) == Some(true) {
+            relaunch_on_login(app, true);
+        }
         state
     }
 
@@ -1087,7 +1092,16 @@ pub const LOGIN_ARG: &str = "--at-login";
 
 /// `true` when this process was started by launch at login.
 pub fn launched_at_login() -> bool {
-    std::env::args().skip(1).any(|arg| arg == LOGIN_ARG)
+    at_login(std::env::args())
+}
+
+/// `true` when `args` (a process's arguments, its program first) are a
+/// launch at login's: [`LOGIN_ARG`] after the program. The single-instance
+/// handover passes a second launch's arguments so.
+pub fn at_login<S: AsRef<str>>(args: impl IntoIterator<Item = S>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .any(|arg| arg.as_ref() == LOGIN_ARG)
 }
 
 /// What [`settle_settings_file`] found at `settings.json`, before the store
@@ -1544,6 +1558,40 @@ fn launch_state(app: &AppHandle) -> Option<bool> {
     }
 }
 
+/// macOS: keeps the system's own relaunch at login ("Reopen windows when
+/// logging back in") off while Grape's launch at login is on
+/// (`launch_at_login`), since the LaunchAgent starts Grape then, and lets
+/// it relaunch Grape again once that's off
+/// (`grape_platform::macos::set_relaunch_on_login`, which keeps AppKit's
+/// calls paired). Queued on the main thread. Elsewhere nothing relaunches
+/// Grape at login on its own.
+#[cfg(target_os = "macos")]
+fn relaunch_on_login(app: &AppHandle, launch_at_login: bool) {
+    let queued =
+        app.run_on_main_thread(move || {
+            match grape_platform::macos::set_relaunch_on_login(!launch_at_login) {
+                Ok(true) if launch_at_login => {
+                    log::info!(
+                        "settings: launch at login is on; macOS won't also relaunch Grape at login"
+                    )
+                }
+                Ok(true) => log::info!(
+                    "settings: launch at login is off; macOS may relaunch Grape at login again"
+                ),
+                Ok(false) => {}
+                Err(err) => {
+                    log::warn!("settings: could not change macOS's relaunch at login: {err}")
+                }
+            }
+        });
+    if let Err(err) = queued {
+        log::warn!("settings: could not change macOS's relaunch at login: no main thread: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn relaunch_on_login(_app: &AppHandle, _launch_at_login: bool) {}
+
 /// Registers Grape to launch at login, or removes it.
 fn set_autostart(app: &AppHandle, on: bool) -> Result<(), String> {
     let Some(manager) = app.try_state::<AutoLaunchManager>() else {
@@ -1680,6 +1728,7 @@ pub async fn settings_set_toggle(
                     log::error!("settings: could not turn launch at login {words}: {err}");
                     return Err(LAUNCH_FAILED);
                 }
+                relaunch_on_login(&app, on);
                 new.launch_at_login = Some(on);
             }
         }
@@ -2543,6 +2592,23 @@ mod tests {
                 "{onboarding_done} {can_save} {at_login}"
             );
         }
+    }
+
+    #[test]
+    fn a_launch_at_login_is_told_by_its_arguments() {
+        let exe = "/Applications/Grape.app/Contents/MacOS/Grape";
+        assert!(at_login([exe, LOGIN_ARG]));
+        assert!(at_login(vec![
+            exe.to_owned(),
+            "-x".to_owned(),
+            LOGIN_ARG.to_owned()
+        ]));
+        assert!(!at_login([exe]));
+        assert!(!at_login(Vec::<String>::new()));
+        // The program's own name never counts, and nor does a near miss.
+        assert!(!at_login([LOGIN_ARG]));
+        assert!(!at_login([exe, "--at-login=1"]));
+        assert!(!at_login([exe, "--AT-LOGIN"]));
     }
 
     #[test]

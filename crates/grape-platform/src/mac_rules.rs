@@ -2,7 +2,8 @@
 //! Grape's top-left points and back, the screen under a point, the text and
 //! arguments the file actions use, how Move judges each item, and the float
 //! shelf's drag out (what it offers, how it ended, whose drag it is, its
-//! icons and frames) and hand-back (the apps the user was last in).
+//! icons and frames) and hand-back (the apps the user was last in), and
+//! the paired calls behind relaunch at login.
 //!
 //! No AppKit here, so these build and are tested on every OS, not only on a
 //! Mac. The `macos` module is the only caller outside the tests.
@@ -463,6 +464,28 @@ pub(crate) fn note_activation(recent: &mut Vec<i32>, pid: i32, grape: i32) {
     recent.retain(|&noted| noted != pid);
     recent.insert(0, pid);
     recent.truncate(RECENT_APPS);
+}
+
+/// A call that changes AppKit's relaunch-at-login counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RelaunchCall {
+    /// `-[NSApplication disableRelaunchOnLogin]`: one up.
+    Disable,
+    /// `-[NSApplication enableRelaunchOnLogin]`: one down.
+    Enable,
+}
+
+/// The call that makes macOS relaunch Grape at login (`relaunch`) or not,
+/// given whether Grape's one disable is in effect now (`disabled`), or none
+/// when it already matches. AppKit keeps a counter, not a flag, and
+/// relaunches only at zero, so Grape makes at most one disable and pairs it
+/// with exactly one enable: repeating either call never stacks.
+pub(crate) fn relaunch_call(disabled: bool, relaunch: bool) -> Option<RelaunchCall> {
+    match (disabled, relaunch) {
+        (false, false) => Some(RelaunchCall::Disable),
+        (true, true) => Some(RelaunchCall::Enable),
+        (false, true) | (true, false) => None,
+    }
 }
 
 #[cfg(test)]
@@ -951,5 +974,30 @@ mod tests {
         assert_eq!(recent.len(), RECENT_APPS);
         assert_eq!(recent[0], 20);
         assert_eq!(recent[RECENT_APPS - 1], 20 - RECENT_APPS as i32 + 1);
+    }
+
+    #[test]
+    fn relaunch_calls_stay_paired() {
+        // A counter that starts at zero, as AppKit's does.
+        let mut counter = 0_i32;
+        let mut disabled = false;
+        for relaunch in [false, false, true, true, false, true, true, false] {
+            match relaunch_call(disabled, relaunch) {
+                Some(RelaunchCall::Disable) => {
+                    counter += 1;
+                    disabled = true;
+                }
+                Some(RelaunchCall::Enable) => {
+                    counter -= 1;
+                    disabled = false;
+                }
+                None => {}
+            }
+            assert!((0..=1).contains(&counter), "{counter}");
+            // AppKit relaunches at zero only.
+            assert_eq!(counter == 0, relaunch);
+        }
+        assert_eq!(relaunch_call(false, true), None);
+        assert_eq!(relaunch_call(true, false), None);
     }
 }
