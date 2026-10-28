@@ -107,8 +107,10 @@ impl Plan {
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
         let tiff = Tiff::read(r, len)?;
         let order = tiff.layout.order;
+        // A description that IFDs share is read once.
+        let mut descriptions = HashSet::new();
         for ifd in tiff.ifds() {
-            if let Some(entry) = ifd.get(270) {
+            if let Some(entry) = ifd.get(270).filter(|e| descriptions.insert(e.value)) {
                 let text = head(r, entry, MAX_JUDGED)?.map(|(text, _)| text);
                 let text = text.unwrap_or_default();
                 if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
@@ -116,12 +118,17 @@ impl Plan {
                 }
             }
         }
+        let shared = tiff.shared();
+        let mut jpeg = JpegScan {
+            shared: &shared,
+            scanned: vec![false; shared.len()],
+            tables: HashSet::new(),
+        };
         for ifd in tiff.ifds() {
-            if ifd.uint(259, order) == Some(7) && jpeg_holds_metadata(r, ifd)? {
+            if ifd.uint(259, order) == Some(7) && jpeg.holds_metadata(r, ifd)? {
                 return Err(Error::Refused(IN_DATA.into()));
             }
         }
-        let shared = tiff.shared();
         let Tiff { layout, pages } = tiff;
         let mut walk = Walk {
             r,
@@ -275,26 +282,46 @@ fn head(r: &mut dyn In, entry: &Entry, max: u64) -> Result<Option<(Vec<u8>, bool
     }
 }
 
-/// Whether the JPEG data of `ifd` (compression 7) holds metadata, or may:
-/// in its JPEGTables, or in a block before its first scan.
-fn jpeg_holds_metadata(r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
-    if let Some(tables) = ifd.get(347) {
-        if let Some((tables, whole)) = head(r, tables, MAX_SCAN)? {
-            if segments_hold_metadata(&tables, whole) {
+/// The scan of JPEG data for metadata, which reads a block, or a
+/// JPEGTables value, once however many times IFDs list it: one that held
+/// metadata ended the scan.
+struct JpegScan<'s> {
+    /// The blocks listed more than once, sorted ([`Tiff::shared`]).
+    shared: &'s [Block],
+    /// Which of them it has read.
+    scanned: Vec<bool>,
+    /// The JPEGTables values it has read, by where they are.
+    tables: HashSet<Value>,
+}
+
+impl JpegScan<'_> {
+    /// Whether the JPEG data of `ifd` (compression 7) holds metadata, or
+    /// may: in its JPEGTables, or in a block before its first scan.
+    fn holds_metadata(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
+        if let Some(tables) = ifd.get(347).filter(|e| self.tables.insert(e.value)) {
+            if let Some((tables, whole)) = head(r, tables, MAX_SCAN)? {
+                if segments_hold_metadata(&tables, whole) {
+                    return Ok(true);
+                }
+            }
+        }
+        let mut buf = Vec::new();
+        for block in ifd.blocks.iter().filter(|b| b.len > 0) {
+            let shared = self.shared.binary_search(block).ok();
+            if let Some(scanned) = shared.and_then(|n| self.scanned.get_mut(n)) {
+                if std::mem::replace(scanned, true) {
+                    continue;
+                }
+            }
+            buf.resize(block.len.min(MAX_SCAN) as usize, 0);
+            seek(r, block.offset)?;
+            read_exact(r, &mut buf)?;
+            if segments_hold_metadata(&buf, block.len <= MAX_SCAN) {
                 return Ok(true);
             }
         }
+        Ok(false)
     }
-    let mut buf = Vec::new();
-    for block in ifd.blocks.iter().filter(|b| b.len > 0) {
-        buf.resize(block.len.min(MAX_SCAN) as usize, 0);
-        seek(r, block.offset)?;
-        read_exact(r, &mut buf)?;
-        if segments_hold_metadata(&buf, block.len <= MAX_SCAN) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 /// Whether the JPEG stream `jpeg` has an APP1, APP13 or COM segment before
@@ -403,9 +430,13 @@ impl Walk<'_> {
         })
     }
 
-    /// Reports `found` for the dropped `entry`, unless its value is blank
-    /// as far as it's read. One that can't be read is reported.
+    /// Reports `found` for the dropped `entry`, unless it's reported
+    /// already (its value isn't read then) or its value is blank as far as
+    /// it's read. One that can't be read is reported.
     fn report(&mut self, found: MetaField, entry: &Entry) -> Result<(), Error> {
+        if self.found.fields.contains(&found) {
+            return Ok(());
+        }
         let blank = match head(self.r, entry, MAX_JUDGED)? {
             Some((value, true)) => exif::is_empty(entry.tag, entry.kind, &value),
             _ => false,
@@ -992,6 +1023,76 @@ mod tests {
         assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", true));
         assert!(segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", false));
         assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xDA\0\x02", false));
+    }
+
+    /// A source that counts the bytes read from it.
+    struct Tally<'f> {
+        file: Cursor<&'f [u8]>,
+        read: u64,
+    }
+
+    impl std::io::Read for Tally<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.file.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for Tally<'_> {
+        fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(pos)
+        }
+    }
+
+    #[test]
+    fn what_ifds_share_or_the_report_has_said_is_read_once() {
+        // 40 JPEG pages whose strip, JPEGTables and description are the
+        // first page's, of over 64 KiB each, and whose Software tags are
+        // 64 KiB each, all different.
+        let strip = [jpeg(b""), vec![0; 64 * 1024]].concat();
+        let tables = [&b"\xFF\xD8\xFF\xD9"[..], &[0; 64 * 1024]].concat();
+        let description = b"A scan ".repeat(10_000);
+        let pages = (0..40u8)
+            .map(|n| {
+                let mut page = gray(8, 8, 8, vec![B::Data(strip.clone())]);
+                page.tags.extend([
+                    (259, V::Short(vec![7])),
+                    (270, V::Bytes(2, description.clone())),
+                    (305, V::Bytes(2, vec![b'A' + n % 26; 64 * 1024])),
+                    (347, V::Bytes(7, tables.clone())),
+                ]);
+                page.tags.sort_by_key(|t| t.0);
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'I', false, pages).build();
+        let tiff = read(&file);
+        let first = &tiff.pages[0];
+        let at = |tag| match first.get(tag).unwrap().value {
+            Value::At { offset, len } => (offset, len),
+            _ => panic!("{tag} inline"),
+        };
+        let block = first.blocks[0];
+        for page in &tiff.pages[1..] {
+            set_entry(&mut file, page.at, 273, 1, block.offset);
+            for tag in [270, 347] {
+                let (offset, len) = at(tag);
+                set_entry(&mut file, page.at, tag, len, offset);
+            }
+        }
+        let mut r = std::io::BufReader::with_capacity(
+            64 * 1024,
+            Tally {
+                file: Cursor::new(&file),
+                read: 0,
+            },
+        );
+        let plan = Plan::new(&mut r, file.len() as u64).unwrap();
+        assert_eq!(plan.found.fields, [Comment, Software].into());
+        // Each 64 KiB once, and the IFDs: not 40 times.
+        let read = r.get_ref().read;
+        assert!(read < 1 << 20, "{read} bytes read");
     }
 
     #[test]
