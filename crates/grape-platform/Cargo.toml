@@ -18,10 +18,22 @@ log = "0.4.34"
 grape-heif-proto.workspace = true
 # The Mac worker's AVIF encoder (D41), OS-neutral so it's tested anywhere:
 # rav1e through ravif (BSD-3-Clause; rav1e, v_frame and av1-grain are
-# BSD-2-Clause), with rayon for its threads. No asm here: see below.
-ravif = { version = "=0.13.0", default-features = false, features = [
+# BSD-2-Clause). No asm here: see below. ravif's own `threading` feature
+# stays off, so it encodes an RGBA picture's color and then its alpha, one
+# after the other: with it on (`rayon::join`) both encodes ran at once, each
+# with its own pool, which at the 35.6 MP cap went past the worker's 2 GiB
+# heap bound.
+ravif = { version = "=0.13.0", default-features = false, optional = true }
+# ravif's rav1e, named only to turn on `threading` (rayon, through
+# maybe-rayon): each encode then runs on a pool of `avif.rs`'s thread count.
+# The version is the one ravif takes, so nothing new is built or locked.
+rav1e = { version = "=0.8.1", default-features = false, features = [
     "threading",
 ], optional = true }
+# ravif's pixel types: `FromSlice` hands ravif the picture's own bytes as
+# `RGB8`/`RGBA8` rather than a copy (143 MB at the cap). ravif's version and
+# features, already locked.
+rgb = { version = "=0.8.53", default-features = false, optional = true }
 # Converts an ICC-tagged picture to sRGB before ravif, which writes sRGB
 # nclx and no ICC (D41). Already in Cargo.lock through `image`, with the same
 # default features (SIMD paths only, no package of their own).
@@ -180,7 +192,7 @@ heif-it = []
 # compile rav1e; CI's heif-it-macos job and local tests turn it on anywhere
 # (the module is OS-neutral). Without it the Mac worker answers "noEncoder"
 # for AVIF.
-avif-encode = ["dep:ravif", "dep:moxcms"]
+avif-encode = ["dep:ravif", "dep:rav1e", "dep:rgb", "dep:moxcms"]
 
 [dev-dependencies]
 # tests/job_object.rs and tests/heif_imageio.rs write protocol requests.

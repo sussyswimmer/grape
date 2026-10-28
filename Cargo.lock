@@ -1849,7 +1849,9 @@ dependencies = [
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-image-io",
+ "rav1e",
  "ravif",
+ "rgb",
  "serde_json",
  "thiserror 2.0.21",
  "windows",
@@ -3720,7 +3722,6 @@ dependencies = [
  "loop9",
  "quick-error 2.0.1",
  "rav1e",
- "rayon",
  "rgb",
 ]
 

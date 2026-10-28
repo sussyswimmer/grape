@@ -750,6 +750,51 @@ jobs:
           else
             echo "No Rosetta on this runner: the x86_64 slice's worker isn't run."
           fi
+      # One AVIF at the encode cap through the shipped worker (D41): an
+      # 8192x4352 RGBA picture with grain and soft transparent edges, under
+      # the 2 GiB heap bound the worker arms (exit 86 is "needs too much
+      # memory"). rav1e runs as many threads as the runner has cores (3), not
+      # the 8 of a bigger Mac; D41 has the 8-thread peaks, measured on Linux.
+      - name: Encode an AVIF at the cap with the image helper worker
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          bin="$app/Contents/MacOS/$name"
+          work=$(mktemp -d "$RUNNER_TEMP/grape-heif-cap.XXXXXX")
+          python3 - "$work/input.rgba" <<'PY'
+          import os, struct, sys
+          w, h = 8192, 4352
+          # A gradient in each color byte's high bits, random grain in its low
+          # four, and alpha that ramps from 0 at the sides to 255 in the middle.
+          row = bytearray()
+          for x in range(w):
+              a = max(0, min(255, (min(x, w - 1 - x) - 256) * 2))
+              row += bytes(((x * 255 // w) & 0xF0, (x * 128 // w) & 0xF0, 0x80, a))
+          size = w * h * 4
+          base = int.from_bytes(bytes(row) * h, "little")
+          mask = int.from_bytes(b"\x0f\x0f\x0f\x00" * (w * h), "little")
+          grain = int.from_bytes(os.urandom(size), "little") & mask
+          with open(sys.argv[1], "wb") as f:
+              f.write(b"GRAPEPX\x01" + struct.pack("<IIII", w, h, 4, 0))
+              f.write((base | grain).to_bytes(size, "little"))
+          PY
+          limits='{"maxSourceBytes":536870912,"maxPixels":134217728,"maxEncodePixels":35651584,"maxEncodeSide":16384,"maxIccBytes":16707345,"maxDecoderMemory":1073741824}'
+          request='{"protocol":2,"workDir":"'"$work"'","op":{"kind":"encode","format":"avif"},"limits":'"$limits"'}'
+          set +e
+          out=$(printf '%s' "$request" | /usr/bin/time -l "$bin" --grape-heif-worker 2> "$work/time.txt")
+          code=$?
+          set -e
+          echo "$out" | tail -n 1
+          grep -E 'real|maximum resident set size' "$work/time.txt" || true
+          [ "$code" -ne 86 ] || { echo "::error::The worker went past its 2 GiB heap bound on an AVIF at the cap (exit 86)."; exit 1; }
+          [ "$code" -eq 0 ] || { echo "::error::The worker exited $code on an AVIF at the cap."; exit 1; }
+          case "$out" in
+            *'"done":'*) ;;
+            *) echo "::error::The worker didn't answer done for an AVIF at the cap."; exit 1 ;;
+          esac
+          [ "$(head -c 12 "$work/out.avif" | tail -c 4)" = avif ] || { echo "::error::out.avif isn't an AVIF."; exit 1; }
+          ls -l "$work/out.avif"
+          rm -rf "$work"
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal

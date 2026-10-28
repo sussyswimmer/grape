@@ -14,6 +14,15 @@
 //!   100, alpha the same), speed 6 (ravif's own default of 4 took three
 //!   times as long for files 3% smaller), 8-bit, at most 8 threads.
 //!   ravif always writes 4:4:4 and a single picture, never a grid.
+//! - **Memory:** an RGBA picture's color and alpha are two rav1e encodes,
+//!   and they run one after the other (ravif is built without its
+//!   `threading` feature, rav1e with its own; see `Cargo.toml`), so at most
+//!   8 threads run and the worker's peak is the larger encode's, not their
+//!   sum. The pixels go to ravif as they are, borrowed; only a picture with
+//!   an ICC profile is copied, converted. At the 35.6 MP cap a soft-edged
+//!   RGBA picture took 1.37 GB of the worker's counted heap with both
+//!   encodes at once and a copy, and takes 0.98 GB now (D41's Limits, with
+//!   the pictures that are mostly noise and still go past the 2 GiB bound).
 //! - **Color:** ravif writes BT.709 primaries with the sRGB transfer (nclx)
 //!   and no ICC profile. So pixels that carry an RGB ICC profile are first
 //!   converted to sRGB with moxcms, alpha untouched: a Display P3 photo
@@ -23,12 +32,14 @@
 //!
 //! Nothing logs, and no failure detail holds a path.
 
+use std::borrow::Cow;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use grape_heif_proto::{FailKind, Failure, Pixels};
 use moxcms::{ColorProfile, DataColorSpace, Layout, Transform8BitExecutor, TransformOptions};
-use ravif::{BitDepth, Encoder, Img, RGB8, RGBA8};
+use ravif::{BitDepth, Encoder, Img};
+use rgb::FromSlice;
 
 /// ravif's quality when the request has none: cavif's own default, which
 /// matched HEIC's 0.8 by eye and SSIM in D41's measurements.
@@ -63,13 +74,13 @@ pub fn encode(pixels: &Pixels, quality: Option<u8>) -> Result<Vec<u8>, Failure> 
         .with_num_threads(Some(threads()));
     let encoded = match pixels.channels {
         3 => {
-            let rgb = to_srgb::<3, RGB8>(pixels, |[r, g, b]| RGB8::new(r, g, b))?;
-            encoder.encode_rgb(Img::new(rgb.as_slice(), width, height))
+            let rgb = to_srgb(pixels, Layout::Rgb)?;
+            encoder.encode_rgb(Img::new(rgb.as_rgb(), width, height))
         }
         4 => {
-            let rgba = to_srgb::<4, RGBA8>(pixels, |[r, g, b, a]| RGBA8::new(r, g, b, a))?;
+            let rgba = to_srgb(pixels, Layout::Rgba)?;
             // ravif leaves the alpha plane out when every pixel is opaque.
-            encoder.encode_rgba(Img::new(rgba.as_slice(), width, height))
+            encoder.encode_rgba(Img::new(rgba.as_rgba(), width, height))
         }
         channels => return Err(fail(FailKind::Internal, format!("{channels} channels"))),
     }
@@ -106,39 +117,38 @@ fn size(pixels: &Pixels) -> Result<(usize, usize), Failure> {
     Ok((width, height))
 }
 
-/// The pixels as ravif's pixel type, converted to sRGB first when they
-/// carry an RGB ICC profile that moxcms reads ([`srgb_transform`]); as they
-/// are otherwise. One copy, made a row at a time.
-fn to_srgb<const N: usize, P>(pixels: &Pixels, pixel: fn([u8; N]) -> P) -> Result<Vec<P>, Failure> {
-    let layout = if N == 4 { Layout::Rgba } else { Layout::Rgb };
-    let transform = pixels
+/// The pixels' bytes in sRGB, `layout`'s channels to a pixel: converted
+/// into one new buffer, a row at a time, when they carry an RGB ICC profile
+/// that moxcms reads ([`srgb_transform`]); otherwise the pixels' own bytes,
+/// borrowed, so the picture isn't copied (143 MB of RGBA at the cap).
+fn to_srgb(pixels: &Pixels, layout: Layout) -> Result<Cow<'_, [u8]>, Failure> {
+    let Some(transform) = pixels
         .icc
         .as_deref()
-        .and_then(|icc| srgb_transform(icc, layout));
-    let mut out: Vec<P> = Vec::new();
-    out.try_reserve_exact(pixels.data.len() / N)
-        .map_err(|_| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
+        .and_then(|icc| srgb_transform(icc, layout))
+    else {
+        return Ok(Cow::Borrowed(&pixels.data));
+    };
+    let channels = if layout == Layout::Rgba { 4 } else { 3 };
     let stride = usize::try_from(pixels.width)
         .ok()
-        .and_then(|width| width.checked_mul(N))
+        .and_then(|width| width.checked_mul(channels))
         .filter(|&stride| stride > 0)
         .ok_or_else(|| fail(FailKind::Internal, "an empty row"))?;
-    let mut converted = Vec::new();
-    for row in pixels.data.chunks_exact(stride) {
-        let row = match &transform {
-            Some(transform) => {
-                converted.clear();
-                converted.resize(row.len(), 0);
-                transform
-                    .transform(row, &mut converted)
-                    .map_err(|err| fail(FailKind::Encode, format!("moxcms: {err}")))?;
-                converted.as_slice()
-            }
-            None => row,
-        };
-        out.extend(row.as_chunks::<N>().0.iter().map(|&px| pixel(px)));
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels.data.len())
+        .map_err(|_| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
+    out.resize(pixels.data.len(), 0);
+    for (row, converted) in pixels
+        .data
+        .chunks_exact(stride)
+        .zip(out.chunks_exact_mut(stride))
+    {
+        transform
+            .transform(row, converted)
+            .map_err(|err| fail(FailKind::Encode, format!("moxcms: {err}")))?;
     }
-    Ok(out)
+    Ok(Cow::Owned(out))
 }
 
 /// An 8-bit transform from `icc` to sRGB in `layout` (alpha copied as it
@@ -328,7 +338,9 @@ mod tests {
             data: vec![234, 51, 35, 128, 128, 128],
             icc: Some(p3.clone()),
         };
-        let rgb = to_srgb::<3, [u8; 3]>(&pixels, |px| px).expect("converted");
+        let converted = to_srgb(&pixels, Layout::Rgb).expect("converted");
+        assert!(matches!(converted, Cow::Owned(_)));
+        let rgb = converted.as_chunks::<3>().0;
         let near =
             |got: [u8; 3], want: [u8; 3]| got.iter().zip(want).all(|(g, w)| g.abs_diff(w) <= 2);
         assert!(near(rgb[0], [255, 0, 0]), "{:?}", rgb[0]);
@@ -343,7 +355,8 @@ mod tests {
             data: vec![234, 51, 35, 77, 128, 128, 128, 0],
             icc: Some(p3),
         };
-        let rgba = to_srgb::<4, [u8; 4]>(&pixels, |px| px).expect("converted");
+        let converted = to_srgb(&pixels, Layout::Rgba).expect("converted");
+        let rgba = converted.as_chunks::<4>().0;
         assert!(
             near([rgba[0][0], rgba[0][1], rgba[0][2]], [255, 0, 0]),
             "{:?}",
@@ -358,8 +371,8 @@ mod tests {
         let mut pixels = gradient(16, 4, 3);
         let before = pixels.data.clone();
         pixels.icc = Some(srgb);
-        let rgb = to_srgb::<3, [u8; 3]>(&pixels, |px| px).expect("converted");
-        for (got, want) in rgb.as_flattened().iter().zip(&before) {
+        let rgb = to_srgb(&pixels, Layout::Rgb).expect("converted");
+        for (got, want) in rgb.iter().zip(&before) {
             assert!(got.abs_diff(*want) <= 1, "{got} for {want}");
         }
     }
@@ -370,8 +383,9 @@ mod tests {
         let before = pixels.data.clone();
         for icc in [b"not an ICC profile".to_vec(), vec![0; 132], Vec::new()] {
             pixels.icc = Some(icc);
-            let rgba = to_srgb::<4, [u8; 4]>(&pixels, |px| px).expect("as they are");
-            assert_eq!(rgba.as_flattened(), before.as_slice());
+            let rgba = to_srgb(&pixels, Layout::Rgba).expect("as they are");
+            assert!(is_borrowed(&rgba, &pixels), "a copy");
+            assert_eq!(&*rgba, before.as_slice());
             check(&encode(&pixels, None).expect("an AVIF"), 8, 4);
         }
     }
@@ -384,12 +398,90 @@ mod tests {
         let mut pixels = gradient(8, 2, 3);
         let before = pixels.data.clone();
         pixels.icc = Some(gray);
-        let rgb = to_srgb::<3, [u8; 3]>(&pixels, |px| px).expect("as they are");
-        assert_eq!(rgb.as_flattened(), before.as_slice());
+        let rgb = to_srgb(&pixels, Layout::Rgb).expect("as they are");
+        assert!(is_borrowed(&rgb, &pixels), "a copy");
+        assert_eq!(&*rgb, before.as_slice());
+    }
+
+    /// True when `bytes` are `pixels`' own, not a copy.
+    fn is_borrowed(bytes: &[u8], pixels: &Pixels) -> bool {
+        std::ptr::eq(bytes, pixels.data.as_slice())
+    }
+
+    #[test]
+    fn pixels_without_a_profile_go_to_ravif_uncopied() {
+        for channels in [3, 4] {
+            let pixels = gradient(8, 4, channels);
+            let layout = if channels == 4 {
+                Layout::Rgba
+            } else {
+                Layout::Rgb
+            };
+            let bytes = to_srgb(&pixels, layout).expect("as they are");
+            assert!(is_borrowed(&bytes, &pixels), "{channels} channels: a copy");
+            // ravif's view of them is the same pixels, in order.
+            if channels == 4 {
+                let px = bytes.as_rgba();
+                assert_eq!(px.len(), 8 * 4);
+                assert_eq!(<[u8; 4]>::from(px[5]), pixels.data[20..24]);
+            } else {
+                let px = bytes.as_rgb();
+                assert_eq!(px.len(), 8 * 4);
+                assert_eq!(<[u8; 3]>::from(px[5]), pixels.data[15..18]);
+            }
+        }
     }
 
     #[test]
     fn threads_are_between_one_and_eight() {
         assert!((1..=MAX_THREADS).contains(&threads()));
+    }
+
+    /// The dependencies `Cargo.lock` lists for the package `name`.
+    fn locked_dependencies(lock: &str, name: &str) -> Vec<String> {
+        let header = format!("name = \"{name}\"\n");
+        let package = lock
+            .split("[[package]]")
+            .find(|package| package.trim_start().starts_with(&header))
+            .unwrap_or_else(|| panic!("{name} isn't in Cargo.lock"));
+        package
+            .split_once("dependencies = [")
+            .map_or("", |(_, list)| list.split(']').next().unwrap_or(""))
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .trim_matches(|c| c == '"' || c == ',')
+                    .split(' ')
+                    .next()
+            })
+            .filter(|dependency| !dependency.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// ravif's own `threading` feature would run an RGBA picture's color
+    /// and alpha encodes at once (`rayon::join`), each on a pool of its
+    /// own: twice the threads, and past the worker's heap bound at the cap
+    /// (D41). Without it ravif's join takes turns, and rav1e's `threading`
+    /// (rayon, through maybe-rayon) gives each encode its pool. The lock
+    /// says which, whatever crate in the workspace turned a feature on:
+    /// ravif depends on rayon only with `threading`, maybe-rayon only with
+    /// `threads`.
+    #[test]
+    fn the_color_and_alpha_encodes_take_turns() {
+        let lock =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock"))
+                .expect("the workspace's Cargo.lock");
+        let ravif = locked_dependencies(&lock, "ravif");
+        assert!(ravif.contains(&"rav1e".to_owned()), "{ravif:?}");
+        assert!(
+            !ravif.contains(&"rayon".to_owned()),
+            "ravif's threading is on: {ravif:?}"
+        );
+        let maybe_rayon = locked_dependencies(&lock, "maybe-rayon");
+        assert!(
+            maybe_rayon.contains(&"rayon".to_owned()),
+            "rav1e's threading is off: {maybe_rayon:?}"
+        );
     }
 }
