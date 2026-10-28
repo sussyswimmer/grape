@@ -427,7 +427,9 @@ fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
 /// behind Explorer with only a flashing taskbar button. A [`TopmostOwner`]
 /// makes it topmost: in front, inactive until clicked. Grape never calls
 /// `SetForegroundWindow` or makes up input for it. Without that owner the
-/// picker still opens, as before, and the log says why.
+/// picker still opens, as before, and the log says why. What staying
+/// topmost costs (no taskbar button, and which window Windows activates
+/// when it closes) is in `docs/PLATFORM_WINDOWS.md` → Move.
 fn pick_move_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
     let start = sources.first().and_then(|source| source.parent());
     let owner = TopmostOwner::new();
