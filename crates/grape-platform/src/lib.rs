@@ -16,6 +16,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::SyncSender;
 
+// The Mac worker's AVIF encoder (rav1e through ravif, D41): safe Rust and
+// OS-neutral, so it's tested on every OS; only the app's macOS build turns
+// the feature on.
+#[cfg(feature = "avif-encode")]
+pub mod avif;
 pub mod file_actions;
 pub mod mock;
 pub mod tracker;

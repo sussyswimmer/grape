@@ -1,6 +1,6 @@
 [package]
 name = "grape-heif-proto"
-description = "The protocol between Grape and its HEIC helper process: wire types, the raw pixel file, sniffing and the worker loop (D33)"
+description = "The protocol between Grape and its image helper process for HEIC and AVIF: wire types, the raw pixel file, sniffing and the worker loop (D33, D41)"
 # Spelled out, not `workspace = true`: tools/grape-heif builds this crate by
 # path from outside the workspace (heic-spec J2).
 version = "0.1.0"

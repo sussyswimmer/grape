@@ -9,10 +9,11 @@ use std::process::ExitCode;
 use grape_engines::pdf::{heap, worker_main, WORKER_FLAG as PDF_WORKER_FLAG};
 use grape_heif_proto::WORKER_FLAG as HEIF_WORKER_FLAG;
 
-/// The system allocator, with every change reported to the PDF worker's
-/// heap bookkeeping (`grape_engines::pdf::heap`, DECISIONS D29), which ends
-/// the worker past its bound. Only the worker arms the bound: in the app
-/// itself this costs one atomic load per call. It is the same as in
+/// The system allocator, with every change reported to the workers' heap
+/// bookkeeping (`grape_engines::pdf::heap`, DECISIONS D29), which ends a
+/// worker past its bound. Only the workers arm the bound, the PDF worker
+/// (D29) and the Mac image helper worker (D41): in the app itself this
+/// costs one atomic load per call. It is the same as in
 /// `crates/grape-engines/src/bin/grape-pdf-worker.rs`: change both
 /// together.
 struct WorkerHeap;
@@ -82,9 +83,9 @@ fn main() -> ExitCode {
     if first_arg_is(std::env::args_os(), PDF_WORKER_FLAG) {
         return worker_main();
     }
-    // `Grape --grape-heif-worker` is the HEIC worker (D33), the same way:
-    // one HEIC job through ImageIO on macOS. It never arms the PDF
-    // worker's heap bound.
+    // `Grape --grape-heif-worker` is the image helper worker (D33, D41),
+    // the same way: one HEIC or AVIF job through ImageIO (and rav1e for
+    // AVIF output) on macOS, under a 2 GiB heap bound.
     if first_arg_is(std::env::args_os(), HEIF_WORKER_FLAG) {
         return heif_worker();
     }
@@ -105,18 +106,38 @@ fn first_arg_is(mut args: impl Iterator<Item = OsString>, flag: &str) -> bool {
     args.nth(1).is_some_and(|first| first == flag)
 }
 
-/// The HEIC worker: ImageIO behind the HEIC protocol on macOS
+/// The image helper worker: ImageIO (and rav1e, `grape_platform::avif`,
+/// for AVIF output) behind the image helper's protocol on macOS
 /// (`grape_platform::macos::heif`), with the exit code it ends with.
 #[cfg(target_os = "macos")]
 fn heif_worker() -> ExitCode {
     use grape_platform::macos::heif::ImageIo;
 
-    // Before ImageIO does anything else, on this one thread.
-    ImageIo::restrict_process();
-    grape_heif_proto::worker_main(&ImageIo)
+    run_heif_worker(ImageIo::restrict_process, || {
+        grape_heif_proto::worker_main(&ImageIo)
+    })
 }
 
-/// Elsewhere the HEIC helper is `grape-heif.exe` (Windows) or none, so
+/// The image helper worker's steps, in order, on every OS so that a test
+/// runs the same path [`heif_worker`] does: `restrict` (on macOS ImageIO's
+/// allowed types, before ImageIO does anything else and while the worker
+/// has one thread), then the worker's memory cap, then `serve` (the
+/// protocol's one job), whose exit code it returns.
+///
+/// The cap (D41) is the heap bound the PDF worker has, at
+/// `grape_heif_proto::WORKER_HEAP_BYTES` (2 GiB), for every op. rav1e's
+/// encoder and Grape's buffers are Rust's heap; ImageIO's own `malloc`
+/// isn't counted. Past the bound the worker exits with
+/// `heap::OVER_HEAP_EXIT`, which the parent reports as "needs too much
+/// memory".
+#[cfg(any(target_os = "macos", test))]
+fn run_heif_worker(restrict: impl FnOnce(), serve: impl FnOnce() -> ExitCode) -> ExitCode {
+    restrict();
+    heap::arm(grape_heif_proto::WORKER_HEAP_BYTES);
+    serve()
+}
+
+/// Elsewhere the image helper is `grape-heif.exe` (Windows) or none, so
 /// `Grape --grape-heif-worker` exits 2 (bad usage) at once and never starts
 /// a second tray app (heic-spec J20).
 #[cfg(not(target_os = "macos"))]
@@ -148,7 +169,7 @@ mod tests {
         assert_eq!(PDF_WORKER_FLAG, "--grape-pdf-worker");
         assert!(is_pdf_worker(&["Grape.exe", "--grape-pdf-worker"]));
         assert!(is_pdf_worker(&["grape", "--grape-pdf-worker", "x"]));
-        // The HEIC flag isn't the PDF worker's.
+        // The image helper's flag isn't the PDF worker's.
         assert!(!is_pdf_worker(&["Grape", "--grape-heif-worker"]));
     }
 
@@ -157,7 +178,7 @@ mod tests {
         assert_eq!(HEIF_WORKER_FLAG, "--grape-heif-worker");
         assert!(is_heif_worker(&["Grape", "--grape-heif-worker"]));
         assert!(is_heif_worker(&["Grape.exe", "--grape-heif-worker", "x"]));
-        // The PDF flag isn't the HEIC worker's.
+        // The PDF flag isn't the image helper worker's.
         assert!(!is_heif_worker(&["Grape", "--grape-pdf-worker"]));
     }
 
@@ -184,12 +205,12 @@ mod tests {
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn the_heif_flag_exits_2_where_grape_isnt_the_heic_helper() {
+    fn the_heif_flag_exits_2_where_grape_isnt_the_image_helper() {
         assert_eq!(heif_worker(), ExitCode::from(2));
     }
 
     #[test]
-    fn the_pdf_workers_heap_bound_sees_every_allocation() {
+    fn the_workers_heap_bound_sees_every_allocation() {
         const MIB: isize = 1 << 20;
         // No real bound: this only checks the allocator reports to it. Other
         // tests allocate meanwhile, so the checks leave a wide margin.
@@ -209,6 +230,67 @@ mod tests {
         drop(zeroed);
         drop(block);
         assert!(heap::held() - shrunk < 32 * MIB);
+    }
+
+    /// The variable that makes [`heif_heap_child`] the child of
+    /// [`the_mac_worker_arms_its_heap_bound`].
+    const HEAP_CHILD: &str = "GRAPE_TEST_HEIF_HEAP_CHILD";
+
+    /// Not a test: the child [`the_mac_worker_arms_its_heap_bound`] runs
+    /// (`--exact … --ignored`). It runs the worker's own steps,
+    /// [`run_heif_worker`], with a `serve` that asks for a block just under
+    /// the bound, which it gets (only reserved, never touched), and one
+    /// just over it, which ends the process with `OVER_HEAP_EXIT` before
+    /// the system allocator sees it.
+    #[test]
+    #[ignore = "the heap bound's child process, run by the test below"]
+    fn heif_heap_child() {
+        if std::env::var_os(HEAP_CHILD).is_none() {
+            return;
+        }
+        let code = run_heif_worker(
+            || println!("restricted"),
+            || {
+                let bound = usize::try_from(grape_heif_proto::WORKER_HEAP_BYTES).unwrap();
+                let under: Vec<u8> = Vec::with_capacity(bound - (64 << 20));
+                drop(under);
+                println!("under the bound");
+                let over: Vec<u8> = Vec::with_capacity(bound + 1);
+                drop(over);
+                println!("over the bound");
+                ExitCode::SUCCESS
+            },
+        );
+        println!("served: {code:?}");
+    }
+
+    /// The Mac worker's heap bound (D41), armed by [`run_heif_worker`],
+    /// which [`heif_worker`] runs: 2 GiB, after `restrict` and before
+    /// `serve`, and past it the exit code the parent reads as "needs too
+    /// much memory". The child is this test binary, so the bound never
+    /// touches the other tests. (The worker itself is macOS only; its
+    /// steps, the arm and the allocator are the same on every OS.)
+    #[test]
+    fn the_mac_worker_arms_its_heap_bound() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::heif_heap_child",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "-q",
+            ])
+            .env(HEAP_CHILD, "1")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(output.status.code(), Some(heap::OVER_HEAP_EXIT), "{stdout}");
+        let restricted = stdout.find("restricted").expect(&stdout);
+        let under = stdout.find("under the bound").expect(&stdout);
+        assert!(restricted < under, "{stdout}");
+        assert!(!stdout.contains("over the bound"), "{stdout}");
+        assert!(!stdout.contains("served"), "{stdout}");
     }
 
     #[cfg(unix)]

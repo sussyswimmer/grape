@@ -1,7 +1,9 @@
-# Grape's overlay (DECISIONS D33): libheif 1.23.7, a security release, on the
-# recipe of vcpkg e456309491fd875487bf02b8a0dca76c1b1b00cc (libheif 1.23.5).
+# Grape's overlay (DECISIONS D33, D41): libheif 1.23.7, a security release, on
+# the recipe of vcpkg e456309491fd875487bf02b8a0dca76c1b1b00cc (libheif 1.23.5).
 # Changes from that recipe: the source is the release asset (so the hash that
-# was built is the hash in the GPL source bundle), and plugin loading is off.
+# was built is the hash in the GPL source bundle), plugin loading is off, and
+# AVIF (D41) decodes with dav1d alone: a `dav1d` feature (the recipe had none
+# and forced WITH_DAV1D off), and `aom` is encoder only (WITH_AOM_DECODER off).
 vcpkg_download_distfile(ARCHIVE
     URLS "https://github.com/strukturag/libheif/releases/download/v${VERSION}/libheif-${VERSION}.tar.gz"
     FILENAME "libheif-${VERSION}.tar.gz"
@@ -18,9 +20,10 @@ vcpkg_extract_source_archive(SOURCE_PATH
 
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
     FEATURES
-        aom         WITH_AOM_DECODER
         aom         WITH_AOM_ENCODER
         aom         VCPKG_LOCK_FIND_PACKAGE_AOM
+        dav1d       WITH_DAV1D
+        dav1d       VCPKG_LOCK_FIND_PACKAGE_DAV1D
         gdk-pixbuf  WITH_GDK_PIXBUF
         hevc        WITH_X265
         hevc        VCPKG_LOCK_FIND_PACKAGE_X265
@@ -55,13 +58,13 @@ vcpkg_cmake_configure(
     OPTIONS
         -DBUILD_TESTING=OFF
         -DENABLE_PLUGIN_LOADING=OFF  # Grape: required, not optional (D33)
+        -DWITH_AOM_DECODER=OFF  # Grape: AV1 decodes with dav1d only (D41)
         -DWITH_FFMPEG_DECODER=OFF
         -DWITH_FUZZERS=OFF
         -DBUILD_DOCUMENTATION=OFF
         -DCMAKE_COMPILE_WARNING_AS_ERROR=OFF
         "-DCMAKE_PROJECT_INCLUDE=${CURRENT_PORT_DIR}/cmake-project-include.cmake"
         -DPLUGIN_DIRECTORY=  # empty
-        -DWITH_DAV1D=OFF
         -DWITH_EXAMPLES=OFF
         -DWITH_EXAMPLE_HEIF_THUMB=OFF
         -DWITH_EXAMPLE_HEIF_VIEW=OFF
@@ -78,6 +81,7 @@ vcpkg_cmake_configure(
     MAYBE_UNUSED_VARIABLES
         VCPKG_LOCK_FIND_PACKAGE_AOM
         VCPKG_LOCK_FIND_PACKAGE_Brotli
+        VCPKG_LOCK_FIND_PACKAGE_DAV1D
         VCPKG_LOCK_FIND_PACKAGE_OpenH264
         VCPKG_LOCK_FIND_PACKAGE_OpenJPEG
         VCPKG_LOCK_FIND_PACKAGE_UVG266

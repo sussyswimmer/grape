@@ -21,10 +21,17 @@
   ],
   "features": {
     "aom": {
-      "description": "AVIF decoding and encoding via aom",
+      "description": "AVIF encoding via aom (encoder only)",
       "license": "BSD-2-Clause",
       "dependencies": [
         "aom"
+      ]
+    },
+    "dav1d": {
+      "description": "AVIF decoding via dav1d",
+      "license": "BSD-2-Clause",
+      "dependencies": [
+        "dav1d"
       ]
     },
     "gdk-pixbuf": {

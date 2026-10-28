@@ -2,6 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::HeifFormat;
+
 /// One line from the helper.
 ///
 /// - `image` comes at most once, only for `decode`, and before any pixel is
@@ -18,7 +20,7 @@ pub enum Message {
     Image(ImageInfo),
     /// How far the job is, from 0 to 1.
     Progress(f32),
-    /// The job is done; `pixels.rgba` or `out.heic` is complete.
+    /// The job is done; `pixels.rgba`, `out.heic` or `out.avif` is complete.
     Done(Done),
     /// The job failed.
     Error(Failure),
@@ -55,7 +57,7 @@ pub struct Done {
     /// Decode: the ICC profile's size in `pixels.rgba`.
     #[serde(skip_serializing_if = "is_zero")]
     pub icc_bytes: u32,
-    /// Encode: the size of `out.heic`.
+    /// Encode: the size of `out.heic` or `out.avif`.
     #[serde(skip_serializing_if = "is_zero")]
     pub bytes: u64,
     /// Probe: what this helper can do.
@@ -67,16 +69,36 @@ fn is_zero<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-/// What a helper can do on this machine.
+/// What a helper can do on this machine, per format.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Caps {
-    /// It can decode HEIC.
-    pub decode: bool,
-    /// It can encode HEIC (false on Macs without a HEVC encoder).
-    pub encode: bool,
-    /// The codec and its version, for the log.
+    /// HEIC (encode is false on Macs without a HEVC encoder).
+    pub heic: FormatCaps,
+    /// AVIF.
+    pub avif: FormatCaps,
+    /// The codec and its versions, for the log.
     pub codec: String,
+}
+
+impl Caps {
+    /// What it can do with `format`.
+    pub fn of(&self, format: HeifFormat) -> FormatCaps {
+        match format {
+            HeifFormat::Heic => self.heic,
+            HeifFormat::Avif => self.avif,
+        }
+    }
+}
+
+/// What a helper can do with one format. The default is nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FormatCaps {
+    /// It can decode the format.
+    pub decode: bool,
+    /// It can encode the format.
+    pub encode: bool,
 }
 
 /// Why the helper failed.
@@ -106,23 +128,24 @@ impl Failure {
 pub enum FailKind {
     /// No HEIF `ftyp` box, or the codec says the bytes aren't HEIF.
     NotHeif,
-    /// HEIF with a codec this helper lacks (AV1, AVC, JPEG, VVC,
-    /// uncompressed), or an HEVC profile its decoder can't do.
+    /// HEIF with a codec this helper lacks (AVC, JPEG, VVC, uncompressed),
+    /// or a codec or profile the decoder can't do.
     Unsupported,
-    /// The codec failed on bytes that looked like HEIC (truncated, corrupt).
+    /// The codec failed on bytes that looked like HEIC or AVIF (truncated,
+    /// corrupt).
     Damaged,
     /// No primary image, or no images.
     NoImage,
     /// Over a limit: the source size, the pixels, the codec's own security
     /// or memory limits, or the encode size.
     TooLarge,
-    /// This machine can't encode HEIC.
+    /// This machine can't encode that format.
     NoEncoder,
     /// The encoder failed.
     Encode,
     /// The source or `input.rgba` can't be opened or read.
     Read,
-    /// `pixels.rgba` or `out.heic` can't be created or written.
+    /// `pixels.rgba` or the encode output can't be created or written.
     Write,
     /// The request's protocol isn't [`crate::PROTOCOL`].
     Protocol,
@@ -170,27 +193,51 @@ mod tests {
             }),
             r#"{"done":{"bytes":1843322}}"#,
         );
+        let both = FormatCaps {
+            decode: true,
+            encode: true,
+        };
         round_trip(
             &Message::Done(Done {
                 caps: Some(Caps {
-                    decode: true,
-                    encode: false,
+                    heic: FormatCaps {
+                        decode: true,
+                        encode: false,
+                    },
+                    avif: FormatCaps {
+                        decode: true,
+                        encode: true,
+                    },
                     codec: "ImageIO".to_string(),
                 }),
                 ..Done::default()
             }),
-            r#"{"done":{"caps":{"decode":true,"encode":false,"codec":"ImageIO"}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":false},"avif":{"decode":true,"encode":true},"codec":"ImageIO"}}}"#,
         );
+        // avif-spec's Windows example (D41).
         round_trip(
             &Message::Done(Done {
                 caps: Some(Caps {
-                    decode: true,
-                    encode: true,
+                    heic: both,
+                    avif: both,
+                    codec: "libheif 1.23.7 (libde265 1.1.3, x265 4.3, dav1d 1.5.4, aom 3.15.2)"
+                        .to_string(),
+                }),
+                ..Done::default()
+            }),
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":true,"encode":true},"codec":"libheif 1.23.7 (libde265 1.1.3, x265 4.3, dav1d 1.5.4, aom 3.15.2)"}}}"#,
+        );
+        // A helper without AVIF.
+        round_trip(
+            &Message::Done(Done {
+                caps: Some(Caps {
+                    heic: both,
+                    avif: FormatCaps::default(),
                     codec: "libheif 1.23.7 (libde265 1.1.3, x265 4.3)".to_string(),
                 }),
                 ..Done::default()
             }),
-            r#"{"done":{"caps":{"decode":true,"encode":true,"codec":"libheif 1.23.7 (libde265 1.1.3, x265 4.3)"}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":false,"encode":false},"codec":"libheif 1.23.7 (libde265 1.1.3, x265 4.3)"}}}"#,
         );
         round_trip(
             &Message::Error(Failure::new(
@@ -205,6 +252,30 @@ mod tests {
                 "public.heic isn't an image destination type",
             )),
             r#"{"error":{"kind":"noEncoder","detail":"public.heic isn't an image destination type"}}"#,
+        );
+    }
+
+    #[test]
+    fn caps_answer_per_format() {
+        let caps = Caps {
+            heic: FormatCaps {
+                decode: true,
+                encode: false,
+            },
+            avif: FormatCaps {
+                decode: false,
+                encode: true,
+            },
+            codec: String::new(),
+        };
+        assert_eq!(caps.of(HeifFormat::Heic), caps.heic);
+        assert_eq!(caps.of(HeifFormat::Avif), caps.avif);
+        assert_eq!(
+            FormatCaps::default(),
+            FormatCaps {
+                decode: false,
+                encode: false
+            }
         );
     }
 
@@ -260,7 +331,14 @@ mod tests {
             r#"{"image":{"width":1,"height":1,"channels":3}}"#,
             r#"{"done":{"x":1}}"#,
             r#"{"done":{"bytes":1,"path":"/a"}}"#,
-            r#"{"done":{"caps":{"decode":true,"encode":true,"codec":"c","x":1}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":true,"encode":true},"codec":"c","x":1}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true,"x":1},"avif":{"decode":true,"encode":true},"codec":"c"}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":true,"encode":true}}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"codec":"c"}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true},"avif":{"decode":true,"encode":true},"codec":"c"}}}"#,
+            r#"{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":true,"encode":true},"heif":{"decode":true,"encode":true},"codec":"c"}}}"#,
+            // Protocol 1's caps.
+            r#"{"done":{"caps":{"decode":true,"encode":true,"codec":"c"}}}"#,
             r#"{"done":{"caps":{"decode":true,"encode":true}}}"#,
             r#"{"error":{"kind":"read","detail":"","x":1}}"#,
             r#"{"error":{"kind":"nope","detail":""}}"#,

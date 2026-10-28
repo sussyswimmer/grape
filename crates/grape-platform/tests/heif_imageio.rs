@@ -1,6 +1,7 @@
 //! ImageIO as Grape's HEIC codec on macOS (DECISIONS D33, heic-spec §14),
 //! against the fixtures CI's Windows `grape-heif` job writes with libheif
-//! (`grape-heif-fixtures`, heic-spec §5.6).
+//! (`grape-heif-fixtures`, heic-spec §5.6), and as its AVIF decoder (D41),
+//! reading back what ravif writes (with `avif-encode`).
 //!
 //! Run with `cargo test -p grape-platform --features heif-it` and
 //! `GRAPE_TEST_HEIF_FIXTURES` set to that folder. Without it these tests
@@ -15,8 +16,8 @@
 use std::path::{Path, PathBuf};
 
 use grape_heif_proto::{
-    serve, Codec, FailKind, Failure, ImageInfo, Limits, Message, Op, PixelSink, Pixels, Request,
-    PROTOCOL,
+    serve, Codec, FailKind, Failure, HeifFormat, ImageInfo, Limits, Message, Op, PixelSink, Pixels,
+    Request, PROTOCOL,
 };
 use grape_platform::macos::heif::ImageIo;
 
@@ -72,8 +73,13 @@ impl Collect {
 }
 
 fn decode(path: &Path) -> Result<Collect, Failure> {
+    decode_as(path, HeifFormat::Heic)
+}
+
+/// `path` decoded as the format it sniffs as.
+fn decode_as(path: &Path, format: HeifFormat) -> Result<Collect, Failure> {
     let mut sink = Collect::default();
-    ImageIo.decode(path, &Limits::DEFAULT, &mut sink)?;
+    ImageIo.decode(path, format, &Limits::DEFAULT, &mut sink)?;
     let (_, height, _) = sink.size();
     assert_eq!(sink.rows.len(), height as usize, "every row");
     Ok(sink)
@@ -92,8 +98,16 @@ fn near(got: &[u8], want: &[u8], tolerance: u8, at: &str) {
 #[test]
 fn this_mac_decodes_heic() {
     let caps = ImageIo.caps();
-    assert!(caps.decode);
-    assert_eq!(caps.codec, "ImageIO");
+    assert!(caps.heic.decode);
+    assert!(caps.codec.starts_with("ImageIO"), "{}", caps.codec);
+}
+
+#[test]
+fn this_mac_decodes_avif() {
+    // ImageIO reads AVIF on macOS 13 and later (D41).
+    let caps = ImageIo.caps();
+    assert!(caps.avif.decode);
+    assert_eq!(caps.avif.encode, cfg!(feature = "avif-encode"));
 }
 
 #[test]
@@ -218,11 +232,11 @@ fn work_dir(name: &str) -> PathBuf {
 }
 
 #[test]
-fn the_avif_brand_is_refused_before_imageio_sees_it() {
-    let dir = work_dir("avif");
+fn the_avci_brand_is_refused_before_imageio_sees_it() {
+    let dir = work_dir("avci");
     let (messages, done) = served(
         Op::Decode {
-            source: fixture("avif-brand.heic"),
+            source: fixture("avci-brand.heic"),
         },
         &dir,
     );
@@ -278,8 +292,8 @@ fn a_served_probe_says_it_decodes() {
     match messages.last() {
         Some(Message::Done(done)) => {
             let caps = done.caps.as_ref().expect("caps");
-            assert!(caps.decode);
-            println!("ImageIO encodes HEIC here: {}", caps.encode);
+            assert!(caps.heic.decode);
+            println!("ImageIO encodes HEIC here: {}", caps.heic.encode);
         }
         other => panic!("{other:?}"),
     }
@@ -313,14 +327,14 @@ fn encode_round_trips_or_says_this_mac_cant() {
     let dir = work_dir("encode");
     for channels in [3, 4] {
         let pixels = gradient(64, 48, channels);
-        let heic = match ImageIo.encode(&pixels, None, &Limits::DEFAULT) {
+        let heic = match ImageIo.encode(&pixels, HeifFormat::Heic, None, &Limits::DEFAULT) {
             Ok(heic) => heic,
             Err(failure) if failure.kind == FailKind::NoEncoder => {
                 println!("this Mac can't write HEIC: {}", failure.detail);
                 // Not listed: the list check said so. Listed (GitHub's VMs
                 // and Macs without the hardware): no destination, or no
                 // finish.
-                let listed = ImageIo.caps().encode;
+                let listed = ImageIo.caps().heic.encode;
                 let why = failure.detail.as_str();
                 let expected = if listed {
                     why == "ImageIO made no HEIC destination"
@@ -348,6 +362,51 @@ fn encode_round_trips_or_says_this_mac_cant() {
             near(&back.pixel(48, 24)[3..], &[128], 8, "alpha");
         }
         // Mean absolute error over the color channels.
+        let mut total = 0u64;
+        for y in 0..height {
+            for x in 0..width {
+                let want = &pixels.data[((y * width + x) * u32::from(channels)) as usize..][..3];
+                let have = &back.pixel(x, y)[..3];
+                total += want
+                    .iter()
+                    .zip(have)
+                    .map(|(a, b)| u64::from(a.abs_diff(*b)))
+                    .sum::<u64>();
+            }
+        }
+        let mean = total as f64 / f64::from(width * height * 3);
+        assert!(mean < 4.0, "{channels} channels: mean error {mean}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn avif_from_ravif_reads_back_or_this_build_has_no_encoder() {
+    let dir = work_dir("avif");
+    for channels in [3, 4] {
+        let pixels = gradient(64, 48, channels);
+        let avif = match ImageIo.encode(&pixels, HeifFormat::Avif, None, &Limits::DEFAULT) {
+            Ok(avif) => avif,
+            Err(failure) if !cfg!(feature = "avif-encode") => {
+                assert_eq!(failure.kind, FailKind::NoEncoder, "{}", failure.detail);
+                println!("built without avif-encode: {}", failure.detail);
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+            Err(failure) => panic!("{failure:?}"),
+        };
+        assert_eq!(
+            grape_heif_proto::sniff(&avif[..avif.len().min(grape_heif_proto::SNIFF_BYTES)]),
+            grape_heif_proto::Sniff::Avif
+        );
+        let path = dir.join(format!("ravif-{channels}.avif"));
+        std::fs::write(&path, &avif).unwrap();
+        let back = decode_as(&path, HeifFormat::Avif).unwrap();
+        let (width, height, got) = back.size();
+        assert_eq!((width, height, got), (64, 48, channels));
+        if channels == 4 {
+            near(&back.pixel(48, 24)[3..], &[128], 8, "alpha");
+        }
         let mut total = 0u64;
         for y in 0..height {
             for x in 0..width {

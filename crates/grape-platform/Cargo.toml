@@ -12,6 +12,41 @@ thiserror.workspace = true
 # Notes for the app's log, such as why Terminal opened another app than the
 # one picked in Settings. The app already builds this version (DECISIONS D9).
 log = "0.4.34"
+# The image helper's protocol: `macos::heif` implements its `Codec`, and
+# `avif` (any OS, behind `avif-encode`) takes its `Pixels` and returns its
+# `Failure`. A workspace crate grape-engines already builds on every OS.
+grape-heif-proto.workspace = true
+# The Mac worker's AVIF encoder (D41), OS-neutral so it's tested anywhere:
+# rav1e through ravif (BSD-3-Clause; rav1e, v_frame and av1-grain are
+# BSD-2-Clause). No asm here: see below. ravif's own `threading` feature
+# stays off, so it encodes an RGBA picture's color and then its alpha, one
+# after the other: with it on (`rayon::join`) both encodes ran at once, each
+# with its own pool, which at the 35.6 MP cap went past the worker's 2 GiB
+# heap bound.
+ravif = { version = "=0.13.0", default-features = false, optional = true }
+# ravif's rav1e, named only to turn on `threading` (rayon, through
+# maybe-rayon): each encode then runs on a pool of `avif.rs`'s thread count.
+# The version is the one ravif takes, so nothing new is built or locked.
+rav1e = { version = "=0.8.1", default-features = false, features = [
+    "threading",
+], optional = true }
+# ravif's pixel types: `FromSlice` hands ravif the picture's own bytes as
+# `RGB8`/`RGBA8` rather than a copy (143 MB at the cap). ravif's version and
+# features, already locked.
+rgb = { version = "=0.8.53", default-features = false, optional = true }
+# Converts an ICC-tagged picture to sRGB before ravif, which writes sRGB
+# nclx and no ICC (D41). Already in Cargo.lock through `image`, with the same
+# default features (SIMD paths only, no package of their own).
+moxcms = { version = "=0.8.1", optional = true }
+
+# rav1e's assembly on Apple silicon needs only Xcode's clang (its build
+# script compiles `src/arm/64/*.S` with `cc`). The Intel slice is cross-built
+# on the arm64 runner without nasm, so it stays pure Rust (D41). Resolver 2
+# turns this feature on only when building for aarch64-apple-darwin.
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+ravif = { version = "=0.13.0", default-features = false, features = [
+    "asm",
+], optional = true }
 
 # Only Windows builds pull in the Win32 bindings. Tauri 2.12 uses `windows ^0.62`,
 # so this shares that build. wry and tao already enable the Win32 features
@@ -20,7 +55,7 @@ log = "0.4.34"
 # (Foundation, ApplicationModel_DataTransfer, Storage, Storage_Streams: the
 # share sheet), so those and the two Win32 ones add new bindings to the build
 # (DECISIONS D9, D13). Win32_Security (CreateJobObjectW's attributes) and
-# Win32_System_JobObjects are the HEIC helper's Job Object (`windows::job`,
+# Win32_System_JobObjects are the image helper's Job Object (`windows::job`,
 # D33): bindings only, no new package.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
@@ -112,7 +147,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSWorkspace",
 ] }
 # Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds),
-# and the HEIC worker's pixels (`macos::heif`, D33): images, color spaces,
+# and the image helper worker's pixels (`macos::heif`, D33): images, color spaces,
 # the bitmap context it draws into and the data provider it encodes from.
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
@@ -124,7 +159,7 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
     "CGError",
     "CGImage",
 ] }
-# The HEIC worker's codec (`macos::heif`, D33): ImageIO's image source and
+# The image helper worker's codec (`macos::heif`, D33): ImageIO's image source and
 # destination. The one new package in Cargo.lock for HEIC (2025-10-04,
 # Zlib OR Apache-2.0 OR MIT). Without its `objc2` and `block2` features it
 # needs only the two crates below, which the build already has.
@@ -151,8 +186,6 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 # `dlsym` for CGImageSourceSetAllowableTypes (macOS 14.2+), which a bound
 # import would stop Grape from launching on macOS 13. Already in the build.
 libc = "0.2.190"
-# The HEIC worker's protocol: `macos::heif` implements its `Codec`.
-grape-heif-proto.workspace = true
 # The main queue, for AppKit work that must run on the main thread.
 dispatch2 = { version = "0.3.1", default-features = false, features = [
     "std",
@@ -160,19 +193,25 @@ dispatch2 = { version = "0.3.1", default-features = false, features = [
 ] }
 
 [features]
-# The HEIC tests that need a real codec (D33): the `grape-heif-worker` test
+# The HEIC and AVIF tests that need a real codec (D33, D41): the `grape-heif-worker` test
 # bin (ImageIO on macOS), `tests/heif_imageio.rs` (macOS, with
 # GRAPE_TEST_HEIF_FIXTURES) and, on Windows, `tests/job_object.rs`'s
 # grape-heif.exe case (GRAPE_TEST_HEIF). CI's heif-it jobs turn it on.
 heif-it = []
+# The Mac worker's AVIF encoder, `avif.rs` (rav1e through ravif, D41). The
+# app turns it on for macOS builds only, so Windows and Linux builds never
+# compile rav1e; CI's heif-it-macos job and local tests turn it on anywhere
+# (the module is OS-neutral). Without it the Mac worker answers "noEncoder"
+# for AVIF.
+avif-encode = ["dep:ravif", "dep:rav1e", "dep:rgb", "dep:moxcms"]
 
 [dev-dependencies]
-# tests/job_object.rs writes protocol requests to grape-heif.exe.
-grape-heif-proto.workspace = true
+# tests/job_object.rs and tests/heif_imageio.rs write protocol requests.
 serde_json.workspace = true
 
-# ImageIO behind the HEIC protocol, for grape-engines' Mac heif-it tests
-# (GRAPE_TEST_HEIF). Elsewhere it says "macOS only" and exits 2.
+# ImageIO behind the image helper's protocol, for grape-engines' Mac heif-it
+# tests (GRAPE_TEST_HEIF); with `avif-encode` it writes AVIF too. Elsewhere
+# it says "macOS only" and exits 2.
 [[bin]]
 name = "grape-heif-worker"
 path = "src/bin/grape-heif-worker.rs"

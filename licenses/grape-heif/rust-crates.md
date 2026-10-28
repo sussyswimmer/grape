@@ -1,6 +1,6 @@
 # grape-heif.exe: Rust crates
 
-`grape-heif.exe` is Grape's HEIC helper on Windows (DECISIONS D33). It's a separate program, GPL-3.0-or-later as a whole because of the C libraries it links (see `LICENSE.txt`, `libheif.txt`, `libde265.txt`, `libde265-win32cond.txt`, `x265.txt` and `SOURCE.md` in this folder). This file lists the Rust crates compiled into it:
+`grape-heif.exe` is Grape's image helper on Windows, for HEIC and AVIF (DECISIONS D33, D41). It's a separate program, GPL-3.0-or-later as a whole because of the C libraries it links (see `LICENSE.txt`, `libheif.txt`, `libde265.txt`, `libde265-win32cond.txt`, `x265.txt`, `dav1d.txt`, `dav1d-PATENTS.txt`, `dav1d-x86inc.txt`, `aom.txt` and `SOURCE.md` in this folder). This file lists the Rust crates compiled into it:
 
 - **20 Rust crates**, grouped by license. Each license's full text follows the crates that use it.
 

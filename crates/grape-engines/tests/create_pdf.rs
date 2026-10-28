@@ -647,8 +647,9 @@ fn which_images_go_to_pdf_and_into_create_pdf() {
     let to_pdf = Operation::convert(Format::Pdf);
     let create = Operation::tool(ToolKey::CreatePdf);
     // Over every format: images → PDF and Create PDF need no sidecar for
-    // these, and HEIC only Grape's HEIC helper. BMP converts to PDF, but
-    // FORMAT_MATRIX gives it no tools, so Create PDF doesn't take one.
+    // these, and HEIC and AVIF only Grape's image helper. BMP and AVIF
+    // convert to PDF, but FORMAT_MATRIX gives them no tools, so Create PDF
+    // takes neither (D41: AVIF → PDF is a conversion only).
     let to_pdf_from = |sidecars: &SidecarPaths| -> Vec<Format> {
         Format::ALL
             .into_iter()
@@ -673,7 +674,7 @@ fn which_images_go_to_pdf_and_into_create_pdf() {
         sorted(to_pdf_from(&SidecarPaths::default())),
         sorted(expected.clone())
     );
-    expected.push(Format::Heic);
+    expected.extend([Format::Heic, Format::Avif]);
     assert_eq!(sorted(to_pdf_from(&with_heif)), sorted(expected));
     let mut expected = vec![Format::Jpg, Format::Png, Format::Webp, Format::Tiff];
     assert_eq!(
@@ -688,9 +689,16 @@ fn which_images_go_to_pdf_and_into_create_pdf() {
     assert!(supports(&create, Some(Format::Png)));
     assert!(!supports(&create, Some(Format::Bmp)));
     assert!(!supports(&create, Some(Format::Heic)));
+    assert!(!supports(&to_pdf, Some(Format::Avif)));
     assert!(!supports_with(
         &create,
         &[Some(Format::Jpg), Some(Format::Bmp)],
+        &with_heif
+    ));
+    assert!(!supports_with(&create, &[Some(Format::Avif)], &with_heif));
+    assert!(!supports_with(
+        &create,
+        &[Some(Format::Jpg), Some(Format::Avif)],
         &with_heif
     ));
 }

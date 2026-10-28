@@ -13,6 +13,10 @@
 //     dev testing only and never ship; bsdtar is built by
 //     `scripts/bsdtar/build.*` from libarchive and Grape's patches, D27;
 //     grape-heif by `tools/grape-heif/build.ps1`, D33),
+//   - for grape-heif, speaks this Grape's image helper protocol: its
+//     configuration line's `protocol=N` is `PROTOCOL` in
+//     `crates/grape-heif-proto/src/lib.rs` (D41: an older build refuses
+//     every HEIC and AVIF job),
 //   - has its license texts in `licenses/<folder>/` (with `SOURCE.md` for
 //     GPL code) and its section in `about.hbs` and `THIRD_PARTY_NOTICES.md`.
 //
@@ -75,15 +79,34 @@ export const RULES = {
   },
   'grape-heif': {
     args: ['-hide_banner', '-version'],
-    // tools/grape-heif's banner: "grape-heif version 1.23.7-grape.1 Copyright (c) 2026 …".
+    // tools/grape-heif's banner: "grape-heif version 1.23.7-grape.2 Copyright (c) 2026 …".
     line: /^grape-heif version \S*-grape(?:\.\d+)?(?:\s|$)/,
     licenses: 'grape-heif',
     gpl: true,
     notice: 'grape-heif',
     missing: "Build it with tools/grape-heif/build.ps1, or take it from CI's grape-heif workflow (D33).",
     foreign: "Only Grape's own build from tools/grape-heif ever ships (D33).",
+    // Its banner's configuration line names the protocol it speaks (D41).
+    protocol: true,
+    stale: "Build it again with tools/grape-heif/build.ps1 -Install, or take it from CI's grape-heif workflow (D41).",
   },
 };
+
+/** Where the image helper's protocol version is, from the repo's root. */
+export const PROTOCOL_SOURCE = ['crates', 'grape-heif-proto', 'src', 'lib.rs'];
+
+/** `PROTOCOL` in grape-heif-proto's source, or undefined when it isn't there. */
+export function grapeProtocol(source) {
+  const found = /^pub const PROTOCOL: u32 = (\d+);$/m.exec(source ?? '');
+  return found ? Number(found[1]) : undefined;
+}
+
+/** The `protocol=N` on a banner's `configuration:` line, or undefined. */
+export function bannerProtocol(output) {
+  const line = output.split(/\r?\n/).find((l) => l.startsWith('configuration: '));
+  const found = line === undefined ? null : /(?:^|\s)protocol=(\d+)(?:\s|$)/.exec(line);
+  return found ? Number(found[1]) : undefined;
+}
 
 /** How long one `-version` run may take, in milliseconds. */
 const RUN_TIMEOUT_MS = 20_000;
@@ -191,6 +214,21 @@ export function check({ repo, triple, io, config, overlay }) {
         const line = firstLine(out);
         if (!rule.line.test(line)) {
           failures.push(`${name}: this isn't Grape's own build. Its version line is "${line}", without the -grape marker. ${rule.foreign}`);
+        } else if (rule.protocol) {
+          const source = join(repo, ...PROTOCOL_SOURCE);
+          let wanted;
+          try {
+            wanted = grapeProtocol(io.read(source));
+          } catch {
+            wanted = undefined;
+          }
+          const spoken = bannerProtocol(out);
+          if (wanted === undefined) {
+            failures.push(`${name}: couldn't read PROTOCOL from ${PROTOCOL_SOURCE.join('/')}.`);
+          } else if (spoken !== wanted) {
+            const speaks = spoken === undefined ? "doesn't say which protocol it speaks" : `speaks protocol ${spoken}`;
+            failures.push(`${name}: it ${speaks} and this Grape speaks ${wanted}, so it would refuse every HEIC and AVIF job. ${rule.stale}`);
+          }
         }
       }
     }

@@ -1,12 +1,13 @@
 <#
 .SYNOPSIS
-Builds grape-heif.exe, Grape's HEIC helper for Windows (DECISIONS D33).
+Builds grape-heif.exe, Grape's image helper for Windows: HEIC and AVIF
+(DECISIONS D33, D41).
 
 .DESCRIPTION
 grape-heif.exe is a small Rust program (this folder) on libheif-rs, linking
-libheif, libde265 and x265 statically. vcpkg builds those C libraries; this
-script pins and checks everything in vcpkg.lock.json. CI's grape-heif
-workflow and a PC run the same steps (heic-spec J13):
+libheif, libde265, x265, dav1d and libaom statically. vcpkg builds those C
+libraries; this script pins and checks everything in vcpkg.lock.json. CI's
+grape-heif workflow and a PC run the same steps (heic-spec J13):
 
   1. reads vcpkg.lock.json;
   2. clones vcpkg into -VcpkgRoot at the pinned commit (git init, fetch
@@ -14,13 +15,14 @@ workflow and a PC run the same steps (heic-spec J13):
      reused only if it has no local changes. Never the runner's C:\vcpkg;
   3. bootstraps it (bootstrap-vcpkg.bat -disableMetrics; the vcpkg tool's
      version is pinned by that commit);
-  4. sources first: `vcpkg install libheif[core,hevc]:x64-windows-static
-     --only-downloads --binarysource=clear` with the overlay port in
-     vcpkg/ports, then checks that every archive in the lock is in
-     <root>\downloads by its SHA-512, that each SHA-512 is the one the port
-     (or the overlay) checks, that each port's version is the lock's, and
-     that x265's archive is of the pinned commit. Done first, so a binary
-     cache hit can't leave the source bundle without its archives;
+  4. sources first: `vcpkg install libheif[core,hevc,aom,dav1d]:x64-windows-static
+     --only-downloads --binarysource=clear` with the overlay ports (libheif
+     and aom) in vcpkg/ports, then checks that every archive in the lock is
+     in <root>\downloads by its SHA-512, that each SHA-512 is the one the
+     port (or the overlay) checks, that each port's version is the lock's,
+     and that x265's and dav1d's archives are of the pinned commits. Done
+     first, so a binary cache hit can't leave the source bundle without its
+     archives;
   5. builds: the same install, with a binary cache only if -BinaryCache is
      given (otherwise none: VCPKG_BINARY_SOURCES=clear), then checks that
      vcpkg installed the pinned versions;
@@ -28,7 +30,8 @@ workflow and a PC run the same steps (heic-spec J13):
      VCPKGRS_TRIPLET set and RUSTFLAGS removed (.cargo/config.toml turns on
      the static C runtime, and RUSTFLAGS would replace it);
   7. puts grape-heif.exe, BUILDINFO.txt (the banner, the pins, the tool
-     versions) and SHA256SUMS in tools\grape-heif\target\out;
+     versions, including the Perl, Python and meson vcpkg downloaded) and
+     SHA256SUMS in tools\grape-heif\target\out;
   8. with -Install, also copies it to
      apps\desktop\src-tauri\binaries\grape-heif-x86_64-pc-windows-msvc.exe,
      where `tauri build` with tauri.sidecars.windows.conf.json takes it.
@@ -37,8 +40,10 @@ CI checks the result further (the banner, no plugin loader, the DLLs it
 imports, the license texts): .github/workflows/grape-heif.yml.
 
 It needs git, Rust 1.99 and the Visual Studio Build Tools with the C++
-workload (docs/PLATFORM_WINDOWS.md, Dev setup); vcpkg fetches CMake, NASM
-and pkgconf itself. The first build takes 30 minutes or more and about 3 GB.
+workload (docs/PLATFORM_WINDOWS.md, Dev setup); vcpkg fetches CMake, NASM,
+ninja and pkgconf itself, and Strawberry Perl (for libaom), Python and meson
+(for dav1d) into <root>\downloads\tools. The first build takes 45 minutes or
+more and about 5 GB, about 1.5 GB of it the Perl (D41's estimates).
 It never changes PATH and installs nothing outside -VcpkgRoot, this folder's
 target\ and, with -Install, binaries\. Works in Windows PowerShell 5.1 and
 PowerShell 7.
@@ -46,7 +51,9 @@ PowerShell 7.
 .PARAMETER VcpkgRoot
 An empty folder for vcpkg, or one this script cloned before. Default:
 target\grape-heif\vcpkg in the repo. Keep the path short: vcpkg's build
-trees are deep.
+trees are deep. A folder that holds nothing but a downloads folder counts
+as empty: CI seeds downloads\tools, the build tools vcpkg fetched, from its
+cache.
 
 .PARAMETER BinaryCache
 A folder for vcpkg's binary cache (read and written). Without it, nothing is
@@ -186,9 +193,15 @@ function Resolve-Folder([string]$Given, [string]$Default) {
 
 # Steps 2 and 3: vcpkg at the pinned commit, bootstrapped.
 function Get-Vcpkg($Lock, [string]$Root) {
-    $exists = Test-Path -LiteralPath $Root -PathType Container
-    $empty = (-not $exists) -or (@(Get-ChildItem -LiteralPath $Root -Force).Count -eq 0)
-    if ($empty) {
+    $entries = @()
+    if (Test-Path -LiteralPath $Root -PathType Container) { $entries = @(Get-ChildItem -LiteralPath $Root -Force) }
+    # Empty, or holding only a downloads folder: vcpkg's build tools kept
+    # from an earlier run (CI's cache of downloads\tools, D41) or archives
+    # put there by hand. vcpkg's .gitignore covers downloads. It checks an
+    # archive there by its SHA-512, but takes an unpacked tool as it finds
+    # it, so seed only from a build of your own (release.yml builds clean).
+    $seeded = ($entries.Count -eq 1 -and $entries[0].PSIsContainer -and $entries[0].Name -ceq 'downloads')
+    if ($entries.Count -eq 0 -or $seeded) {
         New-Item -ItemType Directory -Force -Path $Root | Out-Null
         Invoke-Git $Root @('init', '-q') | Out-Null
     } elseif (-not (Test-Path -LiteralPath (Join-Path $Root '.git'))) {
@@ -307,7 +320,7 @@ function Test-Installed([string]$Exe, [string]$Root, $Lock) {
         }
     }
     $installed = Join-Path $Root "installed\$($Lock.Triplet)"
-    foreach ($f in 'lib\heif.lib', 'share\libheif\copyright', 'share\libde265\copyright', 'share\x265\copyright') {
+    foreach ($f in 'lib\heif.lib', 'share\libheif\copyright', 'share\libde265\copyright', 'share\x265\copyright', 'share\dav1d\copyright', 'share\aom\copyright') {
         if (-not (Test-Path -LiteralPath (Join-Path $installed $f) -PathType Leaf)) { Fail "$installed\$f is missing." }
     }
     return @($r.Lines | Where-Object { $_ -match ':' + [regex]::Escape($Lock.Triplet) + '\s' })
@@ -329,6 +342,47 @@ function Get-VcpkgTool([string]$Exe, [string]$Root, [string]$Name) {
     $path = $r.Lines | Where-Object { $_ -and (Test-Path -LiteralPath $_.Trim() -PathType Leaf) } | Select-Object -Last 1
     if ($null -eq $path) { return $null }
     return $path.Trim()
+}
+
+# The build tools vcpkg downloaded into <root>\downloads\tools for the ports
+# (D41): Strawberry Perl for libaom, Python and meson for dav1d. Each is in a
+# folder named for its version; every one found is listed, so a stale second
+# version there shows up too. Perl and Python also say their own version.
+function Get-DownloadedTools([string]$Root) {
+    $tools = Join-Path $Root 'downloads\tools'
+    $lines = New-Object System.Collections.Generic.List[string]
+    # Name, folder under downloads\tools, which folders, the program in one,
+    # its version flag and the line of its output that says it.
+    $kinds = @(
+        @('perl', 'perl', '*', 'perl\bin\perl.exe', @('-v'), 'This is perl'),
+        @('python', 'python', 'python-*', 'python.exe', @('--version'), '^Python '),
+        @('meson', '', 'meson-*', '', @(), '')
+    )
+    foreach ($k in $kinds) {
+        $parent = $tools
+        $shown = 'downloads\tools'
+        if (-not [string]::IsNullOrEmpty($k[1])) {
+            $parent = Join-Path $tools $k[1]
+            $shown = "$shown\$($k[1])"
+        }
+        $dirs = @()
+        if (Test-Path -LiteralPath $parent -PathType Container) {
+            $dirs = @(Get-ChildItem -LiteralPath $parent -Directory | Where-Object { $_.Name -like $k[2] } | Sort-Object Name)
+        }
+        if ($dirs.Count -eq 0) { $lines.Add("  $($k[0]): none downloaded") }
+        foreach ($d in $dirs) {
+            $where = "$shown\$($d.Name)"
+            if ([string]::IsNullOrEmpty($k[3])) {
+                $lines.Add("  $($k[0]): $where")
+            } else {
+                $exe = Join-Path $d.FullName $k[3]
+                $said = 'unknown'
+                if (Test-Path -LiteralPath $exe -PathType Leaf) { $said = Get-VersionLine $exe $k[4] $k[5] }
+                $lines.Add("  $($k[0]): $where ($said)")
+            }
+        }
+    }
+    return $lines
 }
 
 function Get-Cl {
@@ -369,7 +423,7 @@ function Write-BuildInfo($Lock, [string]$Root, [string]$Vcpkg, [string[]]$Ports,
     $rustc = Invoke-Captured 'rustc' @('-vV')
     $cl = Get-Cl
     $info = New-Object System.Collections.Generic.List[string]
-    $info.Add("grape-heif.exe, Grape's HEIC helper for Windows (DECISIONS D33)")
+    $info.Add("grape-heif.exe, Grape's image helper for Windows: HEIC and AVIF (DECISIONS D33, D41)")
     $info.Add("SHA-256: $(Get-Sha 'SHA256' (Join-Path $Out 'grape-heif.exe'))")
     $info.Add("Grape commit: $commitLine")
     $info.Add("Built: $([DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))")
@@ -391,12 +445,14 @@ function Write-BuildInfo($Lock, [string]$Root, [string]$Vcpkg, [string[]]$Ports,
     $info.Add("  cl.exe: $(Get-VersionLine $cl @() 'Version')")
     $info.Add("  cmake: $(Get-VersionLine (Get-VcpkgTool $Vcpkg $Root 'cmake') @('--version') 'version')")
     $info.Add("  nasm: $(Get-VersionLine (Get-VcpkgTool $Vcpkg $Root 'nasm') @('-v') 'version')")
+    $info.Add("  ninja: $(Get-VersionLine (Get-VcpkgTool $Vcpkg $Root 'ninja') @('--version') '^\d')")
+    foreach ($l in (Get-DownloadedTools $Root)) { $info.Add($l) }
     Write-Utf8 (Join-Path $Out 'BUILDINFO.txt') (($info -join "`n") + "`n")
 }
 
 function Invoke-Main {
     if ($env:OS -ne 'Windows_NT') {
-        Fail "this script is for Windows: grape-heif.exe is Grape's HEIC helper there (macOS uses ImageIO, D33)."
+        Fail "this script is for Windows: grape-heif.exe is Grape's image helper there (macOS uses its own worker, D33, D41)."
     }
     $toolDir = $PSScriptRoot
     $repo = Split-Path -Parent (Split-Path -Parent $toolDir)

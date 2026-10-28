@@ -172,16 +172,17 @@ jobs:
           GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
         run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
 
-  # Grape's own HEIC helper for Windows (DECISIONS D33), built in this run
-  # with its source bundle and the HEIC test fixtures.
+  # Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41),
+  # built in this run with its source bundle and the HEIC and AVIF test
+  # fixtures.
   grape-heif:
     name: grape-heif
     uses: ./.github/workflows/grape-heif.yml
 
-  # The HEIC engine and the Job Object against the grape-heif.exe just built
-  # (feature heif-it).
+  # The HEIC and AVIF engine and the Job Object against the grape-heif.exe
+  # just built (feature heif-it).
   heif-it-windows:
-    name: HEIC tests (Windows)
+    name: HEIC and AVIF tests (Windows)
     needs: grape-heif
     runs-on: windows-latest
     steps:
@@ -206,12 +207,14 @@ jobs:
       # The default clippy run doesn't enable heif-it.
       - name: Clippy (heif-it)
         run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
-      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF.
-      - name: HEIC engine tests (real grape-heif.exe)
+      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF. The log
+      # keeps what they print: the 35.6 MP AVIF encode's and decode's peaks
+      # in the Job Object, and what each damaged fixture was called (D41).
+      - name: HEIC and AVIF engine tests (real grape-heif.exe)
         env:
           GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}\heif-fixtures
-        run: cargo test -p grape-engines --features heif-it --locked
+        run: cargo test -p grape-engines --features heif-it --locked -- --nocapture
       # 35.6 MP under the 2 GiB Job cap; prints the peak (heic-spec J24).
       - name: Job Object tests (real grape-heif.exe)
         env:
@@ -236,12 +239,14 @@ jobs:
           & $bin --nocapture --test-threads=1 --skip grape_heif_encodes_the_largest_picture_under_the_cap
           exit $LASTEXITCODE
 
-  # ImageIO (Grape's HEIC worker on macOS) against the fixtures libheif wrote
-  # on Windows. Encoding needs a hardware HEVC encoder, which GitHub's macOS
-  # VMs lack: those tests accept "This Mac can't write HEIC files." here, and
-  # Mac encoding is manual QA (docs/TESTING.md).
+  # ImageIO (Grape's image helper worker on macOS) against the HEIC and AVIF
+  # fixtures libheif wrote on Windows. HEIC encoding needs a hardware HEVC
+  # encoder, which GitHub's macOS VMs lack: those tests accept "This Mac
+  # can't write HEIC files." here, and Mac HEIC encoding is manual QA
+  # (docs/TESTING.md). AVIF is written by rav1e in the worker (avif-encode,
+  # D41), so its round trips run here end to end.
   heif-it-macos:
-    name: HEIC tests (macOS)
+    name: HEIC and AVIF tests (macOS)
     needs: grape-heif
     runs-on: macos-latest
     steps:
@@ -257,24 +262,25 @@ jobs:
         with:
           name: heif-fixtures
           path: ${{ runner.temp }}/heif-fixtures
+      # The Mac app's features: the worker writes AVIF with rav1e (D41).
       - name: Clippy (heif-it)
-        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
-      - name: Build the test worker (ImageIO behind the HEIC protocol)
-        run: cargo build -p grape-platform --features heif-it --bin grape-heif-worker --locked
+        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it,grape-platform/avif-encode --all-targets --locked -- -D warnings
+      - name: Build the test worker (ImageIO and rav1e behind the image helper's protocol)
+        run: cargo build -p grape-platform --features heif-it,avif-encode --bin grape-heif-worker --locked
       # The heif-it tests fail, not skip, without their variables.
       # One test at a time, as the worker runs one job.
-      - name: ImageIO tests (libheif's fixtures)
+      - name: ImageIO tests (libheif's fixtures, rav1e's AVIF read back)
         env:
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
-        run: cargo test -p grape-platform --features heif-it --locked --no-fail-fast -- --test-threads=1
+        run: cargo test -p grape-platform --features heif-it,avif-encode --locked --no-fail-fast -- --test-threads=1
       # Also after a failure above: the worker is a process of its own, so
       # its jobs say what ImageIO did even if a test process crashed.
-      - name: HEIC engine tests (the ImageIO worker)
+      - name: HEIC and AVIF engine tests (the ImageIO and rav1e worker)
         if: ${{ !cancelled() }}
         env:
           GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
-        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast
+        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast -- --nocapture
       # A crashed test or worker leaves a report naming the frame it died in.
       - name: Crash reports
         if: failure()
@@ -287,6 +293,37 @@ jobs:
             echo
             echo "::endgroup::"
           done
+
+  # What ImageIO says about AVIF on each kind of runner (D41): the types it
+  # reads and writes, and sips's list. Informational, never failing: it
+  # settles which macOS versions and machines decode AVIF, and whether
+  # ImageIO lists it as a destination (Grape writes AVIF with rav1e either
+  # way). No macOS 13 runner exists, so 13.x is manual QA (docs/TESTING.md).
+  avif-probe-macos:
+    name: AVIF probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-26-intel, macos-15, macos-15-intel]
+    steps:
+      - name: ImageIO's and sips's AVIF types
+        run: |
+          sw_vers
+          uname -m
+          probe="$RUNNER_TEMP/imageio-types.swift"
+          cat > "$probe" <<'SWIFT'
+          import ImageIO
+          let reads = (CGImageSourceCopyTypeIdentifiers() as? [String]) ?? []
+          let writes = (CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? []
+          print("ImageIO reads: \(reads.joined(separator: " "))")
+          print("ImageIO writes: \(writes.joined(separator: " "))")
+          print("public.avif: read \(reads.contains("public.avif")), write \(writes.contains("public.avif"))")
+          print("public.heic: read \(reads.contains("public.heic")), write \(writes.contains("public.heic"))")
+          SWIFT
+          swift "$probe" || echo "::warning::swift couldn't run the ImageIO probe."
+          sips --formats | grep -i -E 'avif|heic|heif' || echo "sips lists no AVIF, HEIC or HEIF."
 
   # Grape's own FFmpeg (DECISIONS D24), built in this run: the Windows exes
   # cross-built on Linux, the two Mac halves on their own runners joined with
@@ -651,7 +688,7 @@ jobs:
             echo "$name ($archs): $first"
             [[ $first =~ $re ]] || fail "$name in Grape.app isn't Grape's own build: $first"
           done
-          [ ! -e "$app/Contents/MacOS/grape-heif" ] || fail "grape-heif is Windows only: on a Mac, Grape itself is the HEIC worker (D33)."
+          [ ! -e "$app/Contents/MacOS/grape-heif" ] || fail "grape-heif is Windows only: on a Mac, Grape itself is the image helper (D33)."
 
           # Each license folder whole, byte for byte, and the notices.
           for folder in $folders; do
@@ -673,12 +710,14 @@ jobs:
               fail "Grape.app is signed with the hardened runtime, which refuses the ad-hoc libpdfium.dylib."
               ;;
           esac
-      # The HEIC worker (D33) is Grape itself: `Grape --grape-heif-worker`
-      # answers a probe with ImageIO, on each slice the runner can run.
+      # The image helper worker (D33, D41) is Grape itself: `Grape
+      # --grape-heif-worker` answers a probe with ImageIO, on each slice the
+      # runner can run, and says it writes AVIF: the app's macOS build turns
+      # on grape-platform's avif-encode (rav1e), in both slices.
       # CGImageSourceSetAllowableTypes (macOS 14.2+) must only be looked up
       # with dlsym: a bound import would stop Grape launching on macOS 13
       # (its minimum), and this runner, which has the symbol, wouldn't notice.
-      - name: Check the HEIC worker answers and Grape launches on macOS 13
+      - name: Check the image helper worker answers and Grape launches on macOS 13
         run: |
           app=target/universal-apple-darwin/release/bundle/macos/Grape.app
           name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
@@ -688,7 +727,7 @@ jobs:
             exit 1
           fi
           limits='{"maxSourceBytes":536870912,"maxPixels":134217728,"maxEncodePixels":35651584,"maxEncodeSide":16888,"maxIccBytes":16707345,"maxDecoderMemory":1073741824}'
-          request='{"protocol":1,"workDir":"'"$RUNNER_TEMP"'","op":{"kind":"probe"},"limits":'"$limits"'}'
+          request='{"protocol":2,"workDir":"'"$RUNNER_TEMP"'","op":{"kind":"probe"},"limits":'"$limits"'}'
           probe() {
             set +e
             out=$(printf '%s' "$request" | "$@" --grape-heif-worker)
@@ -696,8 +735,12 @@ jobs:
             set -e
             echo "$* --grape-heif-worker: $out (exit $code)"
             case "$out" in
-              *'"done":{"caps":{"decode":true,'*) [ "$code" -eq 0 ] || { echo "::error::The HEIC worker answered but exited $code."; exit 1; } ;;
-              *) echo "::error::The HEIC worker didn't answer the probe with decode true."; exit 1 ;;
+              *'"done":{"caps":{"heic":{"decode":true,'*) [ "$code" -eq 0 ] || { echo "::error::The image helper worker answered but exited $code."; exit 1; } ;;
+              *) echo "::error::The image helper worker didn't answer the probe with HEIC decode true."; exit 1 ;;
+            esac
+            case "$out" in
+              *'"avif":{"decode":'*',"encode":true}'*) ;;
+              *) echo "::error::The image helper worker can't write AVIF: this Grape was built without grape-platform's avif-encode (D41)."; exit 1 ;;
             esac
           }
           probe "$bin"
@@ -707,6 +750,51 @@ jobs:
           else
             echo "No Rosetta on this runner: the x86_64 slice's worker isn't run."
           fi
+      # One AVIF at the encode cap through the shipped worker (D41): an
+      # 8192x4352 RGBA picture with grain and soft transparent edges, under
+      # the 2 GiB heap bound the worker arms (exit 86 is "needs too much
+      # memory"). rav1e runs as many threads as the runner has cores (3), not
+      # the 8 of a bigger Mac; D41 has the 8-thread peaks, measured on Linux.
+      - name: Encode an AVIF at the cap with the image helper worker
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          bin="$app/Contents/MacOS/$name"
+          work=$(mktemp -d "$RUNNER_TEMP/grape-heif-cap.XXXXXX")
+          python3 - "$work/input.rgba" <<'PY'
+          import os, struct, sys
+          w, h = 8192, 4352
+          # A gradient in each color byte's high bits, random grain in its low
+          # four, and alpha that ramps from 0 at the sides to 255 in the middle.
+          row = bytearray()
+          for x in range(w):
+              a = max(0, min(255, (min(x, w - 1 - x) - 256) * 2))
+              row += bytes(((x * 255 // w) & 0xF0, (x * 128 // w) & 0xF0, 0x80, a))
+          size = w * h * 4
+          base = int.from_bytes(bytes(row) * h, "little")
+          mask = int.from_bytes(b"\x0f\x0f\x0f\x00" * (w * h), "little")
+          grain = int.from_bytes(os.urandom(size), "little") & mask
+          with open(sys.argv[1], "wb") as f:
+              f.write(b"GRAPEPX\x01" + struct.pack("<IIII", w, h, 4, 0))
+              f.write((base | grain).to_bytes(size, "little"))
+          PY
+          limits='{"maxSourceBytes":536870912,"maxPixels":134217728,"maxEncodePixels":35651584,"maxEncodeSide":16384,"maxIccBytes":16707345,"maxDecoderMemory":1073741824}'
+          request='{"protocol":2,"workDir":"'"$work"'","op":{"kind":"encode","format":"avif"},"limits":'"$limits"'}'
+          set +e
+          out=$(printf '%s' "$request" | /usr/bin/time -l "$bin" --grape-heif-worker 2> "$work/time.txt")
+          code=$?
+          set -e
+          echo "$out" | tail -n 1
+          grep -E 'real|maximum resident set size' "$work/time.txt" || true
+          [ "$code" -ne 86 ] || { echo "::error::The worker went past its 2 GiB heap bound on an AVIF at the cap (exit 86)."; exit 1; }
+          [ "$code" -eq 0 ] || { echo "::error::The worker exited $code on an AVIF at the cap."; exit 1; }
+          case "$out" in
+            *'"done":'*) ;;
+            *) echo "::error::The worker didn't answer done for an AVIF at the cap."; exit 1 ;;
+          esac
+          [ "$(head -c 12 "$work/out.avif" | tail -c 4)" = avif ] || { echo "::error::out.avif isn't an AVIF."; exit 1; }
+          ls -l "$work/out.avif"
+          rm -rf "$work"
       - uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal
