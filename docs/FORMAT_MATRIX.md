@@ -113,7 +113,7 @@ audio → `mp3 m4a wav flac ogg opus aiff wma` · video → `mp4 mov mkv webm av
 **Total: 275 pairs** — v1: 178, v2: 81, later: 16.
 
 Notes:
-- `svg` is input-only within images. Rasterize at its intrinsic size; **[Grape]** use 2× for very small viewBoxes (< 256 px).
+- `svg` is input-only within images. Rasterize at its intrinsic size (its width and height in CSS pixels, 96 per inch, or its viewBox's); **[Grape]** twice that when the longer side is under 256 px, rounded up, at least 1 px, and fitted within 16,384 px a side and 64 MP (WebP 16,383; HEIC and AVIF 35.6 MP), with "Drawn smaller to fit" when it was. Linked images are left out (embedded `data:` images are drawn), and text uses the system's fonts. → PDF: a page of the SVG's own size drawn at 300 DPI (D39).
 - `video → mp3` extracts the audio track. `video → gif` uses a palette (see `ENGINES.md`).
 - `gif → video` is offered, but `gif` gets no image targets **[observed]**.
 - PDF → images exports **every page at 300 DPI** **[observed: site copy]**. Multiple pages go into a new folder.

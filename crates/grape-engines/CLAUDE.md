@@ -17,7 +17,7 @@ src/
   publish.rs        shared by every engine: destination folder, no-clobber finalize, user-message names
   output.rs         temp files and the no-clobber hard link
   cancel.rs         Cancellable reader/writer
-  image.rs          image crate (raster); later ravif, resvg. publish_pixels and pixels_fit serve heif.rs; decode_stored serves Compress
+  image.rs          image crate (raster). publish_pixels and pixels_fit serve heif.rs and svg/; decode_stored serves Compress
   imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
                     strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
                     and png_compress.rs (PNG, lossless)
@@ -28,12 +28,16 @@ src/
                     tools/argv.rs (the five FFmpeg tools, D26)
   pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
   heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels
-  helper.rs         helper-process plumbing, WorkDir and the containment hook set_contain (lane A's)
+  svg/              SVG in a worker process: resvg (D39; lane A's module by agreement): protocol.rs (the worker's own JSON), worker.rs
+                    (`Grape --grape-svg-worker`: read, gunzip, parse, draw), resolve.rs (data: references only, a job-wide budget),
+                    size.rs (the size rule, pure), run.rs (the parent: start, watch, read the pixels)
+  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader and the containment hook set_contain (lane A's)
   archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/pump/watchdog, tap) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
   docs.rs           v2, behind feature "v2"
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar
                     feature "rar-it" runs the RAR tests (unit tests in src/archive/rar/it.rs) against a real bsdtar (GRAPE_TEST_BSDTAR)
+                    tests/svg.rs runs the real SVG worker, the grape-svg-worker bin (src/bin/, no feature needed; D39)
 ```
 
 ## FFmpeg argument builders
