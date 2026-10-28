@@ -12,7 +12,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use common::{plan_one, TestDir};
 use grape_core::{Job, Operation, ToolKey};
-use grape_engines::{run_job, EngineCtx};
+use grape_engines::{run_job, EngineCtx, GrapeError, JobOutcome};
 
 /// The bytes held now, and the most held since the last reset.
 static HELD: AtomicUsize = AtomicUsize::new(0);
@@ -81,12 +81,20 @@ fn turn() -> MutexGuard<'static, ()> {
     TURN.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// The most heap `job` held over what was held before it ran.
-fn peak(job: &Job) -> usize {
+/// The most heap `job` held over what was held before it ran, and how it
+/// ended.
+fn peak_of(job: &Job) -> (usize, Result<JobOutcome, GrapeError>) {
     let before = HELD.load(Ordering::Relaxed);
     PEAK.store(before, Ordering::Relaxed);
-    run_job(job, &EngineCtx::default(), &mut |_| {}).unwrap();
-    PEAK.load(Ordering::Relaxed) - before
+    let result = run_job(job, &EngineCtx::default(), &mut |_| {});
+    (PEAK.load(Ordering::Relaxed) - before, result)
+}
+
+/// The most heap `job` held over what was held before it ran.
+fn peak(job: &Job) -> usize {
+    let (peak, result) = peak_of(job);
+    result.unwrap();
+    peak
 }
 
 /// Which byte strip `i` of `n` is.
@@ -241,4 +249,29 @@ fn the_self_check_holds_no_photoshop_resources_of_its_own() {
     );
     let blocks = peak(&job) as f64 / f64::from(size);
     assert!(blocks < 6.5, "{blocks:.2} blocks");
+}
+
+#[test]
+fn pages_that_name_photoshops_resources_each_their_own_way_hold_16_mib_at_most() {
+    // 40 pages that name one block of a 1 MiB path, each 2 bytes more of
+    // it (the padding after it): each is read and filtered on its own,
+    // until 16 MiB of them have been, and the file is too large.
+    let _turn = turn();
+    let (pages, size) = (40, 1 << 20);
+    let irb = [path(size), vec![0; 2 * pages as usize]].concat();
+    let dir = TestDir::new("tiff-heap-irb-lens");
+    let (_, job) = plan_one(
+        &dir,
+        "lengths.tif",
+        &photoshop(pages, &irb, |n| (0, 12 + size + 2 * n)),
+        Operation::tool(ToolKey::RemoveMetadata),
+    );
+    let (peak, result) = peak_of(&job);
+    let err = result.unwrap_err();
+    assert!(
+        err.user_message.ends_with("is too large to convert."),
+        "{err:?}"
+    );
+    let mib = peak as f64 / f64::from(1 << 20);
+    assert!(mib < 18.0, "{mib:.2} MiB");
 }

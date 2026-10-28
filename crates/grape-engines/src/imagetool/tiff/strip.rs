@@ -6,7 +6,8 @@
 //! - **Kept:** the layout, color, resolution and page tags ([`kept`]), ICC
 //!   and Orientation among them; Photoshop's resources, filtered
 //!   ([`irb`](super::irb)): a block that IFDs share is filtered once, and
-//!   held and written once.
+//!   held and written once; past [`MAX_IRB`] of them read in all, the file
+//!   is too large.
 //! - **Dropped and reported:** every other tag ([`field`]), and the Exif
 //!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
 //!   once). Padding, and values that are blank as far as they're read, go
@@ -37,7 +38,9 @@ use crate::{CancelToken, MetaField};
 /// description to see whether it's ImageJ's or OME's.
 const MAX_JUDGED: u64 = 64 * 1024;
 
-/// The most bytes of Photoshop's resources read.
+/// The most bytes of Photoshop's resources read from one file, each block
+/// once however many IFDs name it: what the plan holds of them, filtered,
+/// is never more.
 const MAX_IRB: u64 = 16 << 20;
 
 /// How much of each JPEG block (and of its tables) is read for segments.
@@ -143,6 +146,7 @@ impl Plan {
             reported: HashSet::new(),
             irbs: HashMap::new(),
             keep: true,
+            irb_left: MAX_IRB,
         };
         let pages = pages
             .into_iter()
@@ -197,7 +201,8 @@ impl Plan {
             }
         }
         // And the report finds nothing. The walk holds none of the
-        // resources it filters: each page's go with it.
+        // resources it filters: each page's go with it. The output's are
+        // the plan's, so they're within its cap already.
         let mut walk = Walk {
             r,
             order: out.layout.order,
@@ -205,6 +210,7 @@ impl Plan {
             reported: HashSet::new(),
             irbs: HashMap::new(),
             keep: false,
+            irb_left: u64::MAX,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -416,6 +422,9 @@ struct Walk<'r> {
     /// only needs what the report says, so a block that a later IFD shares
     /// gives that IFD no field.
     keep: bool,
+    /// What's left of the bytes of Photoshop's resources it may read, each
+    /// block once ([`MAX_IRB`]).
+    irb_left: u64,
 }
 
 impl Walk<'_> {
@@ -534,14 +543,13 @@ impl Walk<'_> {
         let Value::At { offset, len } = entry.value else {
             return self.filter_irb(entry);
         };
-        if len > MAX_IRB {
-            return Err(Error::TooLarge(format!(
-                "{len} bytes of Photoshop resources"
-            )));
-        }
         if let Some(field) = self.irbs.get(&(offset, len)) {
             return Ok(field.clone());
         }
+        // Blocks that overlap count each time, however little they differ.
+        self.irb_left = self.irb_left.checked_sub(len).ok_or_else(|| {
+            Error::TooLarge(format!("over {MAX_IRB} bytes of Photoshop resources"))
+        })?;
         let field = self.filter_irb(entry)?;
         let held = if self.keep { field.clone() } else { None };
         self.irbs.insert((offset, len), held);
@@ -844,6 +852,44 @@ mod tests {
         assert!(rest
             .iter()
             .all(|d| matches!(d, Data::Shared(b) if Arc::ptr_eq(b, first))));
+    }
+
+    #[test]
+    fn photoshop_resources_past_16_mib_in_all_are_too_large() {
+        // Three pages whose resources are one block of a 6 MiB path, with
+        // padding after it: named the same way, it's read once; each page
+        // naming 2 more bytes of it, it's read three times, past 16 MiB.
+        let path = res(2000, "", &[7; 6 << 20]);
+        for (step, fine) in [(0, true), (2, false)] {
+            let pages = (0..3)
+                .map(|n| {
+                    let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                    let irb = if n == 0 {
+                        [path.clone(), vec![0; 4]].concat()
+                    } else {
+                        vec![0]
+                    };
+                    page.tags.push((34377, V::Bytes(1, irb)));
+                    page
+                })
+                .collect();
+            let mut file = Builder::new(b'I', false, pages).build();
+            let tiff = read(&file);
+            let Value::At { offset, .. } = tiff.pages[0].get(34377).unwrap().value else {
+                panic!("inline resources")
+            };
+            for (n, page) in (0..).zip(&tiff.pages) {
+                let len = path.len() as u64 + n * step;
+                set_entry(&mut file, page.at, 34377, len, offset);
+            }
+            if fine {
+                let (out, found) = strip(&file);
+                assert!(found.is_empty());
+                assert!(out.len() < file.len());
+            } else {
+                assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
+            }
+        }
     }
 
     #[test]
