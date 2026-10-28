@@ -719,7 +719,9 @@ test('no workflow build passes two overlays that both set externalBin, and every
   const want = [
     ['ci.yml', 'tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json'],
     ['release.yml', 'tauri.pdfium.windows.conf.json', 'tauri.sidecars.windows.conf.json'],
-    ['ci.yml', 'tauri.pdfium.macos.conf.json', 'tauri.sidecars.macos.conf.json'],
+    // The Mac build lives in macos-app.yml, which ci.yml and release.yml
+    // both call (D45).
+    ['macos-app.yml', 'tauri.pdfium.macos.conf.json', 'tauri.sidecars.macos.conf.json'],
   ];
   for (const [file, pdfium, sidecars] of want) {
     const found = builds.filter((b) => b.file === file && b.overlays.includes(pdfium));
@@ -727,8 +729,13 @@ test('no workflow build passes two overlays that both set externalBin, and every
     for (const b of found) assert.deepEqual(b.overlays, [pdfium, sidecars], `${file}: ${b.line.trim()}`);
   }
   // Every build that ships is one of those: none without its sidecars.
-  for (const b of builds.filter((b) => ['ci.yml', 'release.yml'].includes(b.file))) {
+  for (const b of builds.filter((b) => ['ci.yml', 'release.yml', 'macos-app.yml'].includes(b.file))) {
     assert.equal(b.overlays.filter(setsBins).length, 1, `${b.file}: ${b.line.trim()}`);
+  }
+  const workflows = fileURLToPath(new URL('../.github/workflows/', import.meta.url));
+  for (const file of ['ci.yml', 'release.yml']) {
+    const yml = readFileSync(join(workflows, file), 'utf8');
+    assert.match(yml, /^\s*uses: \.\/\.github\/workflows\/macos-app\.yml\s*$/m, `${file} doesn't build the Mac app`);
   }
 });
 
