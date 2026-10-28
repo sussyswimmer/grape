@@ -14,7 +14,7 @@ use grape_core::{Operation, ToolKey};
 use grape_engines::{run_job, EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
 use image::codecs::jpeg::JpegEncoder;
 use image::metadata::Orientation;
-use image::{ImageDecoder, Rgb, RgbImage};
+use image::{ImageDecoder, ImageEncoder, Rgb, RgbImage};
 
 /// Plans `op` on `bytes` named `name` and runs it. Checks that the source
 /// didn't change, that no temp file was left, and that a failed job wrote
@@ -187,4 +187,71 @@ fn a_cancelled_strip_leaves_nothing() {
     assert!(!planned_file(&job).exists());
     assert_no_leftovers(&dir.path);
     assert!(Path::new(&src).exists());
+}
+
+/// The gradient as a PNG.
+fn plain_png() -> Vec<u8> {
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    out
+}
+
+/// A PNG chunk with its CRC.
+fn chunk(kind: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut crc = crc32fast::Hasher::new();
+    crc.update(kind);
+    crc.update(data);
+    let mut out = u32::try_from(data.len()).unwrap().to_be_bytes().to_vec();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    out.extend_from_slice(&crc.finalize().to_be_bytes());
+    out
+}
+
+/// `png` with `chunks` right after IHDR.
+fn png_with(png: &[u8], chunks: &[Vec<u8>]) -> Vec<u8> {
+    // The signature (8) and IHDR (25).
+    let mut out = png[..33].to_vec();
+    for c in chunks {
+        out.extend_from_slice(c);
+    }
+    out.extend_from_slice(&png[33..]);
+    out
+}
+
+#[test]
+fn remove_metadata_strips_a_png_even_one_named_jpg() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-png");
+    let plain = plain_png();
+    let exif = exif(1);
+    // A PNG's eXIf holds the TIFF without "Exif\0\0".
+    let src = png_with(
+        &plain,
+        &[
+            chunk(b"tEXt", b"Author\0secret author"),
+            chunk(b"eXIf", &exif[10..]),
+            chunk(b"tIME", &[7, 232, 5, 1, 10, 20, 30]),
+        ],
+    );
+    for name in ["shot.png", "shot.jpg"] {
+        let outcome = strip(&dir, name, &src).unwrap();
+        let (stem, ext) = name.split_once('.').unwrap();
+        assert_eq!(
+            outcome.outputs,
+            [dir.join(&format!("{stem} No Metadata.{ext}"))]
+        );
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![
+                Location, Camera, Author, ModDate
+            ])]
+        );
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(out, plain);
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
 }

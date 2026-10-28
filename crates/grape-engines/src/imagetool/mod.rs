@@ -3,11 +3,12 @@
 //! image data byte for byte, and Compress on JPEG and PNG.
 //!
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
-//!   ([`jpeg`]).
+//!   ([`jpeg`], [`png`]).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
 
 pub(crate) mod exif;
 mod jpeg;
+mod png;
 mod strip;
 
 use std::path::Path;

@@ -14,7 +14,7 @@ use std::path::Path;
 
 use grape_core::{Format, Job};
 
-use super::jpeg;
+use super::{jpeg, png};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -56,19 +56,26 @@ pub(crate) fn read_u8(r: &mut dyn BufRead) -> Result<u8, Error> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Container {
     Jpeg,
+    Png,
 }
 
 impl Container {
     /// The container `head` (the file's first bytes) starts.
     fn sniff(head: &[u8]) -> Option<Container> {
-        jpeg::sniff(head).then_some(Container::Jpeg)
+        if jpeg::sniff(head) {
+            Some(Container::Jpeg)
+        } else if png::sniff(head) {
+            Some(Container::Png)
+        } else {
+            None
+        }
     }
 }
 
 /// The formats Remove Metadata runs on through this engine, by name; the
 /// content decides the container.
 pub(crate) fn strips(from: Format) -> bool {
-    matches!(from, Format::Jpg)
+    matches!(from, Format::Jpg | Format::Png)
 }
 
 /// Runs Remove Metadata on the image `src` (named as `from`) into `dest`.
@@ -104,7 +111,7 @@ pub(crate) fn run(
         .fill_buf()
         .map_err(|e| read_error(&names, src, &ctx.cancel, e))?;
     let Some(container) = Container::sniff(head) else {
-        return Err(names.decode_failed(format!("{}: not a JPEG", src.display())));
+        return Err(names.decode_failed(format!("{}: not a JPEG or PNG", src.display())));
     };
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
@@ -112,6 +119,7 @@ pub(crate) fn run(
     let mut writer = BufWriter::with_capacity(64 * 1024, Cancellable::new(out, &ctx.cancel));
     let found = match container {
         Container::Jpeg => jpeg::strip(&mut reader, &mut writer),
+        Container::Png => png::strip(&mut reader, &mut writer),
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
     let found = found.map_err(|e| {
