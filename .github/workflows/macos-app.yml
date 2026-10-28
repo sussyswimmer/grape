@@ -291,6 +291,7 @@ jobs:
           printf '%s  %s\n' "$hash" Grape-macOS-universal.dmg > "$out/SHA256SUMS"
           echo "Copied $(basename "${dmgs[0]}") to Grape-macOS-universal.dmg"
           cat "$out/SHA256SUMS"
+      # The DMG is compressed already, so it isn't compressed again.
       - if: inputs.release
         uses: actions/upload-artifact@v7
         with:
@@ -299,3 +300,4 @@ jobs:
             ${{ runner.temp }}/grape-release/Grape-macOS-universal.dmg
             ${{ runner.temp }}/grape-release/SHA256SUMS
           if-no-files-found: error
+          compression-level: 0
