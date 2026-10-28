@@ -71,6 +71,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-26, #27:* CI builds Grape's own FFmpeg (D24), and the installer and DMG now carry it and Grape's bsdtar (D25, D27), so the 104 audio and video pairs and the three RAR pairs run from a CI build too: with every helper there, 151 of the 178 v1 pairs (D35's amendment). A missing `ffmpeg` or `ffprobe` now says "Grape's media converter is missing" / "Reinstalling Grape brings it back.", and a missing bsdtar "Grape's RAR helper is missing", instead of "coming" (D35). None of it has run on GitHub, the PC or a Mac yet: `TESTING.md` → "Sidecars, M3", "RAR, M3" and "Audio and video, M3".
 
+*Status 2026-10-28:* images → PDF are built (D37): JPG, PNG, WEBP, TIFF and BMP → PDF, and HEIC → PDF with Grape's HEIC helper (6 pairs). Grape writes the PDF itself, in its own process, one page at a time: no PDFium and no worker. With every helper there, 157 of the 178 v1 pairs run. Left in M3: AVIF and SVG (21 pairs, their → PDF pairs among them). Not run on the PC or a Mac yet: `TESTING.md` → "Images to PDF and Create PDF, M3/M4".
+
 **Accept:** every v1 pair (178) converts a fixture file on Windows (`engines-it` test run on the PC and in CI), and spot-checks by hand pass.
 
 ## M4: v1 tools (lane B engines, lane A panels)
@@ -80,6 +82,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 *Status 2026-10-26:* the four panels are built (D31): the window, the IPC with golden fixtures, the order list, and remembered presets. No panel opens in a normal build until lane B wires the tool engines; `GRAPE_PREVIEW_PANELS=1` opens them for QA. CI checks the model, the contract and the page; nothing has run on the PC or a Mac yet (`TESTING.md` → "Tool panels, M4").
 
 *Status 2026-10-26:* Extract Archive (ZIP, TAR and GZIP; RAR with Grape's bsdtar), Split PDF, Merge PDFs and Remove Metadata on PDFs run (D35), and Merge PDFs' panel opens in a normal build when PDFium is found. Remove Metadata's toast says what it removed. Compress, Audio Channels and Normalize Volume wait for lane B's FFmpeg tools (D26); `GRAPE_PREVIEW_PANELS=1` still opens their panels. Not run on the PC or a Mac yet: `TESTING.md` → "Archives, M3/M4" and "PDF, M3/M4".
+
+*Status 2026-10-28:* Create PDF runs (D37), with no panel: one page per image in drop order, mixed formats (JPG, PNG, WEBP and TIFF, and HEIC with Grape's HEIC helper), named `{first} Combined.pdf`. A file Grape can't read stops the whole PDF, and the toast names it. Not run on the PC or a Mac yet: `TESTING.md` → "Images to PDF and Create PDF, M3/M4".
 
 ## M5: File actions on Windows (lane A)
 - [ ] copy (`CF_HDROP`), move (`IFileOperation` with undo), copyPath, terminal (Windows Terminal → PowerShell fallback). See `PLATFORM_WINDOWS.md`.
