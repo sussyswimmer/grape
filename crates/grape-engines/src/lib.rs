@@ -296,6 +296,8 @@ enum Engine {
     Media,
     /// HEIC, in a helper process ([`heif`]).
     Heif,
+    /// Grape's own image tools ([`imagetool`]).
+    ImageTool,
 }
 
 /// The engine that converts `from` to `to` with these sidecars, if this
@@ -329,6 +331,8 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
         Some(Engine::Pdf)
     } else if media::tools::runs_tool(tool, from) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
+    } else if imagetool::runs_tool(tool, from) {
+        Some(Engine::ImageTool)
     } else {
         None
     }
@@ -377,7 +381,8 @@ pub fn run_job(
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
                 Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Heif) => heif::convert(job, src, dest, from, to, ctx, progress),
-                None => Err(not_yet_supported(job, Some(from))),
+                // The image tools convert nothing.
+                Some(Engine::ImageTool) | None => Err(not_yet_supported(job, Some(from))),
             }
         }
         // PDF → JPG or PNG: one page writes the file, more the folder.
@@ -407,6 +412,11 @@ pub fn run_job(
                 return Err(not_yet_supported(job, Some(from)));
             }
             media::tools::run(job, src, dest, from, to, tool, &params, ctx, progress)
+        }
+        (Some(from), [src], JobOutput::File(dest), Operation::Tool { tool, .. })
+            if tool_engine(tool, from, sidecars) == Some(Engine::ImageTool) =>
+        {
+            imagetool::run(job, src, dest, from, tool, ctx, progress)
         }
         // Split PDF and Remove Metadata (one input), Merge PDFs (all of
         // them): every input must be a PDF. The engine checks the shape.

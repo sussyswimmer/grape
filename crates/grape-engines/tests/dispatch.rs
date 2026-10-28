@@ -142,7 +142,11 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
     // Over every tool and format, exactly these run, each offered on the
     // wheel for one item or for several.
     let tools = runnable_tools(&all);
-    assert_eq!(tools.len(), 7 + MEDIA_TOOLS.len(), "{tools:?}");
+    assert_eq!(
+        tools.len(),
+        7 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len(),
+        "{tools:?}"
+    );
     for pair in [
         (ToolKey::ExtractArchive, Format::Zip),
         (ToolKey::ExtractArchive, Format::Tar),
@@ -154,6 +158,7 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
     ]
     .into_iter()
     .chain(MEDIA_TOOLS)
+    .chain(IMAGE_TOOLS)
     {
         assert!(tools.contains(&pair), "{pair:?}");
     }
@@ -199,6 +204,9 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         .all(|&(from, _)| from != Format::Rar));
     assert!(!runnable_tools(&no_bsdtar).contains(&(ToolKey::ExtractArchive, Format::Rar)));
 }
+
+/// Grape's own image tools (D26), which need no sidecar.
+const IMAGE_TOOLS: [(ToolKey, Format); 1] = [(ToolKey::RemoveMetadata, Format::Jpg)];
 
 /// The tools that run with `ffmpeg` and `ffprobe` (D26).
 const MEDIA_TOOLS: [(ToolKey, Format); 25] = [
@@ -249,13 +257,22 @@ fn media_tools_run_only_with_both_ffmpeg_sidecars() {
         ),
     ] {
         let tools = runnable_tools(&without);
-        assert_eq!(tools.len(), 7, "without {name}: {tools:?}");
+        assert_eq!(
+            tools.len(),
+            7 + IMAGE_TOOLS.len(),
+            "without {name}: {tools:?}"
+        );
         for pair in MEDIA_TOOLS {
             assert!(!tools.contains(&pair), "{pair:?} without {name}");
         }
     }
-    // Nothing but the archive tools runs with no sidecar at all.
-    assert_eq!(runnable_tools(&SidecarPaths::default()).len(), 3);
+    // Nothing but the archive and image tools runs with no sidecar at all.
+    let bare = runnable_tools(&SidecarPaths::default());
+    assert_eq!(bare.len(), 3 + IMAGE_TOOLS.len(), "{bare:?}");
+    for pair in IMAGE_TOOLS {
+        assert!(bare.contains(&pair), "{pair:?}");
+        assert!(supports(&Operation::tool(pair.0), Some(pair.1)));
+    }
     for (tool, format) in MEDIA_TOOLS {
         assert!(!supports(&Operation::tool(tool), Some(format)));
     }
