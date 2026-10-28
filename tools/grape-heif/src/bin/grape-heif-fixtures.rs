@@ -25,7 +25,7 @@
 //! | `grid.avif` | as `grid.heic`, with AV1 tiles; it sniffs as AVIF, or as HEIC when libheif gives the grid no codec brand (the run's log says which) |
 //! | `icc.avif` | as `icc.heic` (only with `--icc`) |
 //! | `damaged.avif` | the first half of `opaque.avif` |
-//! | `exif-xmp.heic` | as `rotate90.heic` (decodes as 64×96), as a phone writes one: an Exif item (`Exif\0\0`, then big-endian TIFF: Make, Model, Orientation 6, an Exif IFD with DateTimeOriginal, a GPS IFD) and an XMP item (`tiff:Orientation="6"`, Make, Model, DateTimeOriginal, GPS), for D28's metadata graft |
+//! | `exif-xmp.heic` | as `rotate90.heic` (decodes as 64×96), as a phone writes one: an Exif item (`Exif\0\0`, then big-endian TIFF: Make, Model, Orientation 6, an Exif IFD with ExifVersion 0232, DateTimeOriginal and PixelXDimension × PixelYDimension 96 × 64, the stored size; a GPS IFD) and an XMP item (`tiff:Orientation="6"`, Make, Model, DateTimeOriginal, GPS), for D28's metadata graft |
 //! | `thumb.heic` | 320×240 gradients under a checkerboard, with a thumbnail item at most 64 a side (`heif_context_encode_thumbnail`) |
 //! | `nclx-p3.heic` | 64×64 red, green and blue quarters and a white one, its color only an `nclx` box: primaries 12 (Display P3), transfer 13 (sRGB), matrix 6, full range; no ICC profile |
 //! | `q95.heic` | 1600×1200 of fine detail (noise over gradients and a checkerboard) at quality 95, so Compress has something to shrink |
@@ -73,6 +73,11 @@ const MAKE: &str = "Grape";
 
 /// `exif-xmp.heic`'s Model.
 const MODEL: &str = "Fixture Camera";
+
+/// `exif-xmp.heic`'s stored size: its `ispe`, and its Exif's
+/// PixelXDimension and PixelYDimension, as a phone writes them for a
+/// picture it stores sideways (Orientation 6).
+const STORED: (u32, u32) = (96, 64);
 
 /// `exif-xmp.heic`'s XMP packet: what a phone writes beside its Exif, with
 /// the same Orientation (6: turn 90° clockwise to show).
@@ -466,7 +471,9 @@ fn grid(lib: &LibHeif, format: HeifFormat) -> Result<Vec<u8>> {
 /// `exif-xmp.heic`: `stored` (`rotate90.heic`'s picture) turned 90°
 /// clockwise by `irot`, with an Exif item ([`exif`]) and an XMP item
 /// ([`XMP`]) whose Orientation says the same, as a phone writes them. Read
-/// back: one Exif and one XMP block on the primary image, stored 96×64.
+/// back: one Exif and one XMP block on the primary image, stored 96×64,
+/// the Exif block exactly [`exif`]'s behind libheif's offset to its TIFF
+/// header, with ExifVersion and the stored size in its Exif IFD.
 fn exif_xmp(lib: &LibHeif, stored: &Picture) -> Result<Vec<u8>> {
     let image = image(stored, None)?;
     let mut encoder = encoder(lib, HeifFormat::Heic, QUALITY)?;
@@ -497,9 +504,67 @@ fn exif_xmp(lib: &LibHeif, stored: &Picture) -> Result<Vec<u8>> {
                 "exif-xmp.heic is stored {stored_size:?}, not 96×64"
             ));
         }
+        let mut ids = [0; 1];
+        if primary.metadata_block_ids(&mut ids, b"Exif") != 1 {
+            return Err("exif-xmp.heic's Exif block has no ID".to_string());
+        }
+        let block = primary.metadata(ids[0]).map_err(|e| e.to_string())?;
+        check_exif_block(&block)?;
     }
     Ok(bytes)
 }
+
+/// `exif-xmp.heic`'s Exif block as libheif stored it: the big-endian
+/// offset to the TIFF header (6, past `Exif\0\0`), then [`exif`] as it
+/// was given, whose Exif IFD has ExifVersion 0232 and PixelXDimension and
+/// PixelYDimension of [`STORED`], each LONG.
+fn check_exif_block(block: &[u8]) -> Result<()> {
+    let given = exif();
+    if block.get(..4) != Some(&6u32.to_be_bytes()[..]) || block.get(4..) != Some(&given[..]) {
+        return Err(format!(
+            "exif-xmp.heic's Exif block is {} bytes, not the offset 6 and the {} bytes given",
+            block.len(),
+            given.len()
+        ));
+    }
+    // The stored TIFF, past the offset and `Exif\0\0`.
+    let tiff = &block[10..];
+    let entries = |at: u32| -> Option<Vec<RawEntry>> {
+        let at = usize::try_from(at).ok()?;
+        let count = u16::from_be_bytes(tiff.get(at..at + 2)?.try_into().ok()?);
+        (0..usize::from(count))
+            .map(|n| {
+                let e = tiff.get(at + 2 + 12 * n..at + 14 + 12 * n)?;
+                Some((
+                    u16::from_be_bytes([e[0], e[1]]),
+                    u16::from_be_bytes([e[2], e[3]]),
+                    u32::from_be_bytes([e[4], e[5], e[6], e[7]]),
+                    [e[8], e[9], e[10], e[11]],
+                ))
+            })
+            .collect()
+    };
+    let exif_ifd = entries(8)
+        .and_then(|ifd0| ifd0.into_iter().find(|e| e.0 == 0x8769))
+        .and_then(|pointer| entries(u32::from_be_bytes(pointer.3)))
+        .ok_or("exif-xmp.heic's Exif has no Exif IFD")?;
+    // Each entry as written: tag, type, count and the inline value.
+    let wanted = [
+        ("ExifVersion", (0x9000, UNDEFINED, 4, *b"0232")),
+        ("PixelXDimension", (0xA002, LONG, 1, STORED.0.to_be_bytes())),
+        ("PixelYDimension", (0xA003, LONG, 1, STORED.1.to_be_bytes())),
+    ];
+    for (name, entry) in wanted {
+        if !exif_ifd.contains(&entry) {
+            return Err(format!("exif-xmp.heic's Exif IFD has no {name} as written"));
+        }
+    }
+    Ok(())
+}
+
+/// An IFD entry as read: tag, type, count and the 4 bytes of its value or
+/// offset.
+type RawEntry = (u16, u16, u32, [u8; 4]);
 
 /// TIFF field types.
 const BYTE: u16 = 1;
@@ -507,6 +572,7 @@ const ASCII: u16 = 2;
 const SHORT: u16 = 3;
 const LONG: u16 = 4;
 const RATIONAL: u16 = 5;
+const UNDEFINED: u16 = 7;
 
 /// One IFD entry, its value big-endian.
 struct Entry {
@@ -589,9 +655,11 @@ fn ifd(entries: &[Entry], at: u32) -> Vec<u8> {
 
 /// `exif-xmp.heic`'s Exif: `Exif\0\0`, then a big-endian TIFF, as an
 /// iPhone's HEIC holds it. IFD0: Make, Model, Orientation 6 and the
-/// pointers to the Exif IFD (DateTimeOriginal) and the GPS IFD (version
-/// 2.3, 48°51'24" N, 2°17'40" E). libheif stores it after the 4-byte offset
-/// of the TIFF header (6).
+/// pointers to the Exif IFD (ExifVersion 0232, DateTimeOriginal, and
+/// PixelXDimension and PixelYDimension: the stored size, [`STORED`], as
+/// phones write it, so D28's graft has dimensions to patch) and the GPS
+/// IFD (version 2.3, 48°51'24" N, 2°17'40" E). libheif stores it after the
+/// 4-byte offset of the TIFF header (6).
 fn exif() -> Vec<u8> {
     let ifd0 = |exif_at: u32, gps_at: u32| {
         [
@@ -604,7 +672,20 @@ fn exif() -> Vec<u8> {
     };
     // The pointers are inline, so IFD0's length doesn't depend on them.
     let exif_at = 8 + ifd(&ifd0(0, 0), 8).len() as u32;
-    let exif_ifd = ifd(&[ascii(0x9003, "2026:10:28 12:34:56")], exif_at);
+    let exif_ifd = ifd(
+        &[
+            Entry {
+                tag: 0x9000,
+                kind: UNDEFINED,
+                count: 4,
+                value: b"0232".to_vec(),
+            },
+            ascii(0x9003, "2026:10:28 12:34:56"),
+            long(0xA002, STORED.0),
+            long(0xA003, STORED.1),
+        ],
+        exif_at,
+    );
     let gps_at = exif_at + exif_ifd.len() as u32;
     let gps_ifd = ifd(
         &[
