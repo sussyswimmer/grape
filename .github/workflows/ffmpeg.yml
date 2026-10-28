@@ -5,8 +5,8 @@ name: ffmpeg
 # one job per target, checked, and uploaded as artifacts for the jobs of the
 # run that called this, with the GPL source bundle (grape-ffmpeg-sources.tar).
 # The Windows exes are cross-built on Linux; the two Mac halves build natively
-# on their own runners and are joined with lipo. No GitHub Release of the
-# builds until M7; release.yml attaches the source bundle to its draft.
+# on their own runners and are joined with lipo. release.yml attaches the
+# source bundle to its draft, and both builds, zipped (D45).
 #
 # Artifacts:
 #   ffmpeg-x86_64-pc-windows-msvc   ffmpeg-/ffprobe-x86_64-pc-windows-msvc.exe,

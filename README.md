@@ -12,7 +12,7 @@ Grape is a free, open-source file converter that lives in the tray. Start draggi
 
 **Pre-alpha. Windows first.** Grape is being built for Windows 10 and 11 first. The macOS port started early and builds in CI, but hasn't run on a Mac yet (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
-So far, the wheel opens at the cursor when you tap a key while dragging from Explorer or the Desktop. It converts images (JPG, PNG, WEBP, TIFF, BMP, HEIC and AVIF) to each other and to PDF, SVGs to all of those, audio and video, subtitles, archives (RAR too) and PDFs to images or text: all 178 conversions planned for v1. Extract Archive, Split PDF, Merge PDFs, Remove Metadata on PDFs and Create PDF run too. The rest say "Not in this build yet". The six file actions (Copy, Copy Path, Terminal, Move, Share and Float) and Settings work. CI checks all of it (its FFmpeg build is new and hasn't run green yet), and testing by hand on a real PC is next ([docs/TESTING.md](docs/TESTING.md)).
+So far, the wheel opens at the cursor when you tap a key while dragging from Explorer or the Desktop. It converts images (JPG, PNG, WEBP, TIFF, BMP, HEIC and AVIF) to each other and to PDF, SVGs to all of those, audio and video, subtitles, archives (RAR too) and PDFs to images or text: all 178 conversions planned for v1. Most v1 tools run too: Compress, Remove Metadata, Remove Audio, Normalize Volume and Audio Channels on the formats they take, and Extract Archive, Split PDF, Merge PDFs and Create PDF. The rest say "Not in this build yet". The six file actions (Copy, Copy Path, Terminal, Move, Share and Float) and Settings work. CI checks all of it on Windows and macOS, and testing by hand on a real PC is next ([docs/TESTING.md](docs/TESTING.md)).
 
 ## Install
 
@@ -29,7 +29,9 @@ To try a commit that isn't released yet, CI builds the same installer on every r
 
 ### macOS
 
-Not released yet. CI builds a preview DMG on every run. It's ad-hoc signed and not notarized, and nobody has tried it on a Mac yet. To try it anyway: [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build".
+Released versions come from the [Releases page](https://github.com/sussyswimmer/grape/releases) as `Grape-macOS-universal.dmg`, for macOS 13 Ventura or later on Apple silicon and Intel. No release has it yet: it's published only once it has passed the checks on a real Mac. It's ad-hoc signed and not notarized, so macOS blocks the first open: try to open Grape once, then click **Open Anyway** in System Settings → Privacy & Security. The release notes and [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build" give each step.
+
+Until then, CI builds the same DMG on every run as a preview, and nobody has tried it on a Mac yet: [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build".
 
 ## Build from source
 
@@ -89,7 +91,7 @@ CI runs these checks on Windows on every push and pull request, runs clippy and 
 
 ## Releasing
 
-A version tag (`vX.Y.Z`) runs the Release workflow. It checks that the tag matches the version in the repo, builds `Grape-Setup-x64.exe` and `SHA256SUMS.txt`, and makes a draft GitHub Release. Nothing is published until the draft is checked and published by hand. The steps are in [docs/PLATFORM_WINDOWS.md](docs/PLATFORM_WINDOWS.md) → "Releasing".
+A version tag (`vX.Y.Z`) runs the Release workflow. It checks that the tag matches the version in the repo, builds `Grape-Setup-x64.exe` for Windows and `Grape-macOS-universal.dmg` for macOS from the same tag, and makes a draft GitHub Release with both, `SHA256SUMS.txt`, the GPL sources and Grape's own FFmpeg builds. Nothing is published until the draft is checked and published by hand. The steps are in [docs/PLATFORM_WINDOWS.md](docs/PLATFORM_WINDOWS.md) → "Releasing".
 
 ## Offline, always
 
