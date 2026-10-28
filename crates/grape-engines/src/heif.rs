@@ -19,8 +19,8 @@
 //!   working set ([`image::pixels_fit`]) is stopped there. The pixels are
 //!   read once, into the one buffer `pixels_fit` counted, and published by
 //!   [`image::publish_pixels`] (no EXIF, so nothing is rotated twice).
-//!   That decode half ([`decode_pixels`]) also serves HEIC → PDF
-//!   (`pdf::create`, D37), through [`Decoder`].
+//!   That decode half ([`decode_pixels`]) also serves HEIC → PDF and
+//!   Create PDF (`pdf::create`, D37), through [`Decoder`].
 //! - **Raster → HEIC:** the raster engine decodes the source
 //!   ([`image::decode`], EXIF orientation applied), its size is checked
 //!   against one HEVC picture's ([`Limits`]), and its 8-bit RGB or RGBA rows

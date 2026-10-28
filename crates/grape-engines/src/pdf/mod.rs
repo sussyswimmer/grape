@@ -1,7 +1,7 @@
 //! Grape's PDF engine, slice 1 (DECISIONS D29): PDF → JPG, PNG, TXT and
 //! MD, and the Split PDF, Merge PDFs and Remove Metadata tools. And images
-//! → PDF (D37), which parse no PDF and so run in Grape's own process
-//! ([`create`]).
+//! → PDF with the Create PDF tool (D37), which parse no PDF and so run in
+//! Grape's own process ([`create`]).
 //!
 //! - **The PDF work runs in a worker process.** PDFium (C++, through
 //!   `pdfium-render`) and lopdf parse untrusted files. A fault in either one

@@ -1,4 +1,4 @@
-//! Images → PDF end to end through `run_job` (D37): in
+//! Images → PDF and Create PDF end to end through `run_job` (D37): in
 //! Grape's own process, so no sidecar is needed. Every image is generated
 //! here; every test checks that the sources are unchanged and that no temp
 //! file is left. The PDFs are read back with lopdf.
@@ -12,9 +12,10 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use common::{assert_no_leftovers, plan_one, planned_file, SourceState, TestDir};
-use grape_core::{Format, Job, Operation};
+use grape_core::{plan, Format, Job, Operation, Settings, ToolKey};
 use grape_engines::{
-    run_job, supports, supports_with, EngineCtx, ErrorKind, GrapeError, JobOutcome, SidecarPaths,
+    build_selection, run_job, supports, supports_with, EngineCtx, ErrorKind, GrapeError,
+    JobOutcome, SidecarPaths,
 };
 use image::codecs::jpeg::JpegEncoder;
 use image::{
@@ -322,42 +323,202 @@ fn a_black_and_white_scan_is_one_bit_a_pixel() {
     assert_no_leftovers(&dir.path);
 }
 
+/// Writes `files` into `dir` and plans Create PDF for them, in this order.
+fn plan_create(dir: &TestDir, files: &[(&str, Vec<u8>)]) -> (Vec<PathBuf>, Job) {
+    let mut paths = Vec::new();
+    for (name, bytes) in files {
+        let path = dir.join(name);
+        fs::write(&path, bytes).unwrap();
+        paths.push(path);
+    }
+    let settings = Settings::new(dir.join("fallback"));
+    let selection = build_selection(&paths, &settings);
+    let mut jobs = plan(&selection, &Operation::tool(ToolKey::CreatePdf), &settings)
+        .unwrap()
+        .jobs;
+    assert_eq!(jobs.len(), 1);
+    (paths, jobs.remove(0))
+}
+
+/// A JPG, a PNG and a TIFF of different sizes. (BMP has no tools in
+/// FORMAT_MATRIX, so Create PDF is never planned with one.)
+fn three_images() -> Vec<(&'static str, Vec<u8>)> {
+    vec![
+        ("a.jpg", encode(&gradient(30, 20), ImageFormat::Jpeg)),
+        ("b.png", encode(&gradient(12, 34), ImageFormat::Png)),
+        ("c.tiff", encode(&gradient(50, 5), ImageFormat::Tiff)),
+    ]
+}
+
 #[test]
-fn heic_needs_the_helper() {
+fn create_pdf_makes_one_page_per_image_in_order() {
+    let dir = TestDir::new("create-three");
+    let (paths, job) = plan_create(&dir, &three_images());
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
+    let dest = dir.join("a Combined.pdf");
+    assert_eq!(planned_file(&job), dest);
+    let formats: Vec<Option<Format>> =
+        vec![Some(Format::Jpg), Some(Format::Png), Some(Format::Tiff)];
+    assert!(supports_with(&job.op, &formats, &SidecarPaths::default()));
+
+    let (result, progress) = run(&job);
+
+    let outcome = result.unwrap();
+    assert_eq!(outcome.outputs, std::slice::from_ref(&dest));
+    assert!(!outcome.renamed);
+    let expected = [1.0 / 6.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 5.0 / 6.0, 1.0];
+    assert_eq!(progress.len(), expected.len(), "{progress:?}");
+    for (seen, want) in progress.iter().zip(expected) {
+        assert!((seen - want).abs() < 1e-6, "{progress:?}");
+    }
+    let (_, pages) = read_pdf(&dest);
+    let sizes: Vec<Vec<f32>> = pages.iter().map(|p| p.media_box.clone()).collect();
+    assert_eq!(
+        sizes,
+        [
+            vec![0.0, 0.0, 30.0, 20.0],
+            vec![0.0, 0.0, 12.0, 34.0],
+            vec![0.0, 0.0, 50.0, 5.0]
+        ]
+    );
+    assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
+    assert_eq!(name(&pages[1].image, b"Filter"), "FlateDecode");
+    assert_eq!(name(&pages[2].image, b"Filter"), "FlateDecode");
+    for source in &sources {
+        source.assert_unchanged();
+    }
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
+fn a_name_taken_after_planning_gets_the_next_number() {
+    let dir = TestDir::new("create-taken");
+    let (paths, job) = plan_create(&dir, &three_images());
+    let taken = dir.join("a Combined.pdf");
+    fs::write(&taken, b"someone else's").unwrap();
+
+    let outcome = run(&job).0.unwrap();
+
+    let renamed = dir.join("a Combined 2.pdf");
+    assert_eq!(outcome.outputs, std::slice::from_ref(&renamed));
+    assert!(outcome.renamed);
+    assert_eq!(fs::read(&taken).unwrap(), b"someone else's");
+    assert_eq!(read_pdf(&renamed).1.len(), 3);
+    assert_eq!(paths.len(), 3);
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
+fn a_damaged_image_in_the_middle_stops_the_whole_pdf() {
+    let dir = TestDir::new("create-damaged");
+    let mut files = three_images();
+    files[1].1 = b"\x89PNG\r\n\x1a\nnot really".to_vec();
+    let (paths, job) = plan_create(&dir, &files);
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
+    let names_before = dir.names();
+
+    let err = run(&job).0.unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::DecodeFailed);
+    assert_eq!(err.user_message, "b.png isn't a readable PNG image.");
+    assert_eq!(dir.names(), names_before);
+    for source in &sources {
+        source.assert_unchanged();
+    }
+}
+
+#[test]
+fn a_missing_image_is_named() {
+    let dir = TestDir::new("create-missing");
+    let (paths, job) = plan_create(&dir, &three_images());
+    fs::remove_file(&paths[2]).unwrap();
+    let err = run(&job).0.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::ReadFailed);
+    assert_eq!(err.user_message, "Grape couldn't read c.tiff.");
+    assert_eq!(dir.names(), ["a.jpg", "b.png"]);
+}
+
+#[test]
+fn a_cancelled_job_writes_nothing() {
+    let dir = TestDir::new("create-cancel");
+    let (paths, job) = plan_create(&dir, &three_images());
+    let names_before = dir.names();
+    let ctx = EngineCtx::default();
+    ctx.cancel.cancel();
+    let err = run_job(&job, &ctx, &mut |_| {}).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled);
+    assert_eq!(err.user_message, "Cancelled. Nothing was saved.");
+    assert_eq!(dir.names(), names_before);
+
+    // Cancelled once the first page is written: nothing is left either.
+    let ctx = EngineCtx::default();
+    let token = ctx.cancel.clone();
+    let err = run_job(&job, &ctx, &mut |p| {
+        if p >= 1.0 / 3.0 - 1e-6 {
+            token.cancel();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled);
+    assert_eq!(dir.names(), names_before);
+    for path in &paths {
+        assert!(path.exists());
+    }
+}
+
+#[test]
+fn heic_needs_the_helper_even_in_a_mix() {
     let dir = TestDir::new("create-heic");
+    let mut files = three_images();
+    files.push(("d.heic", b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec()));
+    let (_, job) = plan_create(&dir, &files);
+    let formats: Vec<Option<Format>> = [Format::Jpg, Format::Png, Format::Tiff, Format::Heic]
+        .into_iter()
+        .map(Some)
+        .collect();
+    assert!(!supports_with(&job.op, &formats, &SidecarPaths::default()));
     let with_heif = SidecarPaths {
         heif: Some(PathBuf::from("grape-heif")),
         ..SidecarPaths::default()
     };
+    assert!(supports_with(&job.op, &formats, &with_heif));
+    let names_before = dir.names();
+    let err = run(&job).0.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported);
+    assert_eq!(dir.names(), names_before);
+
     let (_, job) = plan_one(
         &dir,
         "e.heic",
         b"\0\0\0\x18ftypheic\0\0\0\0mif1heic",
         Operation::convert(Format::Pdf),
     );
-    let heic = [Some(Format::Heic)];
-    assert!(!supports_with(&job.op, &heic, &SidecarPaths::default()));
-    assert!(supports_with(&job.op, &heic, &with_heif));
-    let names_before = dir.names();
     let err = run(&job).0.unwrap_err();
     assert_eq!(err.kind, ErrorKind::NotYetSupported);
     assert_eq!(err.user_message, "HEIC to PDF isn't in this build yet.");
-    assert_eq!(dir.names(), names_before);
 }
 
 #[test]
-fn which_images_go_to_pdf() {
+fn which_images_go_to_pdf_and_into_create_pdf() {
     let with_heif = SidecarPaths {
         heif: Some(PathBuf::from("grape-heif")),
         ..SidecarPaths::default()
     };
     let to_pdf = Operation::convert(Format::Pdf);
-    // Over every format: images → PDF need no sidecar for these, and HEIC
-    // only Grape's HEIC helper.
+    let create = Operation::tool(ToolKey::CreatePdf);
+    // Over every format: images → PDF and Create PDF need no sidecar for
+    // these, and HEIC only Grape's HEIC helper. BMP converts to PDF, but
+    // FORMAT_MATRIX gives it no tools, so Create PDF doesn't take one.
     let to_pdf_from = |sidecars: &SidecarPaths| -> Vec<Format> {
         Format::ALL
             .into_iter()
             .filter(|&from| supports_with(&to_pdf, &[Some(from)], sidecars))
+            .collect()
+    };
+    let combines = |sidecars: &SidecarPaths| -> Vec<Format> {
+        Format::ALL
+            .into_iter()
+            .filter(|&from| supports_with(&create, &[Some(from)], sidecars))
             .collect()
     };
     let raster = [
@@ -374,9 +535,24 @@ fn which_images_go_to_pdf() {
     );
     expected.push(Format::Heic);
     assert_eq!(sorted(to_pdf_from(&with_heif)), sorted(expected));
+    let mut expected = vec![Format::Jpg, Format::Png, Format::Webp, Format::Tiff];
+    assert_eq!(
+        sorted(combines(&SidecarPaths::default())),
+        sorted(expected.clone())
+    );
+    expected.push(Format::Heic);
+    assert_eq!(sorted(combines(&with_heif)), sorted(expected));
     for from in raster {
         assert!(supports(&to_pdf, Some(from)), "{from:?}");
     }
+    assert!(supports(&create, Some(Format::Png)));
+    assert!(!supports(&create, Some(Format::Bmp)));
+    assert!(!supports(&create, Some(Format::Heic)));
+    assert!(!supports_with(
+        &create,
+        &[Some(Format::Jpg), Some(Format::Bmp)],
+        &with_heif
+    ));
 }
 
 fn sorted(mut formats: Vec<Format>) -> Vec<Format> {

@@ -1,11 +1,13 @@
-//! Images → PDF (DECISIONS D37), in Grape's own
+//! Images → PDF and the Create PDF tool (DECISIONS D37), in Grape's own
 //! process: no PDF worker and no PDFium, because no PDF is parsed. The
 //! only untrusted input is the images, which the raster engine decodes
 //! with its own limits ([`image::decode`]) and Grape's HEIC helper decodes
 //! in its own process ([`heif::Decoder`]).
 //!
 //! - **One page per image,** in the job's input order: JPG, PNG, WebP,
-//!   TIFF and BMP always, HEIC with the helper ([`reads`]). The page is the
+//!   TIFF and BMP always, HEIC with the helper ([`reads`]); Create PDF
+//!   takes the same but BMP, which FORMAT_MATRIX gives no tools
+//!   ([`combines`]). The page is the
 //!   upright image at one pixel a point (72 dpi), scaled down uniformly
 //!   when its longer side is over [`MAX_SIDE`] (Acrobat's 200 inches); the
 //!   pixels are never resampled ([`page_size`]).
@@ -104,10 +106,22 @@ const BATCH_BYTES: u64 = 4 * MIB;
 /// The most RIFF chunks read to tell a lossy WebP from a lossless one.
 const MAX_WEBP_CHUNKS: u32 = 1 << 16;
 
+/// The formats Create PDF takes without a helper: the images FORMAT_MATRIX
+/// gives Create PDF ("Tools per input") that this build reads. BMP
+/// converts to PDF, but FORMAT_MATRIX gives it no tools, so the wheel never
+/// offers Create PDF with one and the engine doesn't take one either.
+const COMBINES: [Format; 4] = [Format::Jpg, Format::Png, Format::Webp, Format::Tiff];
+
 /// True when this build puts an input of format `from` on a PDF page:
 /// JPG, PNG, WebP, TIFF and BMP always, HEIC with the helper.
 pub(crate) fn reads(from: Format, sidecars: &SidecarPaths) -> bool {
     image::RASTER.contains(&from) || (from == Format::Heic && sidecars.heif.is_some())
+}
+
+/// True when Create PDF takes an input of format `from` in this build:
+/// JPG, PNG, WebP and TIFF always, HEIC with the helper ([`COMBINES`]).
+pub(crate) fn combines(from: Format, sidecars: &SidecarPaths) -> bool {
+    COMBINES.contains(&from) || (from == Format::Heic && sidecars.heif.is_some())
 }
 
 /// Converts `src` (of format `from`, by its name) to a one-page PDF at
@@ -125,6 +139,26 @@ pub(crate) fn convert(
     }
     let heic = heif::Decoder::from_sidecars(&ctx.sidecars);
     write_pdf(job, &[(src, from)], dest, ctx, progress, heic.as_ref())
+}
+
+/// Create PDF: one page per input, in the job's order, at `dest`.
+pub(crate) fn combine(
+    job: &Job,
+    dest: &Path,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+) -> Result<JobOutcome, GrapeError> {
+    let mut inputs = Vec::with_capacity(job.inputs.len());
+    for src in &job.inputs {
+        match crate::format_of(src) {
+            Some(from) if COMBINES.contains(&from) || from == Format::Heic => {
+                inputs.push((src.as_path(), from));
+            }
+            from => return Err(crate::not_yet_supported(job, from)),
+        }
+    }
+    let heic = heif::Decoder::from_sidecars(&ctx.sidecars);
+    write_pdf(job, &inputs, dest, ctx, progress, heic.as_ref())
 }
 
 /// Progress passed on only forwards.

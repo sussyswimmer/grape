@@ -1,4 +1,4 @@
-//! Images → PDF, drawn by a real PDFium (feature `pdf-it`,
+//! Images → PDF and Create PDF, drawn by a real PDFium (feature `pdf-it`,
 //! D37): every page is rendered at its point size, one pixel a point, and
 //! compared with the upright decode of its image. `GRAPE_TEST_PDFIUM` must
 //! name the PDFium library; without it these tests fail rather than skip.
@@ -15,11 +15,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use common::{assert_no_leftovers, plan_one, planned_file, SourceState, TestDir};
-use grape_core::{Format, Operation};
-use grape_engines::{run_job, EngineCtx};
+use grape_core::{plan, Format, Operation, Settings, ToolKey};
+use grape_engines::{build_selection, run_job, EngineCtx};
 use image::codecs::jpeg::JpegEncoder;
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Rgb, RgbImage};
+use image::{
+    DynamicImage, GrayImage, ImageDecoder, ImageFormat, ImageReader, Luma, Rgb, RgbImage, Rgba,
+    RgbaImage,
+};
 use pdfium_render::prelude::{PdfBitmapFormat, PdfColor, PdfRenderConfig, Pdfium};
 
 fn pdfium_path() -> PathBuf {
@@ -188,6 +191,73 @@ fn png(img: &DynamicImage) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     img.write_to(&mut bytes, ImageFormat::Png).unwrap();
     bytes.into_inner()
+}
+
+/// `img` composited onto white.
+fn on_white(img: &RgbaImage) -> RgbImage {
+    RgbImage::from_fn(img.width(), img.height(), |x, y| {
+        let [r, g, b, a] = img.get_pixel(x, y).0;
+        let a = u32::from(a);
+        let over = |c: u8| ((u32::from(c) * a + 255 * (255 - a) + 127) / 255) as u8;
+        Rgb([over(r), over(g), over(b)])
+    })
+}
+
+#[test]
+fn lossless_pages_draw_as_their_images() {
+    let dir = TestDir::new("create-render-lossless");
+    // Alpha, drawn over white.
+    let alpha = RgbaImage::from_fn(40, 30, |x, y| {
+        Rgba([(x * 6) as u8, (y * 8) as u8, 120, ((x + y) * 4) as u8])
+    });
+    // Pure black and white, written at one bit a pixel.
+    let text = GrayImage::from_fn(37, 21, |x, y| {
+        Luma([if (x / 2 + y / 3) % 2 == 0 { 0 } else { 255 }])
+    });
+    // A smooth RGB gradient as TIFF.
+    let gradient = RgbImage::from_fn(33, 17, |x, y| Rgb([(x * 7) as u8, (y * 15) as u8, 99]));
+    let mut tiff = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(gradient.clone())
+        .write_to(&mut tiff, ImageFormat::Tiff)
+        .unwrap();
+    let files: Vec<(&str, Vec<u8>, RgbImage)> = vec![
+        (
+            "a.png",
+            png(&DynamicImage::ImageRgba8(alpha.clone())),
+            on_white(&alpha),
+        ),
+        (
+            "b.png",
+            png(&DynamicImage::ImageLuma8(text.clone())),
+            DynamicImage::ImageLuma8(text).to_rgb8(),
+        ),
+        ("c.tiff", tiff.into_inner(), gradient),
+    ];
+    let mut paths = Vec::new();
+    for (name, bytes, _) in &files {
+        let path = dir.join(name);
+        fs::write(&path, bytes).unwrap();
+        paths.push(path);
+    }
+    let settings = Settings::new(dir.join("fallback"));
+    let selection = build_selection(&paths, &settings);
+    let job = plan(&selection, &Operation::tool(ToolKey::CreatePdf), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
+    let pages = draw(&dir.join("a Combined.pdf"));
+    assert_eq!(pages.len(), 3);
+    for (page, (name, _, expected)) in pages.iter().zip(&files) {
+        assert_eq!(
+            (page.width_pt, page.height_pt),
+            (expected.width() as f32, expected.height() as f32),
+            "{name}"
+        );
+        let error = mean_error(&page.pixels, expected);
+        assert!(error < 1.0, "{name}: {error}");
+    }
+    assert_no_leftovers(&dir.path);
 }
 
 #[test]

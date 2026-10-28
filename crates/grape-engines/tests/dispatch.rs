@@ -140,10 +140,11 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
     for pair in &runnable {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
-    // Over every tool and format, exactly these seven run, each offered on
-    // the wheel for one item or for several.
+    // Over every tool and format, exactly these seven and Create PDF on
+    // four image formats run, each offered on the wheel for one item or
+    // for several.
     let tools = runnable_tools(&all);
-    assert_eq!(tools.len(), 7, "{tools:?}");
+    assert_eq!(tools.len(), 7 + 4, "{tools:?}");
     for pair in [
         (ToolKey::ExtractArchive, Format::Zip),
         (ToolKey::ExtractArchive, Format::Tar),

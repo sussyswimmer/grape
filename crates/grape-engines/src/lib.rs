@@ -233,9 +233,9 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// PNG, WebP, TIFF and BMP with `heif` (10); JPG, PNG, WebP, TIFF and BMP
 /// to PDF (5), and HEIC to PDF with `heif` (1). Tools: Extract Archive on
 /// ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs and Remove
-/// Metadata on PDFs with `pdfium` and `pdf_worker`. Pure: it doesn't check
-/// that the sidecar files are there; [`run_job`] fails cleanly if one is
-/// missing.
+/// Metadata on PDFs with `pdfium` and `pdf_worker`; Create PDF on JPG, PNG,
+/// WebP and TIFF (and HEIC with `heif`). Pure: it doesn't check that the
+/// sidecar files are there; [`run_job`] fails cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
         && formats.iter().all(|from| match (op, *from) {
@@ -296,6 +296,8 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
         Some(Engine::Archive)
     } else if pdf::runs_tool(tool, from) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         Some(Engine::Pdf)
+    } else if tool == ToolKey::CreatePdf && pdf::create::combines(from, sidecars) {
+        Some(Engine::PdfCreate)
     } else {
         None
     }
@@ -316,7 +318,8 @@ fn format_of(path: &Path) -> Option<Format> {
 /// `ctx.sidecars` (see [`supports_with`]), or whose inputs and output don't
 /// have the shape its operation plans (one input and a file for most
 /// conversions; pages for PDF → JPG or PNG; a folder for Extract Archive
-/// and Split PDF; every input for Merge PDFs), fails with
+/// and Split PDF; every input for Merge PDFs, and every input and a file
+/// for Create PDF), fails with
 /// [`ErrorKind::NotYetSupported`] before anything is read or written. The
 /// output usually lands at the planned path; if that name was taken after
 /// planning, the next free `" N"` name is used and [`JobOutcome::renamed`]
@@ -363,6 +366,17 @@ pub fn run_job(
             let rar = archive::rar::RarPaths::from_sidecars(sidecars);
             archive::extract(job, src, dest, from, ctx, progress, rar.as_ref())
                 .map(archive::ArchiveOutcome::into_outcome)
+        }
+        // Create PDF: one page per input, every input an image this build
+        // reads (D37).
+        (Some(_), inputs, JobOutput::File(dest), Operation::Tool { tool, .. })
+            if tool == ToolKey::CreatePdf
+                && inputs.iter().all(|path| {
+                    format_of(path).and_then(|f| tool_engine(tool, f, sidecars))
+                        == Some(Engine::PdfCreate)
+                }) =>
+        {
+            pdf::create::combine(job, dest, ctx, progress)
         }
         // Split PDF and Remove Metadata (one input), Merge PDFs (all of
         // them): every input must be a PDF. The engine checks the shape.
