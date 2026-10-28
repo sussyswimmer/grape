@@ -172,8 +172,9 @@ jobs:
           GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
         run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
 
-  # Grape's own HEIC helper for Windows (DECISIONS D33), built in this run
-  # with its source bundle and the HEIC test fixtures.
+  # Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41),
+  # built in this run with its source bundle and the HEIC and AVIF test
+  # fixtures.
   grape-heif:
     name: grape-heif
     uses: ./.github/workflows/grape-heif.yml

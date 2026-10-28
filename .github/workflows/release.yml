@@ -3,10 +3,10 @@ name: Release
 # A version tag (v1.2.3) builds the Windows installer and makes a DRAFT
 # GitHub Release with it, and with the complete source of the two GPL
 # programs the installer carries: Grape's own FFmpeg (grape-ffmpeg-sources.tar,
-# D24) and grape-heif.exe, the HEIC helper (D33). Every sidecar is built here,
-# clean, from the tag. Nothing is published here: Maxwell checks the draft,
-# writes "What's new" and publishes it by hand. The steps are in
-# docs/PLATFORM_WINDOWS.md → "Releasing".
+# D24) and grape-heif.exe, the image helper for HEIC and AVIF (D33, D41).
+# Every sidecar is built here, clean, from the tag. Nothing is published
+# here: Maxwell checks the draft, writes "What's new" and publishes it by
+# hand. The steps are in docs/PLATFORM_WINDOWS.md → "Releasing".
 on:
   push:
     tags:

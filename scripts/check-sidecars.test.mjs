@@ -372,11 +372,11 @@ test("the bsdtar workflow's cache keys cover the copyright lines its full build 
   }
 });
 
-// grape-heif (D33): Grape's HEIC helper on Windows, built from tools/grape-heif.
+// grape-heif (D33, D41): Grape's image helper on Windows, built from tools/grape-heif.
 const HEIF_EXE = join(APP, 'binaries', 'grape-heif-x86_64-pc-windows-msvc.exe');
 const GRAPE_HEIF =
-  'grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors\r\n' +
-  'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1\r\n';
+  'grape-heif version 1.23.7-grape.2 Copyright (c) 2026 the Grape contributors\r\n' +
+  'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 dav1d=1.5.4 aom=3.15.2 plugins=disabled crt=static protocol=2\r\n';
 const GATE = 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build';
 // An overlay file and a TAURI_CONFIG that list only grape-heif (for these
 // tests only), so the tests below are about its rule and the sources. A real

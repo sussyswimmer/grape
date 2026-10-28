@@ -75,7 +75,7 @@ export const RULES = {
   },
   'grape-heif': {
     args: ['-hide_banner', '-version'],
-    // tools/grape-heif's banner: "grape-heif version 1.23.7-grape.1 Copyright (c) 2026 …".
+    // tools/grape-heif's banner: "grape-heif version 1.23.7-grape.2 Copyright (c) 2026 …".
     line: /^grape-heif version \S*-grape(?:\.\d+)?(?:\s|$)/,
     licenses: 'grape-heif',
     gpl: true,

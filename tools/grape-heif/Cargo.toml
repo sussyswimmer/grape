@@ -1,14 +1,15 @@
 [package]
 name = "grape-heif"
-description = "Grape's HEIC helper for Windows: libheif, libde265 and x265 behind the grape-heif-proto protocol (DECISIONS D33)"
+description = "Grape's image helper for Windows: libheif with libde265, x265, dav1d and libaom behind the grape-heif-proto protocol (DECISIONS D33, D41)"
 # libheif's version, then Grape's build number. The banner prints it, and the
 # codec refuses to run against any other libheif.
 version = "1.23.7-grape.2"
 edition = "2021"
 # Grape's own source in this folder is MIT. The built grape-heif.exe links
-# libheif and libde265 (LGPL-3.0-or-later) and x265 (GPL-2.0-or-later)
-# statically, so the program as a whole is GPL-3.0-or-later. It ships only as
-# a separate executable (golden rule 6), with licenses/grape-heif.
+# libheif and libde265 (LGPL-3.0-or-later), x265 (GPL-2.0-or-later), and dav1d
+# and libaom (BSD-2-Clause) statically, so the program as a whole is
+# GPL-3.0-or-later. It ships only as a separate executable (golden rule 6),
+# with licenses/grape-heif.
 license = "MIT"
 repository = "https://github.com/sussyswimmer/grape"
 publish = false
@@ -38,7 +39,8 @@ serde_json = "=1.0.151"
 name = "grape-heif"
 path = "src/main.rs"
 
-# Writes the HEIC test fixtures (heic-spec §5.6). CI only, never shipped.
+# Writes the HEIC and AVIF test fixtures (heic-spec §5.6, D41). CI only,
+# never shipped.
 [[bin]]
 name = "grape-heif-fixtures"
 path = "src/bin/grape-heif-fixtures.rs"

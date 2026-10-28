@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Makes grape-heif.exe's complete corresponding source (DECISIONS D33;
+# Makes grape-heif.exe's complete corresponding source (DECISIONS D33, D41;
 # GPL-3.0 section 6, ENGINES.md licensing rule 3): one reproducible tarball
 # that CI ships next to every build of the installer.
 #
@@ -14,10 +14,12 @@
 #   vendor/            every crate in tools/grape-heif/Cargo.lock (cargo vendor)
 #   vcpkg-downloads/   the archives vcpkg.lock.json pins, found in
 #                      <vcpkg-root>/downloads by SHA-512, and SHA512SUMS
-#   vcpkg-ports/       vcpkg's ports for libheif (the overlay's base),
-#                      libde265, x265, vcpkg-cmake and vcpkg-cmake-config and
-#                      the x64-windows-static triplet at the pinned commit,
-#                      and Grape's overlay in overlay/libheif
+#   vcpkg-ports/       vcpkg's ports for libheif and aom (the overlays'
+#                      bases), libde265, x265, dav1d, vcpkg-cmake,
+#                      vcpkg-cmake-config, vcpkg-tool-meson and
+#                      vcpkg-cmake-get-vars (dav1d's meson build) and the
+#                      x64-windows-static triplet at the pinned commit, and
+#                      Grape's overlays in overlay/libheif and overlay/aom
 #   BUILD.md           the commit, the commands and the build's own record
 #
 # Needs bash, GNU tar (--sort), gzip, sha256sum, sha512sum, git and cargo.
@@ -85,10 +87,12 @@ for sha in $shas; do
 done
 (cd "$root/vcpkg-downloads" && sha512sum -c --quiet SHA512SUMS) || fail "a copied archive doesn't match its SHA-512."
 
-echo "vcpkg's ports at $vcpkg_commit, and the overlay..."
-git -C "$vcpkg_root" archive --format=tar HEAD ports/libheif ports/libde265 ports/x265 ports/vcpkg-cmake ports/vcpkg-cmake-config "triplets/$triplet.cmake" |
+echo "vcpkg's ports at $vcpkg_commit, and the overlays..."
+git -C "$vcpkg_root" archive --format=tar HEAD ports/libheif ports/libde265 ports/x265 ports/dav1d ports/aom \
+    ports/vcpkg-cmake ports/vcpkg-cmake-config ports/vcpkg-tool-meson ports/vcpkg-cmake-get-vars "triplets/$triplet.cmake" |
     tar -x -C "$root/vcpkg-ports"
 cp -R "$here/vcpkg/ports/libheif" "$root/vcpkg-ports/overlay/libheif"
+cp -R "$here/vcpkg/ports/aom" "$root/vcpkg-ports/overlay/aom"
 
 exe_sha='(see BUILDINFO below)'
 if [ -n "$buildinfo" ]; then
@@ -97,10 +101,10 @@ fi
 {
     echo "# $name"
     echo
-    echo "The complete corresponding source of grape-heif.exe $version, Grape's HEIC helper for Windows (DECISIONS D33). The program is GPL-3.0-or-later as a whole: grape-heif/licenses/grape-heif/ has the texts and SOURCE.md."
+    echo "The complete corresponding source of grape-heif.exe $version, Grape's image helper for Windows: HEIC and AVIF (DECISIONS D33, D41). The program is GPL-3.0-or-later as a whole: grape-heif/licenses/grape-heif/ has the texts and SOURCE.md."
     echo
     echo "- Grape commit: \`$commit\`"
-    echo "- vcpkg: $vcpkg_repo at \`$vcpkg_commit\`, triplet \`$triplet\`, \`$install\`, with the overlay in vcpkg-ports/overlay"
+    echo "- vcpkg: $vcpkg_repo at \`$vcpkg_commit\`, triplet \`$triplet\`, \`$install\`, with the overlays in vcpkg-ports/overlay"
     echo "- grape-heif.exe SHA-256: \`$exe_sha\`"
     echo
     echo "## Build it again"
@@ -108,8 +112,8 @@ fi
     echo "On Windows, with Visual Studio's C++ tools (the build's own record below names the Visual Studio and cl.exe it used; CI builds on GitHub's windows-latest image, which has Visual Studio 2026), git and Rust (the version below):"
     echo
     echo '1. Clone vcpkg at the commit above into an empty folder (`git init`, `git fetch --depth 1 <repo> <commit>`, `git checkout --detach FETCH_HEAD`) and run `bootstrap-vcpkg.bat -disableMetrics`.'
-    echo '2. Copy vcpkg-downloads/* into its downloads\ folder, so nothing is fetched (vcpkg checks each SHA-512).'
-    echo "3. From that folder: \`vcpkg install \"$install:$triplet\" --overlay-ports=<this folder>\\vcpkg-ports\\overlay\`."
+    echo '2. Copy vcpkg-downloads/* into its downloads\ folder, so no source archive is fetched (vcpkg checks each SHA-512).'
+    echo "3. From that folder: \`vcpkg install \"$install:$triplet\" --overlay-ports=<this folder>\\vcpkg-ports\\overlay\`. vcpkg fetches its own build tools at that commit (CMake, NASM, ninja, pkgconf, and Strawberry Perl, Python and meson for libaom and dav1d), each checked by its SHA-512; the build's own record below names the versions it used."
     echo '4. In grape-heif\tools\grape-heif, put the crates in place for an offline build: add to .cargo\config.toml'
     echo
     echo '   ```toml'
