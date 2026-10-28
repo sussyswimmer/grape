@@ -2,11 +2,12 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
-- **312 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **313 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
-- **libarchive**, whose `bsdtar` program Grape will read RAR archives with. It will ship as a separate program, with its license texts in the `licenses/libarchive` folder. Today's installer and DMG don't carry it yet.
-- **FFmpeg and ffprobe**, the helper programs that builds of Grape with audio and video conversion ship next to it as separate files, and the libraries built into them. Those builds carry their full license texts in a `licenses` folder.
+- **libarchive**, whose `bsdtar` program Grape reads RAR archives with. It ships as a separate program, with its license texts in the `licenses/libarchive` folder.
+- **grape-heif**, the program Grape converts HEIC images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
+- **FFmpeg and ffprobe**, the programs Grape converts audio and video with, and the libraries built into them. They ship as separate programs under the GPL, with their license texts and where their source is in the `licenses/ffmpeg` folder.
 - **Not here yet:** the other helper programs Grape will ship as separate files. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -31,7 +32,7 @@ The Rust crates use these, most used first:
 - ISC License (`ISC`)
 - zlib License (`Zlib`)
 
-The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive and FFmpeg.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive, FFmpeg and grape-heif.
 
 ## The MPL-2.0 crates
 
@@ -140,7 +141,7 @@ This software is based in part on the work of the Independent JPEG Group.
 
 ## libarchive
 
-Grape will read RAR archives with `bsdtar` from [libarchive](https://www.libarchive.org/) 3.8.10, built by Grape's CI from the release tarball with six small patches (three upstream fixes and three of Grape's own). It will ship as a separate program: `bsdtar.exe` next to `Grape.exe` on Windows, and `Grape.app/Contents/MacOS/bsdtar` on macOS. Its license texts will ship with it in the `licenses/libarchive` folder, where `SOURCE.md` says exactly how it was built. Today's installer and DMG don't carry it yet.
+Grape reads RAR archives with `bsdtar` from [libarchive](https://www.libarchive.org/) 3.8.10, built by Grape's CI from the release tarball with six small patches (three upstream fixes and three of Grape's own). It ships as a separate program: `bsdtar.exe` next to `Grape.exe` on Windows, and `Grape.app/Contents/MacOS/bsdtar` on macOS. Its license texts ship with it in the `licenses/libarchive` folder, where `SOURCE.md` says exactly how it was built.
 
 | Component | License | Text in `licenses/libarchive` |
 |---|---|---|
@@ -158,9 +159,9 @@ This section is written by hand: check it again when `scripts/bsdtar/sources.jso
 
 ## FFmpeg and ffprobe
 
-Builds of Grape that include audio and video conversion ship FFmpeg, which converts the audio and video, and ffprobe, which reads media details. They aren't compiled into Grape: they're separate programs next to it, and Grape starts them when it needs them. Grape builds them itself from FFmpeg 9.0.2 with only the parts it uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
+Grape ships FFmpeg, which converts the audio and video, and ffprobe, which reads media details. They aren't compiled into Grape: they're separate programs next to it (`ffmpeg.exe` and `ffprobe.exe` next to `Grape.exe` on Windows, `ffmpeg` and `ffprobe` in `Grape.app/Contents/MacOS` on macOS), and Grape starts them when it needs them. Grape's CI builds them from FFmpeg 9.0.2 with only the parts Grape uses, and without any networking code. They're under the GNU General Public License, version 2 or later (GPL-2.0-or-later), because they include x264.
 
-Those builds carry their license texts in a `licenses/ffmpeg` folder next to Grape: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the same GitHub Release as those builds.
+Their license texts ship with them in the `licenses/ffmpeg` folder: in Grape's install folder on Windows, and in `Grape.app/Contents/Resources/licenses/ffmpeg/` on macOS. `SOURCE.md` there gives the exact versions, the configure line, and where to get the complete source: `grape-ffmpeg-sources.tar`, on the GitHub Release that ships the installer and in the CI run that built them.
 
 MP3 encoding uses LAME: https://lame.sourceforge.io/
 
@@ -184,6 +185,24 @@ These are built into them. Each has its own text in `licenses/ffmpeg`.
 | GCC runtime, libgcc (Windows) | 13.2.0 | GPL-3.0-or-later WITH GCC-exception-3.1 | `gcc-runtime-exception.txt`, `LICENSE-GPLv3.txt` |
 
 Some of their source files hold code from other projects, like MIPS's fixed-point code, WebRTC's iLBC decoder, musl's `sscanf` and x86inc.asm. `ffmpeg-notices.txt` has each of those notices verbatim, with the files it's in; Grape's build checks that it has every one in what it compiles. Where a file only names the license of code it took from another project, that project's license text is there too: dsd2pcm's (FFmpeg's DSD decoder), Aaron D. Gifford's (its SHA-2 code), Glumpy's (its scaler's filters) and libwebp's (libvpx's threads). libvorbis's LPC code carries Jutta Degener and Carsten Bormann's terms (TU-Berlin-1.0). libvpx and dav1d come with patent grants, the `-PATENTS.txt` files. The GCC Runtime Library Exception lets libgcc's code be distributed under any terms, so it doesn't change the programs' license. `grape-ffmpeg-sources.tar` also holds the mingw-w64 runtime's source.
+
+## grape-heif (HEIC on Windows)
+
+Grape converts HEIC images on Windows with `grape-heif.exe`, a small program of Grape's own (`tools/grape-heif`) that Grape's CI builds. It's a separate program next to `Grape.exe`, which Grape starts for each HEIC image; none of it is inside Grape itself. It links the libraries below statically, and because x265 is under the GPL, the program as a whole is under the **GNU General Public License, version 3 or later**. Its license texts ship with it in the `licenses/grape-heif` folder, where `SOURCE.md` says exactly how it was built. On macOS Grape uses the system's ImageIO instead, so the Mac build has no grape-heif.
+
+| Component | License | Text in `licenses/grape-heif` |
+|---|---|---|
+| grape-heif.exe as a whole | GPL-3.0-or-later | `LICENSE.txt` |
+| libheif 1.23.7 | LGPL-3.0-or-later | `libheif.txt` |
+| libde265 1.1.3 | LGPL-3.0-or-later, and the DOC (ACE/TAO) terms for its Windows condition-variable code | `libde265.txt`, `libde265-win32cond.txt` |
+| x265 4.3 | GPL-2.0-or-later | `x265.txt` |
+| The Rust crates in it (libheif-rs, libheif-sys, serde and others) | MIT, Apache-2.0 and Unicode-3.0 | `rust-crates.md` |
+| Grape's own code in it | MIT | Grape's `LICENSE` |
+| The Visual C++ runtime, linked statically | Visual Studio's redistribution terms, which need no notice | none needed |
+
+**The source.** Every build of the installer comes with grape-heif's complete source, `grape-heif-1.23.7-grape.1-source.tar.gz`, on the GitHub Release that ships the installer and in the CI run that built it. It holds Grape's code for the program, every Rust crate it uses, the three libraries' source archives, vcpkg's build recipes and how to build it again.
+
+This section is written by hand: check it again when `tools/grape-heif/vcpkg.lock.json` changes a version.
 
 ## Rust crates
 
@@ -3275,7 +3294,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4)
+Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4)
 
 *The standard text, because these crates don't ship it. The copyright holders are the authors named on each crate's page.*
 

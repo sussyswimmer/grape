@@ -6,7 +6,8 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-use grape_engines::pdf::{heap, worker_main, WORKER_FLAG};
+use grape_engines::pdf::{heap, worker_main, WORKER_FLAG as PDF_WORKER_FLAG};
+use grape_heif_proto::WORKER_FLAG as HEIF_WORKER_FLAG;
 
 /// The system allocator, with every change reported to the PDF worker's
 /// heap bookkeeping (`grape_engines::pdf::heap`, DECISIONS D29), which ends
@@ -78,8 +79,14 @@ fn main() -> ExitCode {
     // anything of the app starts (no Tauri, no window or tray, no
     // single-instance check, no logger) and exits when the job ends.
     // `args_os`, not `args`: a name that isn't valid Unicode mustn't panic.
-    if is_pdf_worker(std::env::args_os()) {
+    if first_arg_is(std::env::args_os(), PDF_WORKER_FLAG) {
         return worker_main();
+    }
+    // `Grape --grape-heif-worker` is the HEIC worker (D33), the same way:
+    // one HEIC job through ImageIO on macOS. It never arms the PDF
+    // worker's heap bound.
+    if first_arg_is(std::env::args_os(), HEIF_WORKER_FLAG) {
+        return heif_worker();
     }
     if let Err(err) = grape_app::run() {
         // Release builds have no console, so stderr goes nowhere. The log
@@ -91,11 +98,30 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// True when the first argument after the program's own name is
-/// [`WORKER_FLAG`], exactly. Anything else, or the flag later on, starts
-/// the app.
-fn is_pdf_worker(mut args: impl Iterator<Item = OsString>) -> bool {
-    args.nth(1).is_some_and(|first| first == WORKER_FLAG)
+/// True when the first argument after the program's own name is `flag`,
+/// exactly: [`PDF_WORKER_FLAG`] or [`HEIF_WORKER_FLAG`]. Anything else, or
+/// the flag later on, starts the app.
+fn first_arg_is(mut args: impl Iterator<Item = OsString>, flag: &str) -> bool {
+    args.nth(1).is_some_and(|first| first == flag)
+}
+
+/// The HEIC worker: ImageIO behind the HEIC protocol on macOS
+/// (`grape_platform::macos::heif`), with the exit code it ends with.
+#[cfg(target_os = "macos")]
+fn heif_worker() -> ExitCode {
+    use grape_platform::macos::heif::ImageIo;
+
+    // Before ImageIO does anything else, on this one thread.
+    ImageIo::restrict_process();
+    grape_heif_proto::worker_main(&ImageIo)
+}
+
+/// Elsewhere the HEIC helper is `grape-heif.exe` (Windows) or none, so
+/// `Grape --grape-heif-worker` exits 2 (bad usage) at once and never starts
+/// a second tray app (heic-spec J20).
+#[cfg(not(target_os = "macos"))]
+fn heif_worker() -> ExitCode {
+    ExitCode::from(2)
 }
 
 #[cfg(test)]
@@ -109,27 +135,57 @@ mod tests {
             .into_iter()
     }
 
+    fn is_pdf_worker(list: &[&str]) -> bool {
+        first_arg_is(args(list), PDF_WORKER_FLAG)
+    }
+
+    fn is_heif_worker(list: &[&str]) -> bool {
+        first_arg_is(args(list), HEIF_WORKER_FLAG)
+    }
+
     #[test]
     fn the_flag_first_makes_the_pdf_worker() {
-        assert_eq!(WORKER_FLAG, "--grape-pdf-worker");
-        assert!(is_pdf_worker(args(&["Grape.exe", "--grape-pdf-worker"])));
-        assert!(is_pdf_worker(args(&["grape", "--grape-pdf-worker", "x"])));
+        assert_eq!(PDF_WORKER_FLAG, "--grape-pdf-worker");
+        assert!(is_pdf_worker(&["Grape.exe", "--grape-pdf-worker"]));
+        assert!(is_pdf_worker(&["grape", "--grape-pdf-worker", "x"]));
+        // The HEIC flag isn't the PDF worker's.
+        assert!(!is_pdf_worker(&["Grape", "--grape-heif-worker"]));
+    }
+
+    #[test]
+    fn the_flag_first_makes_the_heif_worker() {
+        assert_eq!(HEIF_WORKER_FLAG, "--grape-heif-worker");
+        assert!(is_heif_worker(&["Grape", "--grape-heif-worker"]));
+        assert!(is_heif_worker(&["Grape.exe", "--grape-heif-worker", "x"]));
+        // The PDF flag isn't the HEIC worker's.
+        assert!(!is_heif_worker(&["Grape", "--grape-pdf-worker"]));
     }
 
     #[test]
     fn anything_else_starts_the_app() {
-        assert!(!is_pdf_worker(args(&[])));
-        assert!(!is_pdf_worker(args(&["Grape.exe"])));
-        assert!(!is_pdf_worker(args(&["Grape.exe", "--at-login"])));
-        assert!(!is_pdf_worker(args(&[
-            "Grape.exe",
-            "--at-login",
-            "--grape-pdf-worker"
-        ])));
-        assert!(!is_pdf_worker(args(&["Grape.exe", "--grape-pdf-worker="])));
-        assert!(!is_pdf_worker(args(&["Grape.exe", "--GRAPE-PDF-WORKER"])));
-        // The program's own name is never the flag.
-        assert!(!is_pdf_worker(args(&["--grape-pdf-worker"])));
+        for flag in ["--grape-pdf-worker", "--grape-heif-worker"] {
+            let upper = flag.to_uppercase();
+            let with_value = format!("{flag}=");
+            let cases: [&[&str]; 7] = [
+                &[],
+                &["Grape.exe"],
+                &["Grape.exe", "--at-login"],
+                &["Grape.exe", "--at-login", flag],
+                &["Grape.exe", &with_value],
+                &["Grape.exe", &upper],
+                // The program's own name is never the flag.
+                &[flag],
+            ];
+            for case in cases {
+                assert!(!first_arg_is(args(case), flag), "{case:?}");
+            }
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn the_heif_flag_exits_2_where_grape_isnt_the_heic_helper() {
+        assert_eq!(heif_worker(), ExitCode::from(2));
     }
 
     #[test]
@@ -161,6 +217,7 @@ mod tests {
         use std::os::unix::ffi::OsStringExt;
         let odd = OsString::from_vec(vec![0x2d, 0x2d, 0xff]);
         let list = vec![OsString::from("grape"), odd];
-        assert!(!is_pdf_worker(list.into_iter()));
+        assert!(!first_arg_is(list.clone().into_iter(), PDF_WORKER_FLAG));
+        assert!(!first_arg_is(list.into_iter(), HEIF_WORKER_FLAG));
     }
 }

@@ -18,14 +18,14 @@ We are in **Phase 1: Windows** (`docs/ROADMAP.md`, DECISIONS D8). Development an
 3. **Offline only.** No network calls in the conversion path, ever. No telemetry and no remote config. The only possible exception is an update check, and that needs an entry in `docs/DECISIONS.md` first.
 4. **Never break the user's drag.** If Grape can't show the wheel, it must get out of the way. The OS drag continues as if Grape weren't installed. Esc always closes the wheel.
 5. **One behavior spec, two platforms.** The wheel, matrix, naming and tools are shared. Only the drag detection, overlay window and file actions are platform-specific.
-6. **No GPL code inside Grape's own binaries.** Grape is free and open source (`docs/DECISIONS.md` D2). GPL tools (FFmpeg with x264, x265's `heif-enc`, pandoc) may ship **only as separate sidecar executables**, with license texts and source links. Everything we link must be permissive, or LGPL linked dynamically. See `docs/ENGINES.md` → Licensing rules.
+6. **No GPL code inside Grape's own binaries.** Grape is free and open source (`docs/DECISIONS.md` D2). GPL tools (FFmpeg with x264, x265 in `grape-heif`, pandoc) may ship **only as separate sidecar executables**, with license texts and source links. Everything we link must be permissive, or LGPL linked dynamically. See `docs/ENGINES.md` → Licensing rules.
 
 ## Stack
 
 - **App shell:** Tauri 2. It runs as a tray/menu-bar app with no dock or taskbar icon, and has a settings window plus a transparent overlay window for the wheel.
 - **Core logic:** Rust in the `crates/` workspace. It is pure and unit-testable, with no UI and no OS calls.
 - **UI:** TypeScript (strict), Vite and vanilla DOM/SVG in `apps/desktop/ui`. No framework is needed for the wheel. Use one only for the settings window if it earns its place.
-- **Engines:** bundled sidecar binaries (FFmpeg, ffprobe, heif-enc on Windows) plus Rust crates and OS frameworks. See `docs/ENGINES.md`.
+- **Engines:** bundled sidecar binaries (FFmpeg, ffprobe, grape-heif on Windows) plus Rust crates and OS frameworks. See `docs/ENGINES.md`.
 
 ## Repo layout (target)
 
@@ -34,7 +34,9 @@ apps/desktop/src-tauri/   Tauri app: windows, tray, commands, event wiring  (has
 apps/desktop/ui/          Wheel overlay + settings UI                       (has CLAUDE.md)
 crates/grape-core/        Format registry, matrix, tools, naming, job plans (has CLAUDE.md)
 crates/grape-engines/     Executes job plans: FFmpeg sidecar, image, PDF... (has CLAUDE.md)
+crates/grape-heif-proto/  The HEIC helper protocol: pure, std only (D33)   (has CLAUDE.md)
 crates/grape-platform/    Drag detection, modifiers, file actions per OS    (has CLAUDE.md)
+tools/grape-heif/         grape-heif.exe, the Windows HEIC helper: its own workspace, GPL as built (D33)
 docs/                     Specs — the source of truth for behavior
 .claude/commands/         Slash commands for recurring tasks
 ```
@@ -61,6 +63,8 @@ cargo test -p grape-engines --features pdf-it   # PDF tests that load PDFium: se
 .\scripts\bsdtar\build.ps1 -Install     # Windows: Grape's bsdtar for RAR (D27) into src-tauri/binaries/
 ./scripts/bsdtar/build.sh --install      # macOS: the same, universal
 cargo test -p grape-engines --features rar-it --lib archive::rar   # RAR tests with the real bsdtar: set GRAPE_TEST_BSDTAR
+.\tools\grape-heif\build.ps1 -Install   # Windows: Grape's HEIC helper, grape-heif.exe (D33), into src-tauri/binaries/ (30+ min the first time)
+cargo test -p grape-engines --features heif-it   # HEIC with the real helper: set GRAPE_TEST_HEIF and GRAPE_TEST_HEIF_FIXTURES (D33)
 cargo deny --locked check licenses bans sources   # license check (D23)
 cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs   # after a dependency change
 ```

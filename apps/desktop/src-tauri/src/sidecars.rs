@@ -1,14 +1,15 @@
 //! Finds the sidecar programs Grape ships (FFmpeg, ffprobe, bsdtar and,
-//! on Windows, `heif-enc`) and the PDFium library once at startup, and
-//! hands a copy to every job as [`SidecarPaths`].
+//! on Windows, `grape-heif`), the PDFium library and the HEIC helper once
+//! at startup, and hands a copy to every job as [`SidecarPaths`].
 //!
 //! The programs sit next to Grape's own executable, without the
 //! target-triple suffix they have in `binaries/`: the installer puts them
 //! beside `Grape.exe` on Windows, the bundler puts them in
 //! `Grape.app/Contents/MacOS` on macOS (the executable's own folder), and
 //! in dev tauri-build copies `bundle.externalBin` into `target/debug` the
-//! same way when `tauri dev` gets the `tauri.sidecars.conf.json` overlay
-//! (D25). Nothing else is searched: never `PATH`, so an FFmpeg the user
+//! same way when `tauri dev` gets its OS's sidecars overlay
+//! (`tauri.sidecars.windows.conf.json` or `tauri.sidecars.macos.conf.json`,
+//! D25). Nothing else is searched: never `PATH`, so an FFmpeg the user
 //! installed is never run, and never through the shell plugin.
 //!
 //! PDFium (D29) is a library, loaded only by the PDF worker, which is
@@ -25,8 +26,14 @@
 //! bsdtar (D27) reads RAR archives: `bsdtar.exe` next to `Grape.exe`,
 //! `Grape.app/Contents/MacOS/bsdtar`, by the same rule as FFmpeg.
 //!
-//! The HEIC helper (`SidecarPaths::heif`) stays `None` until the HEIC
-//! build wires it.
+//! The HEIC helper (D33, `SidecarPaths::heif`) is started as
+//! `<helper> --grape-heif-worker` on both systems. On Windows it's
+//! `grape-heif.exe` next to `Grape.exe`, Grape's own sidecar (libheif, a
+//! GPL program of its own, built by CI from `tools/grape-heif`; the
+//! `tauri.sidecars.windows.conf.json` overlay bundles it), by the same rule as
+//! FFmpeg. On macOS it's Grape's own executable (ImageIO, `main.rs`), like
+//! the PDF worker, so it's always there and isn't logged as a sidecar.
+//! Other systems have none.
 //!
 //! A sidecar that isn't there stays `None`, and nothing looks for it
 //! anywhere else.
@@ -39,13 +46,36 @@ use tauri::{AppHandle, Manager};
 
 const FFMPEG: &str = "ffmpeg";
 const FFPROBE: &str = "ffprobe";
-const HEIF_ENC: &str = "heif-enc";
+const GRAPE_HEIF: &str = "grape-heif";
 const BSDTAR: &str = "bsdtar";
 const PDFIUM: &str = "pdfium";
 
-/// Only Windows ships `heif-enc`: macOS encodes HEIC with ImageIO
-/// (`docs/ENGINES.md`).
-const WITH_HEIF_ENC: bool = cfg!(windows);
+/// Where this system's HEIC helper is (D33), or `None` where there's none.
+const HEIF_AT: Option<HeifAt> = if cfg!(windows) {
+    Some(HeifAt::NextToExe)
+} else if cfg!(target_os = "macos") {
+    Some(HeifAt::OwnExe)
+} else {
+    None
+};
+
+/// The HEIC helper, from Grape's executable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeifAt {
+    /// The `grape-heif` sidecar in the executable's own folder (Windows):
+    /// looked for and logged like FFmpeg.
+    NextToExe,
+    /// The executable itself, as `Grape --grape-heif-worker` (macOS,
+    /// ImageIO): always there, and not logged.
+    OwnExe,
+}
+
+impl HeifAt {
+    /// True when `grape-heif` is a sidecar to look for, and to log.
+    fn is_sidecar(at: Option<HeifAt>) -> bool {
+        at == Some(HeifAt::NextToExe)
+    }
+}
 
 /// Where this system's PDFium build lands, or `None` where none ships.
 const PDFIUM_AT: Option<PdfiumAt> = if cfg!(windows) {
@@ -79,7 +109,7 @@ impl Sidecars {
     pub fn find() -> Self {
         let found = match std::env::current_exe() {
             Ok(exe) => Self {
-                engines: resolve_all(&exe, EXE_SUFFIX, WITH_HEIF_ENC, PDFIUM_AT, Path::is_file),
+                engines: resolve_all(&exe, EXE_SUFFIX, HEIF_AT, PDFIUM_AT, Path::is_file),
             },
             Err(err) => {
                 log::warn!("sidecars: can't tell which folder Grape runs from: {err}");
@@ -90,20 +120,21 @@ impl Sidecars {
         };
         log::info!(
             "sidecars: {}",
-            summary(&found.looked_for(WITH_HEIF_ENC, PDFIUM_AT.is_some()))
+            summary(&found.looked_for(HeifAt::is_sidecar(HEIF_AT), PDFIUM_AT.is_some()))
         );
         found
     }
 
     /// Each sidecar looked for, by name, and whether it was found:
-    /// `heif-enc` only when `with_heif_enc`, PDFium only when `with_pdfium`.
-    fn looked_for(&self, with_heif_enc: bool, with_pdfium: bool) -> Vec<(&'static str, bool)> {
+    /// `grape-heif` only when `with_grape_heif`, PDFium only when
+    /// `with_pdfium`.
+    fn looked_for(&self, with_grape_heif: bool, with_pdfium: bool) -> Vec<(&'static str, bool)> {
         let mut names = vec![
             (FFMPEG, self.engines.ffmpeg.is_some()),
             (FFPROBE, self.engines.ffprobe.is_some()),
         ];
-        if with_heif_enc {
-            names.push((HEIF_ENC, self.engines.heif_enc.is_some()));
+        if with_grape_heif {
+            names.push((GRAPE_HEIF, self.engines.heif.is_some()));
         }
         names.push((BSDTAR, self.engines.bsdtar.is_some()));
         if with_pdfium {
@@ -122,17 +153,21 @@ pub fn for_jobs(app: &AppHandle) -> SidecarPaths {
 }
 
 /// Every sidecar for the executable `exe`: the programs in its folder
-/// ([`resolve`]), and PDFium and the PDF worker ([`resolve_pdf`]).
+/// ([`resolve`]), PDFium and the PDF worker ([`resolve_pdf`]), and the
+/// HEIC helper where `heif_at` says.
 fn resolve_all(
     exe: &Path,
     suffix: &str,
-    with_heif_enc: bool,
+    heif_at: Option<HeifAt>,
     pdfium_at: Option<PdfiumAt>,
     is_file: impl Fn(&Path) -> bool,
 ) -> SidecarPaths {
-    let programs = exe.parent().map_or_else(SidecarPaths::default, |dir| {
-        resolve(dir, suffix, with_heif_enc, &is_file)
+    let mut programs = exe.parent().map_or_else(SidecarPaths::default, |dir| {
+        resolve(dir, suffix, HeifAt::is_sidecar(heif_at), &is_file)
     });
+    if heif_at == Some(HeifAt::OwnExe) {
+        programs.heif = Some(exe.to_path_buf());
+    }
     let pdf = resolve_pdf(exe, pdfium_at, &is_file);
     SidecarPaths {
         pdfium: pdf.pdfium,
@@ -142,12 +177,12 @@ fn resolve_all(
 }
 
 /// The sidecars in `dir`, each named `{name}{suffix}` and kept only when
-/// `is_file` says it's a file. `heif-enc` is looked for only when
-/// `with_heif_enc`.
+/// `is_file` says it's a file. `grape-heif` is looked for only when
+/// `with_grape_heif`, and goes in `heif`.
 fn resolve(
     dir: &Path,
     suffix: &str,
-    with_heif_enc: bool,
+    with_grape_heif: bool,
     is_file: impl Fn(&Path) -> bool,
 ) -> SidecarPaths {
     let find = |name: &str| {
@@ -157,7 +192,11 @@ fn resolve(
     SidecarPaths {
         ffmpeg: find(FFMPEG),
         ffprobe: find(FFPROBE),
-        heif_enc: if with_heif_enc { find(HEIF_ENC) } else { None },
+        heif: if with_grape_heif {
+            find(GRAPE_HEIF)
+        } else {
+            None
+        },
         bsdtar: find(BSDTAR),
         ..SidecarPaths::default()
     }
@@ -185,7 +224,7 @@ fn resolve_pdf(exe: &Path, at: Option<PdfiumAt>, is_file: impl Fn(&Path) -> bool
     }
 }
 
-/// What the log says: "found ffmpeg, ffprobe; missing heif-enc". Names
+/// What the log says: "found ffmpeg, ffprobe; missing grape-heif". Names
 /// only, never paths.
 fn summary(looked_for: &[(&str, bool)]) -> String {
     let (mut found, mut missing) = (Vec::new(), Vec::new());
@@ -216,15 +255,17 @@ mod tests {
     }
 
     /// What [`Sidecars::find`] would log for these paths.
-    fn summary_of(engines: &SidecarPaths, with_heif_enc: bool, with_pdfium: bool) -> String {
+    fn summary_of(engines: &SidecarPaths, with_grape_heif: bool, with_pdfium: bool) -> String {
         let sidecars = Sidecars {
             engines: engines.clone(),
         };
-        summary(&sidecars.looked_for(with_heif_enc, with_pdfium))
+        summary(&sidecars.looked_for(with_grape_heif, with_pdfium))
     }
 
     const WINDOWS: Option<PdfiumAt> = Some(PdfiumAt::NextToExe("pdfium.dll"));
     const MACOS: Option<PdfiumAt> = Some(PdfiumAt::Frameworks("libpdfium.dylib"));
+    const WIN_HEIF: Option<HeifAt> = Some(HeifAt::NextToExe);
+    const MAC_HEIF: Option<HeifAt> = Some(HeifAt::OwnExe);
 
     #[test]
     fn this_system_looks_for_its_own_pdfium_build() {
@@ -239,38 +280,50 @@ mod tests {
     }
 
     #[test]
+    fn this_system_runs_its_own_heic_helper() {
+        let expected = if cfg!(windows) {
+            Some(HeifAt::NextToExe)
+        } else if cfg!(target_os = "macos") {
+            Some(HeifAt::OwnExe)
+        } else {
+            None
+        };
+        assert_eq!(HEIF_AT, expected);
+    }
+
+    #[test]
     fn windows_looks_for_four_exes_next_to_grape() {
         let dir = Path::new("install");
         let all = [
             dir.join("ffmpeg.exe"),
             dir.join("ffprobe.exe"),
-            dir.join("heif-enc.exe"),
+            dir.join("grape-heif.exe"),
             dir.join("bsdtar.exe"),
         ];
         let paths = resolve(dir, ".exe", true, only(&all));
         assert_eq!(paths.ffmpeg, Some(dir.join("ffmpeg.exe")));
         assert_eq!(paths.ffprobe, Some(dir.join("ffprobe.exe")));
-        assert_eq!(paths.heif_enc, Some(dir.join("heif-enc.exe")));
+        assert_eq!(paths.heif, Some(dir.join("grape-heif.exe")));
         assert_eq!(paths.bsdtar, Some(dir.join("bsdtar.exe")));
         assert_eq!(
             summary_of(&paths, true, false),
-            "found ffmpeg, ffprobe, heif-enc, bsdtar"
+            "found ffmpeg, ffprobe, grape-heif, bsdtar"
         );
     }
 
     #[test]
-    fn macos_looks_for_plain_names_and_never_heif_enc() {
+    fn macos_looks_for_plain_names_and_never_grape_heif() {
         let dir = Path::new("Grape.app").join("Contents").join("MacOS");
         let all = [
             dir.join("ffmpeg"),
             dir.join("ffprobe"),
-            dir.join("heif-enc"),
+            dir.join("grape-heif"),
             dir.join("bsdtar"),
         ];
         let paths = resolve(&dir, "", false, only(&all));
         assert_eq!(paths.ffmpeg, Some(dir.join("ffmpeg")));
         assert_eq!(paths.ffprobe, Some(dir.join("ffprobe")));
-        assert_eq!(paths.heif_enc, None);
+        assert_eq!(paths.heif, None);
         assert_eq!(paths.bsdtar, Some(dir.join("bsdtar")));
         assert_eq!(
             summary_of(&paths, false, false),
@@ -284,10 +337,10 @@ mod tests {
         let paths = resolve(dir, ".exe", true, only(&[dir.join("ffprobe.exe")]));
         assert_eq!(paths.ffmpeg, None);
         assert_eq!(paths.ffprobe, Some(dir.join("ffprobe.exe")));
-        assert_eq!(paths.heif_enc, None);
+        assert_eq!(paths.heif, None);
         assert_eq!(
             summary_of(&paths, true, false),
-            "found ffprobe; missing ffmpeg, heif-enc, bsdtar"
+            "found ffprobe; missing ffmpeg, grape-heif, bsdtar"
         );
     }
 
@@ -300,15 +353,19 @@ mod tests {
             dir.join("ffmpeg"),
             dir.join("ffmpeg-x86_64-pc-windows-msvc.exe"),
             dir.join("bsdtar-x86_64-pc-windows-msvc.exe"),
+            dir.join("grape-heif-x86_64-pc-windows-msvc.exe"),
+            // The tool it replaced (D33) never counts.
+            dir.join("heif-enc.exe"),
             Path::new("bin").join("ffprobe.exe"),
         ];
         let paths = resolve(dir, ".exe", true, only(&elsewhere));
         assert_eq!(paths.ffmpeg, None);
         assert_eq!(paths.ffprobe, None);
         assert_eq!(paths.bsdtar, None);
+        assert_eq!(paths.heif, None);
         assert_eq!(
             summary_of(&paths, true, false),
-            "none found (looked for ffmpeg, ffprobe, heif-enc, bsdtar)"
+            "none found (looked for ffmpeg, ffprobe, grape-heif, bsdtar)"
         );
         assert_eq!(
             summary_of(&SidecarPaths::default(), false, false),
@@ -322,10 +379,12 @@ mod tests {
         std::fs::create_dir_all(dir.join(format!("ffmpeg{EXE_SUFFIX}"))).expect("a temp folder");
         let ffprobe = dir.join(format!("ffprobe{EXE_SUFFIX}"));
         std::fs::write(&ffprobe, b"x").expect("a temp file");
-        let paths = resolve(&dir, EXE_SUFFIX, WITH_HEIF_ENC, Path::is_file);
+        std::fs::create_dir_all(dir.join(format!("grape-heif{EXE_SUFFIX}")))
+            .expect("a temp folder");
+        let paths = resolve(&dir, EXE_SUFFIX, true, Path::is_file);
         assert_eq!(paths.ffmpeg, None);
         assert_eq!(paths.ffprobe, Some(ffprobe));
-        assert_eq!(paths.heif_enc, None);
+        assert_eq!(paths.heif, None);
         std::fs::remove_dir_all(&dir).expect("the temp folder removed");
     }
 
@@ -453,7 +512,7 @@ mod tests {
         let engines = SidecarPaths {
             ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
             ffprobe: Some(PathBuf::from("ffprobe.exe")),
-            heif_enc: None,
+            heif: None,
             ..SidecarPaths::default()
         };
         let found = SidecarPaths {
@@ -468,7 +527,7 @@ mod tests {
         };
         assert_eq!(
             summary_of(&found, true, true),
-            "found ffmpeg, ffprobe, pdfium; missing heif-enc, bsdtar"
+            "found ffmpeg, ffprobe, pdfium; missing grape-heif, bsdtar"
         );
         assert_eq!(
             summary_of(&missing, false, true),
@@ -486,26 +545,73 @@ mod tests {
     }
 
     #[test]
-    fn every_field_but_the_heic_helper_is_filled_in_one_go() {
+    fn every_field_is_filled_in_one_go_on_windows() {
         let dir = Path::new("install");
         let exe = dir.join("Grape.exe");
         let all = [
             dir.join("ffmpeg.exe"),
             dir.join("ffprobe.exe"),
-            dir.join("heif-enc.exe"),
+            dir.join("grape-heif.exe"),
             dir.join("bsdtar.exe"),
             dir.join("pdfium.dll"),
-            dir.join("grape-heif.exe"),
         ];
-        let paths = resolve_all(&exe, ".exe", true, WINDOWS, only(&all));
+        let paths = resolve_all(&exe, ".exe", WIN_HEIF, WINDOWS, only(&all));
         assert_eq!(paths.ffmpeg, Some(dir.join("ffmpeg.exe")));
         assert_eq!(paths.ffprobe, Some(dir.join("ffprobe.exe")));
-        assert_eq!(paths.heif_enc, Some(dir.join("heif-enc.exe")));
+        assert_eq!(paths.heif, Some(dir.join("grape-heif.exe")));
         assert_eq!(paths.bsdtar, Some(dir.join("bsdtar.exe")));
         assert_eq!(paths.pdfium, Some(dir.join("pdfium.dll")));
         assert_eq!(paths.pdf_worker, Some(exe));
-        // The HEIC build wires its helper (#25).
+        assert_eq!(
+            summary_of(&paths, true, true),
+            "found ffmpeg, ffprobe, grape-heif, bsdtar, pdfium"
+        );
+    }
+
+    #[test]
+    fn windows_without_grape_heif_has_no_heic_helper() {
+        let dir = Path::new("install");
+        let exe = dir.join("Grape.exe");
+        // Grape.exe itself is never the HEIC helper on Windows.
+        let paths = resolve_all(
+            &exe,
+            ".exe",
+            WIN_HEIF,
+            WINDOWS,
+            only(&[exe.clone(), dir.join("pdfium.dll")]),
+        );
         assert_eq!(paths.heif, None);
+        assert_eq!(
+            summary_of(&paths, true, true),
+            "found pdfium; missing ffmpeg, ffprobe, grape-heif, bsdtar"
+        );
+    }
+
+    #[test]
+    fn macos_runs_grape_itself_as_the_heic_helper() {
+        let contents = Path::new("Grape.app").join("Contents");
+        let exe = contents.join("MacOS").join("Grape");
+        // A grape-heif next to it is never looked at.
+        let stray = contents.join("MacOS").join("grape-heif");
+        let dylib = contents.join("Frameworks").join("libpdfium.dylib");
+        let paths = resolve_all(&exe, "", MAC_HEIF, MACOS, only(&[stray, dylib]));
+        assert_eq!(paths.heif, Some(exe.clone()));
+        assert_eq!(paths.pdf_worker, Some(exe));
+        // And it isn't a sidecar, so the log doesn't name it.
+        assert_eq!(
+            summary_of(&paths, HeifAt::is_sidecar(MAC_HEIF), true),
+            "found pdfium; missing ffmpeg, ffprobe, bsdtar"
+        );
+    }
+
+    #[test]
+    fn a_system_without_a_heic_helper_never_finds_one() {
+        let dir = Path::new("target").join("debug");
+        let exe = dir.join("grape");
+        let everywhere = [dir.join("grape-heif"), dir.join("grape-heif.exe")];
+        let paths = resolve_all(&exe, "", None, None, only(&everywhere));
+        assert_eq!(paths.heif, None);
+        assert!(!HeifAt::is_sidecar(None));
     }
 
     #[test]
@@ -513,14 +619,20 @@ mod tests {
         let contents = Path::new("Grape.app").join("Contents");
         let exe = contents.join("MacOS").join("Grape");
         let bsdtar = contents.join("MacOS").join("bsdtar");
-        let paths = resolve_all(&exe, "", false, MACOS, only(std::slice::from_ref(&bsdtar)));
+        let paths = resolve_all(
+            &exe,
+            "",
+            MAC_HEIF,
+            MACOS,
+            only(std::slice::from_ref(&bsdtar)),
+        );
         assert_eq!(paths.bsdtar, Some(bsdtar));
         let elsewhere = [
             contents.join("Resources").join("bsdtar"),
             contents.join("Frameworks").join("bsdtar"),
             contents.join("MacOS").join("bsdtar-universal-apple-darwin"),
         ];
-        let paths = resolve_all(&exe, "", false, MACOS, only(&elsewhere));
+        let paths = resolve_all(&exe, "", MAC_HEIF, MACOS, only(&elsewhere));
         assert_eq!(paths.bsdtar, None);
         assert_eq!(paths.pdf_worker, Some(exe));
     }

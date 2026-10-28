@@ -22,6 +22,9 @@
 //!   volume's root never moves, and each item is judged right after its own
 //!   move); the same panel for Settings' folders; and the haptic tick behind
 //!   [`crate::haptic_tick`].
+//! - `heif`: the HEIC worker's codec, [`heif::ImageIo`] (DECISIONS D33):
+//!   ImageIO behind `grape_heif_proto::Codec`, run only in the worker
+//!   process (`Grape --grape-heif-worker`), never in Grape's own.
 //!
 //! Coordinates are points with the origin at the top-left of the primary
 //! (menu-bar) screen, y down; `DisplayBounds::scale` is always 1.0. The
@@ -38,6 +41,7 @@
 mod actions;
 mod display;
 mod drag;
+pub mod heif;
 mod window;
 
 pub use display::refresh_screens;

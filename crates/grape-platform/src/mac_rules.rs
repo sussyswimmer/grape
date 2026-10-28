@@ -326,6 +326,23 @@ fn round(value: f64) -> i32 {
     value.round() as i32
 }
 
+/// About how many bytes the Mac HEIC worker holds at most for a `width` ×
+/// `height` image of `depth` bits a sample (`kCGImagePropertyDepth`;
+/// `None` counts as 8): ImageIO's decoded picture (4 bytes a pixel at 8
+/// bits, 8 above, since float is off), plus the larger of its YUV planes
+/// while it decodes (2 bytes a pixel, 3 above 8 bits) and Grape's 8-bit
+/// RGBA bitmap while the picture is drawn (4). Checked against the
+/// request's `max_decoder_memory` before anything is decoded (D33), as
+/// libheif holds to it on Windows.
+pub(crate) fn heif_decode_bytes(width: u32, height: u32, depth: Option<i64>) -> u64 {
+    let per_pixel: u64 = if depth.is_some_and(|bits| bits > 8) {
+        8 + 4
+    } else {
+        4 + 4
+    };
+    (u64::from(width) * u64::from(height)).saturating_mul(per_pixel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +667,21 @@ mod tests {
             (MacTerminal::Terminal, None)
         );
         assert!(!asked.get());
+    }
+
+    #[test]
+    fn the_mac_heif_decoder_budget_takes_8_bit_and_refuses_deep_giants() {
+        const BUDGET: u64 = 1 << 30; // grape_heif_proto::Limits::DEFAULT
+                                     // A 48 MP iPhone photo, 8-bit: about 390 MB.
+        assert_eq!(heif_decode_bytes(8064, 6048, Some(8)), 8064 * 6048 * 8);
+        assert!(heif_decode_bytes(8064, 6048, Some(8)) <= BUDGET);
+        // The decoded-pixel cap (134,217,728) at 8 bits still fits.
+        assert!(heif_decode_bytes(16384, 8192, None) <= BUDGET);
+        // A 100 MP 10-bit HEIF doesn't: refused before ImageIO decodes it.
+        assert_eq!(heif_decode_bytes(11648, 8736, Some(10)), 11648 * 8736 * 12);
+        assert!(heif_decode_bytes(11648, 8736, Some(10)) > BUDGET);
+        // No overflow at the extremes: it saturates.
+        assert_eq!(heif_decode_bytes(u32::MAX, u32::MAX, Some(16)), u64::MAX);
     }
 
     #[test]

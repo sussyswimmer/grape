@@ -283,23 +283,42 @@ pub fn check_runnable(
     items: &[SelectionItem],
     sidecars: &SidecarPaths,
 ) -> Result<(), NotRunnable> {
+    runnable_with(op, items, sidecars, &HELPERS)
+}
+
+/// [`check_runnable`] with `helpers` as the helpers Grape ships (tests
+/// pass their own, so each OS's case runs everywhere).
+fn runnable_with(
+    op: &Operation,
+    items: &[SelectionItem],
+    sidecars: &SidecarPaths,
+    helpers: &[Helper],
+) -> Result<(), NotRunnable> {
     let formats: Vec<Option<Format>> = items.iter().map(SelectionItem::format).collect();
     if supports_with(op, &formats, sidecars) {
         return Ok(());
     }
-    if let Some(helper) = missing_helper(op, &formats, sidecars) {
+    if let Some(helper) = missing_helper(op, &formats, sidecars, helpers) {
         return Err(NotRunnable {
             title: helper.title.to_owned(),
             detail: Some(helper.detail.to_owned()),
         });
     }
-    // One item names the toast: the first that can't run even with every
-    // helper Grape ships, so a missing PDFium never blames the PDF in a
-    // PDF and PNG drop; else the first that can't run as is.
-    let shipped = HELPERS
+    let shipped = helpers
         .iter()
         .filter(|helper| helper.ships)
         .fold(sidecars.clone(), |found, helper| (helper.with)(&found));
+    // No one helper is enough, but those Grape ships are: several are
+    // missing (a PDF and a HEIC without PDFium and grape-heif).
+    if supports_with(op, &formats, &shipped) {
+        return Err(NotRunnable {
+            title: "Some of Grape's helpers are missing".to_owned(),
+            detail: Some("Reinstalling Grape brings them back.".to_owned()),
+        });
+    }
+    // One item names the toast: the first that can't run even with every
+    // helper Grape ships, so a missing PDFium never blames the PDF in a
+    // PDF and PNG drop; else the first that can't run as is.
     let fails =
         |item: &SelectionItem, with: &SidecarPaths| !supports_with(op, &[item.format()], with);
     let first = items
@@ -338,10 +357,14 @@ struct Helper {
     with: fn(&SidecarPaths) -> SidecarPaths,
 }
 
-/// The helpers lane A's engines need. PDFium ships wherever a build has
-/// one (D29). bsdtar ships once the bundles carry it (#27, D27): then
-/// `ships` becomes `cfg!(any(windows, target_os = "macos"))` too.
-const HELPERS: [Helper; 2] = [
+/// The helpers the engines need. PDFium ships wherever a build has one
+/// (D29). FFmpeg (`ffmpeg` and `ffprobe`, Grape's own build, D24) and
+/// bsdtar (D27) ship in every installer and DMG through the per-OS
+/// sidecars overlay (D25). The HEIC helper ships on Windows
+/// (`grape-heif.exe`, D33); on macOS it's Grape itself, so it's never
+/// missing there. Grape ships for no other OS, so there every drop that
+/// needs a helper is "coming".
+const HELPERS: [Helper; 4] = [
     Helper {
         title: "Grape's PDF library is missing",
         detail: "Reinstalling Grape brings it back.",
@@ -351,8 +374,21 @@ const HELPERS: [Helper; 2] = [
     Helper {
         title: "Grape's RAR helper is missing",
         detail: "Reinstalling Grape brings it back.",
-        ships: false,
+        ships: cfg!(any(windows, target_os = "macos")),
         with: with_bsdtar,
+    },
+    Helper {
+        title: "Grape's HEIC helper is missing",
+        detail: "Reinstall Grape to convert HEIC files.",
+        ships: cfg!(windows),
+        with: with_heif,
+    },
+    // 221 px in the title's 13 px semibold (Inter), of its 248.
+    Helper {
+        title: "Grape's media converter is missing",
+        detail: "Reinstalling Grape brings it back.",
+        ships: cfg!(any(windows, target_os = "macos")),
+        with: with_ffmpeg,
     },
 ];
 
@@ -371,14 +407,34 @@ fn with_bsdtar(sidecars: &SidecarPaths) -> SidecarPaths {
     }
 }
 
-/// The shipped helper whose absence alone stops `op` on `formats`.
+fn with_heif(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        heif: Some(PathBuf::from("grape-heif")),
+        ..sidecars.clone()
+    }
+}
+
+/// Both programs: the media engine needs `ffmpeg` and `ffprobe`, and they
+/// ship together, so one missing is the same broken install.
+fn with_ffmpeg(sidecars: &SidecarPaths) -> SidecarPaths {
+    SidecarPaths {
+        ffmpeg: Some(PathBuf::from("ffmpeg")),
+        ffprobe: Some(PathBuf::from("ffprobe")),
+        ..sidecars.clone()
+    }
+}
+
+/// The shipped helper among `helpers` whose absence alone stops `op` on
+/// `formats`.
 fn missing_helper(
     op: &Operation,
     formats: &[Option<Format>],
     sidecars: &SidecarPaths,
+    helpers: &[Helper],
 ) -> Option<Helper> {
-    HELPERS
-        .into_iter()
+    helpers
+        .iter()
+        .copied()
         .find(|helper| helper.ships && supports_with(op, formats, &(helper.with)(sidecars)))
 }
 
@@ -450,7 +506,9 @@ fn run(
                 if outcome.renamed { " (renamed)" } else { "" },
                 log_notes(&outcome.notes)
             ),
-            Err(err) => log::warn!("jobs: {err} ({})", err.detail),
+            // The kind and the detail without the job's paths: the user
+            // message names the file, so it's only for the toast.
+            Err(err) => log::warn!("{}", failure_log(err, job)),
         }
         results.push(result);
     }
@@ -668,6 +726,47 @@ fn count(n: u32, one: &str, many: &str) -> String {
     }
 }
 
+/// The log line for a job that failed: its kind and the engine's detail,
+/// with the job's paths, their folders and their file names taken out (an
+/// engine's detail may hold the paths involved). Never the user message,
+/// which names the file.
+fn failure_log(err: &GrapeError, job: &Job) -> String {
+    format!("jobs: {:?} ({})", err.kind, without_paths(&err.detail, job))
+}
+
+/// `detail` with every input and output path of `job` replaced by
+/// `<path>`, their folders by `<folder>` and their file names by `<name>`.
+/// Words under 3 characters are left (a bare root, a one-letter name).
+fn without_paths(detail: &str, job: &Job) -> String {
+    let mut paths: Vec<&Path> = job.inputs.iter().map(PathBuf::as_path).collect();
+    match &job.output {
+        JobOutput::File(path) | JobOutput::Folder(path) => paths.push(path),
+        JobOutput::PagesFileOrFolder { file, folder, .. } => {
+            paths.push(file);
+            paths.push(folder);
+        }
+    }
+    let mut words: Vec<(String, &str)> = Vec::new();
+    for path in paths {
+        words.push((path.to_string_lossy().into_owned(), "<path>"));
+        if let Some(parent) = path.parent() {
+            words.push((parent.to_string_lossy().into_owned(), "<folder>"));
+        }
+        if let Some(name) = path.file_name() {
+            words.push((name.to_string_lossy().into_owned(), "<name>"));
+        }
+    }
+    // Longest first, so a path goes before its folder and its name.
+    words.sort_by_key(|word| std::cmp::Reverse(word.0.len()));
+    let mut out = detail.to_owned();
+    for (word, with) in &words {
+        if word.chars().count() >= 3 {
+            out = out.replace(word.as_str(), with);
+        }
+    }
+    out
+}
+
 /// The notes for the log: counts and kinds, never names.
 fn log_notes(notes: &[Note]) -> String {
     notes
@@ -792,9 +891,13 @@ mod tests {
         Settings::new(PathBuf::from("/home/max/Downloads/Grape"))
     }
 
-    /// What Grape finds in a full install: PDFium, the worker and bsdtar.
+    /// What Grape finds in a full install on every OS: FFmpeg and ffprobe,
+    /// PDFium, the worker and bsdtar. (The HEIC helper is
+    /// [`with_heic_helper`].)
     fn installed() -> SidecarPaths {
         SidecarPaths {
+            ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
+            ffprobe: Some(PathBuf::from("ffprobe.exe")),
             pdfium: Some(PathBuf::from("pdfium.dll")),
             pdf_worker: Some(PathBuf::from("Grape.exe")),
             bsdtar: Some(PathBuf::from("bsdtar.exe")),
@@ -835,6 +938,202 @@ mod tests {
         assert_eq!(why.detail.as_deref(), Some("AVIF to PNG is coming."));
     }
 
+    /// [`installed`] plus the HEIC helper: `grape-heif.exe` on Windows,
+    /// Grape itself on macOS.
+    fn with_heic_helper() -> SidecarPaths {
+        SidecarPaths {
+            heif: Some(PathBuf::from("grape-heif.exe")),
+            ..installed()
+        }
+    }
+
+    #[test]
+    fn heic_runs_with_its_helper_both_ways() {
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let png = [SelectionItem::file("/a/photo.png")];
+        for to in [
+            Format::Jpg,
+            Format::Png,
+            Format::Webp,
+            Format::Tiff,
+            Format::Bmp,
+        ] {
+            let op = Operation::Convert { to };
+            assert_eq!(
+                check_runnable(&op, &heic, &with_heic_helper()),
+                Ok(()),
+                "{to:?}"
+            );
+        }
+        for from in ["/a/photo.png", "/a/photo.jpg", "/a/scan.tiff"] {
+            let op = Operation::Convert { to: Format::Heic };
+            let items = [SelectionItem::file(from)];
+            assert_eq!(
+                check_runnable(&op, &items, &with_heic_helper()),
+                Ok(()),
+                "{from}"
+            );
+        }
+        // HEIC ⇄ AVIF and HEIC → PDF wait for their engines (D33).
+        let to_avif = Operation::Convert { to: Format::Avif };
+        assert_eq!(
+            check_runnable(&to_avif, &heic, &with_heic_helper())
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("HEIC to AVIF is coming.")
+        );
+        let to_heic = Operation::Convert { to: Format::Heic };
+        assert_eq!(check_runnable(&to_heic, &png, &with_heic_helper()), Ok(()));
+    }
+
+    #[test]
+    fn heic_without_its_helper_says_so_on_windows_and_is_coming_elsewhere() {
+        let to_png = Operation::Convert { to: Format::Png };
+        let to_heic = Operation::Convert { to: Format::Heic };
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let png = [SelectionItem::file("/a/photo.png")];
+        for (op, items, coming) in [
+            (&to_png, &heic, "HEIC to PNG is coming."),
+            (&to_heic, &png, "PNG to HEIC is coming."),
+        ] {
+            let why = check_runnable(op, items, &installed()).unwrap_err();
+            if cfg!(windows) {
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Grape's HEIC helper is missing".to_owned(),
+                        detail: Some("Reinstall Grape to convert HEIC files.".to_owned()),
+                    }
+                );
+            } else {
+                // macOS always has its helper (Grape itself); Linux none.
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Not in this build yet".to_owned(),
+                        detail: Some(coming.to_owned()),
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_heic_and_an_avif_never_blame_the_heic_helper() {
+        let to_png = Operation::Convert { to: Format::Png };
+        let mixed = [
+            SelectionItem::file("/a/one.heic"),
+            SelectionItem::file("/a/two.avif"),
+        ];
+        // Without the helper: where it ships, even with it the AVIF can't
+        // run, so the AVIF names the toast; elsewhere the HEIC does.
+        let why = check_runnable(&to_png, &mixed, &installed()).unwrap_err();
+        assert_eq!(why.title, "Not in this build yet");
+        let named = if cfg!(windows) {
+            "AVIF to PNG is coming."
+        } else {
+            "HEIC to PNG is coming."
+        };
+        assert_eq!(why.detail.as_deref(), Some(named));
+        // With it, only the AVIF can't run.
+        assert_eq!(
+            check_runnable(&to_png, &mixed, &with_heic_helper()),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("AVIF to PNG is coming.".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn several_missing_helpers_say_so_and_never_blame_a_pdf_as_coming() {
+        let shipped = [
+            Helper {
+                ships: true,
+                ..HELPERS[0]
+            },
+            Helper {
+                ships: true,
+                ..HELPERS[2]
+            },
+        ];
+        let to_png = Operation::Convert { to: Format::Png };
+        let both = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.heic"),
+        ];
+        let several = Err(NotRunnable {
+            title: "Some of Grape's helpers are missing".to_owned(),
+            detail: Some("Reinstalling Grape brings them back.".to_owned()),
+        });
+        assert_eq!(runnable_with(&to_png, &both, &none(), &shipped), several);
+        // One missing: that one is named.
+        let heif_only = SidecarPaths {
+            heif: Some(PathBuf::from("grape-heif.exe")),
+            ..none()
+        };
+        assert_eq!(
+            runnable_with(&to_png, &both, &heif_only, &shipped)
+                .unwrap_err()
+                .title,
+            "Grape's PDF library is missing"
+        );
+        assert_eq!(
+            runnable_with(&to_png, &both, &with_heic_helper(), &shipped),
+            Ok(())
+        );
+        // Something that can't run even with both is what the toast names.
+        let three = [
+            SelectionItem::file("/a/a.pdf"),
+            SelectionItem::file("/a/b.heic"),
+            SelectionItem::file("/a/c.avif"),
+        ];
+        assert_eq!(
+            runnable_with(&to_png, &three, &none(), &shipped)
+                .unwrap_err()
+                .detail
+                .as_deref(),
+            Some("AVIF to PNG is coming.")
+        );
+        // The real list on Windows, where both ship.
+        if cfg!(windows) {
+            assert_eq!(check_runnable(&to_png, &both, &none()), several);
+        }
+    }
+
+    #[test]
+    fn a_failure_is_logged_without_the_jobs_names_or_paths() {
+        let job = job(
+            "/home/max/Taxes/Divorce papers scan.heic",
+            "/home/max/Taxes/Divorce papers scan.jpg",
+            false,
+        );
+        let err = GrapeError {
+            kind: ErrorKind::DecodeFailed,
+            user_message: "Divorce papers scan.heic isn't a readable HEIC image.".to_owned(),
+            detail: "decode /home/max/Taxes/Divorce papers scan.heic: bad; create temp in /home/max/Taxes: denied; Divorce papers scan.jpg".to_owned(),
+        };
+        let line = failure_log(&err, &job);
+        assert!(
+            !line.contains("Divorce") && !line.contains("/home/max"),
+            "{line}"
+        );
+        assert_eq!(
+            line,
+            "jobs: DecodeFailed (decode <path>: bad; create temp in <folder>: denied; <name>)"
+        );
+        // A detail without the job's paths (the HEIC helper's) stays as is.
+        let helper = GrapeError {
+            detail: "HEIC helper: Damaged: ImageIO's image status is 3".to_owned(),
+            ..err
+        };
+        assert_eq!(
+            failure_log(&helper, &job),
+            "jobs: DecodeFailed (HEIC helper: Damaged: ImageIO's image status is 3)"
+        );
+    }
+
     #[test]
     fn archives_run_and_rar_needs_bsdtar() {
         for (name, to) in [
@@ -851,26 +1150,113 @@ mod tests {
         let rar = [SelectionItem::file("/a/x.rar")];
         let to_zip = Operation::Convert { to: Format::Zip };
         assert_eq!(check_runnable(&to_zip, &rar, &installed()), Ok(()));
-        // bsdtar isn't in any installer yet (#27): RAR is "coming".
-        assert_eq!(
-            check_runnable(&to_zip, &rar, &none()),
-            Err(NotRunnable {
-                title: "Not in this build yet".to_owned(),
-                detail: Some("RAR to ZIP is coming.".to_owned()),
-            })
-        );
         let extract = Operation::tool(ToolKey::ExtractArchive);
         let both = [
             SelectionItem::file("/a/x.zip"),
             SelectionItem::file("/a/y.rar"),
         ];
         assert_eq!(check_runnable(&extract, &both, &installed()), Ok(()));
+        // Every installer and DMG carries bsdtar (D27), so without it a RAR
+        // drop is a broken install there. Grape ships for no other OS, so
+        // there RAR is "coming".
+        let missing = NotRunnable {
+            title: "Grape's RAR helper is missing".to_owned(),
+            detail: Some("Reinstalling Grape brings it back.".to_owned()),
+        };
+        for (op, items, coming) in [
+            (&to_zip, &rar[..], "RAR to ZIP is coming."),
+            (&extract, &both[..], "Extract Archive on RAR is coming."),
+        ] {
+            let why = check_runnable(op, items, &none()).unwrap_err();
+            if cfg!(any(windows, target_os = "macos")) {
+                assert_eq!(why, missing, "{op:?}");
+            } else {
+                assert_eq!(
+                    why,
+                    NotRunnable {
+                        title: "Not in this build yet".to_owned(),
+                        detail: Some(coming.to_owned()),
+                    }
+                );
+            }
+        }
+        // A build where bsdtar doesn't ship says "coming" on every OS.
+        let unshipped = [Helper {
+            ships: false,
+            ..HELPERS[1]
+        }];
         assert_eq!(
-            check_runnable(&extract, &both, &none())
-                .unwrap_err()
-                .detail
-                .as_deref(),
-            Some("Extract Archive on RAR is coming.")
+            runnable_with(&extract, &both, &none(), &unshipped),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("Extract Archive on RAR is coming.".to_owned()),
+            })
+        );
+        // With the RAR helper shipped, a missing one is named on every OS.
+        let shipped = [Helper {
+            ships: true,
+            ..HELPERS[1]
+        }];
+        assert_eq!(
+            runnable_with(&to_zip, &rar, &none(), &shipped),
+            Err(missing)
+        );
+    }
+
+    #[test]
+    fn mp4_to_mov_runs_with_ffmpeg_and_says_when_it_is_missing() {
+        let to_mov = Operation::Convert { to: Format::Mov };
+        let mp4 = [SelectionItem::file("/a/clip.mp4")];
+        assert_eq!(check_runnable(&to_mov, &mp4, &installed()), Ok(()));
+        let missing = NotRunnable {
+            title: "Grape's media converter is missing".to_owned(),
+            detail: Some("Reinstalling Grape brings it back.".to_owned()),
+        };
+        let coming = NotRunnable {
+            title: "Not in this build yet".to_owned(),
+            detail: Some("MP4 to MOV is coming.".to_owned()),
+        };
+        // Either program missing is a broken install: the engine needs both.
+        let no_ffmpeg = SidecarPaths {
+            ffmpeg: None,
+            ..installed()
+        };
+        let no_ffprobe = SidecarPaths {
+            ffprobe: None,
+            ..installed()
+        };
+        for sidecars in [none(), no_ffmpeg, no_ffprobe] {
+            let why = check_runnable(&to_mov, &mp4, &sidecars).unwrap_err();
+            // Every installer and DMG carries FFmpeg (D24, D25); Grape
+            // ships for no other OS.
+            if cfg!(any(windows, target_os = "macos")) {
+                assert_eq!(why, missing, "{sidecars:?}");
+            } else {
+                assert_eq!(why, coming, "{sidecars:?}");
+            }
+        }
+        // Each OS's case, on every OS: FFmpeg shipped, and not.
+        let ffmpeg = HELPERS[3];
+        assert_eq!(ffmpeg.title, "Grape's media converter is missing");
+        let shipped = [Helper {
+            ships: true,
+            ..ffmpeg
+        }];
+        let unshipped = [Helper {
+            ships: false,
+            ..ffmpeg
+        }];
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &none(), &shipped),
+            Err(missing)
+        );
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &none(), &unshipped),
+            Err(coming)
+        );
+        assert_eq!(
+            runnable_with(&to_mov, &mp4, &installed(), &unshipped),
+            Ok(())
         );
     }
 
@@ -900,18 +1286,19 @@ mod tests {
                 assert_eq!(why.title, "Not in this build yet", "{op:?}");
             }
         }
-        // A PDF and a PNG without PDFium: where PDFium ships, the PNG is
+        // A PDF and a TIFF without PDFium: where PDFium ships, the TIFF is
         // what this build can't run, so it names the toast. Elsewhere no
-        // PDF runs, so the PDF does.
+        // PDF runs, so the PDF does. (TIFF, not PNG or JPG: lane B's tools
+        // (D26) run Remove Metadata on those.)
         let op = Operation::tool(ToolKey::RemoveMetadata);
         let mixed = [
             SelectionItem::file("/a/a.pdf"),
-            SelectionItem::file("/a/b.png"),
+            SelectionItem::file("/a/b.tiff"),
         ];
         let why = check_runnable(&op, &mixed, &none()).unwrap_err();
         assert_eq!(why.title, "Not in this build yet");
         let named = if cfg!(any(windows, target_os = "macos")) {
-            "Remove Metadata on PNG is coming."
+            "Remove Metadata on TIFF is coming."
         } else {
             "Remove Metadata on PDF is coming."
         };
@@ -929,31 +1316,33 @@ mod tests {
 
     #[test]
     fn other_tools_say_they_are_coming() {
+        // TIFF stays "coming" for both tools once lane B's tools (D26) run
+        // them on JPG, PNG and media.
         for tool in [ToolKey::Compress, ToolKey::RemoveMetadata] {
             let op = Operation::Tool {
                 tool,
                 params: ToolParams::default(),
             };
-            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.png")], &installed())
+            let why = check_runnable(&op, &[SelectionItem::file("/a/photo.tiff")], &installed())
                 .unwrap_err();
             assert_eq!(why.title, "Not in this build yet");
             assert_eq!(
                 why.detail,
-                Some(format!("{} on PNG is coming.", tool.name()))
+                Some(format!("{} on TIFF is coming.", tool.name()))
             );
         }
-        // Remove Metadata on a PDF and a PNG: the PNG names the toast.
+        // Remove Metadata on a PDF and a TIFF: the TIFF names the toast.
         let op = Operation::tool(ToolKey::RemoveMetadata);
         let mixed = [
             SelectionItem::file("/a/a.pdf"),
-            SelectionItem::file("/a/b.png"),
+            SelectionItem::file("/a/b.tiff"),
         ];
         assert_eq!(
             check_runnable(&op, &mixed, &installed())
                 .unwrap_err()
                 .detail
                 .as_deref(),
-            Some("Remove Metadata on PNG is coming.")
+            Some("Remove Metadata on TIFF is coming.")
         );
     }
 

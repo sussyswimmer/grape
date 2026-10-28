@@ -12,7 +12,7 @@ Grape is a free, open-source file converter that lives in the tray. Start draggi
 
 **Pre-alpha. Windows first.** Grape is being built for Windows 10 and 11 first. The macOS port started early and builds in CI, but hasn't run on a Mac yet (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
-So far, the wheel opens at the cursor when you tap a key while dragging from Explorer or the Desktop. It converts between JPG, PNG, WEBP, TIFF and BMP; the other formats and the tools say "Not in this build yet". The six file actions (Copy, Copy Path, Terminal, Move, Share and Float) and Settings work. All of it passes CI, and testing by hand on a real PC is next ([docs/TESTING.md](docs/TESTING.md)).
+So far, the wheel opens at the cursor when you tap a key while dragging from Explorer or the Desktop. It converts images (JPG, PNG, WEBP, TIFF, BMP and HEIC), audio and video, subtitles, archives (RAR too) and PDFs to images or text: 151 of the 178 conversions planned for v1. Extract Archive, Split PDF, Merge PDFs and Remove Metadata on PDFs run too. The rest say "Not in this build yet". The six file actions (Copy, Copy Path, Terminal, Move, Share and Float) and Settings work. CI checks all of it (its FFmpeg build is new and hasn't run green yet), and testing by hand on a real PC is next ([docs/TESTING.md](docs/TESTING.md)).
 
 ## Install
 

@@ -45,3 +45,5 @@ Everything runs on your PC. Grape uploads nothing, has no account and sends no t
 ## Source and licenses
 
 Grape is released under the MIT License. The source for this version is the [v{{VERSION}} tag](https://github.com/sussyswimmer/grape/tree/v{{VERSION}}), and the licenses of the code it includes are in [THIRD_PARTY_NOTICES.md](https://github.com/sussyswimmer/grape/blob/v{{VERSION}}/THIRD_PARTY_NOTICES.md).
+
+The installer also carries programs that Grape runs as separate executables, each built from source for Grape: FFmpeg's `ffmpeg.exe` and `ffprobe.exe` (GPL-2.0-or-later), libarchive's `bsdtar.exe` (BSD-2-Clause) and `grape-heif.exe` (GPL-3.0-or-later). Their license texts are in the `licenses` folder where Grape is installed. The complete source of the two GPL programs is in the files below, `grape-ffmpeg-sources.tar` and `grape-heif-{{HEIF_VERSION}}-source.tar.gz`, and `SHA256SUMS.txt` lists their hashes too.

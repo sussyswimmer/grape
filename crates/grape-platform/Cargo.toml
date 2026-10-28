@@ -19,7 +19,9 @@ log = "0.4.34"
 # shell data object). Nothing else in the build enables the WinRT ones
 # (Foundation, ApplicationModel_DataTransfer, Storage, Storage_Streams: the
 # share sheet), so those and the two Win32 ones add new bindings to the build
-# (DECISIONS D9, D13).
+# (DECISIONS D9, D13). Win32_Security (CreateJobObjectW's attributes) and
+# Win32_System_JobObjects are the HEIC helper's Job Object (`windows::job`,
+# D33): bindings only, no new package.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "ApplicationModel_DataTransfer",
@@ -28,10 +30,12 @@ windows = { version = "0.62.2", features = [
     "Storage_Streams",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
@@ -96,17 +100,77 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSWindow",
     "NSWorkspace",
 ] }
-# Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds).
+# Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds),
+# and the HEIC worker's pixels (`macos::heif`, D33): images, color spaces,
+# the bitmap context it draws into and the data provider it encodes from.
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGDataProvider",
     "CGDirectDisplay",
     "CGError",
+    "CGImage",
 ] }
+# The HEIC worker's codec (`macos::heif`, D33): ImageIO's image source and
+# destination. The one new package in Cargo.lock for HEIC (2025-10-04,
+# Zlib OR Apache-2.0 OR MIT). Without its `objc2` and `block2` features it
+# needs only the two crates below, which the build already has.
+objc2-image-io = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CGImageDestination",
+    "CGImageProperties",
+    "CGImageSource",
+    "objc2-core-graphics",
+] }
+# The CoreFoundation values ImageIO takes and returns. Already in the build
+# through objc2-foundation; now direct, for these features.
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFBase",
+    "CFCGTypes",
+    "CFData",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+    "CFURL",
+] }
+# `dlsym` for CGImageSourceSetAllowableTypes (macOS 14.2+), which a bound
+# import would stop Grape from launching on macOS 13. Already in the build.
+libc = "0.2.190"
+# The HEIC worker's protocol: `macos::heif` implements its `Codec`.
+grape-heif-proto.workspace = true
 # The main queue, for AppKit work that must run on the main thread.
 dispatch2 = { version = "0.3.1", default-features = false, features = [
     "std",
     "objc2",
 ] }
+
+[features]
+# The HEIC tests that need a real codec (D33): the `grape-heif-worker` test
+# bin (ImageIO on macOS), `tests/heif_imageio.rs` (macOS, with
+# GRAPE_TEST_HEIF_FIXTURES) and, on Windows, `tests/job_object.rs`'s
+# grape-heif.exe case (GRAPE_TEST_HEIF). CI's heif-it jobs turn it on.
+heif-it = []
+
+[dev-dependencies]
+# tests/job_object.rs writes protocol requests to grape-heif.exe.
+grape-heif-proto.workspace = true
+serde_json.workspace = true
+
+# ImageIO behind the HEIC protocol, for grape-engines' Mac heif-it tests
+# (GRAPE_TEST_HEIF). Elsewhere it says "macOS only" and exits 2.
+[[bin]]
+name = "grape-heif-worker"
+path = "src/bin/grape-heif-worker.rs"
+required-features = ["heif-it"]
+
+[[test]]
+name = "heif_imageio"
+path = "tests/heif_imageio.rs"
+required-features = ["heif-it"]
 
 [lints]
 workspace = true

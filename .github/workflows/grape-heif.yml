@@ -1,0 +1,276 @@
+name: grape-heif
+
+# Grape's own HEIC helper for Windows (DECISIONS D33): tools/grape-heif on
+# libheif, libde265 and x265, which vcpkg builds at the commit pinned in
+# tools/grape-heif/vcpkg.lock.json and which are linked statically. Built,
+# tested and checked here, with its GPL source bundle (GPL-3.0 section 6) and
+# the HEIC test fixtures, as artifacts for the jobs of the run that called
+# this. No GitHub Release until M7; release.yml attaches the source bundle to
+# its draft.
+on:
+  workflow_call:
+    inputs:
+      cache:
+        description: Use the vcpkg binary cache and the cargo target cache (release.yml builds clean).
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (release.yml passes its tag); empty for the caller's own ref.
+        type: string
+        default: ""
+    outputs:
+      version:
+        description: grape-heif's version (tools/grape-heif/Cargo.toml).
+        value: ${{ jobs.build.outputs.version }}
+      sha256:
+        description: grape-heif.exe's SHA-256.
+        value: ${{ jobs.build.outputs.sha256 }}
+  workflow_dispatch:
+    inputs:
+      cache:
+        description: Use the vcpkg binary cache and the cargo target cache.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: grape-heif (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    outputs:
+      version: ${{ steps.result.outputs.version }}
+      sha256: ${{ steps.result.outputs.sha256 }}
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # Same toolchain as rust-toolchain.toml. No RUSTFLAGS anywhere: it would
+      # replace .cargo/config.toml's +crt-static.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      # A fresh vcpkg in the runner's temp folder (never C:\vcpkg), which every
+      # cargo step below finds through VCPKG_ROOT (libheif-sys's vcpkg-rs).
+      - name: Paths
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VCPKGRS_TRIPLET=x64-windows-static"
+      # The C++ compiler is in vcpkg's ABI hash and in what cargo linked, so
+      # it's in both cache keys: when the runner image updates Visual
+      # Studio, both caches start over and are saved again, instead of
+      # restoring archives vcpkg can't use (it would rebuild everything on
+      # every run, since an exact key hit is never saved again) and a cargo
+      # target that wouldn't relink against the new libraries.
+      - id: msvc
+        name: The C++ compiler (for the cache keys)
+        run: |
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $ask = @('-latest', '-products', '*', '-requires', 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-property')
+          $vs = @(& $vswhere @ask installationVersion) | Select-Object -First 1
+          $root = @(& $vswhere @ask installationPath) | Select-Object -First 1
+          if (-not $vs -or -not $root) { Write-Output '::error::vswhere found no Visual Studio with the C++ tools.'; exit 1 }
+          $default = Join-Path $root 'VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt'
+          if (-not (Test-Path -LiteralPath $default -PathType Leaf)) { Write-Output "::error::$default is missing."; exit 1 }
+          $tools = (Get-Content -Raw -LiteralPath $default).Trim()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "key=vs$vs-msvc$tools"
+          Write-Output "Visual Studio $vs, MSVC $tools"
+      # vcpkg's binary cache: the built libheif, libde265 and x265.
+      - if: inputs.cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\vcpkg-archives
+          key: grape-heif-vcpkg-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**') }}
+      # Keyed on the compiler and the vcpkg inputs too: cargo doesn't relink
+      # when only the static libraries change (heic-spec J33).
+      - if: inputs.cache
+        uses: actions/cache@v6
+        with:
+          path: tools/grape-heif/target
+          key: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-${{ hashFiles('tools/grape-heif/src/**', 'crates/grape-heif-proto/**') }}
+          restore-keys: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-
+      # The PC's own shell: build.ps1's checks must work in Windows PowerShell
+      # 5.1 too. Dot-sourcing only defines its functions.
+      - name: build.ps1's checks work in Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          . ./tools/grape-heif/build.ps1
+          $lock = Read-Lock (Resolve-Path tools/grape-heif/vcpkg.lock.json).Path
+          $overlay = (Resolve-Path tools/grape-heif/vcpkg/ports/libheif).Path
+          if ((Get-PortSha512 "$overlay\portfile.cmake") -cne $lock.Sources[0].Sha512) { throw 'the overlay and the lock disagree' }
+          if ((Get-PortVersion "$overlay\vcpkg.json") -cne $lock.Sources[0].Version) { throw 'the overlay and the lock disagree' }
+          Write-Output "vcpkg $($lock.Commit), $($lock.Sources.Count) sources"
+      - name: Build (vcpkg at the pin, sources checked first, then cargo)
+        env:
+          USE_CACHE: ${{ inputs.cache }}
+        # A hashtable binds by name; an array splat binds by position, so
+        # '-BinaryCache' would be taken as a value, not a parameter.
+        run: |
+          $build = @{ VcpkgRoot = $env:VCPKG_ROOT }
+          if ($env:USE_CACHE -eq 'true') { $build.BinaryCache = Join-Path $env:RUNNER_TEMP 'vcpkg-archives' }
+          ./tools/grape-heif/build.ps1 @build
+          exit $LASTEXITCODE
+      # tools/grape-heif is its own workspace, so ci.yml's fmt and clippy
+      # never see it. One command per step, so no failure is masked.
+      - name: Format
+        working-directory: tools/grape-heif
+        run: cargo fmt --check
+      - name: Clippy
+        working-directory: tools/grape-heif
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+      # Banner, version and limits, a LibheifCodec round trip, plugin loading
+      # compiled out, and LIBHEIF_SECURITY_LIMITS=off ignored (a child run).
+      - name: Unit tests
+        working-directory: tools/grape-heif
+        run: cargo test --release --locked
+      - id: result
+        name: Version and SHA-256
+        run: |
+          $toml = Get-Content -Raw -LiteralPath tools/grape-heif/Cargo.toml
+          if ($toml -notmatch '(?m)^version = "([^"]+)"') { Write-Output '::error::No version in tools/grape-heif/Cargo.toml.'; exit 1 }
+          $version = $Matches[1]
+          $sha = (Get-FileHash -Algorithm SHA256 -LiteralPath tools/grape-heif/target/out/grape-heif.exe).Hash.ToLowerInvariant()
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "sha256=$sha"
+          Write-Output "grape-heif $version, SHA-256 $sha"
+      - name: Check the banner, the plugin loader, the DLLs and the licenses
+        run: |
+          $exe = (Resolve-Path tools/grape-heif/target/out/grape-heif.exe).Path
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          $want = @{}
+          foreach ($s in (Get-Content -Raw -LiteralPath tools/grape-heif/vcpkg.lock.json | ConvertFrom-Json).sources) { $want[$s.port] = $s.version }
+
+          # The banner: the pinned versions, from libheif itself.
+          $lines = @(& $exe -hide_banner -version)
+          if ($LASTEXITCODE -ne 0 -or $lines.Count -lt 3) { Bad "grape-heif.exe -hide_banner -version failed: $($lines -join ' / ')" }
+          $lines | ForEach-Object { Write-Output "  $_" }
+          if ($lines[0] -cnotmatch ('^grape-heif version ' + [regex]::Escape($want['libheif']) + '-grape\.\d+ ')) { Bad "Banner line 1: $($lines[0])" }
+          $tokens = @("$($lines[1])" -split ' ')
+          foreach ($t in "libheif=$($want['libheif'])", "libde265=$($want['libde265'])", "x265=$($want['x265'])", 'plugins=disabled', 'crt=static', 'protocol=1') {
+            if ($tokens -cnotcontains $t) { Bad "Banner line 2 lacks $t`: $($lines[1])" }
+          }
+
+          # No plugin loader: LIBHEIF_PLUGIN_PATH is only in plugins_windows.cc
+          # and plugins_unix.cc, which are compiled only with loading on.
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          foreach ($enc in [System.Text.Encoding]::ASCII, [System.Text.Encoding]::Unicode) {
+            if ($enc.GetString($bytes).Contains('LIBHEIF_PLUGIN_PATH')) { Bad "grape-heif.exe holds LIBHEIF_PLUGIN_PATH ($($enc.EncodingName)): libheif was built with plugin loading." }
+          }
+          # And a planted plugin folder changes nothing.
+          $plugins = Join-Path $env:RUNNER_TEMP 'heif-planted-plugins'
+          New-Item -ItemType Directory -Force -Path $plugins | Out-Null
+          [System.IO.File]::WriteAllBytes((Join-Path $plugins 'x.dll'), [byte[]](1..64))
+          $env:LIBHEIF_PLUGIN_PATH = $plugins
+          $planted = @(& $exe -hide_banner -version)
+          if ("$($planted[1])" -notmatch '(^| )plugins=disabled( |$)') { Bad "With LIBHEIF_PLUGIN_PATH set: $($planted[1])" }
+          $work = Join-Path $env:RUNNER_TEMP 'heif-probe'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
+          $probe = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $answer = @($probe | & $exe --grape-heif-worker)
+          if ($LASTEXITCODE -ne 0 -or "$($answer[-1])" -notmatch '^\{"done":\{"caps":\{"decode":true,"encode":true,') { Bad "Probe with LIBHEIF_PLUGIN_PATH set: $($answer -join ' / ')" }
+          Remove-Item Env:LIBHEIF_PLUGIN_PATH
+
+          # The DLLs it imports: Windows' own only (heic-spec J34; the first
+          # runs settle this list, and any change to it needs a reviewer).
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          $dumpbin = @(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe') | Select-Object -Last 1
+          if (-not $dumpbin) { Bad 'dumpbin.exe not found.' } else {
+            $deps = @(& $dumpbin /nologo /dependents $exe | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() })
+            Write-Output "Imports: $($deps -join ', ')"
+            if ($deps.Count -eq 0) { Bad 'dumpbin found no imports at all.' }
+            $allowed = 'KERNEL32.dll', 'ADVAPI32.dll', 'ntdll.dll', 'bcryptprimitives.dll', 'bcrypt.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'USERENV.dll', 'WS2_32.dll'
+            foreach ($d in $deps) {
+              if ($d -like 'vcruntime*' -or $d -like 'msvcp*' -or $d -like 'api-ms-win-crt-*' -or $d -like 'ucrtbase*') { Bad "grape-heif.exe needs the Visual C++ runtime ($d): it must be linked statically." }
+              elseif ($d -like 'heif*' -or $d -like 'libde265*' -or $d -like '*x265*') { Bad "grape-heif.exe loads ${d}: the codecs must be linked statically." }
+              elseif ($allowed -notcontains $d) { Bad "grape-heif.exe imports $d, which isn't on the list." }
+            }
+          }
+
+          # The license texts that ship are the ones vcpkg installed for this
+          # build (heic-spec J35), line endings aside.
+          $share = Join-Path $env:VCPKG_ROOT 'installed\x64-windows-static\share'
+          function Text([string]$p) { [System.IO.File]::ReadAllText((Resolve-Path $p).Path).Replace("`r`n", "`n") }
+          foreach ($pair in @(@('libheif', 'libheif.txt'), @('x265', 'x265.txt'))) {
+            if ((Text "$share\$($pair[0])\copyright") -cne (Text "licenses/grape-heif/$($pair[1])")) { Bad "licenses/grape-heif/$($pair[1]) isn't vcpkg's $($pair[0]) copyright file." }
+          }
+          $de265 = Text "$share\libde265\copyright"
+          foreach ($f in 'libde265.txt', 'libde265-win32cond.txt') {
+            if (-not $de265.Contains((Text "licenses/grape-heif/$f").TrimEnd())) { Bad "vcpkg's libde265 copyright file doesn't contain licenses/grape-heif/$f." }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          Write-Output 'Every check passed.'
+          exit 0
+      - name: Write the HEIC test fixtures
+        run: |
+          $icc = 'C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm'
+          if (-not (Test-Path -LiteralPath $icc -PathType Leaf)) { Write-Output "::error::$icc is missing."; exit 1 }
+          ./tools/grape-heif/target/release/grape-heif-fixtures.exe (Join-Path $env:RUNNER_TEMP 'heif-fixtures') --icc $icc
+          exit $LASTEXITCODE
+      # libheif's own limits come from its compiled-in defaults, so an
+      # inherited LIBHEIF_SECURITY_LIMITS=off changes nothing (Grape removes
+      # it too, heic-spec J38).
+      - name: A decode with LIBHEIF_SECURITY_LIMITS=off
+        run: |
+          $exe = (Resolve-Path tools/grape-heif/target/out/grape-heif.exe).Path
+          $work = Join-Path $env:RUNNER_TEMP 'heif-decode'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
+          $source = Join-Path $env:RUNNER_TEMP 'heif-fixtures\opaque.heic'
+          $request = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'decode'; source = $source }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $env:LIBHEIF_SECURITY_LIMITS = 'off'
+          $answer = @($request | & $exe --grape-heif-worker)
+          $code = $LASTEXITCODE
+          $answer | ForEach-Object { Write-Output "  $_" }
+          if ($code -ne 0 -or "$($answer[-1])" -cne '{"done":{"width":128,"height":96,"channels":3}}') { Write-Output '::error::The decode with LIBHEIF_SECURITY_LIMITS=off failed.'; exit 1 }
+          if (-not (Test-Path -LiteralPath (Join-Path $work 'pixels.rgba') -PathType Leaf)) { Write-Output '::error::No pixels.rgba.'; exit 1 }
+          exit 0
+      # GPL-3.0 section 6: the complete corresponding source travels with the
+      # program. `shell: bash` is Git Bash (GNU tar); a bare bash from pwsh can
+      # be WSL's.
+      - name: Source bundle
+        shell: bash
+        run: |
+          tmp=$(cygpath -u "$RUNNER_TEMP")
+          tools/grape-heif/source-bundle.sh "$tmp/vcpkg" "$tmp/grape-heif-source" tools/grape-heif/target/out/BUILDINFO.txt
+      # The exe is GPL-3.0-or-later, so its artifact carries the license
+      # texts and SOURCE.md, which says the complete source is this run's
+      # grape-heif-source artifact. Staged in a folder of its own, so the
+      # exe stays at the artifact's top level for ci.yml and release.yml.
+      - name: Stage the artifact with its licenses
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP 'grape-heif-artifact'
+          $licenses = Join-Path (Join-Path $stage 'licenses') 'grape-heif'
+          New-Item -ItemType Directory -Force -Path $licenses | Out-Null
+          foreach ($f in 'grape-heif.exe', 'BUILDINFO.txt', 'SHA256SUMS') {
+            Copy-Item -LiteralPath (Join-Path 'tools/grape-heif/target/out' $f) -Destination $stage
+          }
+          Copy-Item -Path licenses/grape-heif/* -Destination $licenses
+          if (-not (Test-Path -LiteralPath (Join-Path $licenses 'LICENSE.txt') -PathType Leaf) -or -not (Test-Path -LiteralPath (Join-Path $licenses 'SOURCE.md') -PathType Leaf)) { Write-Output '::error::The artifact has no LICENSE.txt or SOURCE.md.'; exit 1 }
+          Get-ChildItem -Recurse -File -LiteralPath $stage | ForEach-Object { Write-Output "  $($_.FullName.Substring($stage.Length + 1))" }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif-artifact
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: grape-heif-source
+          path: |
+            ${{ runner.temp }}/grape-heif-source/*.tar.gz
+            ${{ runner.temp }}/grape-heif-source/*.tar.gz.sha256
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: heif-fixtures
+          path: ${{ runner.temp }}/heif-fixtures
+          if-no-files-found: error

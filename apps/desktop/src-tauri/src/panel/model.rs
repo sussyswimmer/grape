@@ -739,9 +739,12 @@ mod tests {
         }
     }
 
-    /// What Grape finds in a full install: PDFium, the worker and bsdtar.
+    /// What Grape finds in a full install: FFmpeg and ffprobe, PDFium, the
+    /// worker and bsdtar.
     fn installed() -> SidecarPaths {
         SidecarPaths {
+            ffmpeg: Some(PathBuf::from("ffmpeg.exe")),
+            ffprobe: Some(PathBuf::from("ffprobe.exe")),
             pdfium: Some(PathBuf::from("pdfium.dll")),
             pdf_worker: Some(PathBuf::from("Grape.exe")),
             bsdtar: Some(PathBuf::from("bsdtar.exe")),
@@ -749,7 +752,8 @@ mod tests {
         }
     }
 
-    /// Update when lane B wires the media tools into `check_runnable`.
+    /// Even with FFmpeg there, the media tools' panels stay shut until lane
+    /// B's FFmpeg tools (D26) run them: update this test then.
     #[test]
     fn this_build_opens_only_the_merge_panel() {
         let real =
