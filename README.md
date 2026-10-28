@@ -29,7 +29,7 @@ To try a commit that isn't released yet, CI builds the same installer on every r
 
 ### macOS
 
-Released versions come from the [Releases page](https://github.com/sussyswimmer/grape/releases) as `Grape-macOS-universal.dmg`, for macOS 13 Ventura or later on Apple silicon and Intel. No release has it yet: it's published only once it has passed the checks on a real Mac. It's ad-hoc signed and not notarized, so macOS blocks the first open; the release notes and [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build" show how to open it anyway.
+Released versions come from the [Releases page](https://github.com/sussyswimmer/grape/releases) as `Grape-macOS-universal.dmg`, for macOS 13 Ventura or later on Apple silicon and Intel. No release has it yet: it's published only once it has passed the checks on a real Mac. It's ad-hoc signed and not notarized, so macOS blocks the first open: try to open Grape once, then click **Open Anyway** in System Settings → Privacy & Security. The release notes and [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build" give each step.
 
 Until then, CI builds the same DMG on every run as a preview, and nobody has tried it on a Mac yet: [docs/PLATFORM_MACOS.md](docs/PLATFORM_MACOS.md) → "Running a CI build".
 
