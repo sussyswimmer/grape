@@ -93,7 +93,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-22:* copy, copyPath, terminal and move are built, with toasts. CI's Windows runner checks the clipboard contents and a real shell move. The picker, the terminals and undo still need the PC (`TESTING.md` → "File actions, M5").
 
-*Status 2026-10-25:* Share (the share sheet) and the float shelf are built too (D21). Their tests pass on Linux and their Windows code passes clippy; the Windows-only tests run on CI's Windows runner, and they check the Share file lookups and the shelf's drag data but never open the sheet or start a drag. Neither has run on the PC yet; `TESTING.md` → "File actions, M5" starts with the Recycle Bin check. *Update 2026-10-28:* Float runs on the Mac too (D43, M8 below).
+*Status 2026-10-25:* Share (the share sheet) and the float shelf are built too (D21). Their tests pass on Linux and their Windows code passes clippy; the Windows-only tests run on CI's Windows runner, and they check the Share file lookups and the shelf's drag data but never open the sheet or start a drag. Neither has run on the PC yet; `TESTING.md` → "File actions, M5" starts with the Recycle Bin check. *Update 2026-10-28:* Float is built for the Mac too (D43, M8 below); nothing has run on a Mac yet.
 
 ## M6: Settings + polish (lane A)
 *Status 2026-10-24:* the first slice is built (D19): keys with swap-on-conflict, output location and fallback folder, sounds, haptics on macOS, and launch at login, all saved and applied at once. CI checks it; nothing has run on the PC or a Mac yet (`TESTING.md` → "Settings, M6").
