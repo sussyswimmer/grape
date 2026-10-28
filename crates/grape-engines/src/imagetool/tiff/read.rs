@@ -659,16 +659,19 @@ impl Walk<'_> {
             Some(bps) => self.uints(&bps, MAX_SAMPLES)?,
             None => vec![1],
         };
+        let overflow = || unsure("sizes past any file");
         // Bits a pixel, in each plane.
         let bits: Vec<u64> = match (planar, bps.as_slice()) {
             (true, [one]) if spp <= MAX_SAMPLES as u64 => vec![*one; spp as usize],
             (true, [_]) => return Err(unsure("too many samples")),
             (true, all) => all.to_vec(),
             (false, [one]) => vec![one.saturating_mul(spp)],
-            (false, all) => vec![all.iter().sum()],
+            (false, all) => {
+                let sum = all.iter().try_fold(0u64, |sum, &b| sum.checked_add(b));
+                vec![sum.ok_or_else(overflow)?]
+            }
         };
         let row = |w: u64, bits: u64| w.checked_mul(bits).map(|b| b.div_ceil(8));
-        let overflow = || unsure("sizes past any file");
         // The strips or tiles of one plane, and each one's rows.
         let (per_plane, rows) = if ifd.tiled {
             let (Some(tw), Some(th)) = (get(322), get(323)) else {
@@ -1106,6 +1109,21 @@ mod tests {
         // LZW: no guess.
         page.tags.push((259, V::Short(vec![5])));
         let file = Builder::new(b'M', false, vec![page]).build();
+        assert!(matches!(read(&file), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn bits_per_sample_past_any_number_is_broken() {
+        // Two samples of 2^63 bits each, chunky, with no byte counts.
+        let mut page = gray(1, 1, 1, vec![B::data(b"xy")]);
+        page.tags.retain(|t| t.0 != 258);
+        let half = (1u64 << 63).to_le_bytes();
+        page.tags.extend([
+            (258, V::Bytes(16, [half, half].concat())),
+            (277, V::Short(vec![2])),
+        ]);
+        page.counts = Some(Vec::new());
+        let file = Builder::new(b'I', true, vec![page]).build();
         assert!(matches!(read(&file), Err(Error::Broken(_))));
     }
 
