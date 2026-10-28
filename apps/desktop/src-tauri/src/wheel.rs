@@ -280,7 +280,9 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
     }
     // Position, size, position: moving to a monitor with another DPI makes
     // Windows rescale the window (WM_DPICHANGED), so the size is set after
-    // the move, and the position again in case the rescale shifted it.
+    // the move, and the position again in case the rescale shifted it. A
+    // rescale raised by the resize or the show is caught after the show, on
+    // Windows by `raise_overlay`'s read-back.
     let position = PhysicalPosition::new(frame.x, frame.y);
     let framed = overlay
         .set_position(position)
@@ -299,7 +301,7 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
         return;
     }
     #[cfg(target_os = "windows")]
-    raise_overlay(app, overlay);
+    raise_overlay(app, overlay, frame);
     log::info!(
         "overlay shown in {:.1} ms",
         began.elapsed().as_secs_f64() * 1000.0
@@ -309,23 +311,55 @@ fn show_overlay(app: &AppHandle, frame: Rect) {
 /// Lifts the overlay to the top of the topmost band, on the main thread
 /// after the show (FIFO), so an open tool panel or the float shelf, both
 /// topmost too, never covers the wheel. Every show: one `SetWindowPos`.
+/// Then reads its rect back and, while a DPI change left it off `frame`,
+/// sets the frame again (at most three times), so the whole monitor is
+/// Grape's drop target and the wheel is drawn in the window. The rect is
+/// logged once, in physical pixels; a warning when it's still off.
 #[cfg(target_os = "windows")]
-fn raise_overlay(app: &AppHandle, overlay: WebviewWindow) {
+fn raise_overlay(app: &AppHandle, overlay: WebviewWindow, frame: Rect) {
     let queued = app.run_on_main_thread(move || {
-        let raised = overlay
-            .hwnd()
-            .map_err(|err| err.to_string())
-            .and_then(|hwnd| {
-                grape_platform::windows::raise_topmost(hwnd.0 as isize)
-                    .map_err(|err| err.to_string())
-            });
-        if let Err(err) = raised {
+        let hwnd = match overlay.hwnd() {
+            Ok(hwnd) => hwnd.0 as isize,
+            Err(err) => {
+                log::error!("could not raise the overlay over the topmost windows: {err}");
+                return;
+            }
+        };
+        if let Err(err) = grape_platform::windows::raise_topmost(hwnd) {
             log::error!("could not raise the overlay over the topmost windows: {err}");
+        }
+        use grape_platform::windows::Reframed;
+        match grape_platform::windows::reframe_overlay(hwnd, frame) {
+            Ok(Reframed {
+                rect: Some(rect),
+                reframed,
+            }) if rect == frame => log::info!(
+                "overlay framed at {} (set again {reframed} time(s))",
+                describe_rect(rect)
+            ),
+            Ok(Reframed {
+                rect: Some(rect),
+                reframed,
+            }) => log::warn!(
+                "overlay at {}, not its monitor's {} (set again {reframed} time(s))",
+                describe_rect(rect),
+                describe_rect(frame)
+            ),
+            Ok(Reframed { rect: None, .. }) => {
+                log::warn!("could not read back the overlay's frame");
+            }
+            Err(err) => log::error!("could not check the overlay's frame: {err}"),
         }
     });
     if let Err(err) = queued {
         log::error!("could not raise the overlay: no main thread: {err}");
     }
+}
+
+/// A rect for the log: `(x, y) w×h`.
+#[cfg(any(target_os = "windows", test))]
+fn describe_rect(rect: Rect) -> String {
+    format!("({}, {}) {}×{}", rect.x, rect.y, rect.width, rect.height)
 }
 
 /// Frames the overlay on the monitor (in points) and orders it to the
@@ -511,6 +545,19 @@ fn to_global(frame: Rect, x: f64, y: f64) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rect_is_logged_as_its_corner_and_size() {
+        assert_eq!(
+            describe_rect(Rect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            }),
+            "(-1920, 0) 1920×1080"
+        );
+    }
 
     #[test]
     fn a_missed_drop_is_logged_by_kind_and_count_never_by_path() {

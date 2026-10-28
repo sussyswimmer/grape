@@ -1,7 +1,8 @@
 //! The pure rules under the Windows layer: which app Terminal starts, what
 //! Share leaves out, how it spells paths for the sheet, what the sheet's
-//! title says and where its anchor goes, and what hiding the tool panel
-//! does with the foreground.
+//! title says and where its anchor goes, what hiding the tool panel does
+//! with the foreground, and when a window's frame is set again after a
+//! DPI change moved it.
 //!
 //! No Win32 here, so these build and are tested on every OS, not only on
 //! Windows. The `windows` module is the only caller outside the tests.
@@ -199,9 +200,113 @@ pub(crate) fn hand_back_plan(
     }
 }
 
+/// How many times the overlay's frame is set again after its show while
+/// reading it back finds the window elsewhere. A DPI change on the way
+/// (tao rescales the window in its `WM_DPICHANGED` handler) can leave it
+/// smaller or larger than the monitor, and setting the frame can raise
+/// another one.
+pub(crate) const OVERLAY_REFRAMES: u32 = 3;
+
+/// What to do after reading back where a window is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Reframe {
+    /// It's at its frame: done.
+    Fits,
+    /// It's elsewhere and a try is left: set the frame again, then read it
+    /// back again.
+    Again,
+    /// It's elsewhere and no try is left, or where it is can't be read:
+    /// leave it as it is.
+    Stop,
+}
+
+/// [`Reframe`] for a window read back at `now` (`None` when that failed)
+/// that should be at `frame`, once its frame was set again `reframed`
+/// times of at most `most`.
+pub(crate) fn reframe(now: Option<Rect>, frame: Rect, reframed: u32, most: u32) -> Reframe {
+    match now {
+        Some(now) if now == frame => Reframe::Fits,
+        Some(_) if reframed < most => Reframe::Again,
+        _ => Reframe::Stop,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MONITOR: Rect = Rect {
+        x: -1920,
+        y: 0,
+        width: 1920,
+        height: 1080,
+    };
+
+    #[test]
+    fn a_window_at_its_frame_is_left_alone() {
+        for reframed in [0, 1, OVERLAY_REFRAMES] {
+            assert_eq!(
+                reframe(Some(MONITOR), MONITOR, reframed, OVERLAY_REFRAMES),
+                Reframe::Fits,
+                "{reframed}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_window_elsewhere_is_framed_again_at_most_the_allowed_times() {
+        // What tao's rescale makes of the monitor's frame going from 150 %
+        // to 100 %.
+        let rescaled = Rect {
+            width: 1280,
+            height: 720,
+            ..MONITOR
+        };
+        let moved = Rect { x: 0, ..MONITOR };
+        for now in [rescaled, moved] {
+            for reframed in 0..OVERLAY_REFRAMES {
+                assert_eq!(
+                    reframe(Some(now), MONITOR, reframed, OVERLAY_REFRAMES),
+                    Reframe::Again,
+                    "{now:?} {reframed}"
+                );
+            }
+            assert_eq!(
+                reframe(Some(now), MONITOR, OVERLAY_REFRAMES, OVERLAY_REFRAMES),
+                Reframe::Stop,
+                "{now:?}"
+            );
+        }
+        // The shelf's and the panel's one more try.
+        assert_eq!(reframe(Some(rescaled), MONITOR, 0, 1), Reframe::Again);
+        assert_eq!(reframe(Some(rescaled), MONITOR, 1, 1), Reframe::Stop);
+    }
+
+    #[test]
+    fn a_window_that_cant_be_read_back_is_left_alone() {
+        for reframed in [0, OVERLAY_REFRAMES] {
+            assert_eq!(
+                reframe(None, MONITOR, reframed, OVERLAY_REFRAMES),
+                Reframe::Stop,
+                "{reframed}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_loop_the_rule_drives_ends_after_the_allowed_tries() {
+        // A window that never takes its frame: every read finds it
+        // elsewhere.
+        let stuck = Rect {
+            width: 1280,
+            ..MONITOR
+        };
+        let mut reframed = 0;
+        while reframe(Some(stuck), MONITOR, reframed, OVERLAY_REFRAMES) == Reframe::Again {
+            reframed += 1;
+        }
+        assert_eq!(reframed, OVERLAY_REFRAMES);
+    }
 
     #[test]
     fn a_panel_that_isnt_in_front_only_hides() {

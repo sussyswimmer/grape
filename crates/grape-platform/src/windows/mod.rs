@@ -14,7 +14,8 @@
 //!   shows them without activating them and hides them ([`show_shelf`],
 //!   [`hide_shelf`], [`show_panel`], [`hide_panel`], which hands the
 //!   foreground back to [`other_app_foreground`]'s window); lifts the
-//!   overlay over both on every show ([`raise_topmost`]).
+//!   overlay over both on every show ([`raise_topmost`]) and puts it back
+//!   on its monitor's frame if a DPI change moved it ([`reframe_overlay`]).
 //! - `drag_out`: dragging files out of the shelf ([`drag_out`]): an OLE
 //!   drag of a `CF_HDROP`-only data object that offers copy or link, never
 //!   move.
@@ -45,7 +46,8 @@ pub use drag_out::{drag_out, DragOut};
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{
     describe_ex_style, ex_style, harden_overlay, harden_panel, harden_shelf, hide_panel,
-    hide_shelf, other_app_foreground, raise_topmost, show_panel, show_shelf, HandBack,
+    hide_shelf, other_app_foreground, raise_topmost, reframe_overlay, show_panel, show_shelf,
+    HandBack, Reframed,
 };
 
 pub(crate) use actions::{

@@ -466,6 +466,7 @@ Drag + wheel
 - [ ] Multi-select of 3 JPGs → Tools shows Create PDF (and Collage, which is v2-only, once v2 tools are enabled); Conversions converts all three.
 - [ ] Folder → only Actions has items; the others show empty states naming the right keys.
 - [ ] Second monitor at a different scale → correct position and hit testing.
+- [ ] win: two monitors at different scales, the smaller at 100 % left of (or above) a larger one at 150 %: open a wheel on the large one and cancel it, then open one near the small one's bottom-right corner → the wheel is drawn whole, an off-ring drop there is swallowed (the log says `no segment (cancel)`), and the log's `overlay framed at` line gives that monitor's rect (a `not its monitor's` warning is a failure). Then the other way, from the small monitor to the large one.
 - [ ] mac: full-screen app in front; Stage Manager on.
 - [ ] win: **Shift-drop never deletes the source** (repeat 10×, including dragging from a different drive).
 - [ ] win: elevated Explorer → Grape stays out of the way.
