@@ -25,8 +25,9 @@
 //! The pixels are read [`SPAN`] at a time, never copied whole, and the
 //! cancel token is checked before each span and between each
 //! [`ENCODE_STEP`] the encoder is given. The encoder compresses a row
-//! once it's whole, so a PNG with rows of many megabytes answers a cancel
-//! only after the row.
+//! once it's whole, so a step runs on to the end of its row: wide noisy
+//! rows answer a cancel tens of ms late, and rows of many megabytes only
+//! after the row.
 
 use std::collections::HashMap;
 use std::fs::File;
