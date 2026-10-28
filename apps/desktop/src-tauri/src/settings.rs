@@ -1232,9 +1232,9 @@ struct LaunchFacts<'a> {
     /// only in a release build with `true` stored ([`run_value_missing`]).
     run_value_missing: bool,
     /// macOS only: the LaunchAgent launch at login wrote names a program
-    /// that no longer exists (a disk image since ejected, a translocated
-    /// copy, a copy since moved). Looked up only in a release build with
-    /// `true` stored ([`agent_program_gone`]).
+    /// that no longer exists (a copy since moved) or is on a disk image or
+    /// translocated, mounted or not. Looked up only in a release build
+    /// with `true` stored ([`agent_program_gone`]).
     agent_program_gone: bool,
     /// There's a store to remember the choice in.
     has_store: bool,
@@ -1358,9 +1358,11 @@ enum LaunchAgent {
     Missing,
     /// Its program is this Grape.
     ThisExe,
-    /// Its program is another path that exists: another copy of Grape.
+    /// Its program is another path that exists and lasts: another copy of
+    /// Grape.
     OtherExe,
-    /// Its program is an absolute path that no longer exists.
+    /// Its program is an absolute path that no longer exists, or one on a
+    /// disk image or translocated, which is gone by the next login.
     ProgramGone,
     /// The file or its program couldn't be read, or the program's path
     /// can't be checked: leave it alone.
@@ -1372,7 +1374,10 @@ enum LaunchAgent {
 /// names it (`this_exe`: `current_exe` made canonical, if that worked) and
 /// a way to ask whether a path exists (`exists`, `Path::try_exists`).
 /// Only a program that's an absolute path the disk says is gone counts as
-/// gone; anything unclear is [`LaunchAgent::Unreadable`].
+/// gone, and so does one in a place that goes away
+/// ([`transient_mac_location`]) without asking the disk: a DMG still
+/// mounted at the same `/Volumes` path is ejected by the next login all
+/// the same. Anything unclear is [`LaunchAgent::Unreadable`].
 fn launch_agent_state(
     plist: io::Result<String>,
     this_exe: Option<&Path>,
@@ -1392,6 +1397,9 @@ fn launch_agent_state(
         return LaunchAgent::Unreadable;
     }
     let program = Path::new(&program);
+    if transient_mac_location(program) {
+        return LaunchAgent::ProgramGone;
+    }
     match exists(program) {
         Ok(true) if this_exe == Some(program) => LaunchAgent::ThisExe,
         Ok(true) => LaunchAgent::OtherExe,
@@ -1464,9 +1472,10 @@ fn unescape_xml(text: &str) -> String {
 /// macOS: whether the LaunchAgent the autostart plugin writes
 /// (`~/Library/LaunchAgents/<product name>.plist`, named as the plugin
 /// names it, with `current_exe` made canonical as its program) names a
-/// program that no longer exists. Never auto-launch's `is_enabled`, which
-/// only checks that the file is there. A file that's missing, names this
-/// Grape or another copy that's there, or can't be read counts as not
+/// program that no longer exists, or one on a disk image or translocated
+/// ([`launch_agent_state`]). Never auto-launch's `is_enabled`, which only
+/// checks that the file is there. A file that's missing, names this Grape
+/// or another lasting copy that's there, or can't be read counts as not
 /// gone, and the log says so for the last two. Never logs a path. Called
 /// only on macOS.
 fn agent_program_gone(app: &AppHandle, exe: Option<&Path>) -> bool {
@@ -3376,12 +3385,12 @@ mod tests {
     #[test]
     fn a_launch_agent_is_judged_by_its_program() {
         let here = Path::new("/Applications/Grape.app/Contents/MacOS/Grape");
-        let dmg = "/Volumes/Grape/Grape.app/Contents/MacOS/Grape";
+        let desktop = "/Users/max/Desktop/Grape.app/Contents/MacOS/Grape";
         let read = |program: &str| Ok(auto_launch_plist(program));
         let gone = |_: &Path| Ok(false);
         let there = |_: &Path| Ok(true);
         assert_eq!(
-            launch_agent_state(read(dmg), Some(here), gone),
+            launch_agent_state(read(desktop), Some(here), gone),
             LaunchAgent::ProgramGone
         );
         assert_eq!(
@@ -3389,17 +3398,32 @@ mod tests {
             LaunchAgent::ThisExe
         );
         assert_eq!(
-            launch_agent_state(read(dmg), Some(here), there),
+            launch_agent_state(read(desktop), Some(here), there),
             LaunchAgent::OtherExe
         );
         assert_eq!(
-            launch_agent_state(read(dmg), None, there),
+            launch_agent_state(read(desktop), None, there),
             LaunchAgent::OtherExe
         );
+        // A disk image (mounted again at the same path, say) or a
+        // translocated copy is gone by the next login: the disk isn't asked.
+        let ask = |_: &Path| -> io::Result<bool> { panic!("asked the disk") };
+        for program in [
+            "/Volumes/Grape/Grape.app/Contents/MacOS/Grape",
+            "/private/var/folders/xy/abc/T/AppTranslocation/1A2B/d/Grape.app/Contents/MacOS/Grape",
+        ] {
+            for this_exe in [Some(here), Some(Path::new(program)), None] {
+                assert_eq!(
+                    launch_agent_state(read(program), this_exe, ask),
+                    LaunchAgent::ProgramGone,
+                    "{program} {this_exe:?}"
+                );
+            }
+        }
         // Only what the disk answers is believed.
         let unsure = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
         assert_eq!(
-            launch_agent_state(read(dmg), Some(here), unsure),
+            launch_agent_state(read(desktop), Some(here), unsure),
             LaunchAgent::Unreadable
         );
         assert_eq!(
