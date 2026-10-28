@@ -422,7 +422,7 @@ while IFS=$'\t' read -r name pin url file want_size want_sha dir use; do
   else
     echo "  $name $pin: downloading $url"
     if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-      --silent --show-error --retry 3 --connect-timeout 30 \
+      --silent --show-error --retry 3 --retry-all-errors --connect-timeout 30 \
       --output "$dest" "$url"; then
       rm -f "$dest"
       fail "couldn't download $name from $url."

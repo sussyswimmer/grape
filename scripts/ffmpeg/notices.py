@@ -740,10 +740,8 @@ Independent JPEG Group.
 scripts/ffmpeg/build.sh finds the files from each build's own dependency
 records and scripts/ffmpeg/notices.py reads every comment in them. The build
 stops when it finds a notice, or a file with one, that this file doesn't
-have. notices.py also wrote this file, from the builds named in it. Files
-marked "macos-arm64 (read, not built yet)" are the AArch64 sources that only
-the Apple silicon build compiles; they were read from the source because
-that build hasn't run yet, and its first run checks them.
+have. notices.py also wrote this file, from the builds named in it: Linux
+and Windows x86_64 built here, and the two macOS halves built by CI.
 
 Part 1 has the notices. Part 2 has the other things those files' comments
 say about licenses: code from the public domain or from another project, or

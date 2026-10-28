@@ -15,10 +15,8 @@ Independent JPEG Group.
 scripts/ffmpeg/build.sh finds the files from each build's own dependency
 records and scripts/ffmpeg/notices.py reads every comment in them. The build
 stops when it finds a notice, or a file with one, that this file doesn't
-have. notices.py also wrote this file, from the builds named in it. Files
-marked "macos-arm64 (read, not built yet)" are the AArch64 sources that only
-the Apple silicon build compiles; they were read from the source because
-that build hasn't run yet, and its first run checks them.
+have. notices.py also wrote this file, from the builds named in it: Linux
+and Windows x86_64 built here, and the two macOS halves built by CI.
 
 Part 1 has the notices. Part 2 has the other things those files' comments
 say about licenses: code from the public domain or from another project, or
@@ -50,7 +48,7 @@ Part 1: notices
 ==============================================================================
 [1] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
-  ffmpeg-9.0.2/libavcodec/aacsbr_fixed.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/aacsbr_fixed.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2013
@@ -83,7 +81,7 @@ Text:
 ==============================================================================
 [2] FFmpeg 9.0.2, Zlib: Nokia Corporation and/or its subsidiary(-ies); Linaro Limited; D. R. Commander; Matthie...
 Files:
-  ffmpeg-9.0.2/libavcodec/aarch64/fdctdsp_neon.S  macos-arm64 (read, not built yet)
+  ffmpeg-9.0.2/libavcodec/aarch64/fdctdsp_neon.S  macos-arm64
 Text:
 
  * Copyright (C) 2009-2011, Nokia Corporation and/or its subsidiary(-ies).
@@ -114,7 +112,7 @@ Text:
 ==============================================================================
 [3] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
-  ffmpeg-9.0.2/libavcodec/ac3dec_fixed.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/ac3dec_fixed.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012
@@ -151,7 +149,7 @@ Text:
 ==============================================================================
 [4] FFmpeg 9.0.2, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  ffmpeg-9.0.2/libavcodec/aom_film_grain_template.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/aom_film_grain_template.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018, Niklas Haas
@@ -183,7 +181,7 @@ Text:
 ==============================================================================
 [5] FFmpeg 9.0.2, ISC: Michael Niedermayer <michaelni@gmx.at>; Roman Shaposhnik
 Files:
-  ffmpeg-9.0.2/libavcodec/faandct.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/faandct.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
@@ -204,8 +202,8 @@ Text:
 ==============================================================================
 [6] FFmpeg 9.0.2, BSD-3-Clause: The WebRTC project authors
 Files:
-  ffmpeg-9.0.2/libavcodec/ilbcdata.h  linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/ilbcdec.c   linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/ilbcdata.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/ilbcdec.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2013, The WebRTC project authors. All rights reserved.
@@ -241,7 +239,7 @@ Text:
 ==============================================================================
 [7] FFmpeg 9.0.2, ISC: Marko Kreen; Adam Gashlin; Paul B Mahol
 Files:
-  ffmpeg-9.0.2/libavcodec/interplayacm.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/interplayacm.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2004-2008 Marko Kreen
@@ -263,7 +261,7 @@ Text:
 ==============================================================================
 [8] FFmpeg 9.0.2, IJG
 Files:
-  ffmpeg-9.0.2/libavcodec/jfdctfst.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/jfdctfst.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * This file is part of the Independent JPEG Group's software.
@@ -330,7 +328,7 @@ Text:
 ==============================================================================
 [9] FFmpeg 9.0.2, IJG
 Files:
-  ffmpeg-9.0.2/libavcodec/jfdctint_template.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/jfdctint_template.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * This file is part of the Independent JPEG Group's software.
@@ -390,7 +388,7 @@ Text:
 ==============================================================================
 [10] FFmpeg 9.0.2, BSD-3-Clause: Osamu Watanabe
 Files:
-  ffmpeg-9.0.2/libavcodec/jpeg2000htdec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/jpeg2000htdec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright 2019 - 2021, Osamu Watanabe
@@ -423,7 +421,7 @@ Text:
 ==============================================================================
 [11] FFmpeg 9.0.2, IJG
 Files:
-  ffmpeg-9.0.2/libavcodec/jrevdct.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/jrevdct.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * This file is part of the Independent JPEG Group's software.
@@ -486,8 +484,8 @@ Text:
 ==============================================================================
 [12] FFmpeg 9.0.2, MIT: a840bda5870ba11f19698ff6eb9581dfb0f95fa5; Loic Minier <lool at dooz.org>
 Files:
-  ffmpeg-9.0.2/libavcodec/nellymoser.c  linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/nellymoser.h  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoser.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoser.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Common code between Nellymoser encoder and decoder
@@ -518,7 +516,7 @@ Text:
 ==============================================================================
 [13] FFmpeg 9.0.2, MIT: a840bda5870ba11f19698ff6eb9581dfb0f95fa5; Loic Minier <lool at dooz.org>
 Files:
-  ffmpeg-9.0.2/libavcodec/nellymoserdec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoserdec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * NellyMoser audio decoder
@@ -549,8 +547,8 @@ Text:
 ==============================================================================
 [14] FFmpeg 9.0.2, BSD-3-Clause: Xiph.org Foundation; Jean-Marc Valin; Analog Devices Inc; Commonwealth Scientific and I...
 Files:
-  ffmpeg-9.0.2/libavcodec/speexdata.h  linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/speexdec.c   linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/speexdata.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/speexdec.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright 2002-2008  Xiph.org Foundation
@@ -591,7 +589,7 @@ Text:
 ==============================================================================
 [15] FFmpeg 9.0.2, MIT: Benjamin Dobell, Glass Echidna; Matthäus G. "Anteru" Chajdas (http://anteru.net); Vitto...
 Files:
-  ffmpeg-9.0.2/libavcodec/texturedsp.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/texturedsp.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Texture block decompression
@@ -619,7 +617,7 @@ Text:
 ==============================================================================
 [16] FFmpeg 9.0.2, BSD-3-Clause: ITU/ISO/IEC
 Files:
-  ffmpeg-9.0.2/libavcodec/vvc/itx_1d.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/vvc/itx_1d.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* The copyright in this software is being made available under the BSD
@@ -657,8 +655,8 @@ Text:
 ==============================================================================
 [17] FFmpeg 9.0.2, MIT: Christophe GISQUET <christophe.gisquet@free.fr>
 Files:
-  ffmpeg-9.0.2/libavcodec/x86/vc1dsp_init.c  linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/x86/vc1dsp_mmx.c   linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/x86/vc1dsp_init.c  linux-x86_64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/x86/vc1dsp_mmx.c   linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * VC-1 and WMV3 - DSP functions MMX-optimized
@@ -688,7 +686,7 @@ Text:
 ==============================================================================
 [18] FFmpeg 9.0.2, ISC: Derek Buitenhuis
 Files:
-  ffmpeg-9.0.2/libavcodec/zerocodec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/zerocodec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012, Derek Buitenhuis
@@ -708,10 +706,10 @@ Text:
 ==============================================================================
 [19] FFmpeg 9.0.2, MIT: Michael Ahlberg, Måns Rullgård
 Files:
-  ffmpeg-9.0.2/libavformat/oggdec.c          linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavformat/oggdec.h          linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavformat/oggparseogm.c     linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavformat/oggparsevorbis.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggdec.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggdec.h          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggparseogm.c     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggparsevorbis.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
     Copyright (C) 2005  Michael Ahlberg, Måns Rullgård
@@ -739,7 +737,7 @@ Text:
 ==============================================================================
 [20] FFmpeg 9.0.2, MIT: Reimar Döffinger
 Files:
-  ffmpeg-9.0.2/libavformat/oggparsespeex.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggparsespeex.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
       Copyright (C) 2008  Reimar Döffinger
@@ -767,7 +765,7 @@ Text:
 ==============================================================================
 [21] FFmpeg 9.0.2, MIT: Matthieu CASTET, Alex Beregszaszi
 Files:
-  ffmpeg-9.0.2/libavformat/oggparsetheora.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/oggparsetheora.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  *    Copyright (C) 2005  Matthieu CASTET, Alex Beregszaszi
@@ -795,7 +793,7 @@ Text:
 ==============================================================================
 [22] FFmpeg 9.0.2, Zlib: Mark Adler
 Files:
-  ffmpeg-9.0.2/libavutil/adler32.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/adler32.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (C) 1995 Mark Adler
@@ -819,7 +817,7 @@ Text:
 ==============================================================================
 [23] FFmpeg 9.0.2, MIT: Rich Felker, et al
 Files:
-  ffmpeg-9.0.2/libavutil/avsscanf.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/avsscanf.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2005-2014 Rich Felker, et al.
@@ -846,7 +844,7 @@ Text:
 ==============================================================================
 [24] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
-  ffmpeg-9.0.2/libavutil/fixed_dsp.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/fixed_dsp.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012
@@ -881,7 +879,7 @@ Text:
 ==============================================================================
 [25] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
-  ffmpeg-9.0.2/libavutil/fixed_dsp.h  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/fixed_dsp.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012
@@ -916,7 +914,7 @@ Text:
 ==============================================================================
 [26] FFmpeg 9.0.2, BSL-1.0
 Files:
-  ffmpeg-9.0.2/libavutil/libm.h  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/libm.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * erf function
@@ -950,7 +948,7 @@ DEALINGS IN THE SOFTWARE.
 ==============================================================================
 [27] FFmpeg 9.0.2, BSL-1.0
 Files:
-  ffmpeg-9.0.2/libavutil/mathematics.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/mathematics.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * 0th order modified bessel function of the first kind.
@@ -984,7 +982,7 @@ DEALINGS IN THE SOFTWARE.
 ==============================================================================
 [28] FFmpeg 9.0.2, BSD-3-Clause: MIPS Technologies, Inc., California
 Files:
-  ffmpeg-9.0.2/libavutil/softfloat_tables.h  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/softfloat_tables.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (c) 2012
@@ -1019,7 +1017,7 @@ Text:
 ==============================================================================
 [29] FFmpeg 9.0.2, BSD-3-Clause: Theodore Ts'o
 Files:
-  ffmpeg-9.0.2/libavutil/uuid.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/uuid.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright (C) 1996, 1997 Theodore Ts'o.
@@ -1053,7 +1051,7 @@ Text:
 ==============================================================================
 [30] FFmpeg 9.0.2, ISC: x264 project
 Files:
-  ffmpeg-9.0.2/libavutil/x86/x86inc.asm  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/x86/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ;* Copyright (C) 2005-2024 x264 project
@@ -1078,7 +1076,7 @@ Text:
 ==============================================================================
 [31] x264 b35605ac, ISC: x264 project
 Files:
-  x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, windows-x86_64
+  x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ;* Copyright (C) 2005-2025 x264 project
@@ -1103,7 +1101,7 @@ Text:
 ==============================================================================
 [32] Opus 1.6.1, BSD-2-Clause: Mark Borgerding
 Files:
-  opus-1.6.1/celt/_kiss_fft_guts.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/_kiss_fft_guts.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /*Copyright (c) 2003-2004, Mark Borgerding
@@ -1134,7 +1132,7 @@ Text:
 ==============================================================================
 [33] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/arch.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/arch.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2003-2008 Jean-Marc Valin
@@ -1170,45 +1168,11 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[34] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot; Arm Limited
+[34] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot
 Files:
-  opus-1.6.1/celt/arm/arm_celt_map.c  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (c) 2010 Xiph.Org Foundation
- * Copyright (c) 2013 Parrot
- * Copyright (c) 2024 Arm Limited */
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[35] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Parrot
-Files:
-  opus-1.6.1/celt/arm/armcpu.c     macos-arm64 (read, not built yet)
-  opus-1.6.1/celt/arm/armcpu.h     macos-arm64 (read, not built yet)
-  opus-1.6.1/celt/arm/pitch_arm.h  macos-arm64 (read, not built yet)
-  opus-1.6.1/celt/cpu_support.h    linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/arm/armcpu.h     macos-arm64
+  opus-1.6.1/celt/arm/pitch_arm.h  macos-arm64
+  opus-1.6.1/celt/cpu_support.h    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2010 Xiph.Org Foundation
@@ -1238,83 +1202,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[36] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[35] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Arm Limited
 Files:
-  opus-1.6.1/celt/arm/celt_fft_ne10.c  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (c) 2015 Xiph.Org Foundation
-   Written by Viswanath Puttagunta */
-/**
-   @file celt_fft_ne10.c
-   @brief ARM Neon optimizations for fft using NE10 library
- */
-
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[37] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
-Files:
-  opus-1.6.1/celt/arm/celt_mdct_ne10.c  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (c) 2015 Xiph.Org Foundation
-   Written by Viswanath Puttagunta */
-/**
-   @file celt_mdct_ne10.c
-   @brief ARM Neon optimizations for mdct using NE10 library
- */
-
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[38] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Arm Limited
-Files:
-  opus-1.6.1/celt/arm/celt_neon_intr.c  macos-arm64 (read, not built yet)
+  opus-1.6.1/celt/arm/celt_neon_intr.c  macos-arm64
 Text:
 
 /* Copyright (c) 2014-2015 Xiph.Org Foundation
@@ -1350,174 +1240,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[39] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[36] Opus 1.6.1, BSD-2-Clause: Arm Limited
 Files:
-  opus-1.6.1/celt/arm/fft_arm.h  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (c) 2015 Xiph.Org Foundation
-   Written by Viswanath Puttagunta */
-/**
-   @file fft_arm.h
-   @brief ARM Neon Intrinsic optimizations for fft using NE10 library
- */
-
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[40] Opus 1.6.1, BSD-2-Clause: Vidyo
-Files:
-  opus-1.6.1/celt/arm/fixed_arm64.h  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (C) 2015 Vidyo */
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[41] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
-Files:
-  opus-1.6.1/celt/arm/fixed_armv4.h  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (C) 2013 Xiph.Org Foundation and contributors */
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[42] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation; Jean-Marc Valin; CSIRO; Parrot
-Files:
-  opus-1.6.1/celt/arm/fixed_armv5e.h  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (C) 2007-2009 Xiph.Org Foundation
-   Copyright (C) 2003-2008 Jean-Marc Valin
-   Copyright (C) 2007-2008 CSIRO
-   Copyright (C) 2013      Parrot */
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[43] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation and contributors
-Files:
-  opus-1.6.1/celt/arm/kiss_fft_armv4.h   macos-arm64 (read, not built yet)
-  opus-1.6.1/celt/arm/kiss_fft_armv5e.h  macos-arm64 (read, not built yet)
-Text:
-
-/*Copyright (c) 2013, Xiph.Org Foundation and contributors.
-
-  All rights reserved.
-
-  Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions are met:
-
-    * Redistributions of source code must retain the above copyright notice,
-       this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright notice,
-       this list of conditions and the following disclaimer in the
-       documentation and/or other materials provided with the distribution.
-
-  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-  AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-  IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-  ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-  LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-  CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-  SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-  INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-  CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-  ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-  POSSIBILITY OF SUCH DAMAGE.*/
-
-==============================================================================
-[44] Opus 1.6.1, BSD-2-Clause: Arm Limited
-Files:
-  opus-1.6.1/celt/arm/mathops_arm.h  macos-arm64 (read, not built yet)
+  opus-1.6.1/celt/arm/mathops_arm.h  macos-arm64
 Text:
 
 /* Copyright (c) 2024 Arm Limited */
@@ -1546,52 +1271,15 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[45] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[37] Opus 1.6.1, BSD-3-Clause: Google Inc
 Files:
-  opus-1.6.1/celt/arm/mdct_arm.h  macos-arm64 (read, not built yet)
-Text:
-
-/* Copyright (c) 2015 Xiph.Org Foundation
-   Written by Viswanath Puttagunta */
-/**
-   @file arm_mdct.h
-   @brief ARM Neon Intrinsic optimizations for mdct using NE10 library
- */
-
-/*
-   Redistribution and use in source and binary forms, with or without
-   modification, are permitted provided that the following conditions
-   are met:
-
-   - Redistributions of source code must retain the above copyright
-   notice, this list of conditions and the following disclaimer.
-
-   - Redistributions in binary form must reproduce the above copyright
-   notice, this list of conditions and the following disclaimer in the
-   documentation and/or other materials provided with the distribution.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-   ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
-   A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER
-   OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
-   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
-   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
-   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[46] Opus 1.6.1, BSD-3-Clause: Google Inc
-Files:
-  opus-1.6.1/celt/arm/pitch_neon_intr.c              macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/LPC_inv_pred_gain_arm.h        macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/LPC_inv_pred_gain_neon_intr.c  macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/NSQ_del_dec_arm.h              macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/NSQ_del_dec_neon_intr.c        macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/biquad_alt_arm.h               macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/biquad_alt_neon_intr.c         macos-arm64 (read, not built yet)
+  opus-1.6.1/celt/arm/pitch_neon_intr.c              macos-arm64
+  opus-1.6.1/silk/arm/LPC_inv_pred_gain_arm.h        macos-arm64
+  opus-1.6.1/silk/arm/LPC_inv_pred_gain_neon_intr.c  macos-arm64
+  opus-1.6.1/silk/arm/NSQ_del_dec_arm.h              macos-arm64
+  opus-1.6.1/silk/arm/NSQ_del_dec_neon_intr.c        macos-arm64
+  opus-1.6.1/silk/arm/biquad_alt_arm.h               macos-arm64
+  opus-1.6.1/silk/arm/biquad_alt_neon_intr.c         macos-arm64
 Text:
 
 Copyright (c) 2017 Google Inc.
@@ -1620,10 +1308,10 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[47] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[38] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
-  opus-1.6.1/celt/bands.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/bands.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/bands.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/bands.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -1655,11 +1343,11 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[48] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[39] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
-  opus-1.6.1/celt/celt.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/celt_decoder.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/celt_encoder.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt_decoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt_encoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -1691,9 +1379,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[49] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[40] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
-  opus-1.6.1/celt/celt.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -1730,10 +1418,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[50] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[41] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/celt_lpc.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/celt_lpc.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt_lpc.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/celt_lpc.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2009-2010 Xiph.Org Foundation
@@ -1763,10 +1451,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[51] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Timothy B. Terriberry
+[42] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Timothy B. Terriberry
 Files:
-  opus-1.6.1/celt/cwrs.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/cwrs.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/cwrs.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/cwrs.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -1798,9 +1486,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[52] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[43] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/ecintrin.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/ecintrin.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2003-2008 Timothy B. Terriberry
@@ -1830,9 +1518,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[53] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry
+[44] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry
 Files:
-  opus-1.6.1/celt/entcode.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/entcode.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2001-2011 Timothy B. Terriberry
@@ -1862,13 +1550,13 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[54] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[45] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/entcode.h  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/entdec.c   linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/entdec.h   linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/entenc.c   linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/entenc.h   linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/entcode.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/entdec.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/entdec.h   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/entenc.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/entenc.h   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2001-2011 Timothy B. Terriberry
@@ -1898,9 +1586,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[55] Opus 1.6.1, BSD-2-Clause: Erik de Castro Lopo <erikd AT mega-nerd DOT com>
+[46] Opus 1.6.1, BSD-2-Clause: Erik de Castro Lopo <erikd AT mega-nerd DOT com>
 Files:
-  opus-1.6.1/celt/float_cast.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/float_cast.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (C) 2001 Erik de Castro Lopo <erikd AT mega-nerd DOT com> */
@@ -1929,10 +1617,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[56] Opus 1.6.1, BSD-2-Clause: Mark Borgerding; Xiph.Org Foundation; Xiph.Org Foundation, CSIRO
+[47] Opus 1.6.1, BSD-2-Clause: Mark Borgerding; Xiph.Org Foundation; Xiph.Org Foundation, CSIRO
 Files:
-  opus-1.6.1/celt/kiss_fft.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/kiss_fft.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/kiss_fft.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/kiss_fft.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /*Copyright (c) 2003-2004, Mark Borgerding
@@ -1964,10 +1652,10 @@ Text:
   POSSIBILITY OF SUCH DAMAGE.*/
 
 ==============================================================================
-[57] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[48] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/laplace.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/laplace.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/laplace.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/laplace.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007 CSIRO
@@ -1998,9 +1686,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[58] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
+[49] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
 Files:
-  opus-1.6.1/celt/mathops.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/mathops.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2002-2008 Jean-Marc Valin
@@ -2037,9 +1725,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[59] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
+[50] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; CSIRO; Xiph.Org Foundation; Arm Limited
 Files:
-  opus-1.6.1/celt/mathops.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/mathops.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2002-2008 Jean-Marc Valin
@@ -2076,10 +1764,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[60] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[51] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/mdct.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/mdct.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/mdct.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/mdct.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2110,9 +1798,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[61] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
+[52] Opus 1.6.1, BSD-2-Clause: Timothy B. Terriberry; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/mfrngcod.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/mfrngcod.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2001-2008 Timothy B. Terriberry
@@ -2142,10 +1830,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[62] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[53] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
-  opus-1.6.1/celt/modes.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/modes.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/modes.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/modes.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2177,9 +1865,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[63] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[54] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
-  opus-1.6.1/celt/os_support.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/os_support.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (C) 2007 Jean-Marc Valin
@@ -2212,9 +1900,9 @@ Text:
    POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[64] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[55] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/pitch.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/pitch.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2250,9 +1938,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[65] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[56] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/pitch.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/pitch.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2288,13 +1976,13 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[66] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[57] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/quant_bands.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/quant_bands.h  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/rate.c         linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/rate.h         linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/vq.c           linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/quant_bands.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/quant_bands.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/rate.c         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/rate.h         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/vq.c           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2325,9 +2013,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[67] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; Xiph.Org Foundation
+[58] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/stack_alloc.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/stack_alloc.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (C) 2002-2003 Jean-Marc Valin
@@ -2361,9 +2049,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[68] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
+[59] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation
 Files:
-  opus-1.6.1/celt/vq.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/vq.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2398,19 +2086,19 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[69] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
+[60] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
 Files:
-  opus-1.6.1/celt/x86/celt_lpc_sse.h     linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/celt_lpc_sse4_1.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/pitch_sse.c        linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/pitch_sse2.c       linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/pitch_sse4_1.c     linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/x86_celt_map.c     linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/x86cpu.c           linux-x86_64, windows-x86_64
-  opus-1.6.1/celt/x86/x86cpu.h           linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/SigProc_FIX_sse.h  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/main_sse.h         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/x86_silk_map.c     linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/celt_lpc_sse.h     linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/celt_lpc_sse4_1.c  linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/pitch_sse.c        linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/pitch_sse2.c       linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/pitch_sse4_1.c     linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/x86_celt_map.c     linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/x86cpu.c           linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/x86cpu.h           linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/SigProc_FIX_sse.h  linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/main_sse.h         linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/x86_silk_map.c     linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2014, Cisco Systems, INC
@@ -2440,9 +2128,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[70] Opus 1.6.1, BSD-2-Clause: Amazon
+[61] Opus 1.6.1, BSD-2-Clause: Amazon
 Files:
-  opus-1.6.1/celt/x86/pitch_avx.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/pitch_avx.c  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2023 Amazon */
@@ -2471,9 +2159,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[71] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin and John Ridges; Cisco Systems, INC MingXiang WeiZhou MinPeng YanWang
+[62] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin and John Ridges; Cisco Systems, INC MingXiang WeiZhou MinPeng YanWang
 Files:
-  opus-1.6.1/celt/x86/pitch_sse.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/pitch_sse.h  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2013 Jean-Marc Valin and John Ridges
@@ -2508,9 +2196,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[72] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[63] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
-  opus-1.6.1/celt/x86/vq_sse.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/vq_sse.h  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2016  Jean-Marc Valin */
@@ -2539,9 +2227,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[73] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Jean-Marc Valin
+[64] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Jean-Marc Valin
 Files:
-  opus-1.6.1/celt/x86/vq_sse2.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/celt/x86/vq_sse2.c  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2572,11 +2260,11 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[74] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited
+[65] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited
 Files:
-  opus-1.6.1/include/opus.h          linux-x86_64, windows-x86_64
-  opus-1.6.1/include/opus_defines.h  linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_encoder.c      linux-x86_64, windows-x86_64
+  opus-1.6.1/include/opus.h          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/include/opus_defines.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_encoder.c      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2010-2011 Xiph.Org Foundation, Skype Limited
@@ -2606,9 +2294,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[75] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
+[66] Opus 1.6.1, BSD-2-Clause: CSIRO; Xiph.Org Foundation; Gregory Maxwell
 Files:
-  opus-1.6.1/include/opus_custom.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/include/opus_custom.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2007-2008 CSIRO
@@ -2640,13 +2328,13 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[76] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[67] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
-  opus-1.6.1/include/opus_multistream.h      linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_multistream.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_multistream_decoder.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_multistream_encoder.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/src/repacketizer.c              linux-x86_64, windows-x86_64
+  opus-1.6.1/include/opus_multistream.h      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_multistream.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_multistream_decoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_multistream_encoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/repacketizer.c              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2011 Xiph.Org Foundation
@@ -2676,13 +2364,13 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[77] Opus 1.6.1, BSD-2-Clause: Google Inc
+[68] Opus 1.6.1, BSD-2-Clause: Google Inc
 Files:
-  opus-1.6.1/include/opus_projection.h      linux-x86_64, windows-x86_64
-  opus-1.6.1/src/mapping_matrix.c           linux-x86_64, windows-x86_64
-  opus-1.6.1/src/mapping_matrix.h           linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_projection_decoder.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/src/opus_projection_encoder.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/include/opus_projection.h      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/mapping_matrix.c           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/mapping_matrix.h           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_projection_decoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_projection_encoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2017 Google Inc.
@@ -2712,9 +2400,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[78] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[69] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
-  opus-1.6.1/include/opus_types.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/include/opus_types.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* (C) COPYRIGHT 1994-2002 Xiph.Org Foundation */
@@ -2744,134 +2432,134 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[79] Opus 1.6.1, BSD-3-Clause: Skype Limited
+[70] Opus 1.6.1, BSD-3-Clause: Skype Limited
 Files:
-  opus-1.6.1/silk/A2NLSF.c                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/API.h                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/CNG.c                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/HP_variable_cutoff.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/Inlines.h                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/LPC_analysis_filter.c                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/LPC_inv_pred_gain.c                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/LP_variable_cutoff.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/MacroCount.h                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF2A.c                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_VQ.c                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_VQ_weights_laroia.c             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_decode.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_del_dec_quant.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_encode.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_stabilize.c                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NLSF_unpack.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NSQ.c                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/NSQ_del_dec.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/PLC.c                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/PLC.h                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/SigProc_FIX.h                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/VAD.c                                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/VQ_WMat_EC.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/ana_filt_bank_1.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/biquad_alt.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/bwexpander.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/bwexpander_32.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/check_control_input.c                linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/code_signs.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/control.h                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/control_SNR.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/control_audio_bandwidth.c            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/control_codec.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/debug.c                              linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/debug.h                              linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/dec_API.c                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_core.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_frame.c                       linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_indices.c                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_parameters.c                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_pitch.c                       linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decode_pulses.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/decoder_set_fs.c                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/define.h                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/enc_API.c                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/encode_indices.c                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/encode_pulses.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/errors.h                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/LPC_analysis_filter_FLP.c      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/LPC_inv_pred_gain_FLP.c        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/LTP_analysis_filter_FLP.c      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/LTP_scale_ctrl_FLP.c           linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/SigProc_FLP.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/apply_sine_window_FLP.c        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/autocorrelation_FLP.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/burg_modified_FLP.c            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/bwexpander_FLP.c               linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/corrMatrix_FLP.c               linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/encode_frame_FLP.c             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/energy_FLP.c                   linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/find_LPC_FLP.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/find_LTP_FLP.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/find_pitch_lags_FLP.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/find_pred_coefs_FLP.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/inner_product_FLP.c            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/k2a_FLP.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/main_FLP.h                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/noise_shape_analysis_FLP.c     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/pitch_analysis_core_FLP.c      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/process_gains_FLP.c            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/regularize_correlations_FLP.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/residual_energy_FLP.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/scale_copy_vector_FLP.c        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/scale_vector_FLP.c             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/schur_FLP.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/sort_FLP.c                     linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/structs_FLP.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/warped_autocorrelation_FLP.c   linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/float/wrappers_FLP.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/gain_quant.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/init_decoder.c                       linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/init_encoder.c                       linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/inner_prod_aligned.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/interpolate.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/lin2log.c                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/log2lin.c                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/macros.h                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/main.h                               linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/pitch_est_defines.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/pitch_est_tables.c                   linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/process_NLSFs.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/quant_LTP_gains.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler.c                          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_down2.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_down2_3.c                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_private.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_private_AR2.c              linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_private_IIR_FIR.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_private_down_FIR.c         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_private_up2_HQ.c           linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_rom.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_rom.h                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/resampler_structs.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/shell_coder.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/sigm_Q15.c                           linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/sort.c                               linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_LR_to_MS.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_MS_to_LR.c                    linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_decode_pred.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_encode_pred.c                 linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_find_predictor.c              linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/stereo_quant_pred.c                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/structs.h                            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/sum_sqr_shift.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/table_LSF_cos.c                      linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables.h                             linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_LTP.c                         linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_NLSF_CB_NB_MB.c               linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_NLSF_CB_WB.c                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_gain.c                        linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_other.c                       linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_pitch_lag.c                   linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tables_pulses_per_block.c            linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/tuning_parameters.h                  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/typedef.h                            linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/A2NLSF.c                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/API.h                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/CNG.c                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/HP_variable_cutoff.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/Inlines.h                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/LPC_analysis_filter.c                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/LPC_inv_pred_gain.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/LP_variable_cutoff.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/MacroCount.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF2A.c                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_VQ.c                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_VQ_weights_laroia.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_decode.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_del_dec_quant.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_encode.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_stabilize.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NLSF_unpack.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NSQ.c                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/NSQ_del_dec.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/PLC.c                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/PLC.h                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/SigProc_FIX.h                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/VAD.c                                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/VQ_WMat_EC.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/ana_filt_bank_1.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/biquad_alt.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/bwexpander.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/bwexpander_32.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/check_control_input.c                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/code_signs.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/control.h                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/control_SNR.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/control_audio_bandwidth.c            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/control_codec.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/debug.c                              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/debug.h                              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/dec_API.c                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_core.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_frame.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_indices.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_parameters.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_pitch.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decode_pulses.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/decoder_set_fs.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/define.h                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/enc_API.c                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/encode_indices.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/encode_pulses.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/errors.h                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/LPC_analysis_filter_FLP.c      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/LPC_inv_pred_gain_FLP.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/LTP_analysis_filter_FLP.c      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/LTP_scale_ctrl_FLP.c           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/SigProc_FLP.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/apply_sine_window_FLP.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/autocorrelation_FLP.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/burg_modified_FLP.c            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/bwexpander_FLP.c               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/corrMatrix_FLP.c               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/encode_frame_FLP.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/energy_FLP.c                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/find_LPC_FLP.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/find_LTP_FLP.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/find_pitch_lags_FLP.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/find_pred_coefs_FLP.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/inner_product_FLP.c            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/k2a_FLP.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/main_FLP.h                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/noise_shape_analysis_FLP.c     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/pitch_analysis_core_FLP.c      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/process_gains_FLP.c            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/regularize_correlations_FLP.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/residual_energy_FLP.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/scale_copy_vector_FLP.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/scale_vector_FLP.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/schur_FLP.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/sort_FLP.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/structs_FLP.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/warped_autocorrelation_FLP.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/wrappers_FLP.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/gain_quant.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/init_decoder.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/init_encoder.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/inner_prod_aligned.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/interpolate.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/lin2log.c                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/log2lin.c                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/macros.h                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/main.h                               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/pitch_est_defines.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/pitch_est_tables.c                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/process_NLSFs.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/quant_LTP_gains.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler.c                          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_down2.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_down2_3.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_private.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_private_AR2.c              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_private_IIR_FIR.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_private_down_FIR.c         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_private_up2_HQ.c           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_rom.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_rom.h                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/resampler_structs.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/shell_coder.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/sigm_Q15.c                           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/sort.c                               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_LR_to_MS.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_MS_to_LR.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_decode_pred.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_encode_pred.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_find_predictor.c              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/stereo_quant_pred.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/structs.h                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/sum_sqr_shift.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/table_LSF_cos.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables.h                             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_LTP.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_NLSF_CB_NB_MB.c               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_NLSF_CB_WB.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_gain.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_other.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_pitch_lag.c                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tables_pulses_per_block.c            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/tuning_parameters.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/typedef.h                            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2006-2011, Skype Limited. All rights reserved.
@@ -2900,9 +2588,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[80] Opus 1.6.1, BSD-3-Clause: Koen Vos
+[71] Opus 1.6.1, BSD-3-Clause: Koen Vos
 Files:
-  opus-1.6.1/silk/LPC_fit.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/LPC_fit.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2013, Koen Vos. All rights reserved.
@@ -2931,9 +2619,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[81] Opus 1.6.1, BSD-3-Clause: Skype Limited; Xiph.Org Foundation
+[72] Opus 1.6.1, BSD-3-Clause: Skype Limited; Xiph.Org Foundation
 Files:
-  opus-1.6.1/silk/MacroDebug.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/MacroDebug.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2006-2011, Skype Limited. All rights reserved.
@@ -2963,9 +2651,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[82] Opus 1.6.1, BSD-3-Clause: Vidyo; Skype Limited
+[73] Opus 1.6.1, BSD-3-Clause: Vidyo; Skype Limited
 Files:
-  opus-1.6.1/silk/NSQ.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/NSQ.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2014 Vidyo.
@@ -2995,11 +2683,10 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[83] Opus 1.6.1, BSD-3-Clause: Vidyo
+[74] Opus 1.6.1, BSD-3-Clause: Vidyo
 Files:
-  opus-1.6.1/silk/arm/NSQ_neon.c      macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/NSQ_neon.h      macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/arm_silk_map.c  macos-arm64 (read, not built yet)
+  opus-1.6.1/silk/arm/NSQ_neon.c  macos-arm64
+  opus-1.6.1/silk/arm/NSQ_neon.h  macos-arm64
 Text:
 
 Copyright (C) 2014 Vidyo
@@ -3028,74 +2715,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[84] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors; Parrot
+[75] Opus 1.6.1, BSD-3-Clause: Vidyo
 Files:
-  opus-1.6.1/silk/arm/SigProc_FIX_armv4.h  macos-arm64 (read, not built yet)
-Text:
-
-Copyright (C) 2013 Xiph.Org Foundation and contributors
-Copyright (c) 2013       Parrot
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-- Redistributions of source code must retain the above copyright notice,
-this list of conditions and the following disclaimer.
-- Redistributions in binary form must reproduce the above copyright
-notice, this list of conditions and the following disclaimer in the
-documentation and/or other materials provided with the distribution.
-- Neither the name of Internet Society, IETF or IETF Trust, nor the
-names of specific contributors, may be used to endorse or promote
-products derived from this software without specific prior written
-permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[85] Opus 1.6.1, BSD-3-Clause: Skype Limited; Parrot
-Files:
-  opus-1.6.1/silk/arm/SigProc_FIX_armv5e.h  macos-arm64 (read, not built yet)
-  opus-1.6.1/silk/arm/macros_armv5e.h       macos-arm64 (read, not built yet)
-Text:
-
-Copyright (c) 2006-2011, Skype Limited. All rights reserved.
-Copyright (c) 2013       Parrot
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-- Redistributions of source code must retain the above copyright notice,
-this list of conditions and the following disclaimer.
-- Redistributions in binary form must reproduce the above copyright
-notice, this list of conditions and the following disclaimer in the
-documentation and/or other materials provided with the distribution.
-- Neither the name of Internet Society, IETF or IETF Trust, nor the
-names of specific contributors, may be used to endorse or promote
-products derived from this software without specific prior written
-permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[86] Opus 1.6.1, BSD-3-Clause: Vidyo
-Files:
-  opus-1.6.1/silk/arm/macros_arm64.h  macos-arm64 (read, not built yet)
+  opus-1.6.1/silk/arm/macros_arm64.h  macos-arm64
 Text:
 
 Copyright (C) 2015 Vidyo
@@ -3124,40 +2746,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[87] Opus 1.6.1, BSD-3-Clause: Xiph.Org Foundation and contributors
+[76] Opus 1.6.1, BSD-3-Clause: Skype Limited
 Files:
-  opus-1.6.1/silk/arm/macros_armv4.h  macos-arm64 (read, not built yet)
-Text:
-
-Copyright (C) 2013 Xiph.Org Foundation and contributors.
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-- Redistributions of source code must retain the above copyright notice,
-this list of conditions and the following disclaimer.
-- Redistributions in binary form must reproduce the above copyright
-notice, this list of conditions and the following disclaimer in the
-documentation and/or other materials provided with the distribution.
-- Neither the name of Internet Society, IETF or IETF Trust, nor the
-names of specific contributors, may be used to endorse or promote
-products derived from this software without specific prior written
-permission.
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
-AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
-ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
-LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
-CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
-SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
-INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
-CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[88] Opus 1.6.1, BSD-3-Clause: Skype Limited
-Files:
-  opus-1.6.1/silk/float/x86/inner_product_FLP_avx2.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/float/x86/inner_product_FLP_avx2.c  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2006-2011, Skype Limited. All rights reserved.
@@ -3187,9 +2778,9 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[89] Opus 1.6.1, BSD-3-Clause: Google Inc
+[77] Opus 1.6.1, BSD-3-Clause: Google Inc
 Files:
-  opus-1.6.1/silk/x86/NSQ_del_dec_avx2.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/NSQ_del_dec_avx2.c  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 Copyright (c) 2021 Google Inc.
@@ -3218,12 +2809,12 @@ ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[90] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
+[78] Opus 1.6.1, BSD-2-Clause: Cisco Systems, INC
 Files:
-  opus-1.6.1/silk/x86/NSQ_del_dec_sse4_1.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/NSQ_sse4_1.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/VAD_sse4_1.c          linux-x86_64, windows-x86_64
-  opus-1.6.1/silk/x86/VQ_WMat_EC_sse4_1.c   linux-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/NSQ_del_dec_sse4_1.c  linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/NSQ_sse4_1.c          linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/VAD_sse4_1.c          linux-x86_64, macos-x86_64, windows-x86_64
+  opus-1.6.1/silk/x86/VQ_WMat_EC_sse4_1.c   linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2014-2020, Cisco Systems, INC
@@ -3253,10 +2844,10 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[91] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[79] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
-  opus-1.6.1/src/analysis.c  linux-x86_64, windows-x86_64
-  opus-1.6.1/src/analysis.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/analysis.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  opus-1.6.1/src/analysis.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2011 Xiph.Org Foundation
@@ -3286,9 +2877,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[92] Opus 1.6.1, BSD-2-Clause: Amazon
+[80] Opus 1.6.1, BSD-2-Clause: Amazon
 Files:
-  opus-1.6.1/src/extensions.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/extensions.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2022 Amazon */
@@ -3317,9 +2908,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[93] Opus 1.6.1, BSD-2-Clause: Octasic Inc
+[81] Opus 1.6.1, BSD-2-Clause: Octasic Inc
 Files:
-  opus-1.6.1/src/mlp.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/mlp.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2008-2011 Octasic Inc.
@@ -3349,9 +2940,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[94] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
+[82] Opus 1.6.1, BSD-2-Clause: Jean-Marc Valin
 Files:
-  opus-1.6.1/src/mlp.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/mlp.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2017 Jean-Marc Valin */
@@ -3380,9 +2971,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[95] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
+[83] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
 Files:
-  opus-1.6.1/src/opus.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/opus.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2011 Xiph.Org Foundation, Skype Limited
@@ -3413,9 +3004,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[96] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
+[84] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation, Skype Limited; Arm Limited
 Files:
-  opus-1.6.1/src/opus_decoder.c  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_decoder.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2010 Xiph.Org Foundation, Skype Limited
@@ -3446,9 +3037,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[97] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
+[85] Opus 1.6.1, BSD-2-Clause: Xiph.Org Foundation
 Files:
-  opus-1.6.1/src/opus_private.h  linux-x86_64, windows-x86_64
+  opus-1.6.1/src/opus_private.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Copyright (c) 2012 Xiph.Org Foundation
@@ -3478,9 +3069,9 @@ Text:
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[98] libvorbis 1.3.7, TU-Berlin-1.0: Jutta Degener and Carsten Bormann
+[86] libvorbis 1.3.7, TU-Berlin-1.0: Jutta Degener and Carsten Bormann
 Files:
-  libvorbis-1.3.7/lib/lpc.c  linux-x86_64, windows-x86_64
+  libvorbis-1.3.7/lib/lpc.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
 /* Some of these routines (autocorrelator, LPC coefficient estimator)
@@ -3510,9 +3101,9 @@ Jutta Degener
 Carsten Bormann
 
 ==============================================================================
-[99] libvpx 1.17.0, ISC: x264 project
+[87] libvpx 1.17.0, ISC: x264 project
 Files:
-  libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, windows-x86_64
+  libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ;* Copyright (C) 2005-2019 x264 project
@@ -3535,71 +3126,71 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[100] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[88] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/include/common/attributes.h       linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/common/bitdepth.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/common/dump.h             linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/common/intops.h           linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/common/validate.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/dav1d/common.h            linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/dav1d/data.h              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/arm/loopfilter.h              macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/looprestoration.h         macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/mc.h                      macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/cdef.h                        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cdef_apply.h                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cdef_apply_tmpl.c             linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cdef_tmpl.c                   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cdf.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cpu.c                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ctx.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/data.c                        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/decode.h                      linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/dequant_tables.c              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/env.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/fg_apply.h                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/getbits.c                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/getbits.h                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ipred_prepare.h               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ipred_prepare_tmpl.c          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ipred_tmpl.c                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/levels.h                      linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lf_apply.h                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lf_apply_tmpl.c               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lf_mask.c                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lib.c                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/loopfilter.h                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/loopfilter_tmpl.c             linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/looprestoration_tmpl.c        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lr_apply.h                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lr_apply_tmpl.c               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/mc.h                          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/mc_tmpl.c                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/mem.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/msac.c                        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/msac.h                        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/obu.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/picture.c                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/qm.c                          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/qm.h                          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ref.c                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ref.h                         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/scan.c                        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/thread_data.h                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/thread_task.c                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/warpmv.c                      linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/warpmv.h                      linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/wedge.c                       linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/wedge.h                       linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cdef.h                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cdef_avx2.asm             linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cpu.c                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cpu.h                     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cpuid.asm                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter_avx512.asm     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration_avx2.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/include/common/attributes.h       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/common/bitdepth.h         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/common/dump.h             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/common/intops.h           linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/common/validate.h         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/common.h            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/data.h              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/arm/loopfilter.h              macos-arm64
+  dav1d-1.5.4/src/arm/looprestoration.h         macos-arm64
+  dav1d-1.5.4/src/arm/mc.h                      macos-arm64
+  dav1d-1.5.4/src/cdef.h                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cdef_apply.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cdef_apply_tmpl.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cdef_tmpl.c                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cdf.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cpu.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ctx.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/data.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/decode.h                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/dequant_tables.c              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/env.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/fg_apply.h                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/getbits.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/getbits.h                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ipred_prepare.h               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ipred_prepare_tmpl.c          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ipred_tmpl.c                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/levels.h                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lf_apply.h                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lf_apply_tmpl.c               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lf_mask.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lib.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/loopfilter.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/loopfilter_tmpl.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/looprestoration_tmpl.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lr_apply.h                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lr_apply_tmpl.c               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/mc.h                          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/mc_tmpl.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/mem.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/msac.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/msac.h                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/obu.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/picture.c                     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/qm.c                          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/qm.h                          linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ref.c                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ref.h                         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/scan.c                        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/thread_data.h                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/thread_task.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/warpmv.c                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/warpmv.h                      linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/wedge.c                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/wedge.h                       linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef.h                    linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef_avx2.asm             linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cpu.c                     linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cpu.h                     linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cpuid.asm                 linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter_avx512.asm     linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration.h         linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration_avx2.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3628,10 +3219,10 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[101] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[89] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
-  dav1d-1.5.4/include/common/frame.h  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/arm/asm-offsets.h   macos-arm64 (read, not built yet)
+  dav1d-1.5.4/include/common/frame.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/arm/asm-offsets.h   macos-arm64
 Text:
 
  * Copyright © 2021, VideoLAN and dav1d authors
@@ -3659,37 +3250,37 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[102] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[90] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/include/dav1d/dav1d.h        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/cdf.c                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/data.h                   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/decode.c                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/dequant_tables.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/filmgrain.h              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/internal.h               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/ipred.h                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/itx.h                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/lf_mask.h                linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/looprestoration.h        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/obu.c                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/picture.h                linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/recon.h                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/recon_tmpl.c             linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/scan.h                   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/tables.c                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/tables.h                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/thread.h                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/thread_task.h            linux-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/dav1d.h        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cdf.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/data.h                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/decode.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/dequant_tables.h         linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/filmgrain.h              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/internal.h               linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ipred.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/itx.h                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/lf_mask.h                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/looprestoration.h        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/obu.c                    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/picture.h                linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/recon.h                  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/recon_tmpl.c             linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/scan.h                   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/tables.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/tables.h                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/thread.h                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/thread_task.h            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
   dav1d-1.5.4/src/win32/thread.c           windows-x86_64
-  dav1d-1.5.4/src/x86/ipred.h              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/ipred_avx2.asm       linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/ipred_sse.asm        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/itx_avx2.asm         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/itx_sse.asm          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter_avx2.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter_sse.asm   linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred.h              linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred_avx2.asm       linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred_sse.asm        linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx_avx2.asm         linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx_sse.asm          linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter.h         linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter_avx2.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter_sse.asm   linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2021, VideoLAN and dav1d authors
@@ -3718,10 +3309,10 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[103] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[91] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/include/dav1d/headers.h  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/include/dav1d/picture.h  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/headers.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/picture.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2020, VideoLAN and dav1d authors
@@ -3750,9 +3341,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[104] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
+[92] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
-  dav1d-1.5.4/include/dav1d/version.h  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/include/dav1d/version.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2019-2024, VideoLAN and dav1d authors
@@ -3780,14 +3371,14 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[105] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[93] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/cdef.S        macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/ipred.S       macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/ipred16.S     macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/itx.S         macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/loopfilter.S  macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/itx.h            macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/cdef.S        macos-arm64
+  dav1d-1.5.4/src/arm/64/ipred.S       macos-arm64
+  dav1d-1.5.4/src/arm/64/ipred16.S     macos-arm64
+  dav1d-1.5.4/src/arm/64/itx.S         macos-arm64
+  dav1d-1.5.4/src/arm/64/loopfilter.S  macos-arm64
+  dav1d-1.5.4/src/arm/itx.h            macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3816,13 +3407,13 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[106] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[94] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/cdef16.S             macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/cdef_tmpl.S          macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/itx16.S              macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/loopfilter16.S       macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/looprestoration16.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/cdef16.S             macos-arm64
+  dav1d-1.5.4/src/arm/64/cdef_tmpl.S          macos-arm64
+  dav1d-1.5.4/src/arm/64/itx16.S              macos-arm64
+  dav1d-1.5.4/src/arm/64/loopfilter16.S       macos-arm64
+  dav1d-1.5.4/src/arm/64/looprestoration16.S  macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3851,11 +3442,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[107] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[95] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/filmgrain.S    macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/filmgrain16.S  macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/refmvs.S       macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/filmgrain.S    macos-arm64
+  dav1d-1.5.4/src/arm/64/filmgrain16.S  macos-arm64
+  dav1d-1.5.4/src/arm/64/refmvs.S       macos-arm64
 Text:
 
  * Copyright © 2021, VideoLAN and dav1d authors
@@ -3884,11 +3475,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[108] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[96] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/looprestoration.S         macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/looprestoration_common.S  macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/64/looprestoration_tmpl.S    macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/looprestoration.S         macos-arm64
+  dav1d-1.5.4/src/arm/64/looprestoration_common.S  macos-arm64
+  dav1d-1.5.4/src/arm/64/looprestoration_tmpl.S    macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3917,9 +3508,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[109] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
+[97] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/mc.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/mc.S  macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3949,9 +3540,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[110] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
+[98] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/mc16.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/mc16.S  macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -3981,9 +3572,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[111] dav1d 1.5.4, BSD-2-Clause: Arm Limited
+[99] dav1d 1.5.4, BSD-2-Clause: Arm Limited
 Files:
-  dav1d-1.5.4/src/arm/64/mc16_sve.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/mc16_sve.S  macos-arm64
 Text:
 
  * Copyright © 2024, Arm Limited
@@ -4011,9 +3602,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[112] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo; Arm Limited
+[100] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau; Martin Storsjo; Arm Limited
 Files:
-  dav1d-1.5.4/src/arm/64/mc_dotprod.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/mc_dotprod.S  macos-arm64
 Text:
 
  * Copyright © 2024, VideoLAN and dav1d authors
@@ -4044,9 +3635,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[113] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
+[101] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo
 Files:
-  dav1d-1.5.4/src/arm/64/msac.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/msac.S  macos-arm64
 Text:
 
  * Copyright © 2019, VideoLAN and dav1d authors
@@ -4075,9 +3666,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[114] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo; Janne Grunau
+[102] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Martin Storsjo; Janne Grunau
 Files:
-  dav1d-1.5.4/src/arm/64/util.S  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/64/util.S  macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -4107,74 +3698,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[115] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
-Files:
-  dav1d-1.5.4/src/arm/arm-arch.h  macos-arm64 (read, not built yet)
-Text:
-
- * Copyright © 2024, VideoLAN and dav1d authors
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[116] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
-Files:
-  dav1d-1.5.4/src/arm/cdef.h   macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/ipred.h  macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/log.c        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/log.h        linux-x86_64, windows-x86_64
-Text:
-
- * Copyright © 2018, VideoLAN and dav1d authors
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are met:
- *
- * 1. Redistributions of source code must retain the above copyright notice, this
- *    list of conditions and the following disclaimer.
- *
- * 2. Redistributions in binary form must reproduce the above copyright notice,
- *    this list of conditions and the following disclaimer in the documentation
- *    and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
- * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
- * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
- * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
- * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-==============================================================================
-[117] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau
+[103] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Janne Grunau
 Files:
   dav1d-1.5.4/src/arm/asm.S  macos-arm64
-  dav1d-1.5.4/src/arm/cpu.c  macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/arm/cpu.h  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/cpu.c  macos-arm64
+  dav1d-1.5.4/src/arm/cpu.h  macos-arm64
 Text:
 
  * Copyright © 2018, VideoLAN and dav1d authors
@@ -4203,9 +3731,42 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[118] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC; Martin Storsjo
+[104] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors
 Files:
-  dav1d-1.5.4/src/arm/filmgrain.h  macos-arm64 (read, not built yet)
+  dav1d-1.5.4/src/arm/cdef.h   macos-arm64
+  dav1d-1.5.4/src/arm/ipred.h  macos-arm64
+  dav1d-1.5.4/src/log.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/log.h        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+Text:
+
+ * Copyright © 2018, VideoLAN and dav1d authors
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions are met:
+ *
+ * 1. Redistributions of source code must retain the above copyright notice, this
+ *    list of conditions and the following disclaimer.
+ *
+ * 2. Redistributions in binary form must reproduce the above copyright notice,
+ *    this list of conditions and the following disclaimer in the documentation
+ *    and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+ * DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ * ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+ * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+==============================================================================
+[105] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC; Martin Storsjo
+Files:
+  dav1d-1.5.4/src/arm/filmgrain.h  macos-arm64
 Text:
 
  * Copyright © 2018, Niklas Haas
@@ -4236,11 +3797,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[119] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[106] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/arm/msac.h    macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/x86/msac.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/msac.h    linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/arm/msac.h    macos-arm64
+  dav1d-1.5.4/src/x86/msac.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/msac.h    linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2019, VideoLAN and dav1d authors
@@ -4269,23 +3830,23 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[120] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[107] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/arm/refmvs.h                      macos-arm64 (read, not built yet)
-  dav1d-1.5.4/src/x86/cdef16_avx2.asm               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/filmgrain16_sse.asm           linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/ipred16_avx2.asm              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/ipred16_sse.asm               linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter16_avx2.asm         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter16_sse.asm          linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration16_avx2.asm    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration16_avx512.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration16_sse.asm     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/looprestoration_avx512.asm    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc16_avx2.asm                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc16_sse.asm                  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/refmvs.asm                    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/refmvs.h                      linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/arm/refmvs.h                      macos-arm64
+  dav1d-1.5.4/src/x86/cdef16_avx2.asm               linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain16_sse.asm           linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred16_avx2.asm              linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred16_sse.asm               linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter16_avx2.asm         linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter16_sse.asm          linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration16_avx2.asm    linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration16_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration16_sse.asm     linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration_avx512.asm    linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc16_avx2.asm                 linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc16_sse.asm                  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/refmvs.asm                    linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/refmvs.h                      linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2021, VideoLAN and dav1d authors
@@ -4314,10 +3875,10 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[121] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[108] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/cpu.h            linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/filmgrain.h  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/cpu.h            linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain.h  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2022, VideoLAN and dav1d authors
@@ -4346,9 +3907,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[122] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[109] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/ctx.c  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ctx.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2024, VideoLAN and dav1d authors
@@ -4377,9 +3938,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[123] dav1d 1.5.4, ISC: x264 project
+[110] dav1d 1.5.4, ISC: x264 project
 Files:
-  dav1d-1.5.4/src/ext/x86/x86inc.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/ext/x86/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ;* Copyright (C) 2005-2024 x264 project
@@ -4402,10 +3963,10 @@ Text:
 ;* OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 ==============================================================================
-[124] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
+[111] dav1d 1.5.4, BSD-2-Clause: Niklas Haas; VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/fg_apply_tmpl.c   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/filmgrain_tmpl.c  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/fg_apply_tmpl.c   linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/filmgrain_tmpl.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018, Niklas Haas
@@ -4435,11 +3996,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[125] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[112] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/intra_edge.c  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/intra_edge.h  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/itx.h     linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/intra_edge.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/intra_edge.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx.h     linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2023, VideoLAN and dav1d authors
@@ -4468,11 +4029,11 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[126] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[113] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/itx_1d.c    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/itx_1d.h    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/itx_tmpl.c  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/itx_1d.c    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/itx_1d.h    linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/itx_tmpl.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2019, VideoLAN and dav1d authors
@@ -4501,15 +4062,15 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[127] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[114] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/mem.c                 linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/refmvs.c              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/refmvs.h              linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/cdef_avx512.asm   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/ipred_avx512.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc16_avx512.asm   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc_avx512.asm     linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/mem.c                 linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/refmvs.c              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/refmvs.h              linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef_avx512.asm   linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc16_avx512.asm   linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc_avx512.asm     linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2020, VideoLAN and dav1d authors
@@ -4538,12 +4099,12 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[128] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[115] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/pal.c        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/pal.h        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/pal.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/pal.h    linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/pal.c        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/pal.h        linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/pal.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/pal.h    linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2023, VideoLAN and dav1d authors
@@ -4572,12 +4133,12 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[129] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[116] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/cdef16_avx512.asm        linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/filmgrain16_avx512.asm   linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/filmgrain_avx512.asm     linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/loopfilter16_avx512.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef16_avx512.asm        linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain16_avx512.asm   linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain_avx512.asm     linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/loopfilter16_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2022, VideoLAN and dav1d authors
@@ -4606,9 +4167,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[130] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge
+[117] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge
 Files:
-  dav1d-1.5.4/src/x86/cdef16_sse.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef16_sse.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2021, VideoLAN and dav1d authors
@@ -4639,9 +4200,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[131] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
+[118] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
 Files:
-  dav1d-1.5.4/src/x86/cdef_sse.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/cdef_sse.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2018, VideoLAN and dav1d authors
@@ -4671,9 +4232,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[132] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[119] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/filmgrain16_avx2.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain16_avx2.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2021-2022, VideoLAN and dav1d authors
@@ -4702,10 +4263,10 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[133] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[120] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/filmgrain_avx2.asm    linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/filmgrain_common.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain_avx2.asm    linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain_common.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2019-2022, VideoLAN and dav1d authors
@@ -4734,9 +4295,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[134] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[121] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/filmgrain_sse.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/filmgrain_sse.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2019-2021, VideoLAN and dav1d authors
@@ -4765,9 +4326,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[135] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[122] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/ipred16_avx512.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/ipred16_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2022-2024, VideoLAN and dav1d authors
@@ -4796,9 +4357,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[136] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; Matthias Dressel
+[123] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; Matthias Dressel
 Files:
-  dav1d-1.5.4/src/x86/itx16_avx2.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx16_avx2.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2021, VideoLAN and dav1d authors
@@ -4828,9 +4389,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[137] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[124] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/itx16_avx512.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx16_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2022-2023, VideoLAN and dav1d authors
@@ -4859,9 +4420,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[138] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge; Matt...
+[125] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; The rav1e contributors; Nathan Egge; Matt...
 Files:
-  dav1d-1.5.4/src/x86/itx16_sse.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx16_sse.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2021, VideoLAN and dav1d authors
@@ -4893,9 +4454,9 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[139] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[126] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/itx_avx512.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/itx_avx512.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2020-2023, VideoLAN and dav1d authors
@@ -4924,10 +4485,10 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[140] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
+[127] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC; VideoLabs
 Files:
-  dav1d-1.5.4/src/x86/looprestoration_sse.asm  linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc_sse.asm               linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/looprestoration_sse.asm  linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc_sse.asm               linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
 ; Copyright © 2018, VideoLAN and dav1d authors
@@ -4957,10 +4518,10 @@ Text:
 ; SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[141] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
+[128] dav1d 1.5.4, BSD-2-Clause: VideoLAN and dav1d authors; Two Orioles, LLC
 Files:
-  dav1d-1.5.4/src/x86/mc.h         linux-x86_64, windows-x86_64
-  dav1d-1.5.4/src/x86/mc_avx2.asm  linux-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc.h         linux-x86_64, macos-x86_64, windows-x86_64
+  dav1d-1.5.4/src/x86/mc_avx2.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Text:
 
  * Copyright © 2018-2021, VideoLAN and dav1d authors
@@ -4989,9 +4550,9 @@ Text:
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-[142] zlib 1.3.2, Zlib: Jean-loup Gailly and Mark Adler
+[129] zlib 1.3.2, Zlib: Jean-loup Gailly and Mark Adler
 Files:
-  zlib-1.3.2/zlib.h  linux-x86_64, windows-x86_64
+  zlib-1.3.2/zlib.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Text:
 
   Copyright (C) 1995-2026 Jean-loup Gailly and Mark Adler
@@ -5023,9 +4584,9 @@ Text:
 ==============================================================================
 Part 2: other statements about licenses
 ==============================================================================
-[143] FFmpeg 9.0.2
+[130] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/bsf/mjpeg2jpeg.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/bsf/mjpeg2jpeg.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: public domain.
 Text:
 
@@ -5033,9 +4594,9 @@ Text:
  * Paris 2010 Adrian Daerr, public domain
 
 ==============================================================================
-[144] FFmpeg 9.0.2
+[131] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/dfpwmdec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/dfpwmdec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: public domain, as each file of that DFPWM code also says.
 Text:
 
@@ -5043,11 +4604,11 @@ Text:
 // Licensed in the public domain
 
 ==============================================================================
-[145] FFmpeg 9.0.2
+[132] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/dsd.c     linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/dsd.h     linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/dsddec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/dsd.c     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/dsd.h     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/dsddec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: dsd2pcm.txt, dsd2pcm's license (BSD-2-Clause-Views), from
   Sebastian Gesemann's own release.
 Text:
@@ -5058,11 +4619,11 @@ Text:
  * Copyright (c) 2014 Peter Ross
 
 ==============================================================================
-[146] FFmpeg 9.0.2
+[133] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/nellymoser.c     linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/nellymoser.h     linux-x86_64, windows-x86_64
-  ffmpeg-9.0.2/libavcodec/nellymoserdec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoser.c     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoser.h     linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/nellymoserdec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: it explains the names in these files' MIT notice, which is
   in Part 1.
 Text:
@@ -5072,9 +4633,9 @@ Text:
  * implementers. The original code is available from http://code.google.com/p/nelly2pcm/
 
 ==============================================================================
-[147] FFmpeg 9.0.2
+[134] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/ra144dec.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/ra144dec.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: public domain.
 Text:
 
@@ -5083,9 +4644,9 @@ Text:
  *     Based on public domain decoder at http://www.honeypot.net/audio
 
 ==============================================================================
-[148] FFmpeg 9.0.2
+[135] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/truemotion1data.h  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/truemotion1data.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: GPL code, and this build's programs are under the GPL as a
   whole (LICENSE.txt), with their complete source.
 Text:
@@ -5096,9 +4657,9 @@ Text:
  * for decoding algorithms are not necessarily copyrightable.
 
 ==============================================================================
-[149] FFmpeg 9.0.2
+[136] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavcodec/x86/vvc/mc.asm  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavcodec/x86/vvc/mc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Upstream license: dav1d.txt, dav1d's license (BSD-2-Clause): this assembly
   comes from dav1d's, and keeps its copyright lines.
 Text:
@@ -5108,9 +4669,9 @@ Text:
 ; * All rights reserved.
 
 ==============================================================================
-[150] FFmpeg 9.0.2
+[137] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavformat/mpegtsenc.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavformat/mpegtsenc.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: LGPL-2.1-or-later, as FFmpeg's own files are; this build's
   programs are under the GPL (LICENSE.txt), as section 3 of the LGPL allows.
 Text:
@@ -5120,9 +4681,9 @@ Text:
  * Vincent Penquerc'h <vincent.penquerch@collabora.co.uk>
 
 ==============================================================================
-[151] FFmpeg 9.0.2
+[138] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavutil/sha.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/sha.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: sha2-gifford.txt, Aaron D. Gifford's license for his SHA-2
   code (BSD-3-Clause), from Ruby's copy of it. Steve Reid's SHA-1 code is
   public domain.
@@ -5134,9 +4695,9 @@ Text:
  * and on BSD-licensed SHA-2 code by Aaron D. Gifford
 
 ==============================================================================
-[152] FFmpeg 9.0.2
+[139] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libavutil/sha512.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libavutil/sha512.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: sha2-gifford.txt, Aaron D. Gifford's license for his SHA-2
   code (BSD-3-Clause), from Ruby's copy of it.
 Text:
@@ -5147,9 +4708,9 @@ Text:
  * based on BSD-licensed SHA-2 code by Aaron D. Gifford
 
 ==============================================================================
-[153] FFmpeg 9.0.2
+[140] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: glumpy.txt, Glumpy's license (BSD-3-Clause), the "(new) BSD
   License" this names.
 Text:
@@ -5160,9 +4721,9 @@ Text:
  * (https://github.com/glumpy/glumpy/blob/master/glumpy/library/build-spatial-filters.py)
 
 ==============================================================================
-[154] FFmpeg 9.0.2
+[141] FFmpeg 9.0.2
 Files:
-  ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, windows-x86_64
+  ffmpeg-9.0.2/libswscale/filters.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: FFmpeg says it wrote this math from scratch, taking only
   some algorithms from these sources; the code from Glumpy is the entry before
   this one.
@@ -5181,9 +4742,9 @@ Text:
  * - https://github.com/AviSynth/jinc-resize (only used to verify the math)
 
 ==============================================================================
-[155] x264 b35605ac
+[142] x264 b35605ac
 Files:
-  x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, windows-x86_64
+  x264-b35605ace3ddf7c1a5d67a2eb553f034aef41d55/common/x86/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Needs nothing more: it explains the ISC notice at the top of the same file,
   which is in Part 1.
 Text:
@@ -5196,9 +4757,9 @@ Text:
 ; to x264-devel@videolan.org .
 
 ==============================================================================
-[156] LAME 4.0
+[143] LAME 4.0
 Files:
-  lame-4.0/libmp3lame/fft.c  linux-x86_64, windows-x86_64
+  lame-4.0/libmp3lame/fft.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: if the GPL it mentions applies, this build's programs are
   under the GPL anyway (LICENSE.txt), and the credit it asks for is this text.
 Text:
@@ -5236,9 +4797,9 @@ Text:
 **           Takehiro  - some dirty hack for speed up
 
 ==============================================================================
-[157] libogg 1.3.6
+[144] libogg 1.3.6
 Files:
-  libogg-1.3.6/src/framing.c  linux-x86_64, windows-x86_64
+  libogg-1.3.6/src/framing.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Needs nothing more: public domain.
 Text:
 
@@ -5247,9 +4808,9 @@ Text:
  for details.
 
 ==============================================================================
-[158] libvpx 1.17.0
+[145] libvpx 1.17.0
 Files:
-  libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, windows-x86_64
+  libvpx-1.17.0/third_party/x86inc/x86inc.asm  linux-x86_64, macos-x86_64, windows-x86_64
 Needs nothing more: it explains the ISC notice at the top of the same file,
   which is in Part 1 and libvpx-x86inc.txt.
 Text:
@@ -5262,9 +4823,9 @@ Text:
 ; to x264-devel@videolan.org .
 
 ==============================================================================
-[159] libvpx 1.17.0
+[146] libvpx 1.17.0
 Files:
-  libvpx-1.17.0/vpx_util/vpx_pthread.h  linux-x86_64, windows-x86_64
+  libvpx-1.17.0/vpx_util/vpx_pthread.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: libwebp.txt, libwebp's COPYING (BSD-3-Clause): these files
   come from libwebp, and libvpx has no COPYING. The PATENTS they name is
   libvpx's, libvpx-PATENTS.txt.
@@ -5280,10 +4841,10 @@ Text:
 // -----------------------------------------------------------------------------
 
 ==============================================================================
-[160] libvpx 1.17.0
+[147] libvpx 1.17.0
 Files:
-  libvpx-1.17.0/vpx_util/vpx_thread.c  linux-x86_64, windows-x86_64
-  libvpx-1.17.0/vpx_util/vpx_thread.h  linux-x86_64, windows-x86_64
+  libvpx-1.17.0/vpx_util/vpx_thread.c  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
+  libvpx-1.17.0/vpx_util/vpx_thread.h  linux-x86_64, macos-arm64, macos-x86_64, windows-x86_64
 Upstream license: libwebp.txt, libwebp's COPYING (BSD-3-Clause): these files
   come from libwebp, and libvpx has no COPYING. The PATENTS they name is
   libvpx's, libvpx-PATENTS.txt.

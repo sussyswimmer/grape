@@ -82,16 +82,17 @@ FFmpeg and the libraries hold code from other projects under BSD, MIT, ISC, zlib
 3. fails when a notice or a statement isn't in `ffmpeg-notices.txt` (compared without comment marks and line breaks), or when a file that has one isn't listed under it;
 4. fails when a statement has no decision in `STATEMENTS` in `notices.py`. Each one says what the statement means for Grape: when its code, its copyright lines or the license file it points to come from another project and the file doesn't carry that license's text (FFmpeg's DSD decoder from dsd2pcm, its SHA-2 code from Aaron D. Gifford's, `libswscale/filters.c` from Glumpy, its VVC assembly from dav1d's, libvpx's thread code from libwebp), the upstream text, which must be in `licenses/ffmpeg/` (`SOURCE.md` says where each came from); otherwise why it needs nothing more (public domain, GPL or LGPL code the programs' own license covers, code FFmpeg says it wrote itself, a note about a notice that's listed). `ffmpeg-notices.txt` has that line under each statement's files, and the check fails when it doesn't match.
 
-It writes `compiled-files.txt`, `notices-found.json` and `notices-found.txt` (what this build found, in the format of `ffmpeg-notices.txt`) into `build/ffmpeg/<target>/logs/`. When it fails: read what it found, decide each new statement in `STATEMENTS` (adding the upstream text to `licenses/ffmpeg/` and `SOURCE.md` when it needs one), then write `ffmpeg-notices.txt` again from every target's `notices-found.json`, with the macOS arm64 sources read as below until a Mac build exists:
+It writes `compiled-files.txt`, `notices-found.json` and `notices-found.txt` (what this build found, in the format of `ffmpeg-notices.txt`) into `build/ffmpeg/<target>/logs/`. When it fails: read what it found, decide each new statement in `STATEMENTS` (adding the upstream text to `licenses/ffmpeg/` and `SOURCE.md` when it needs one), then write `ffmpeg-notices.txt` again from every target's `notices-found.json`. The macOS halves' come from CI's `ffmpeg-logs-macos-arm64` and `ffmpeg-logs-macos-x86_64` artifacts (uploaded by every build, including a failed one):
 
 ```
 python3 -I scripts/ffmpeg/notices.py render \
   build/ffmpeg/linux-x86_64/logs/notices-found.json \
   build/ffmpeg/windows-x86_64/logs/notices-found.json \
-  build/ffmpeg/arm64-*.json > licenses/ffmpeg/ffmpeg-notices.txt
+  ffmpeg-logs-macos-arm64/notices-found.json \
+  ffmpeg-logs-macos-x86_64/notices-found.json > licenses/ffmpeg/ffmpeg-notices.txt
 ```
 
-The macOS arm64 build compiles AArch64 code the x86_64 builds don't (`libavcodec/aarch64/`, dav1d's `src/arm/`, ...). Until it has run, those sources were read with `notices.py scan`, and their entries say `macos-arm64 (read, not built yet)`. From an unpacked source, for each library (FFmpeg shown):
+The macOS arm64 build compiles AArch64 code the x86_64 builds don't (`libavcodec/aarch64/`, dav1d's `src/arm/`, ...). Before the first Mac build ran in CI (2026-10-28), those sources were read with `notices.py scan`, and their entries said `macos-arm64 (read, not built yet)`; since then the file comes from the four builds alone. `scan` stays for code no build here compiles. From an unpacked source, for each library (FFmpeg shown):
 
 ```
 cd ffmpeg-9.0.2
@@ -101,7 +102,7 @@ find libavcodec/aarch64 libavutil/aarch64 libswscale/aarch64 libswresample/aarch
     'macos-arm64 (read, not built yet)' ffmpeg . > ../build/ffmpeg/arm64-ffmpeg.json
 ```
 
-The folders read: FFmpeg's above; dav1d's `src/arm/*.c`, `*.h` and `src/arm/64/`; libvpx's `vpx_dsp/arm/`, `vp9/encoder/arm/`, `vp9/common/arm/`, `vpx_ports/aarch64_cpudetect.c`, `arm_cpudetect.h` and `arm.h`; x264's `common/aarch64/`; Opus's `celt/arm/` and `silk/arm/`. The first Mac build checks them for real: if it compiles a file with a notice that isn't listed, it fails, and its `notices-found.json` replaces the read one.
+The folders read: FFmpeg's above; dav1d's `src/arm/*.c`, `*.h` and `src/arm/64/`; libvpx's `vpx_dsp/arm/`, `vp9/encoder/arm/`, `vp9/common/arm/`, `vpx_ports/aarch64_cpudetect.c`, `arm_cpudetect.h` and `arm.h`; x264's `common/aarch64/`; Opus's `celt/arm/` and `silk/arm/`. The first Mac builds (CI, 2026-10-28) checked them for real, and their `notices-found.json` replaced the read ones.
 
 ## Measured
 
