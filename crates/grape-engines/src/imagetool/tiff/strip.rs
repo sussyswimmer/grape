@@ -406,9 +406,10 @@ enum Seen {
 /// can't be seen. Its segments are read up to its first scan when that
 /// holds every component of a sequential frame, which then has no other
 /// scan, so only its end follows; otherwise past every scan, each to the
-/// marker after its coded data, to the end. A hierarchical JPEG isn't
-/// read past its DHP. Anything that isn't a stream of segments is clean:
-/// it's copied as it is.
+/// marker after its coded data, to the end. Stray bytes before a marker
+/// are read past, as libjpeg reads past them. A hierarchical JPEG isn't
+/// read past its DHP. Data that doesn't start with SOI, or a scan with no
+/// frame, isn't a stream Grape knows, and is clean: it's copied as it is.
 fn segments(jpeg: &[u8], whole: bool) -> Seen {
     // Where what was read ends too soon.
     let cut = if whole { Seen::Clean } else { Seen::Unseen };
@@ -419,15 +420,10 @@ fn segments(jpeg: &[u8], whole: bool) -> Seen {
     // in one scan).
     let mut frame: Option<(u8, bool)> = None;
     loop {
-        // A marker, after any fill bytes.
-        let fill = rest.iter().take_while(|&&b| b == 0xFF).count();
-        let Some(&marker) = rest.get(fill) else {
+        let Some((at, marker)) = next_marker(rest) else {
             return cut;
         };
-        if fill == 0 {
-            return Seen::Clean;
-        }
-        rest = &rest[fill + 1..];
+        rest = &rest[at..];
         match marker {
             0xE1 | 0xED | 0xFE => return Seen::Metadata,
             // A hierarchical JPEG (DHP): its frames after the first,
@@ -465,6 +461,23 @@ fn segments(jpeg: &[u8], whole: bool) -> Seen {
                 rest = &rest[at..];
             }
             _ => {}
+        }
+    }
+}
+
+/// The next marker in `jpeg`, and where what follows it starts, as
+/// libjpeg's `next_marker` and jpeg.rs find it: past stray bytes, which
+/// libjpeg warns of ("extraneous bytes before marker") and reads past,
+/// fill bytes (0xFF) and stuffed zeros (0xFF 0); `None` when `jpeg` ends
+/// first.
+fn next_marker(jpeg: &[u8]) -> Option<(usize, u8)> {
+    let mut from = 0;
+    loop {
+        let at = from + jpeg.get(from..)?.iter().position(|&b| b == 0xFF)?;
+        let fill = jpeg[at..].iter().take_while(|&&b| b == 0xFF).count();
+        match *jpeg.get(at + fill)? {
+            0 => from = at + fill + 1,
+            marker => return Some((at + fill + 1, marker)),
         }
     }
 }
@@ -1224,8 +1237,8 @@ mod tests {
                 jpeg_page(jpeg(b""), Some(b"\xFF\xD8\xFF\xD9".to_vec())),
                 false,
             ),
-            // Not a stream of segments: nothing to say.
-            (jpeg_page(b"\xFF\xD8garbage\xFF\xE1".to_vec(), None), false),
+            // Not a JPEG stream: nothing to say.
+            (jpeg_page(b"garbage\xFF\xE1".to_vec(), None), false),
         ] {
             match plan(&file) {
                 Err(Error::Refused(why)) => {
@@ -1332,6 +1345,54 @@ mod tests {
         let cut = [&soi[..], &frame(0xC2, 1), &scan(1), b"\xFF\xFF"].concat();
         assert_eq!(segments(&cut, false), Seen::Unseen);
         assert_eq!(segments(&cut, true), Seen::Clean);
+    }
+
+    #[test]
+    fn stray_bytes_before_a_marker_are_read_past_as_libjpeg_does() {
+        // A JFIF APP0, then 2 zero bytes, then an APP1: libjpeg warns of
+        // "2 extraneous bytes before marker 0xe1" and reads the APP1.
+        let app0 = segment(0xE0, b"JFIF\0\x01\x01\0\0\x01\0\x01\0\0");
+        let app1 = segment(0xE1, b"Exif\0\0MM\0*");
+        let stray = [&app0[..], b"\0\0", &app1].concat();
+        let (soi, eoi) = (b"\xFF\xD8".to_vec(), b"\xFF\xD9".to_vec());
+        assert_eq!(segments(&[&soi, &stray[..]].concat(), true), Seen::Metadata);
+        // A stuffed zero (0xFF 0) among them is stray too; and between a
+        // progressive frame's scans, after a segment.
+        let stuffed = [&soi[..], b"\x12\xFF\x00\x34", &app1].concat();
+        assert_eq!(segments(&stuffed, true), Seen::Metadata);
+        let tables = segment(0xC4, &[0; 17]);
+        let between = [&tables[..], b"\0\0", &app1].concat();
+        let progressive = [
+            &soi[..],
+            &frame(0xC2, 1),
+            &scan(1),
+            &between,
+            &scan(1),
+            &eoi,
+        ]
+        .concat();
+        assert_eq!(segments(&progressive, true), Seen::Metadata);
+        // Stray bytes to the end of what was read: what follows can't be
+        // seen.
+        let cut = [&soi[..], &app0, b"\0\0\0"].concat();
+        assert_eq!(segments(&cut, false), Seen::Unseen);
+        assert_eq!(segments(&cut, true), Seen::Clean);
+        // Through the plan, in a strip or in its tables: refused.
+        for file in [
+            jpeg_page(jpeg(&stray), None),
+            jpeg_page(jpeg(b""), Some([&soi, &stray[..], &eoi].concat())),
+        ] {
+            let Err(Error::Refused(why)) = plan(&file) else {
+                panic!("not refused")
+            };
+            assert_eq!(why, IN_DATA);
+        }
+        // Stray bytes past the 64 KiB read: unchecked.
+        let far = [&app0[..], &[0; 70_000], &app1].concat();
+        let Err(Error::Refused(why)) = plan(&jpeg_page(jpeg(&far), None)) else {
+            panic!("not refused")
+        };
+        assert_eq!(why, UNCHECKED);
     }
 
     #[test]
