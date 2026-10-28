@@ -23,11 +23,12 @@
 //!   then writes one picture at ImageIO's lossy quality 0.8 by default. A
 //!   finish that fails is the same "this Mac can't write HEIC": that's how
 //!   ImageIO fails on hardware without an encoder that still lists the type.
-//! - Before anything else it asks of ImageIO (its caps, a decode or an
-//!   encode) the worker restricts ImageIO to the HEIF types with
-//!   `CGImageSourceSetAllowableTypes` on macOS 14.2 and later, looked up
-//!   with `dlsym`: a bound import would stop Grape from launching on
-//!   macOS 13.
+//! - First thing, before ImageIO does anything else and while it has one
+//!   thread, the worker restricts ImageIO to the HEIF types with
+//!   `CGImageSourceSetAllowableTypes` on macOS 14.2 and later
+//!   ([`ImageIo::restrict_process`]), looked up with `dlsym`: a bound
+//!   import would stop Grape from launching on macOS 13. The codec's own
+//!   calls never set it, so tests can use it on many threads.
 //!
 //! Every op runs in its own autorelease pool, nothing logs, and no failure
 //! detail holds a path.
@@ -74,10 +75,19 @@ const UPRIGHT: i32 = 1;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImageIo;
 
+impl ImageIo {
+    /// Restricts ImageIO in this whole process to the HEIF types (macOS
+    /// 14.2 and later; a no-op before). The worker calls it first thing,
+    /// before ImageIO does anything else and while it's the only thread:
+    /// on CI, setting it while another thread used ImageIO crashed the
+    /// process. Never call it in Grape's own process.
+    pub fn restrict_process() {
+        restrict_to_heif();
+    }
+}
+
 impl Codec for ImageIo {
     fn caps(&self) -> Caps {
-        // Always before anything else ImageIO does in this process.
-        restrict_to_heif();
         autoreleasepool(|_| Caps {
             decode: can_read_heic(),
             encode: can_write_heic(),
@@ -91,7 +101,6 @@ impl Codec for ImageIo {
         limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure> {
-        restrict_to_heif();
         autoreleasepool(|_| decode(source, limits, out))
     }
 
@@ -101,7 +110,6 @@ impl Codec for ImageIo {
         quality: Option<u8>,
         _limits: &Limits,
     ) -> Result<Vec<u8>, Failure> {
-        restrict_to_heif();
         autoreleasepool(|_| encode(pixels, quality))
     }
 }

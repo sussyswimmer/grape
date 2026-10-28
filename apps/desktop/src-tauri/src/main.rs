@@ -109,7 +109,11 @@ fn first_arg_is(mut args: impl Iterator<Item = OsString>, flag: &str) -> bool {
 /// (`grape_platform::macos::heif`), with the exit code it ends with.
 #[cfg(target_os = "macos")]
 fn heif_worker() -> ExitCode {
-    grape_heif_proto::worker_main(&grape_platform::macos::heif::ImageIo)
+    use grape_platform::macos::heif::ImageIo;
+
+    // Before ImageIO does anything else, on this one thread.
+    ImageIo::restrict_process();
+    grape_heif_proto::worker_main(&ImageIo)
 }
 
 /// Elsewhere the HEIC helper is `grape-heif.exe` (Windows) or none, so

@@ -12,7 +12,10 @@ fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     match (args.next(), args.next()) {
         (Some(flag), None) if flag == grape_heif_proto::WORKER_FLAG => {
-            grape_heif_proto::worker_main(&grape_platform::macos::heif::ImageIo)
+            use grape_platform::macos::heif::ImageIo;
+
+            ImageIo::restrict_process();
+            grape_heif_proto::worker_main(&ImageIo)
         }
         _ => {
             eprintln!("usage: grape-heif-worker {}", grape_heif_proto::WORKER_FLAG);

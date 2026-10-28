@@ -262,8 +262,7 @@ jobs:
       - name: Build the test worker (ImageIO behind the HEIC protocol)
         run: cargo build -p grape-platform --features heif-it --bin grape-heif-worker --locked
       # The heif-it tests fail, not skip, without their variables.
-      # One test at a time, as the worker runs one job: the codec restricts
-      # ImageIO for the whole process before it first uses it.
+      # One test at a time, as the worker runs one job.
       - name: ImageIO tests (libheif's fixtures)
         env:
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
