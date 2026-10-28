@@ -1295,6 +1295,40 @@ pub(super) mod tests {
         assert_eq!(stripped(Format::Mp3, &two, &Tags::default()).count(), 1);
     }
 
+    #[test]
+    fn strip_sets_languages_and_font_tags_by_output_index() {
+        // A data track before the audio: the audio is output 1, input 2.
+        let probe = probe_of(
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            vec![
+                stream(0, StreamKind::Video, "h264"),
+                stream(1, StreamKind::Data, "none"),
+                stream(2, StreamKind::Audio, "aac"),
+            ],
+        );
+        let tags = Tags {
+            languages: BTreeMap::from([(2, "fra".to_owned())]),
+            ..Tags::default()
+        };
+        let args = strip(&src(), Format::Mp4, &probe, &tags, &out());
+        assert!(has(&args, ["-metadata:s:1", "language=fra"]), "{args:?}");
+        // Cover art before the font: the font is output 1, input 2.
+        let mkv = probe_of(
+            "matroska,webm",
+            vec![
+                stream(0, StreamKind::Video, "h264"),
+                cover(1),
+                stream(2, StreamKind::Attachment, "ttf"),
+            ],
+        );
+        let tags = Tags {
+            font_streams: BTreeSet::from([2]),
+            ..Tags::default()
+        };
+        let args = strip(&src(), Format::Mkv, &mkv, &tags, &out());
+        assert!(has(&args, ["-map_metadata:s:1", "0:s:2"]), "{args:?}");
+    }
+
     /// An audio stream of `codec` at `depth` bits.
     fn audio(codec: &str, depth: u32) -> StreamInfo {
         StreamInfo {
@@ -1379,6 +1413,13 @@ pub(super) mod tests {
             Err("FLAC")
         );
         assert!(same_quality(Format::Wav, &audio("pcm_s32le", 32), None, 2).is_ok());
+        // No channels (ffprobe didn't say): nothing divides by zero.
+        let none = StreamInfo {
+            channels: 0,
+            ..mp3.clone()
+        };
+        assert!(same_quality(Format::Mp3, &none, Some(128_000), 2).is_ok());
+        assert_eq!(aac_rate(64_000, 0), 64_000);
     }
 
     #[test]
@@ -1426,6 +1467,22 @@ pub(super) mod tests {
 
     #[test]
     fn reencode_keeps_the_cover_and_blanks_replaygain() {
+        // Seven keys, each blanked by a `-metadata` of its own.
+        let (options, keys): (Vec<&str>, Vec<&str>) =
+            REPLAYGAIN.chunks(2).map(|pair| (pair[0], pair[1])).unzip();
+        assert_eq!(options, ["-metadata"; 7]);
+        assert_eq!(
+            keys,
+            [
+                "REPLAYGAIN_TRACK_GAIN=",
+                "REPLAYGAIN_TRACK_PEAK=",
+                "REPLAYGAIN_ALBUM_GAIN=",
+                "REPLAYGAIN_ALBUM_PEAK=",
+                "R128_TRACK_GAIN=",
+                "R128_ALBUM_GAIN=",
+                "iTunNORM=",
+            ]
+        );
         let mut rg: Vec<&str> = REPLAYGAIN.to_vec();
         let mp3 = song("mp3", "mp3");
         let codec = same_quality(Format::Mp3, &mp3.streams[0], Some(256_000), 1).unwrap();
@@ -1816,6 +1873,11 @@ pub(super) mod tests {
             (
                 "pcm_u8", 8, 22_050, Balanced, "s16", None, 22_050, false, false,
             ),
+            // 16 bits at 48 kHz: Small has nothing more to cut.
+            (
+                "flac", 16, 48_000, Balanced, "s16", None, 48_000, false, false,
+            ),
+            ("flac", 16, 48_000, High, "s16", None, 48_000, false, false),
         ];
         for (codec, depth, rate, preset, format, filter, out_rate, lossy, try_small) in cases {
             assert_eq!(
@@ -2083,6 +2145,25 @@ pub(super) mod tests {
         );
         let middle = ["-map", "0:0", "-c", "copy", "-c:0", "aac", "-b:0", "128k"];
         assert_eq!(shrink.args, expect(&[], &middle, "matroska"));
+
+        // Only AAC is copied: MP3 at 120k is re-encoded.
+        let mut mp3 = stream(1, StreamKind::Audio, "mp3");
+        mp3.bit_rate = Some(120_000);
+        let probe = probe_of(
+            "matroska,webm",
+            vec![stream(0, StreamKind::Video, "h264"), mp3],
+        );
+        let shrink = super::shrink(
+            &src(),
+            Format::Mkv,
+            &probe,
+            &Tags::default(),
+            CompressPreset::Balanced,
+            true,
+            &out(),
+        );
+        assert!(!shrink.copies);
+        assert!(has(&shrink.args, ["-c:1", "aac"]), "{:?}", shrink.args);
     }
 
     #[test]

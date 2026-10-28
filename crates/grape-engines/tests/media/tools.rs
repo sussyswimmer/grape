@@ -1347,6 +1347,56 @@ fn normalize_volume_keeps_the_format_and_leaves_alone_what_it_cant_help() {
     assert_eq!(err.user_message, "at.wav is already at \u{2212}23 LUFS.");
 }
 
+/// The keys of `got` that hold a gain: ReplayGain, R128 or `iTunNORM`.
+fn gain_keys(got: &HashMap<String, String>) -> Vec<String> {
+    let mut keys: Vec<String> = got
+        .keys()
+        .filter(|k| {
+            let k = k.to_ascii_lowercase();
+            k.contains("replaygain") || k.contains("r128") || k.contains("itunnorm")
+        })
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn normalize_volume_drops_the_gain_tags_its_change_makes_wrong() {
+    let dir = TestDir::new("tools-normalize-gain");
+    let quiet = dir.join("quiet.wav");
+    steady(&quiet, -30.0, 2, 48_000, Sample::I16);
+    let mut failures = Vec::new();
+    for (name, codec, muxer) in [
+        ("song.flac", "flac", "flac"),
+        ("song.mp3", "libmp3lame", "mp3"),
+    ] {
+        let src = dir.join(name);
+        let mut args = vec!["-i", s(&quiet), "-c:a", codec];
+        args.extend(["-metadata", "REPLAYGAIN_TRACK_GAIN=-3.20 dB"]);
+        args.extend(["-metadata", "R128_TRACK_GAIN=-819"]);
+        args.extend(["-metadata", "iTunNORM= 0000044C 0000044C"]);
+        args.extend(["-metadata", "title=Song", "-f", muxer, s(&src)]);
+        ffmpeg(&args);
+        assert_eq!(gain_keys(&tags(&src)).len(), 3, "{name}: {:?}", tags(&src));
+        let out = match run_tool(&dir, &src, ToolKey::NormalizeAudio, to_lufs(-16)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{name}: {e} ({})", e.detail));
+                continue;
+            }
+        };
+        let got = tags(&out.outputs[0]);
+        if !gain_keys(&got).is_empty() {
+            failures.push(format!("{name}: kept {:?}", gain_keys(&got)));
+        }
+        if got.get("format.tags.title").map(String::as_str) != Some("Song") {
+            failures.push(format!("{name}: title {got:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn a_cancel_in_normalizes_second_pass_leaves_nothing() {
     let dir = TestDir::new("tools-normalize-cancel");
