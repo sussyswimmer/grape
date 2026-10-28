@@ -753,6 +753,49 @@ fn remove_metadata_strips_video_and_keeps_tracks_languages_and_fonts() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn remove_metadata_drops_an_mkvs_cover_copied_as_a_video_track() {
+    use grape_engines::MetaField::CoverArt;
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-strip-copied-cover");
+    // An MKV whose cover, an image attachment, was copied as FFmpeg copies
+    // one: back as a one-frame PNG video track, not marked cover art.
+    let cover = cover_png(&dir);
+    let attached = dir.join("attached.mkv");
+    let mut args = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt"]);
+    args.extend(["yuv420p", "-c:a", "aac", "-t", "1", "-attach", s(&cover)]);
+    args.extend(["-metadata:s:t", "mimetype=image/png", "-metadata:s:t"]);
+    args.extend(["filename=cover.png", "-f", "matroska", s(&attached)]);
+    ffmpeg(&args);
+    let src = dir.join("movie.mkv");
+    ffmpeg(&[
+        "-i",
+        s(&attached),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-f",
+        "matroska",
+        s(&src),
+    ]);
+    assert_eq!(kinds(&src), ["video", "audio", "video"]);
+    let got = tags(&src);
+    assert_eq!(got["streams.stream.2.codec_name"], "png");
+    assert_eq!(got["streams.stream.2.disposition.attached_pic"], "0");
+
+    let out = run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()).unwrap();
+    let stripped = &out.outputs[0];
+    assert_eq!(kinds(stripped), ["video", "audio"]);
+    assert_eq!(left_over(stripped), Vec::<String>::new());
+    let Note::MetadataRemoved(fields) = &out.notes[0] else {
+        panic!("{:?}", out.notes);
+    };
+    assert!(fields.contains(&CoverArt), "{fields:?}");
+}
+
 /// How the samples of a test WAV are stored.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sample {

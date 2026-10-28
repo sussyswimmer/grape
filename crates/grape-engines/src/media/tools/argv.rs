@@ -221,8 +221,9 @@ pub(super) fn strip(
 ///   every `mov_text` subtitle;
 /// - M4A: every audio track;
 /// - MKV: every video that isn't cover art (an image attachment is cover
-///   art to the demuxer), audio track and subtitle, and the fonts its
-///   subtitles need;
+///   art to the demuxer, and so is a still image beside real video: a
+///   cover FFmpeg copied as a one-frame video track, [`picture`]), audio
+///   track and subtitle, and the fonts its subtitles need;
 /// - MP3, FLAC and WAV: the audio.
 ///
 /// Cover art goes (its JPEG keeps the camera's EXIF, and Grape's FFmpeg
@@ -238,6 +239,10 @@ pub(super) fn stripped<'a>(
         .iter()
         .find(|s| s.kind == StreamKind::Audio)
         .map(|s| s.index);
+    let real_video = probe
+        .streams
+        .iter()
+        .any(|s| s.kind == StreamKind::Video && !s.attached_pic && !is_still(s));
     probe.streams.iter().filter(move |s| {
         let video = s.kind == StreamKind::Video && !s.attached_pic;
         let audio = s.kind == StreamKind::Audio;
@@ -245,7 +250,7 @@ pub(super) fn stripped<'a>(
             Format::Mp4 | Format::Mov => video || audio || is_mov_text(s),
             Format::M4a => audio,
             Format::Mkv => {
-                video
+                (video && !(real_video && is_still(s)))
                     || audio
                     || s.kind == StreamKind::Subtitle
                     || (s.kind == StreamKind::Attachment && tags.font_streams.contains(&s.index))
@@ -817,9 +822,12 @@ pub(super) fn picture(probe: &Probe) -> Option<&StreamInfo> {
         .iter()
         .filter(|s| s.kind == StreamKind::Video && !s.attached_pic);
     let first = videos.clone().next();
-    videos
-        .find(|s| !STILL_CODECS.contains(&s.codec.as_str()))
-        .or(first)
+    videos.find(|s| !is_still(s)).or(first)
+}
+
+/// Whether `stream` is coded as a still image ([`STILL_CODECS`]).
+fn is_still(stream: &StreamInfo) -> bool {
+    STILL_CODECS.contains(&stream.codec.as_str())
 }
 
 /// Codecs of still images, which a video track rarely is but cover art
@@ -1397,6 +1405,34 @@ pub(super) mod tests {
         );
         assert_eq!(stripped(Format::M4a, &two, &Tags::default()).count(), 2);
         assert_eq!(stripped(Format::Mp3, &two, &Tags::default()).count(), 1);
+        // In an MKV, a still image beside real video is a cover FFmpeg
+        // copied as a video track; alone, it's the video.
+        let indexes = |to, probe: &Probe| -> Vec<u32> {
+            stripped(to, probe, &Tags::default())
+                .map(|s| s.index)
+                .collect()
+        };
+        let copied = |format_name| {
+            probe_of(
+                format_name,
+                vec![
+                    stream(0, StreamKind::Video, "h264"),
+                    stream(1, StreamKind::Audio, "aac"),
+                    stream(2, StreamKind::Video, "png"),
+                ],
+            )
+        };
+        assert_eq!(indexes(Format::Mkv, &copied("matroska,webm")), [0, 1]);
+        let still = probe_of(
+            "matroska,webm",
+            vec![
+                stream(0, StreamKind::Video, "mjpeg"),
+                stream(1, StreamKind::Audio, "aac"),
+            ],
+        );
+        assert_eq!(indexes(Format::Mkv, &still), [0, 1]);
+        let mp4 = copied("mov,mp4,m4a,3gp,3g2,mj2");
+        assert_eq!(indexes(Format::Mp4, &mp4), [0, 1, 2]);
     }
 
     #[test]

@@ -44,7 +44,7 @@ use super::{
 };
 use crate::output::TempFile;
 use crate::publish;
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
+use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
 
 /// True when this engine runs `tool` on a file of format `from` (with
 /// `ffmpeg` and `ffprobe`; the caller checks those).
@@ -237,9 +237,21 @@ impl Tool<'_> {
                 ),
             ));
         }
+        let mut removed = self.tags.fields.clone();
+        // A video track left out is a cover FFmpeg copied as one, which
+        // the tags probe can't tell from video ([`argv::stripped`]).
+        let dropped = info
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
+            .any(|s| !kept.iter().any(|k| k.index == s.index));
+        if dropped {
+            removed.insert(MetaField::CoverArt);
+        }
         let mut outcome = self.publish(written, bar)?;
-        let removed = self.tags.fields.iter().copied().collect();
-        outcome.notes.push(Note::MetadataRemoved(removed));
+        outcome
+            .notes
+            .push(Note::MetadataRemoved(removed.into_iter().collect()));
         Ok(outcome)
     }
 
@@ -1198,6 +1210,27 @@ mod tests {
         let case = Case::new("take.wav", ToolKey::RemoveMetadata);
         let (result, _) = case.run();
         assert_eq!(result.unwrap().notes, [Note::MetadataRemoved(Vec::new())]);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn remove_metadata_drops_a_cover_copied_as_a_video_track() {
+        // An MKV whose cover FFmpeg copied back as a PNG video track.
+        let case = Case::new("movie.mkv", ToolKey::RemoveMetadata);
+        let mkv = flat("matroska,webm", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mkv}", track(2, "video", "png", false))),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(mkv),
+            no_tags(),
+        ]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![crate::MetaField::CoverArt])]
+        );
+        assert!(!ran_args(2).iter().any(|a| a == "0:2"), "{:?}", ran_args(2));
         case.assert_clean();
     }
 
