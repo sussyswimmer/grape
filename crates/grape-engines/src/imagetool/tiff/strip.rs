@@ -10,8 +10,9 @@
 //!   is too large.
 //! - **Dropped and reported:** every other tag ([`field`]), and the Exif
 //!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
-//!   once). Padding, and values that are blank as far as they're read, go
-//!   unsaid.
+//!   once). Padding, and blank values of up to [`MAX_JUDGED`] bytes, go
+//!   unsaid: a value that entries share is read once, and at most
+//!   [`JUDGE_BUDGET`] in all, past which a value is reported unread.
 //! - **Written back:** the DCF Adobe RGB Exif (ColorSpace uncalibrated,
 //!   Interop `R03`), when that's how an IFD with no ICC profile said its
 //!   color: each such IFD gets its own, even when they shared one.
@@ -34,9 +35,17 @@ use super::read::{read_value, seek, Block, Entry, Ifd, Layout, Meta, Order, Tiff
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
 
-/// How much of a dropped value is read to see whether it's blank, or of a
-/// description to see whether it's ImageJ's or OME's.
+/// The longest dropped value read to see whether it's blank, and how much
+/// of a description is read to see whether it's ImageJ's or OME's.
 const MAX_JUDGED: u64 = 64 * 1024;
+
+/// The most bytes read in one file to see whether dropped values are
+/// blank, as PNG's text has: past it, a dropped value is reported unread.
+const JUDGE_BUDGET: u64 = 16 << 20;
+
+/// The most values judged blank that the report remembers, so that one
+/// that entries share is read once.
+const MAX_BLANKS: usize = 4_096;
 
 /// The most bytes of Photoshop's resources read from one file, each block
 /// once however many IFDs name it: what the plan holds of them, filtered,
@@ -147,6 +156,8 @@ impl Plan {
             irbs: HashMap::new(),
             keep: true,
             irb_left: MAX_IRB,
+            blanks: HashSet::new(),
+            judge_left: JUDGE_BUDGET,
         };
         let pages = pages
             .into_iter()
@@ -211,6 +222,8 @@ impl Plan {
             irbs: HashMap::new(),
             keep: false,
             irb_left: u64::MAX,
+            blanks: HashSet::new(),
+            judge_left: JUDGE_BUDGET,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -425,6 +438,12 @@ struct Walk<'r> {
     /// What's left of the bytes of Photoshop's resources it may read, each
     /// block once ([`MAX_IRB`]).
     irb_left: u64,
+    /// The values it read and judged blank, by where they are and their
+    /// tag and type (what blank means for them), at most [`MAX_BLANKS`].
+    blanks: HashSet<(Value, u16, u16)>,
+    /// What's left of the bytes it may read to judge values blank
+    /// ([`JUDGE_BUDGET`]).
+    judge_left: u64,
 }
 
 impl Walk<'_> {
@@ -484,18 +503,31 @@ impl Walk<'_> {
     }
 
     /// Reports `found` for the dropped `entry`, unless it's reported
-    /// already (its value isn't read then) or its value is blank as far as
-    /// it's read. One that can't be read is reported.
+    /// already, or its value is blank: inline, or read whole, at most
+    /// [`MAX_JUDGED`] bytes, while the budget lasts. A value judged blank
+    /// already isn't read again. One that can't be read is reported.
     fn report(&mut self, found: MetaField, entry: &Entry) -> Result<(), Error> {
-        if self.found.fields.contains(&found) {
+        let judged = (entry.value, entry.tag, entry.kind);
+        if self.found.fields.contains(&found) || self.blanks.contains(&judged) {
             return Ok(());
         }
-        let blank = match head(self.r, entry, MAX_JUDGED)? {
-            Some((value, true)) => exif::is_empty(entry.tag, entry.kind, &value),
-            _ => false,
+        let len = match entry.value {
+            Value::At { len, .. } => len,
+            Value::Inline { .. } | Value::Unread => 0,
+        };
+        let blank = if len > MAX_JUDGED.min(self.judge_left) {
+            false
+        } else {
+            self.judge_left -= len;
+            match head(self.r, entry, MAX_JUDGED)? {
+                Some((value, true)) => exif::is_empty(entry.tag, entry.kind, &value),
+                _ => false,
+            }
         };
         if !blank {
             self.found.fields.insert(found);
+        } else if len > 0 && self.blanks.len() < MAX_BLANKS {
+            self.blanks.insert(judged);
         }
         Ok(())
     }
@@ -1249,6 +1281,72 @@ mod tests {
         // Each 64 KiB once, and the IFDs: not 40 times.
         let read = r.get_ref().read;
         assert!(read < 1 << 20, "{read} bytes read");
+    }
+
+    /// A TIFF of `pages` pages whose `tags` (ASCII) all point into one run
+    /// of NULs, `len` bytes each: page `n`'s `step × n` bytes into it.
+    fn blanks(pages: u32, tags: &[u16], len: u64, step: u64) -> Vec<u8> {
+        let pages = (0..pages)
+            .map(|n| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                for &tag in tags {
+                    let run = if n == 0 && tag == tags[0] {
+                        vec![0; (len + step * u64::from(pages)) as usize]
+                    } else {
+                        vec![0]
+                    };
+                    page.tags.push((tag, V::Bytes(2, run)));
+                }
+                page.tags.sort_by_key(|t| t.0);
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'I', false, pages).build();
+        let tiff = read(&file);
+        let Value::At { offset, .. } = tiff.pages[0].get(tags[0]).unwrap().value else {
+            panic!("an inline run")
+        };
+        for (n, page) in (0..).zip(&tiff.pages) {
+            for &tag in tags {
+                set_entry(&mut file, page.at, tag, len, offset + step * n);
+            }
+        }
+        file
+    }
+
+    /// `file` planned through a reader that counts: what went, and the
+    /// bytes read.
+    fn tallied(file: &[u8]) -> (BTreeSet<MetaField>, u64) {
+        let mut r = std::io::BufReader::with_capacity(
+            64 * 1024,
+            Tally {
+                file: Cursor::new(file),
+                read: 0,
+            },
+        );
+        let plan = Plan::new(&mut r, file.len() as u64).unwrap();
+        (plan.found.fields, r.get_ref().read)
+    }
+
+    #[test]
+    fn a_blank_value_that_entries_share_is_read_once() {
+        // 64 pages whose title, camera, software, date, author and
+        // copyright tags are all one blank 64 KiB value.
+        let tags = [269, 271, 272, 285, 305, 306, 315, 33432];
+        let (found, read) = tallied(&blanks(64, &tags, 64 * 1024, 0));
+        assert!(found.is_empty(), "{found:?}");
+        // Once for each tag: not 512 times.
+        assert!(read < 1 << 20, "{read} bytes read");
+    }
+
+    #[test]
+    fn values_are_judged_blank_within_16_mib_a_file() {
+        // 260 pages whose software tags are 64 KiB of one run of NULs,
+        // each 2 bytes further on: each is read, until 16 MiB have been,
+        // and the rest are reported unread.
+        let (found, read) = tallied(&blanks(260, &[305], 64 * 1024, 2));
+        assert_eq!(found, [Software].into());
+        assert!(read < JUDGE_BUDGET + (1 << 20), "{read} bytes read");
     }
 
     #[test]
