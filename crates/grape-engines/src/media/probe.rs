@@ -20,7 +20,7 @@ use super::args::{file_url, DEMUXERS};
 /// read tag keys with their own probe, [`super::tags`]).
 const ENTRIES: &str = "format=format_name,duration,bit_rate\
     :stream=index,codec_type,codec_name,codec_tag_string,width,height,has_b_frames,pix_fmt,\
-    color_transfer,avg_frame_rate,sample_rate,channels,channel_layout,sample_fmt,\
+    color_transfer,avg_frame_rate,nb_frames,sample_rate,channels,channel_layout,sample_fmt,\
     bits_per_sample,bits_per_raw_sample,bit_rate\
     :stream_disposition=attached_pic\
     :stream_side_data=rotation";
@@ -104,6 +104,10 @@ pub(crate) struct StreamInfo {
     pub(crate) color_transfer: String,
     /// Video: the average frame rate as a fraction, when known.
     pub(crate) avg_fps: Option<(u32, u32)>,
+    /// How many frames the container says the stream holds, when it
+    /// says: MP4 and MOV count them (`nb_frames`); Matroska and a
+    /// fragmented MP4 don't.
+    pub(crate) frames: Option<u64>,
 }
 
 /// What kind of stream a [`StreamInfo`] is, as `ffprobe`'s `codec_type`.
@@ -243,6 +247,7 @@ pub(crate) fn parse(flat: &str) -> Result<Probe, String> {
             sample_fmt: s.sample_fmt.clone(),
             color_transfer: s.color_transfer.clone(),
             avg_fps: s.avg_fps,
+            frames: s.nb_frames,
         })
         .collect();
     Ok(Probe {
@@ -276,6 +281,7 @@ struct Stream {
     sample_fmt: String,
     color_transfer: String,
     avg_fps: Option<(u32, u32)>,
+    nb_frames: Option<u64>,
     bit_rate: Option<u64>,
     attached_pic: bool,
     rotation: Option<f64>,
@@ -300,6 +306,7 @@ impl Stream {
             "sample_fmt" => self.sample_fmt = value,
             "color_transfer" if value != "unknown" => self.color_transfer = value,
             "avg_frame_rate" => self.avg_fps = fraction(&value),
+            "nb_frames" => self.nb_frames = value.parse().ok().filter(|&n| n > 0),
             "bit_rate" => self.bit_rate = value.parse().ok(),
             "disposition.attached_pic" => self.attached_pic = value == "1",
             // 6.1 and 9.0 print side_data_list.side_data.N.rotation; any
@@ -686,6 +693,56 @@ format.duration="1.000000"
 format.bit_rate="1412112"
 "#;
 
+    /// An MP4 that a copy (`-map 0 -c copy`) of an MKV made, whose PNG
+    /// attachment the MKV's own copy had turned into a video track. 6.1.1
+    /// prints the same.
+    const COPIED_COVER_MP4: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_name="h264"
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="avc1"
+streams.stream.0.width=160
+streams.stream.0.height=120
+streams.stream.0.has_b_frames=2
+streams.stream.0.pix_fmt="yuv420p"
+streams.stream.0.color_transfer="unknown"
+streams.stream.0.avg_frame_rate="10/1"
+streams.stream.0.bit_rate="35544"
+streams.stream.0.bits_per_raw_sample="8"
+streams.stream.0.nb_frames="10"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.1.index=1
+streams.stream.1.codec_name="aac"
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="mp4a"
+streams.stream.1.sample_fmt="fltp"
+streams.stream.1.sample_rate="44100"
+streams.stream.1.channels=1
+streams.stream.1.channel_layout="mono"
+streams.stream.1.bits_per_sample=0
+streams.stream.1.avg_frame_rate="0/0"
+streams.stream.1.bit_rate="68804"
+streams.stream.1.bits_per_raw_sample="N/A"
+streams.stream.1.nb_frames="45"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.2.index=2
+streams.stream.2.codec_name="png"
+streams.stream.2.codec_type="video"
+streams.stream.2.codec_tag_string="mp4v"
+streams.stream.2.width=64
+streams.stream.2.height=64
+streams.stream.2.has_b_frames=0
+streams.stream.2.pix_fmt="rgb24"
+streams.stream.2.color_transfer="unknown"
+streams.stream.2.avg_frame_rate="16000/1"
+streams.stream.2.bit_rate="70656000"
+streams.stream.2.bits_per_raw_sample="N/A"
+streams.stream.2.nb_frames="1"
+streams.stream.2.disposition.attached_pic=0
+format.format_name="mov,mp4,m4a,3gp,3g2,mj2"
+format.duration="1.044467"
+format.bit_rate="125867"
+"#;
+
     /// A GIF read from a pipe, where the demuxer can't sum the frame delays.
     const GIF_NO_DURATION: &str = r#"streams.stream.0.index=0
 streams.stream.0.codec_name="gif"
@@ -718,8 +775,8 @@ format.duration="N/A"
             "-show_entries",
             "format=format_name,duration,bit_rate\
              :stream=index,codec_type,codec_name,codec_tag_string,width,height,has_b_frames,\
-             pix_fmt,color_transfer,avg_frame_rate,sample_rate,channels,channel_layout,\
-             sample_fmt,bits_per_sample,bits_per_raw_sample,bit_rate\
+             pix_fmt,color_transfer,avg_frame_rate,nb_frames,sample_rate,channels,\
+             channel_layout,sample_fmt,bits_per_sample,bits_per_raw_sample,bit_rate\
              :stream_disposition=attached_pic\
              :stream_side_data=rotation",
             "-of",
@@ -777,6 +834,7 @@ format.duration="N/A"
                         sample_fmt: String::new(),
                         color_transfer: String::new(),
                         avg_fps: None,
+                        frames: None,
                     },
                     StreamInfo {
                         index: 1,
@@ -792,6 +850,7 @@ format.duration="N/A"
                         sample_fmt: "fltp".into(),
                         color_transfer: String::new(),
                         avg_fps: None,
+                        frames: None,
                     },
                 ],
             }
@@ -901,6 +960,26 @@ format.duration="N/A"
         ] {
             assert_eq!(fraction(rate), fps, "{rate}");
         }
+    }
+
+    #[test]
+    fn frame_counts_are_kept_where_the_container_says_them() {
+        let probe = parse(COPIED_COVER_MP4).unwrap();
+        let frames: Vec<Option<u64>> = probe.streams.iter().map(|s| s.frames).collect();
+        assert_eq!(frames, [Some(10), Some(45), Some(1)]);
+        // Matroska says none, and a count of 0 isn't one.
+        for none in ["\"N/A\"", "\"0\"", "\"-1\"", "\"x\""] {
+            let flat = COPIED_COVER_MP4.replace(
+                "\"1\"\nstreams.stream.2.disp",
+                &format!("{none}\nstreams.stream.2.disp"),
+            );
+            assert_eq!(stream(&parse(&flat).unwrap(), 2).frames, None, "{none}");
+        }
+        assert!(parse(MOVIE_MKV)
+            .unwrap()
+            .streams
+            .iter()
+            .all(|s| s.frames.is_none()));
     }
 
     #[test]
