@@ -238,14 +238,9 @@ impl Tool<'_> {
             ));
         }
         let mut removed = self.tags.fields.clone();
-        // A video track left out is a cover FFmpeg copied as one, which
-        // the tags probe can't tell from video ([`argv::stripped`]).
-        let dropped = info
-            .streams
-            .iter()
-            .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
-            .any(|s| !kept.iter().any(|k| k.index == s.index));
-        if dropped {
+        // A cover a copy turned into a video track isn't cover art to the
+        // tags probe; it is once left out ([`argv::copied_covers`]).
+        if !argv::copied_covers(self.to, info, self.tags).is_empty() {
             removed.insert(MetaField::CoverArt);
         }
         let mut outcome = self.publish(written, bar)?;
@@ -1215,14 +1210,19 @@ mod tests {
 
     #[test]
     fn remove_metadata_drops_a_cover_copied_as_a_video_track() {
-        // An MKV whose cover FFmpeg copied back as a PNG video track.
+        // An MKV whose cover a copy turned into a PNG video track, which
+        // kept the attachment's MIME type.
         let case = Case::new("movie.mkv", ToolKey::RemoveMetadata);
         let mkv = flat("matroska,webm", true, "aac");
+        let copied = |codec| format!("{}{mkv}", track(2, "video", codec, false));
+        let mime = "streams.stream.2.index=2\n\
+                    streams.stream.2.codec_type=\"video\"\n\
+                    streams.stream.2.tags.MIMETYPE=\"image/png\"\n";
         script([
-            Fake::Prints(format!("{}{mkv}", track(2, "video", "png", false))),
-            no_tags(),
+            Fake::Prints(copied("png")),
+            Fake::Prints(mime.to_owned()),
             Fake::Child("write", "stripped".to_owned()),
-            Fake::Prints(mkv),
+            Fake::Prints(mkv.clone()),
             no_tags(),
         ]);
         let outcome = case.run().0.unwrap();
@@ -1231,6 +1231,37 @@ mod tests {
             [Note::MetadataRemoved(vec![crate::MetaField::CoverArt])]
         );
         assert!(!ran_args(2).iter().any(|a| a == "0:2"), "{:?}", ran_args(2));
+        case.assert_clean();
+
+        // A camera's MJPEG track beside the H.264 says no MIME type: it's
+        // video, kept and not reported.
+        let case = Case::new("movie.mkv", ToolKey::RemoveMetadata);
+        script([
+            Fake::Prints(copied("mjpeg")),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(copied("mjpeg")),
+            no_tags(),
+        ]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(outcome.notes, [Note::MetadataRemoved(Vec::new())]);
+        assert!(has(&ran_args(2), ["-map", "0:2"]), "{:?}", ran_args(2));
+        case.assert_clean();
+
+        // An M4A's video is left out by the M4A's own rule, and isn't
+        // cover art.
+        let case = Case::new("song.m4a", ToolKey::RemoveMetadata);
+        let m4a = flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac");
+        script([
+            Fake::Prints(m4a),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", false, "aac")),
+            no_tags(),
+        ]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(outcome.notes, [Note::MetadataRemoved(Vec::new())]);
+        assert!(!has(&ran_args(2), ["-map", "0:0"]), "{:?}", ran_args(2));
         case.assert_clean();
     }
 

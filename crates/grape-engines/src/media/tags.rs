@@ -7,7 +7,7 @@
 //! [`Parser`], which keeps the tag *keys*, sorted into [`MetaField`]s, and
 //! only these values: a stream's language (`[a-z]{2,3}`, not `und`), the
 //! container's `creation_time` (an ISO 8601 date, the first of a `;` list)
-//! and whether an attachment's MIME type is a font. Titles, comments and
+//! and whether a MIME type is a font's or an image's. Titles, comments and
 //! locations are never kept, so nothing a file says can reach a log or an
 //! argv from here, and a large tag (an editor's XMP history) costs nothing
 //! to read: only [`MAX_OUTPUT`] and the probe's timeout bound it.
@@ -87,6 +87,10 @@ pub(crate) struct Tags {
     pub(crate) bext: bool,
     /// The indexes of attachments that are fonts (MKV subtitles need them).
     pub(crate) font_streams: BTreeSet<u32>,
+    /// The indexes of video tracks, not cover art, with an image's MIME
+    /// type: an MKV's image attachment that a copy turned into a video
+    /// track keeps the attachment's `mimetype` and `filename` tags.
+    pub(crate) image_tracks: BTreeSet<u32>,
     /// How many chapters there are.
     pub(crate) chapters: u32,
     /// Some tag isn't one Remove Metadata's output may keep
@@ -317,6 +321,10 @@ impl Stream {
                     tags.fields.insert(MetaField::Other);
                 }
             },
+            // Not reported here: the tool that leaves it out says so.
+            "video" if self.attachment == Some(Attachment::Image) => {
+                tags.image_tracks.insert(index);
+            }
             // Camera telemetry: GoPro's GPMF and the camera motion track
             // hold the position; a timecode track the time of day. A
             // QuickTime text track is the chapter track FFmpeg, iTunes and
@@ -658,6 +666,31 @@ format.tags.ARTIST="Director"
 format.tags.ENCODER="Lavf60.16.100"
 "#;
 
+    /// An MKV whose PNG attachment a copy (`-map 0 -c copy`) turned into a
+    /// video track: it keeps the attachment's tags, not its cover-art mark.
+    /// 6.1.1 prints the same.
+    const COPIED_COVER_MKV: &str = r#"streams.stream.0.index=0
+streams.stream.0.codec_type="video"
+streams.stream.0.codec_tag_string="[0][0][0][0]"
+streams.stream.0.disposition.attached_pic=0
+streams.stream.0.tags.ENCODER="Lavc60.31.102 libx264"
+streams.stream.0.tags.DURATION="00:00:01.200000000"
+streams.stream.1.index=1
+streams.stream.1.codec_type="audio"
+streams.stream.1.codec_tag_string="[0][0][0][0]"
+streams.stream.1.disposition.attached_pic=0
+streams.stream.1.tags.ENCODER="Lavc60.31.102 aac"
+streams.stream.1.tags.DURATION="00:00:01.244000000"
+streams.stream.2.index=2
+streams.stream.2.codec_type="video"
+streams.stream.2.codec_tag_string="MPNG"
+streams.stream.2.disposition.attached_pic=0
+streams.stream.2.tags.FILENAME="cover.png"
+streams.stream.2.tags.MIMETYPE="image/png"
+streams.stream.2.tags.DURATION="00:00:00.177000000"
+format.tags.ENCODER="Lavf60.16.100"
+"#;
+
     /// H.264 and AAC with two chapters and a title (`-map_chapters` from an
     /// FFmpeg metadata file): the MP4 muxer writes the chapters as a
     /// QuickTime text track too. 6.1.1 adds a `vendor_id` to each track
@@ -783,6 +816,7 @@ format.tags.encoder="Lavf60.16.100"
                 apple_keys: false,
                 bext: false,
                 font_streams: BTreeSet::new(),
+                image_tracks: BTreeSet::new(),
                 chapters: 0,
                 unlisted: true,
             }
@@ -911,6 +945,7 @@ format.tags.encoder="Lavf60.16.100"
                 apple_keys: false,
                 bext: false,
                 font_streams: BTreeSet::from([4]),
+                image_tracks: BTreeSet::new(),
                 chapters: 2,
                 unlisted: true,
             }
@@ -938,6 +973,34 @@ format.tags.encoder="Lavf60.16.100"
             let tags = parse(&MOVIE_MKV.replace("application/x-truetype-font", font));
             assert_eq!(tags.font_streams, BTreeSet::from([4]), "{font}");
         }
+    }
+
+    #[test]
+    fn a_cover_copied_into_a_video_track_is_told_apart() {
+        let tags = parse(COPIED_COVER_MKV);
+        assert_eq!(tags.image_tracks, BTreeSet::from([2]));
+        // Its tags aren't fields; the tool that drops it reports it.
+        assert_eq!(tags.fields, set([Software]));
+        // Only an image's type counts, in any case.
+        for (mime, image) in [
+            ("IMAGE/JPEG", true),
+            ("font/ttf", false),
+            ("application/octet-stream", false),
+            ("", false),
+        ] {
+            let tags = parse(&COPIED_COVER_MKV.replace("image/png", mime));
+            assert_eq!(tags.image_tracks.contains(&2), image, "{mime:?}");
+        }
+        // Cover art is cover art, whatever its tags; an image attachment
+        // isn't a video track.
+        let marked = COPIED_COVER_MKV.replace(
+            "2.disposition.attached_pic=0",
+            "2.disposition.attached_pic=1",
+        );
+        assert!(parse(&marked).image_tracks.is_empty());
+        let attached = MOVIE_MKV.replace("application/x-truetype-font", "image/png");
+        assert!(parse(&attached).image_tracks.is_empty());
+        assert!(parse(MOVIE_MKV).image_tracks.is_empty());
     }
 
     #[test]

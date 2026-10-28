@@ -221,9 +221,9 @@ pub(super) fn strip(
 ///   every `mov_text` subtitle;
 /// - M4A: every audio track;
 /// - MKV: every video that isn't cover art (an image attachment is cover
-///   art to the demuxer, and so is a still image beside real video: a
-///   cover FFmpeg copied as a one-frame video track, [`picture`]), audio
-///   track and subtitle, and the fonts its subtitles need;
+///   art to the demuxer, and so is one a copy turned into a video track,
+///   [`copied_covers`]), audio track and subtitle, and the fonts its
+///   subtitles need;
 /// - MP3, FLAC and WAV: the audio.
 ///
 /// Cover art goes (its JPEG keeps the camera's EXIF, and Grape's FFmpeg
@@ -239,10 +239,7 @@ pub(super) fn stripped<'a>(
         .iter()
         .find(|s| s.kind == StreamKind::Audio)
         .map(|s| s.index);
-    let real_video = probe
-        .streams
-        .iter()
-        .any(|s| s.kind == StreamKind::Video && !s.attached_pic && !is_still(s));
+    let covers = copied_covers(to, probe, tags);
     probe.streams.iter().filter(move |s| {
         let video = s.kind == StreamKind::Video && !s.attached_pic;
         let audio = s.kind == StreamKind::Audio;
@@ -250,7 +247,7 @@ pub(super) fn stripped<'a>(
             Format::Mp4 | Format::Mov => video || audio || is_mov_text(s),
             Format::M4a => audio,
             Format::Mkv => {
-                (video && !(real_video && is_still(s)))
+                (video && !covers.contains(&s.index))
                     || audio
                     || s.kind == StreamKind::Subtitle
                     || (s.kind == StreamKind::Attachment && tags.font_streams.contains(&s.index))
@@ -258,6 +255,28 @@ pub(super) fn stripped<'a>(
             _ => Some(s.index) == first_audio,
         }
     })
+}
+
+/// The video tracks [`stripped`] leaves out of an MKV as cover art: each
+/// image attachment a copy turned into a video track, which comes back
+/// without the cover-art mark but with the attachment's MIME type
+/// ([`Tags::image_tracks`]) and one frame. Only a still image
+/// ([`STILL_CODECS`]) and only beside a video that isn't one, so a cover
+/// that is the only video stays, and a camera's MJPEG track, which carries
+/// no MIME type, is video.
+pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> {
+    if to != Format::Mkv {
+        return Vec::new();
+    }
+    let (covers, videos): (Vec<&StreamInfo>, Vec<&StreamInfo>) = probe
+        .streams
+        .iter()
+        .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
+        .partition(|s| is_still(s) && tags.image_tracks.contains(&s.index));
+    if videos.is_empty() {
+        return Vec::new();
+    }
+    covers.iter().map(|s| s.index).collect()
 }
 
 /// `RG`: the tags a change of loudness or channels makes wrong, blanked
@@ -1405,34 +1424,67 @@ pub(super) mod tests {
         );
         assert_eq!(stripped(Format::M4a, &two, &Tags::default()).count(), 2);
         assert_eq!(stripped(Format::Mp3, &two, &Tags::default()).count(), 1);
-        // In an MKV, a still image beside real video is a cover FFmpeg
-        // copied as a video track; alone, it's the video.
-        let indexes = |to, probe: &Probe| -> Vec<u32> {
-            stripped(to, probe, &Tags::default())
-                .map(|s| s.index)
-                .collect()
+    }
+
+    #[test]
+    fn strip_leaves_out_an_mkvs_cover_a_copy_made_a_video_track() {
+        let indexes = |to, probe: &Probe, tags: &Tags| -> Vec<u32> {
+            stripped(to, probe, tags).map(|s| s.index).collect()
         };
-        let copied = |format_name| {
+        let mkv = |videos: [&str; 2]| {
             probe_of(
-                format_name,
+                "matroska,webm",
                 vec![
-                    stream(0, StreamKind::Video, "h264"),
+                    stream(0, StreamKind::Video, videos[0]),
                     stream(1, StreamKind::Audio, "aac"),
-                    stream(2, StreamKind::Video, "png"),
+                    stream(2, StreamKind::Video, videos[1]),
                 ],
             )
         };
-        assert_eq!(indexes(Format::Mkv, &copied("matroska,webm")), [0, 1]);
-        let still = probe_of(
+        // The tags probe found the attachment's image MIME type on track 2.
+        let copied = Tags {
+            image_tracks: BTreeSet::from([2]),
+            ..Tags::default()
+        };
+        // (videos, whether track 2 has the MIME type, whether it's left out)
+        let cases = [
+            // H.264 and a copied PNG or JPEG cover.
+            (["h264", "png"], true, true),
+            (["h264", "mjpeg"], true, true),
+            // A camera's MJPEG track says no MIME type: video.
+            (["h264", "mjpeg"], false, false),
+            // MJPEG as the movie, and a copied cover.
+            (["mjpeg", "png"], true, true),
+            // A track with an image's type that isn't coded as an image.
+            (["h264", "h264"], true, false),
+            // Two stills, the movie one of them: nothing to tell apart.
+            (["mjpeg", "mjpeg"], false, false),
+        ];
+        for (videos, typed, left_out) in cases {
+            let probe = mkv(videos);
+            let tags = if typed { &copied } else { &Tags::default() };
+            let kept: &[u32] = if left_out { &[0, 1] } else { &[0, 1, 2] };
+            assert_eq!(indexes(Format::Mkv, &probe, tags), kept, "{videos:?}");
+            let covers = copied_covers(Format::Mkv, &probe, tags);
+            assert_eq!(covers, if left_out { vec![2] } else { vec![] });
+        }
+        // A copied cover that is the only video stays.
+        let alone = probe_of(
             "matroska,webm",
             vec![
-                stream(0, StreamKind::Video, "mjpeg"),
-                stream(1, StreamKind::Audio, "aac"),
+                stream(0, StreamKind::Audio, "aac"),
+                stream(2, StreamKind::Video, "png"),
             ],
         );
-        assert_eq!(indexes(Format::Mkv, &still), [0, 1]);
-        let mp4 = copied("mov,mp4,m4a,3gp,3g2,mj2");
-        assert_eq!(indexes(Format::Mp4, &mp4), [0, 1, 2]);
+        assert_eq!(indexes(Format::Mkv, &alone, &copied), [0, 2]);
+        assert!(copied_covers(Format::Mkv, &alone, &copied).is_empty());
+        // Only an MKV: an M4A leaves out every video by its own rule.
+        let mp4 = probe_of("mov,mp4,m4a,3gp,3g2,mj2", mkv(["h264", "png"]).streams);
+        assert_eq!(indexes(Format::Mp4, &mp4, &copied), [0, 1, 2]);
+        assert_eq!(indexes(Format::M4a, &mp4, &copied), [1]);
+        for to in [Format::Mp4, Format::M4a] {
+            assert!(copied_covers(to, &mp4, &copied).is_empty(), "{to:?}");
+        }
     }
 
     #[test]
