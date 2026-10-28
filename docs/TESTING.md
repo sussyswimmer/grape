@@ -448,7 +448,7 @@ Release, M9 (mac; on the first draft with the DMG; `PLATFORM_WINDOWS.md` → "Re
 - [ ] mac: optional, on a fresh copy from the DMG: the notes' `xattr -dr com.apple.quarantine /Applications/Grape.app` instead of Open Anyway → Grape opens with no dialog.
 - [ ] mac: download `grape-ffmpeg-macos-universal.zip` from the draft and double-click it → the folder holds the `ffmpeg-` and `ffprobe-` files for `aarch64-`, `x86_64-` and `universal-apple-darwin`, both `BUILDINFO-macos-*.txt`, `SHA256SUMS` and `licenses/ffmpeg/`; `ls -l` shows the six programs executable, and `shasum -a 256 -c SHA256SUMS` there prints OK for all six.
 - [ ] mac: the notes' uninstall: turn off launch at login in Settings (System Settings → General → Login Items no longer lists Grape), quit Grape from its menu and drag it to the Trash → no Grape process is left, and `~/Library/Application Support/io.github.sussyswimmer.grape/settings.json` is still there. Note any other `io.github.sussyswimmer.grape` folder under `~/Library`, for the notes.
-- [ ] mac: publish → the release page offers `Grape-macOS-universal.dmg`. If any item above failed, delete the DMG from the draft first, and from the notes the macOS section and the sentences about the Mac or the DMG.
+- [ ] mac: publish → the release page offers `Grape-macOS-universal.dmg`. If any item above failed, first delete the DMG from the draft and the notes' Mac parts (`PLATFORM_WINDOWS.md` → "Releasing", step 7).
 
 Drag + wheel
 - [ ] Drag a file from Finder/Explorer → tap the conversions key → the wheel appears at the cursor, clamped on screen.

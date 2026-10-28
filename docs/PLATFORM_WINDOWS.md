@@ -228,7 +228,10 @@ A version tag makes a draft release. `.github/workflows/release.yml` builds the 
    - Download `Grape-Setup-x64.exe` and `SHA256SUMS.txt` from the draft, and check the hash with the PowerShell line in the notes.
    - Install it on a clean standard user account (no admin rights), go through SmartScreen, and convert a file.
    - On a Mac, download `Grape-macOS-universal.dmg` and `SHA256SUMS.txt`, check the hash with the Terminal line in the notes, open Grape through Privacy & Security → **Open Anyway**, and convert a file.
-7. Edit the draft: replace the TODO under "What's new". If the Mac checks haven't passed yet, delete `Grape-macOS-universal.dmg` from the draft, and from the notes the macOS section and the sentences about the Mac or the DMG (D45). `SHA256SUMS.txt` keeps the DMG's line.
+7. Edit the draft: replace the TODO under "What's new". If the Mac checks haven't passed yet, take the Mac off the draft (D45):
+   - Delete `Grape-macOS-universal.dmg` from its files.
+   - In the notes, delete the `## macOS` section, the last sentence under "Offline" (it starts "On a Mac"), and the two sentences under "Source and licenses" that start "The DMG carries" and "On a Mac". The rest of the notes fits a Windows-only release.
+   - `SHA256SUMS.txt` keeps the DMG's line.
 8. Publish it.
 
 If the version check fails, nothing was built or released. Delete the tag (`git tag -d vX.Y.Z`, then `git push --delete origin vX.Y.Z`), fix the versions, commit and tag again. To run a tag again after a runner or network failure, use Actions → Release → Run workflow and type the tag. That button shows only once `release.yml` is on the repo's default branch. Before that, open the failed run and click **Re-run failed jobs**. A fix in the code needs a new version, because a tag stays where it is.

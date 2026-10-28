@@ -1,4 +1,4 @@
-Grape is a free, open-source file converter for Windows and macOS that lives in the tray, or in the menu bar on a Mac. Drag a file, tap a key, and drop it on the wheel: the converted copy appears next to the original.
+Grape is a free, open-source file converter. Drag a file, tap a key, and drop it on the wheel: the converted copy appears next to the original.
 
 ## What's new in {{VERSION}}
 
