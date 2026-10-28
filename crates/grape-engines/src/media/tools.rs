@@ -887,11 +887,14 @@ mod tests {
             }
         }
 
-        /// Runs the job, returning every progress value reported.
+        /// Runs the job, returning every progress value reported. Every
+        /// job, whatever its end, leaves no FFmpeg slot held: checked here,
+        /// while no other test can take one.
         fn run(&self) -> (Result<JobOutcome, GrapeError>, Vec<f32>) {
             let _serial = one_at_a_time();
             let mut seen = Vec::new();
             let result = crate::run_job(&self.job, &ctx(), &mut |f| seen.push(f));
+            assert_eq!(slots_held(), 0, "{result:?}");
             (result, seen)
         }
 
@@ -961,7 +964,6 @@ mod tests {
         assert_eq!(err.user_message, "silent.mov has no sound to remove.");
         // The probe and the tags probe: no slot, no temp file, no bar.
         assert_eq!(ran().len(), 2);
-        assert_eq!(slots_held(), 0);
         assert!(seen.is_empty());
         assert!(!case.dest().exists());
         case.assert_clean();
@@ -1294,7 +1296,6 @@ mod tests {
             assert_eq!(err.user_message, message);
             assert_eq!(ran().len(), 2, "{message}");
             assert!(seen.is_empty());
-            assert_eq!(slots_held(), 0);
             case.assert_clean();
         }
         let case = channels_case("song.m4a", Channels::Mono);
@@ -1463,7 +1464,6 @@ mod tests {
             assert_eq!(err.user_message, message);
             // Only the measure ran, and nothing was created.
             assert_eq!(ran().len(), 3);
-            assert_eq!(slots_held(), 0);
             assert!(!case.dest().exists());
             case.assert_clean();
         }
@@ -1593,7 +1593,6 @@ mod tests {
         assert_eq!(err.user_message, "song.mp3 is already compact. Try Small.");
         assert!(err.detail.contains("901 bytes from 1000"), "{}", err.detail);
         assert!(!case.dest().exists());
-        assert_eq!(slots_held(), 0);
         case.assert_clean();
 
         // At Small there's nothing smaller to suggest.
@@ -1637,7 +1636,6 @@ mod tests {
             assert_eq!(err.user_message, message);
             assert_eq!(ran().len(), 2);
             assert!(seen.is_empty());
-            assert_eq!(slots_held(), 0);
             case.assert_clean();
         }
         // The container's rate stands in for a stream without one.
@@ -1804,7 +1802,6 @@ mod tests {
             assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
             assert_eq!(err.user_message, message);
             assert!(!case.dest().exists());
-            assert_eq!(slots_held(), 0);
             case.assert_clean();
         }
 
