@@ -282,6 +282,7 @@ impl Tiff {
             ifds: 0,
             entries: 0,
             blocks: 0,
+            samples_read: 0,
         };
         let mut pages = Vec::new();
         let mut at_pages = HashSet::new();
@@ -518,6 +519,10 @@ struct Walk<'r> {
     ifds: usize,
     entries: usize,
     blocks: usize,
+    /// Bytes of BitsPerSample arrays read to size strips that don't say
+    /// their byte counts, at most the file's size: pages can all point at
+    /// one long array.
+    samples_read: u64,
 }
 
 impl Walk<'_> {
@@ -775,7 +780,17 @@ impl Walk<'_> {
         let spp = get(277).unwrap_or(1);
         let planar = get(284).unwrap_or(1) == 2;
         let bps = match ifd.get(258).cloned() {
-            Some(bps) => self.uints(&bps, MAX_SAMPLES)?,
+            Some(bps) => {
+                if let Value::At { len, .. } = bps.value {
+                    self.samples_read = self.samples_read.saturating_add(len);
+                    if self.samples_read > self.layout.len {
+                        return Err(Error::TooLarge(
+                            "BitsPerSample read past the file's size".into(),
+                        ));
+                    }
+                }
+                self.uints(&bps, MAX_SAMPLES)?
+            }
             None => vec![1],
         };
         let overflow = || unsure("sizes past any file");
@@ -1239,6 +1254,31 @@ mod tests {
         into_ifd.counts = Some(vec![1, 1]);
         let file = Builder::new(b'I', false, vec![into_ifd]).build();
         assert!(matches!(read(&file), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn bits_per_sample_is_read_at_most_the_files_size_in_all() {
+        // Pages that don't say their byte counts, each pointing its
+        // BitsPerSample at one array of 1,000 numbers: 8, then zeros.
+        let mut page = gray(1, 1, 1, vec![B::data(&[7])]);
+        page.counts = Some(Vec::new());
+        let share = |n: usize| {
+            let mut file = Builder::new(b'I', false, vec![page.clone(); n]).build();
+            let ats: Vec<u64> = read(&file).unwrap().pages.iter().map(|p| p.at).collect();
+            file.resize(file.len().next_multiple_of(2), 0);
+            let array = file.len() as u64;
+            file.extend_from_slice(&8u16.to_le_bytes());
+            file.resize(file.len() + 999 * 2, 0);
+            for at in ats {
+                set_entry(&mut file, at, 258, 1_000, array);
+            }
+            file
+        };
+        // One page reads it once, within the file's size.
+        let one = share(1);
+        assert_eq!(read(&one).unwrap().pages[0].blocks[0].len, 1);
+        // 64 pages would read it 64 times: 125 KiB of a 7 KiB file.
+        assert!(matches!(read(&share(64)), Err(Error::TooLarge(_))));
     }
 
     #[test]
