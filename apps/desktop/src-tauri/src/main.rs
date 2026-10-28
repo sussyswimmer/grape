@@ -113,21 +113,28 @@ fn first_arg_is(mut args: impl Iterator<Item = OsString>, flag: &str) -> bool {
 fn heif_worker() -> ExitCode {
     use grape_platform::macos::heif::ImageIo;
 
-    // Before ImageIO does anything else, on this one thread.
-    ImageIo::restrict_process();
-    arm_heif_heap();
-    grape_heif_proto::worker_main(&ImageIo)
+    run_heif_worker(ImageIo::restrict_process, || {
+        grape_heif_proto::worker_main(&ImageIo)
+    })
 }
 
-/// The Mac worker's memory cap (D41): the heap bound the PDF worker has,
-/// at `grape_heif_proto::WORKER_HEAP_BYTES` (2 GiB), for every op. rav1e's
+/// The image helper worker's steps, in order, on every OS so that a test
+/// runs the same path [`heif_worker`] does: `restrict` (on macOS ImageIO's
+/// allowed types, before ImageIO does anything else and while the worker
+/// has one thread), then the worker's memory cap, then `serve` (the
+/// protocol's one job), whose exit code it returns.
+///
+/// The cap (D41) is the heap bound the PDF worker has, at
+/// `grape_heif_proto::WORKER_HEAP_BYTES` (2 GiB), for every op. rav1e's
 /// encoder and Grape's buffers are Rust's heap; ImageIO's own `malloc`
 /// isn't counted. Past the bound the worker exits with
 /// `heap::OVER_HEAP_EXIT`, which the parent reports as "needs too much
 /// memory".
 #[cfg(any(target_os = "macos", test))]
-fn arm_heif_heap() {
+fn run_heif_worker(restrict: impl FnOnce(), serve: impl FnOnce() -> ExitCode) -> ExitCode {
+    restrict();
     heap::arm(grape_heif_proto::WORKER_HEAP_BYTES);
+    serve()
 }
 
 /// Elsewhere the image helper is `grape-heif.exe` (Windows) or none, so
@@ -230,31 +237,39 @@ mod tests {
     const HEAP_CHILD: &str = "GRAPE_TEST_HEIF_HEAP_CHILD";
 
     /// Not a test: the child [`the_mac_worker_arms_its_heap_bound`] runs
-    /// (`--exact … --ignored`). It arms the Mac worker's bound, then asks
-    /// for a block just under it, which it gets (only reserved, never
-    /// touched), and one just over it, which ends the process with
-    /// `OVER_HEAP_EXIT` before the system allocator sees it.
+    /// (`--exact … --ignored`). It runs the worker's own steps,
+    /// [`run_heif_worker`], with a `serve` that asks for a block just under
+    /// the bound, which it gets (only reserved, never touched), and one
+    /// just over it, which ends the process with `OVER_HEAP_EXIT` before
+    /// the system allocator sees it.
     #[test]
     #[ignore = "the heap bound's child process, run by the test below"]
     fn heif_heap_child() {
         if std::env::var_os(HEAP_CHILD).is_none() {
             return;
         }
-        arm_heif_heap();
-        let bound = usize::try_from(grape_heif_proto::WORKER_HEAP_BYTES).unwrap();
-        let under: Vec<u8> = Vec::with_capacity(bound - (64 << 20));
-        drop(under);
-        println!("under the bound");
-        let over: Vec<u8> = Vec::with_capacity(bound + 1);
-        drop(over);
-        println!("over the bound");
+        let code = run_heif_worker(
+            || println!("restricted"),
+            || {
+                let bound = usize::try_from(grape_heif_proto::WORKER_HEAP_BYTES).unwrap();
+                let under: Vec<u8> = Vec::with_capacity(bound - (64 << 20));
+                drop(under);
+                println!("under the bound");
+                let over: Vec<u8> = Vec::with_capacity(bound + 1);
+                drop(over);
+                println!("over the bound");
+                ExitCode::SUCCESS
+            },
+        );
+        println!("served: {code:?}");
     }
 
-    /// The Mac worker's heap bound (D41), armed by [`heif_worker`] through
-    /// [`arm_heif_heap`]: 2 GiB, and past it the exit code the parent
-    /// reads as "needs too much memory". The child is this test binary, so
-    /// the bound never touches the other tests. (The worker itself is
-    /// macOS only; the arm and the allocator are the same on every OS.)
+    /// The Mac worker's heap bound (D41), armed by [`run_heif_worker`],
+    /// which [`heif_worker`] runs: 2 GiB, after `restrict` and before
+    /// `serve`, and past it the exit code the parent reads as "needs too
+    /// much memory". The child is this test binary, so the bound never
+    /// touches the other tests. (The worker itself is macOS only; its
+    /// steps, the arm and the allocator are the same on every OS.)
     #[test]
     fn the_mac_worker_arms_its_heap_bound() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -271,8 +286,11 @@ mod tests {
             .unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert_eq!(output.status.code(), Some(heap::OVER_HEAP_EXIT), "{stdout}");
-        assert!(stdout.contains("under the bound"), "{stdout}");
+        let restricted = stdout.find("restricted").expect(&stdout);
+        let under = stdout.find("under the bound").expect(&stdout);
+        assert!(restricted < under, "{stdout}");
         assert!(!stdout.contains("over the bound"), "{stdout}");
+        assert!(!stdout.contains("served"), "{stdout}");
     }
 
     #[cfg(unix)]
