@@ -402,7 +402,16 @@ fn with_sta<T>(work: impl FnOnce() -> Result<T, PlatformError>) -> Result<T, Pla
 }
 
 fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
-    let Some(to) = pick_move_folder(sources)? else {
+    // One owner for the picker and the move's own progress and name-clash
+    // dialogs, alive until both are done: see `pick_move_folder`.
+    let topmost = TopmostOwner::new();
+    if let Err(err) = &topmost {
+        log::warn!(
+            "Move's dialogs have no topmost owner ({err}), so they may open behind other windows"
+        );
+    }
+    let owner = topmost.as_ref().ok().map(|topmost| topmost.0);
+    let Some(to) = pick_move_folder(sources, owner)? else {
         return Ok(MoveOutcome::Cancelled);
     };
     let sources: Vec<&Path> = sources
@@ -416,7 +425,7 @@ fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
     if crosses_drives(&sources, &to) && !confirm_other_drive() {
         return Ok(MoveOutcome::Cancelled);
     }
-    move_items(&sources, &to)
+    move_items(&sources, &to, owner)
 }
 
 /// Move's folder picker, starting next to the first item. `None` when the
@@ -424,26 +433,23 @@ fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
 ///
 /// After a drop Grape has no right to the foreground (the drop was
 /// Explorer's input, not Grape's), so a picker with no owner can open
-/// behind Explorer with only a flashing taskbar button. A [`TopmostOwner`]
-/// makes it topmost: in front, inactive until clicked. Grape never calls
-/// `SetForegroundWindow` or makes up input for it. Without that owner the
-/// picker still opens, as before, and the log says why. What staying
-/// topmost costs (no taskbar button, and which window Windows activates
-/// when it closes) is in `docs/PLATFORM_WINDOWS.md` → Move.
-fn pick_move_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
+/// behind Explorer with only a flashing taskbar button. `owner`, a
+/// [`TopmostOwner`] from `choose_and_move`, makes it topmost: in front,
+/// inactive until clicked. Grape never calls `SetForegroundWindow` or makes
+/// up input for it. Without that owner the picker still opens, as before,
+/// and the log says why. What staying topmost costs (no taskbar button, and
+/// which window Windows activates when it closes) is in
+/// `docs/PLATFORM_WINDOWS.md` → Move.
+fn pick_move_folder(
+    sources: &[PathBuf],
+    owner: Option<HWND>,
+) -> Result<Option<PathBuf>, PlatformError> {
     let start = sources.first().and_then(|source| source.parent());
-    let owner = TopmostOwner::new();
-    if let Err(err) = &owner {
-        log::warn!(
-            "Move's folder picker has no topmost owner ({err}), so it may open behind other windows"
-        );
-    }
-    // `owner` lives until the picker has closed, whatever it returns.
-    let hwnd = owner.as_ref().ok().map(|owner| owner.0);
-    folder_dialog(hwnd, &picker_title(sources), Some(w!("Move here")), start)
+    folder_dialog(owner, &picker_title(sources), Some(w!("Move here")), start)
 }
 
-/// An invisible window on this thread that owns Move's folder picker: a
+/// An invisible window on this thread that owns Move's folder picker and
+/// its file operation's progress and name-clash dialogs: a
 /// 1 × 1 topmost tool-window popup that's never shown, at the middle of
 /// the work area under the cursor (so a picker centered on its owner opens
 /// on the drop's monitor; the top-left of the primary one if that can't be
@@ -663,12 +669,25 @@ fn confirm_other_drive() -> bool {
 }
 
 /// Moves `sources` into `to` with the shell's file operation: its own
-/// progress, its own name-clash questions, and undo.
-fn move_items(sources: &[&Path], to: &Path) -> Result<MoveOutcome, PlatformError> {
+/// progress, its own name-clash questions, and undo. Those dialogs are
+/// owned by `owner` (Move's [`TopmostOwner`]), so they open in front as
+/// the picker does; with none they're the shell's own, as before.
+fn move_items(
+    sources: &[&Path],
+    to: &Path,
+    owner: Option<HWND>,
+) -> Result<MoveOutcome, PlatformError> {
     // SAFETY: creates the shell's file operation on this STA thread.
     let operation: IFileOperation =
         unsafe { CoCreateInstance(&FileOperation, None, CLSCTX_INPROC_SERVER) }
             .map_err(|err| os_err("CoCreateInstance(FileOperation)", &err))?;
+    if let Some(owner) = owner {
+        // SAFETY: a live operation and a window this thread made, which
+        // outlives the operation (choose_and_move holds it).
+        if let Err(err) = unsafe { operation.SetOwnerWindow(owner) } {
+            log::warn!("Move's progress and name-clash dialogs have no owner: {err}");
+        }
+    }
     let reports = Arc::new(Mutex::new(Vec::new()));
     let sink: IFileOperationProgressSink = MoveLog(Arc::clone(&reports)).into();
     let folder = HSTRING::from(to.as_os_str());
@@ -1289,7 +1308,8 @@ mod tests {
         let one = scratch.file("one.txt");
         let two = scratch.file("two.txt");
         let into = scratch.folder("into");
-        let outcome = with_sta(|| move_items(&[one.as_path(), two.as_path()], &into)).unwrap();
+        let outcome =
+            with_sta(|| move_items(&[one.as_path(), two.as_path()], &into, None)).unwrap();
         let MoveOutcome::Moved {
             to,
             moved,
@@ -1318,7 +1338,7 @@ mod tests {
         let trip = scratch.folder("trip");
         std::fs::write(trip.join("a.jpg"), b"grape").unwrap();
         let into = scratch.folder("into");
-        let outcome = with_sta(|| move_items(&[trip.as_path()], &into)).unwrap();
+        let outcome = with_sta(|| move_items(&[trip.as_path()], &into, None)).unwrap();
         let MoveOutcome::Moved {
             moved, unsure, of, ..
         } = outcome
