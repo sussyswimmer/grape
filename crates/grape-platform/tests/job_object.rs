@@ -11,7 +11,10 @@
 //! `ui_limits_are_set_unless_the_helper_is_already_in_a_job` checks both
 //! cases; CI's heif-it-windows job runs this binary outside cargo too, with
 //! `GRAPE_TEST_JOB_UI=1`, so the UI-limited job, the one an installed
-//! Grape makes, is tested as well.
+//! Grape makes, is tested as well. GitHub's runner starts every step inside
+//! a job of its own, so there the child is started to break away from it;
+//! if that job doesn't allow it, the test says so with a warning (the PC
+//! checks that case: TESTING.md → "HEIC, D33").
 //!
 //! With `--features heif-it` and `GRAPE_TEST_HEIF` set to `grape-heif.exe`,
 //! one more test encodes HEVC level 6.2's largest picture under Grape's
@@ -42,8 +45,19 @@ const MIB: u64 = 1024 * 1024;
 /// What the child test does once it reads its go-ahead.
 const CHILD_ENV: &str = "GRAPE_TEST_JOB_CHILD";
 
+/// `CREATE_BREAKAWAY_FROM_JOB`: the child starts outside the jobs this
+/// process is in, or doesn't start when one of them doesn't allow that.
+const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+
 /// This test binary, running only `test`, held on stdin.
 fn spawn_child(test: &str, task: &str) -> Child {
+    spawn_child_with(test, task, 0).unwrap()
+}
+
+/// [`spawn_child`] with these process creation flags.
+fn spawn_child_with(test: &str, task: &str, flags: u32) -> std::io::Result<Child> {
+    use std::os::windows::process::CommandExt;
+
     Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -54,11 +68,11 @@ fn spawn_child(test: &str, task: &str) -> Child {
             "-q",
         ])
         .env(CHILD_ENV, task)
+        .creation_flags(flags)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .unwrap()
 }
 
 /// Lets a held child go.
@@ -223,10 +237,24 @@ fn a_helper_already_in_a_job_gets_a_nested_one_with_its_limits() {
 
 /// The UI limits are set exactly when the helper is in no other job. Under
 /// cargo it always is; CI also runs this outside cargo with
-/// `GRAPE_TEST_JOB_UI=1`, which insists on the UI-limited case.
+/// `GRAPE_TEST_JOB_UI=1`, which insists on the UI-limited case: the child
+/// breaks away from the runner's own job, or the test warns that it can't.
 #[test]
 fn ui_limits_are_set_unless_the_helper_is_already_in_a_job() {
-    let mut child = spawn_child("job_child", "sleep");
+    let insist = std::env::var_os("GRAPE_TEST_JOB_UI").is_some_and(|v| v == "1");
+    let (mut child, broke_away) = if insist {
+        match spawn_child_with("job_child", "sleep", CREATE_BREAKAWAY_FROM_JOB) {
+            Ok(child) => (child, true),
+            Err(err) => {
+                println!(
+                    "::warning::GRAPE_TEST_JOB_UI=1, but this process's job lets no child break away ({err}), so the UI-limited job isn't tested here; the PC checks it (TESTING.md, HEIC, D33)"
+                );
+                (spawn_child("job_child", "sleep"), false)
+            }
+        }
+    } else {
+        (spawn_child("job_child", "sleep"), false)
+    };
     let nested = in_a_job(&child);
     let job = JobGuard::assign(&child, Some(512 * MIB)).unwrap();
     println!(
@@ -238,10 +266,10 @@ fn ui_limits_are_set_unless_the_helper_is_already_in_a_job() {
         }
     );
     assert_eq!(job.has_ui_limits(), !nested);
-    if std::env::var_os("GRAPE_TEST_JOB_UI").is_some_and(|v| v == "1") {
+    if broke_away {
         assert!(
             !nested,
-            "GRAPE_TEST_JOB_UI=1, but the helper started inside a job: run this binary outside cargo (or the runner itself runs steps in a job)"
+            "GRAPE_TEST_JOB_UI=1 and the helper broke away, but it's still inside a job: run this binary outside cargo"
         );
     }
     drop(job);

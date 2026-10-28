@@ -218,10 +218,11 @@ jobs:
           GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
         run: cargo test -p grape-platform --features heif-it --test job_object --locked -- --nocapture
       # cargo runs its tests inside a job of its own, so above the helper's
-      # job is always nested, without UI limits. Run straight from here, the
-      # helper is in no other job, as in an installed Grape, and
-      # GRAPE_TEST_JOB_UI=1 makes the test insist on that (if this runner
-      # ran steps in a job, it would fail here and say so). The 35.6 MP
+      # job is always nested, without UI limits. The runner starts this step
+      # inside a job too, so with GRAPE_TEST_JOB_UI=1 the test starts its
+      # helper breaking away from it: then it's in no other job, as in an
+      # installed Grape, and must get the UI limits. If the runner's job
+      # doesn't allow that, the test warns and the PC checks it. The 35.6 MP
       # encode isn't run twice.
       - name: Job Object tests outside cargo (the UI-limited job)
         env:
@@ -261,15 +262,32 @@ jobs:
       - name: Build the test worker (ImageIO behind the HEIC protocol)
         run: cargo build -p grape-platform --features heif-it --bin grape-heif-worker --locked
       # The heif-it tests fail, not skip, without their variables.
+      # One test at a time, as the worker runs one job: the codec restricts
+      # ImageIO for the whole process before it first uses it.
       - name: ImageIO tests (libheif's fixtures)
         env:
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
-        run: cargo test -p grape-platform --features heif-it --locked --no-fail-fast
+        run: cargo test -p grape-platform --features heif-it --locked --no-fail-fast -- --test-threads=1
+      # Also after a failure above: the worker is a process of its own, so
+      # its jobs say what ImageIO did even if a test process crashed.
       - name: HEIC engine tests (the ImageIO worker)
+        if: ${{ !cancelled() }}
         env:
           GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
         run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast
+      # A crashed test or worker leaves a report naming the frame it died in.
+      - name: Crash reports
+        if: failure()
+        run: |
+          sleep 5
+          shopt -s nullglob
+          for f in ~/Library/Logs/DiagnosticReports/*.ips /Library/Logs/DiagnosticReports/*.ips; do
+            echo "::group::$(basename "$f")"
+            head -c 100000 "$f"
+            echo
+            echo "::endgroup::"
+          done
 
   # Grape's own FFmpeg (DECISIONS D24), built in this run: the Windows exes
   # cross-built on Linux, the two Mac halves on their own runners joined with

@@ -23,9 +23,10 @@
 //!   then writes one picture at ImageIO's lossy quality 0.8 by default. A
 //!   finish that fails is the same "this Mac can't write HEIC": that's how
 //!   ImageIO fails on hardware without an encoder that still lists the type.
-//! - Before its first decode the worker restricts ImageIO to the HEIF types
-//!   with `CGImageSourceSetAllowableTypes` on macOS 14.2 and later, looked
-//!   up with `dlsym`: a bound import would stop Grape from launching on
+//! - Before anything else it asks of ImageIO (its caps, a decode or an
+//!   encode) the worker restricts ImageIO to the HEIF types with
+//!   `CGImageSourceSetAllowableTypes` on macOS 14.2 and later, looked up
+//!   with `dlsym`: a bound import would stop Grape from launching on
 //!   macOS 13.
 //!
 //! Every op runs in its own autorelease pool, nothing logs, and no failure
@@ -75,6 +76,8 @@ pub struct ImageIo;
 
 impl Codec for ImageIo {
     fn caps(&self) -> Caps {
+        // Always before anything else ImageIO does in this process.
+        restrict_to_heif();
         autoreleasepool(|_| Caps {
             decode: can_read_heic(),
             encode: can_write_heic(),
@@ -98,6 +101,7 @@ impl Codec for ImageIo {
         quality: Option<u8>,
         _limits: &Limits,
     ) -> Result<Vec<u8>, Failure> {
+        restrict_to_heif();
         autoreleasepool(|_| encode(pixels, quality))
     }
 }
