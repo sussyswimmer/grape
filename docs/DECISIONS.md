@@ -973,7 +973,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - Photoshop's IRB is filtered down to paths, the clipping path, alpha channel names, resolution, guides and display info.
   - The DCF Adobe RGB Exif goes back when that's how the file signaled its color.
   - Exif, GPS, XMP, IPTC, GeoTIFF, Photoshop layers (37724) and every other tag are dropped and reported.
-  - Refused: DNG, old-style JPEG, metadata inside JPEG strips, and ImageJ/OME files, whose layout lives in their description.
+  - Refused: DNG, old-style JPEG, metadata inside JPEG strips, JPEG strips it can't check for metadata ("… has JPEG data Grape can't check for metadata yet.": segments or scans past the 64 KiB it reads, or a hierarchical JPEG), and ImageJ/OME files, whose layout lives in their description.
   - The output is re-read before publishing.
 - **Remove Metadata, HEIC:**
   - `meta` is rebuilt in place without its Exif, XMP and other metadata items, or the `udes`/`crtt`/`mdft` properties (`ipma` renumbered).
