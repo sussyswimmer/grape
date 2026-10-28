@@ -246,6 +246,8 @@ pub(crate) struct Builder {
     pub(crate) mdat_form: Form,
     /// More boxes at the end of `meta`.
     pub(crate) extra_meta: Vec<Vec<u8>>,
+    /// This many more `ipma` boxes after the first, empty.
+    pub(crate) more_ipma: usize,
     /// `meta`'s boxes left out.
     pub(crate) leave_out: Vec<[u8; 4]>,
     /// An item whose `iloc` entry is written twice.
@@ -281,6 +283,7 @@ impl Builder {
             meta_form: Form::Small,
             mdat_form: Form::Small,
             extra_meta: Vec::new(),
+            more_ipma: 0,
             leave_out: Vec::new(),
             iloc_twice: None,
             dinf: true,
@@ -452,7 +455,10 @@ impl Builder {
             }
         }
         let ipco = bx(b"ipco", &self.properties.concat());
-        let ipma = full(b"ipma", u8::from(wide), u32::from(self.wide_indices), &ipma);
+        let mut ipma = full(b"ipma", u8::from(wide), u32::from(self.wide_indices), &ipma);
+        for _ in 0..self.more_ipma {
+            ipma.extend_from_slice(&full(b"ipma", 0, 0, &[0; 4]));
+        }
         boxes.push((*b"iprp", bx(b"iprp", &[ipco, ipma].concat())));
         if !idat.is_empty() {
             boxes.push((*b"idat", bx(b"idat", idat)));

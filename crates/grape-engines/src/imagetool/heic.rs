@@ -632,6 +632,8 @@ fn rebuild_iprp(s: &Survey, child: &Child) -> Vec<u8> {
         renumbered[i + 1] = (i + 1 - gone) as u16;
     }
     let mut c = Vec::new();
+    // The ipma boxes, in iprp's order.
+    let mut maps = m.maps.iter().peekable();
     for (i, kid) in iprp.children.iter().enumerate() {
         if iprp.ipco == Some(i) {
             let mut ipco = Vec::new();
@@ -639,7 +641,7 @@ fn rebuild_iprp(s: &Survey, child: &Child) -> Vec<u8> {
                 ipco.extend_from_slice(&m.bytes[p.range.clone()]);
             }
             c.extend_from_slice(&boxed(b"ipco", kid.form, &ipco));
-        } else if let Some(map) = m.maps.iter().find(|map| map.child == i) {
+        } else if let Some(map) = maps.next_if(|map| map.child == i) {
             let start = kid.content().start;
             let mut ipma = m.bytes[start..start + 4].to_vec();
             let entries: Vec<_> = map
@@ -1540,6 +1542,29 @@ mod tests {
         let mut o = out.clone();
         o.push(0);
         assert!(matches!(check(&o), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn many_ipma_boxes_take_a_time_in_proportion() {
+        // The best of three runs with `n` empty ipma boxes.
+        let time = |n: usize| {
+            let mut b = described();
+            b.more_ipma = n;
+            let (src, _) = b.build();
+            (0..3)
+                .map(|_| {
+                    let started = std::time::Instant::now();
+                    let (out, _) = strip(&src);
+                    assert_eq!(meta(&out).maps.len(), n + 1);
+                    started.elapsed()
+                })
+                .min()
+                .unwrap()
+        };
+        // Eight times the boxes: 64 times the time if each looked through
+        // them all.
+        let (few, many) = (time(8_191), time(65_534));
+        assert!(many < few * 16, "{few:?}, then {many:?}");
     }
 
     #[test]
