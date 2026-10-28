@@ -386,7 +386,7 @@ const HELPERS: [Helper; 4] = [
         ships: cfg!(windows),
         with: with_heif,
     },
-    // 221 px in the title's 13 px semibold (Inter), of its 248.
+    // 221 px in the title's 13 px semibold (Inter), of its 246.
     Helper {
         title: "Grape's media converter is missing",
         detail: "Reinstalling Grape brings it back.",
@@ -603,8 +603,9 @@ fn finished(
             };
             // "2 already compact": the jobs that had nothing to do.
             let rest = (unchanged > 0).then(|| format!("{unchanged} {}", unchanged_words(jobs)));
-            // Only the jobs that wrote something count. The detail row is
-            // one line cut with an ellipsis, so where the files went leads.
+            // Only the jobs that wrote something count. Where the files
+            // went leads; a done toast's detail takes up to two lines
+            // (toast.css), so the count after a long name still shows.
             let fell_back = jobs
                 .iter()
                 .zip(results)
@@ -872,12 +873,15 @@ fn meta_word(field: MetaField) -> &'static str {
     }
 }
 
-/// The longest "Removed …" title with two names: 33 characters. The
-/// widest of those, "Removed camera and embedded media", is 247.9 px in
-/// the title's 13 px semibold, measured with Inter, and the toast's title
-/// has 248 px, so it fits with no room to spare. Segoe UI's and SF Pro's
-/// widths are QA items (TESTING.md → "Image tools, M4").
-const REMOVED_MAX: usize = 33;
+/// The longest "Removed …" title with two names: 32 characters. The
+/// toast's title has 246 px (320 − 8 for the pill's inset, 2 for its
+/// border, 42 for its padding and 22 for the dot and its gap), and
+/// "Removed camera and embedded media" (33) is 247.9 px in the title's
+/// 13 px semibold, measured with Inter, so it's cut. The widest title
+/// left, the fallback "Removed embedded media and 1 more", is 241.8 px.
+/// Segoe UI's and SF Pro's widths are QA items (TESTING.md → "Image
+/// tools, M4").
+const REMOVED_MAX: usize = 32;
 
 /// "1 link", "2 links".
 fn count(n: u32, one: &str, many: &str) -> String {
@@ -1823,22 +1827,39 @@ mod tests {
             removed_title(&[MetaField::Author, MetaField::Title, MetaField::Xmp], true),
             "Removed author, title and 1 more"
         );
+        // The longest that keeps two names: 32 characters, 239.1 px.
+        assert_eq!(
+            removed_title(
+                &[
+                    MetaField::Comment,
+                    MetaField::Xmp,
+                    MetaField::Thumbnail,
+                    MetaField::CoverArt,
+                    MetaField::Chapters,
+                    MetaField::Other,
+                ],
+                false
+            ),
+            "Removed comments, XMP and 4 more"
+        );
+        // 33 characters with two names, too wide: one name and a count.
         assert_eq!(
             removed_title(&[MetaField::Keywords, MetaField::Other], true),
-            "Removed keywords and other fields"
+            "Removed keywords and 1 more"
         );
-        // The widest that fits with two names: 33 characters.
+        // 247.9 px with two names, of the title's 246.
         assert_eq!(
             removed_title(&[MetaField::Embedded, MetaField::Camera], false),
-            "Removed camera and embedded media"
+            "Removed camera and 1 more"
         );
-        // 39 characters with two names.
+        // 39 characters with two names; the fallback, 33 characters, is
+        // the widest title there is: 241.8 px.
         assert_eq!(
             removed_title(&[MetaField::Other, MetaField::Embedded], false),
             "Removed embedded media and 1 more"
         );
-        // Every set of fields: at most 33 characters (the title has 248 px;
-        // the widest is 247.9 px in Inter's 13 px semibold).
+        // Every set of fields: two names only within 32 characters, and
+        // no title over 33 (the fallback above; the title has 246 px).
         for mask in 0u32..(1 << ALL_FIELDS.len()) {
             let fields: Vec<MetaField> = ALL_FIELDS
                 .iter()
@@ -1847,7 +1868,13 @@ mod tests {
                 .map(|(_, field)| *field)
                 .collect();
             let title = removed_title(&fields, false);
-            assert!(title.chars().count() <= REMOVED_MAX, "{title}");
+            // One name and a count: "Removed embedded media and 1 more".
+            let fallback = title.ends_with(" more") && !title.contains(", ");
+            let chars = title.chars().count();
+            assert!(
+                chars <= REMOVED_MAX || (fallback && chars <= REMOVED_MAX + 1),
+                "{title}"
+            );
         }
     }
 

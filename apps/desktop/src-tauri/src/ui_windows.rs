@@ -1,7 +1,7 @@
 //! Grape's webview windows: the hidden overlay, toast and tool panel
 //! (declared in tauri.conf.json) and the settings window (created on first
-//! use). The float shelf is built on first use in `float.rs`; the panel is
-//! shown and hidden in `panel.rs`.
+//! use). The float shelf is built in `float.rs` (on first use on Windows,
+//! at launch on macOS); the panel is shown and hidden in `panel.rs`.
 
 use std::sync::{Mutex, PoisonError};
 

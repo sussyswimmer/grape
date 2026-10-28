@@ -55,6 +55,8 @@ const ALONE = '.toast[data-tone="error"] .toast-title:only-child';
 const UNDER = '.toast[data-tone="error"] .toast-detail';
 /** An info toast's detail: "Nothing to change" over a tool's own sentence. */
 const INFO = '.toast[data-tone="info"] .toast-detail';
+/** A done toast's detail: an output's name, then "; 1 already compact". */
+const DONE = '.toast[data-tone="done"] .toast-detail';
 
 describe("toast.css", () => {
   it("keeps titles and details to one line, cut with an ellipsis", () => {
@@ -64,8 +66,8 @@ describe("toast.css", () => {
     }
   });
 
-  it("gives an error's title alone, an error's detail and an info toast's detail two lines", () => {
-    for (const selector of [ALONE, UNDER, INFO]) {
+  it("gives an error's title alone and an error's, an info toast's and a done toast's detail two lines", () => {
+    for (const selector of [ALONE, UNDER, INFO, DONE]) {
       const rule = declarations(selector);
       expect(rule.get("display"), selector).toBe("-webkit-box");
       expect(rule.get("-webkit-box-orient"), selector).toBe("vertical");
@@ -76,7 +78,7 @@ describe("toast.css", () => {
     }
   });
 
-  it("fits an error's, or an info toast's, three lines in the pill", () => {
+  it("fits an error's, an info toast's or a done toast's three lines in the pill", () => {
     // The window is 64 px (Rust sets it); the pill is 8 px shorter and has
     // a 1 px border.
     const pill = 64 - 8 - 2;
@@ -88,5 +90,6 @@ describe("toast.css", () => {
     expect(2 * line(ALONE, ".toast-title")).toBeLessThanOrEqual(pill);
     expect(title + gap + 2 * line(UNDER, ".toast-detail")).toBeLessThanOrEqual(pill - 6);
     expect(title + gap + 2 * line(INFO, ".toast-detail")).toBeLessThanOrEqual(pill - 6);
+    expect(title + gap + 2 * line(DONE, ".toast-detail")).toBeLessThanOrEqual(pill - 6);
   });
 });

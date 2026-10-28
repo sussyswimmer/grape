@@ -48,7 +48,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 - **Audio Channels** is Mono / Stereo, starting at Mono every time.
 - **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
 - **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder. Its panel opens once Grape's PDF library is found (D35).
-- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); for now on PDFs and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26), which say "No metadata found" when they had none. D26 adds JPG, PNG, WebP and GIF next.
+- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); on PDFs, on JPG, PNG, WebP and GIF (no helper needed), and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26); images and media say "No metadata found" when they had none.
 
 ## File actions
 
@@ -57,7 +57,7 @@ Actions work on any selection: folders, mixed types, files with no conversions *
 | Key | Title | macOS | Windows | Tier |
 |---|---|---|---|---|
 | share | AIRDROP → **SHARE** on Windows | `NSSharingService(named: .sendViaAirDrop)` with the file URLs | Windows share sheet (`IDataTransferManagerInterop::ShowShareUIForWindow`, owned by an invisible window of Grape's) → Nearby Share and apps. Files only: folders, shortcuts and missing items are left out, and a toast says so (D21) | v1 |
-| float | FLOAT | Floating shelf panel that can be pinned to a screen edge; files can be dragged *out* of it into other apps. Not in this build yet: the drag out needs an `NSDraggingSession` | A topmost tool window at the right edge of the screen that opens without taking focus. It holds up to 50 items and snaps to the left or right edge when left near one. Items drag out with OLE as a copy or a shortcut, never a move (D21) | v1 |
+| float | FLOAT | Floating shelf panel that can be pinned to a screen edge; files can be dragged *out* of it into other apps. The same shelf as on Windows, at the floating level under Grape's other windows, opened without taking focus; items drag out with an AppKit dragging session as a copy or an alias, never a move (D43) | A topmost tool window at the right edge of the screen that opens without taking focus. It holds up to 50 items and snaps to the left or right edge when left near one. Items drag out with OLE as a copy or a shortcut, never a move (D21) | v1 |
 | copy | COPY | File URLs on `NSPasteboard.general` (paste in Finder copies files) | `CF_HDROP` + `Preferred DropEffect = COPY` on the clipboard | v1 |
 | move | MOVE | `NSOpenPanel` (folders only) → move originals. **The only action allowed to move a source.** | `IFileOpenDialog` with `FOS_PICKFOLDERS` → `MoveFileExW` / `IFileOperation` (undo-able) | v1 |
 | copyPath | COPY PATH | Absolute POSIX paths, one per line | Absolute Windows paths, one per line, unquoted | v1 |

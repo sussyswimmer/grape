@@ -291,7 +291,7 @@ describe("Compress and Audio Channels", () => {
     expect(byClass(h.root, "is-checked")).toEqual([segmentOf(radio(h.root, "high"))]);
     expect(byId(h.root, "panel-note").textContent).toBe("Best quality. Saves the least space.");
     check(h.root, "small");
-    expect(byId(h.root, "panel-note").textContent).toBe("Smallest file. Large photos and videos are scaled down.");
+    expect(byId(h.root, "panel-note").textContent).toBe("Smallest file. Large JPEGs and videos are scaled down.");
   });
 
   it("Enter runs with the chosen preset (panel-run-compress.json)", () => {

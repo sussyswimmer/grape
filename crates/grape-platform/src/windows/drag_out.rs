@@ -62,7 +62,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
 use super::actions::{drop_files, global_copy, os_err, preferred_drop_effect};
 use super::drag::primary_button_down;
 use super::overlay::owned_window;
-use crate::PlatformError;
+use crate::{DragOutcome, PlatformError};
 
 /// What a drag out of the shelf did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,25 +74,6 @@ pub struct DragOut {
     /// the button was already up before any path was looked at, else the
     /// paths left out by the time it was found up.
     pub skipped: Vec<PathBuf>,
-}
-
-/// How a drag out of the shelf ended. What a target reports is a hint:
-/// some targets don't report what they did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DragOutcome {
-    /// Dropped, and the target says it copied the files.
-    Copied,
-    /// Dropped, and the target says it linked to them (made shortcuts).
-    Linked,
-    /// Cancelled with Esc, let go where nothing takes files, or refused by
-    /// the target.
-    Cancelled,
-    /// No mouse button was down by the time the drag would have started,
-    /// so it didn't: it would have dropped at once, wherever the pointer
-    /// was.
-    ButtonUp,
-    /// None of the paths can be dragged (see [`DragOut::skipped`]).
-    NothingToDrag,
 }
 
 /// What the drag offers: copy or link, never move (golden rule 2).

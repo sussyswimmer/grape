@@ -1,10 +1,11 @@
 /*
  * The tool panel (D31): a transparent window 352 px wide (Rust sets its
  * height per tool) holding one rounded glass surface, inset 6 px on every
- * side for its shadow. Header 52 px, footer 60 px; the body is 100 px for
- * Compress and Audio Channels, 110 for Normalize, and 90 + rows × 36 for
- * Merge (the list scrolls past six rows). The page fills whatever size
- * Rust gives it. Grape's palette only, via tokens.css.
+ * side for its shadow. Header 52 px, footer 60 px; the body is 118 px for
+ * Compress (its note takes up to two lines), 100 for Audio Channels, 110
+ * for Normalize, and 90 + rows × 36 for Merge (the list scrolls past six
+ * rows). The page fills whatever size Rust gives it. Grape's palette
+ * only, via tokens.css.
  */
 :root {
   --panel-fill: var(--glass-fill-pill);

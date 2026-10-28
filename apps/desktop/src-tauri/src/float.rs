@@ -1,42 +1,58 @@
-//! The float shelf: Alt-drop on FLOAT puts the items on a small topmost
-//! tool window at the right edge of the screen, and each can be dragged out
-//! of it into any app as a copy or a shortcut, never a move (golden rule 2).
-//! Rust owns the paths and the window; the page in `ui/float.html` gets ids
-//! and names (`float://view`) and asks for removes, reveals and drags by id.
+//! The float shelf: Alt-drop (Windows) or Control-drop (macOS) on FLOAT
+//! puts the items on a small always-on-top window at the right edge of the
+//! screen, and each can be dragged out of it into any app as a copy or a
+//! shortcut (an alias on the Mac), never a move (golden rule 2). Rust owns
+//! the paths and the window; the page in `ui/float.html` gets ids and names
+//! (`float://view`) and asks for removes, reveals and drags by id.
 //!
 //! - The model ([`Shelf`]) is in memory only: items in drop order, no path
-//!   twice, at most [`CAPACITY`]. Quitting clears it.
-//! - Windows only: the window is built on first use, off the main thread,
+//!   twice, at most [`CAPACITY`]. Quitting clears it. It, the placement,
+//!   the snap and the commands are shared by both OSes; only the window's
+//!   native calls and the drag out are each OS's own (`window::native`).
+//! - Windows (D21): the window is built on first use, off the main thread,
 //!   hidden. It's shown, resized and hidden through
 //!   `grape_platform::windows::show_shelf` / `hide_shelf` on the main
 //!   thread, never Tauri's `show` or `set_focus`, so it opens without
 //!   taking focus. Clicking it does activate Grape: the drag out needs that
-//!   to take the mouse capture.
-//! - It refuses drops (DECISIONS D13), at creation and before every show,
-//!   so dragging an item back onto the shelf does nothing.
+//!   to take the mouse capture. It refuses drops (D13), at creation and
+//!   before every show, so dragging an item back onto the shelf does
+//!   nothing.
+//! - macOS (D43): the window is built hidden at launch, because wry asks
+//!   macOS to activate Grape whenever it builds a webview, which on the
+//!   first Float would take the keyboard from the app in front. It's
+//!   hardened as `WindowRole::Shelf` (the floating level, 3, under every
+//!   other Grape window; the `Closable` bit, so Cmd+W is a close request)
+//!   and shown, resized and hidden through `show_shelf` / `hide_shelf`
+//!   (`grape_platform::macos`) on the main thread: never key, never
+//!   activating Grape, and hiding hands activation back to the app the user
+//!   was last in (followed from launch) if a click had made the shelf key.
+//!   Its frame is read in points (`window_frame`), never Tauri's backing
+//!   pixels. wry takes every drop on it as a copy and ignores it (D18).
 //! - Moved by its header and left within reach of a screen edge, it snaps
 //!   flush to that edge once the mouse button is up.
-//! - It can't be minimized or maximized, and a close request (Alt+F4 once
-//!   a click made it the active window) is turned into the header's ×: the
-//!   shelf is emptied and hidden, never destroyed with its items kept. A
-//!   shelf minimized anyway counts as closed, so the next Float places it
-//!   again.
+//! - It can't be minimized or maximized, and a close request (Alt+F4 on
+//!   Windows, Cmd+W on macOS, once a click made it the active window) is
+//!   turned into the header's ×: the shelf is emptied and hidden, never
+//!   destroyed with its items kept. A shelf minimized anyway counts as
+//!   closed, so the next Float places it again.
 //! - `float_drag_out` is async: it drops the items that are gone on its
 //!   own thread, then queues the drag on the main thread (a sync command
-//!   would run it inside WebView2's IPC callback); the page hears
-//!   `float://drag-ended` when it's over.
+//!   would run it inside the webview's IPC callback); the page hears
+//!   `float://drag-ended` when it's over. On Windows the drag blocks the
+//!   main thread until the drop; on macOS AppKit's session returns at once
+//!   and its source reports the end.
 //!
-//! macOS and Linux never build the window: Float is "coming" there, and the
-//! commands only see an empty shelf.
+//! Linux never builds the window: Float is "coming" there, and the commands
+//! only see an empty shelf.
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use anyhow::Context as _;
 use grape_core::{ItemKind, SelectionItem};
-use grape_platform::{DisplayBounds, PlatformError, Rect};
+use grape_platform::{DisplayBounds, DragItem, DragOutcome, PlatformError, Rect};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::events::{FloatDragEnded, FloatItem, FloatKind, FloatOutcome, FloatView};
@@ -86,8 +102,8 @@ struct Model {
 
 /// What putting items on the shelf did.
 #[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "only Windows has the shelf window")
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code, reason = "only Windows and macOS have the shelf window")
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Added {
@@ -103,8 +119,8 @@ impl Model {
     /// Puts `items` after what's there, in order, skipping paths already
     /// on the shelf, until it holds [`CAPACITY`].
     #[cfg_attr(
-        not(target_os = "windows"),
-        allow(dead_code, reason = "only Windows has the shelf window")
+        not(any(target_os = "windows", target_os = "macos")),
+        allow(dead_code, reason = "only Windows and macOS have the shelf window")
     )]
     fn add(&mut self, items: &[SelectionItem]) -> Added {
         let mut added = Added::default();
@@ -147,12 +163,17 @@ impl Model {
             .map(|item| item.path.clone())
     }
 
-    /// The paths of `ids`, in shelf order. Unknown ids are ignored.
-    fn paths_for(&self, ids: &[u64]) -> Vec<PathBuf> {
+    /// The items of `ids` as a drag out carries them, in shelf order, each
+    /// with whether it's a folder as it was dropped. Unknown ids are
+    /// ignored.
+    fn drag_items(&self, ids: &[u64]) -> Vec<DragItem> {
         self.items
             .iter()
             .filter(|item| ids.contains(&item.id))
-            .map(|item| item.path.clone())
+            .map(|item| DragItem {
+                path: item.path.clone(),
+                folder: item.kind == FloatKind::Folder,
+            })
             .collect()
     }
 
@@ -194,13 +215,28 @@ fn exists(path: &Path) -> bool {
     path.try_exists().unwrap_or(true)
 }
 
-/// The paths a drag out can carry: those still there, in order. One whose
-/// state can't be read is left out, as the platform's own check does.
-fn draggable(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    paths
+/// The items a drag out can carry: those still there, in order. One whose
+/// state can't be read is left out, as the Windows platform's own check
+/// does.
+fn draggable<T: AsRef<Path>>(items: Vec<T>) -> Vec<T> {
+    items
         .into_iter()
-        .filter(|path| path.try_exists().unwrap_or(false))
+        .filter(|item| item.as_ref().try_exists().unwrap_or(false))
         .collect()
+}
+
+/// The page's word for how a drag ended.
+#[cfg_attr(
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code, reason = "only Windows and macOS have the shelf window")
+)]
+fn outcome(drag: DragOutcome) -> FloatOutcome {
+    match drag {
+        DragOutcome::Copied => FloatOutcome::Copied,
+        DragOutcome::Linked => FloatOutcome::Linked,
+        DragOutcome::Cancelled => FloatOutcome::Cancelled,
+        DragOutcome::ButtonUp | DragOutcome::NothingToDrag => FloatOutcome::Nothing,
+    }
 }
 
 /// The window's height in logical pixels for `count` items: the inset, the
@@ -237,10 +273,10 @@ fn inside(rect: Rect, work: Rect) -> Rect {
 
 /// Where a closed shelf opens with `count` items: at the right edge of
 /// `display`'s work area, [`MARGIN`] in, centered top to bottom. Global
-/// physical pixels.
+/// physical pixels on Windows, points on macOS (where the scale is 1).
 #[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "only Windows has the shelf window")
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code, reason = "only Windows and macOS have the shelf window")
 )]
 pub fn place_at_right_edge(display: &DisplayBounds, count: usize) -> Rect {
     let work = display.work_area;
@@ -258,8 +294,8 @@ pub fn place_at_right_edge(display: &DisplayBounds, count: usize) -> Rect {
 /// An open shelf at `frame` with `count` items now: it stays where it is,
 /// sized for `count` at `display`'s scale, kept inside the work area.
 #[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "only Windows has the shelf window")
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code, reason = "only Windows and macOS have the shelf window")
 )]
 fn resized(frame: Rect, display: &DisplayBounds, count: usize) -> Rect {
     let frame = Rect {
@@ -276,8 +312,8 @@ fn resized(frame: Rect, display: &DisplayBounds, count: usize) -> Rect {
 /// otherwise where it is. Always inside `work`. A snapped shelf snaps to
 /// where it already is.
 #[cfg_attr(
-    not(target_os = "windows"),
-    allow(dead_code, reason = "only Windows has the shelf window")
+    not(any(target_os = "windows", target_os = "macos")),
+    allow(dead_code, reason = "only Windows and macOS have the shelf window")
 )]
 pub fn snap(rect: Rect, work: Rect, scale: f64) -> Rect {
     let reach = px(SNAP_REACH, scale);
@@ -303,8 +339,14 @@ pub struct Shelf {
     /// in the order the changes happened.
     publishing: Mutex<()>,
     /// Debounces the snap after the user moves the shelf.
-    #[cfg(target_os = "windows")]
-    snap: std::sync::Arc<win::SnapTimer>,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    snap: std::sync::Arc<window::SnapTimer>,
+    /// The app in front at the last show that wasn't Grape. When the shelf
+    /// hides after a click made it key, activation goes back to the app the
+    /// user was last in (`grape_platform::macos::follow_app_activations`);
+    /// this one only when none of those is known. Main thread only.
+    #[cfg(target_os = "macos")]
+    back_to: Mutex<Option<i32>>,
 }
 
 impl Shelf {
@@ -325,20 +367,21 @@ impl Shelf {
 /// shelf opens at the right edge of `display`'s work area, an open one
 /// stays where it is and only its height changes.
 ///
-/// Builds the window on first use, so call it off the main thread, and it
-/// waits for the main thread to show the shelf: never from a thread the
-/// main thread is waiting for ("grape-action" is fine).
+/// Builds the window on first use (on macOS, only if building it at launch
+/// failed), so call it off the main thread, and it waits for the main
+/// thread to show the shelf: never from a thread the main thread is waiting
+/// for ("grape-action" is fine).
 ///
 /// # Errors
 /// Fails if the window can't be built or shown. Nothing is added when it
 /// can't be built.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub fn add(
     app: &AppHandle,
     items: &[SelectionItem],
     display: &DisplayBounds,
 ) -> anyhow::Result<Added> {
-    win::window(app).context("could not build the shelf window")?;
+    window::window(app).context("could not build the shelf window")?;
     let added = app.state::<Shelf>().lock().add(items);
     log::info!(
         "float: {} added, {} already there, {} left out",
@@ -347,10 +390,28 @@ pub fn add(
         added.left_out
     );
     publish(app);
-    win::sync(app, Some(*display))
+    window::sync(app, Some(*display))
         .recv()
         .context("the main thread didn't answer")??;
     Ok(added)
+}
+
+/// Builds the shelf's window, hidden, at launch (macOS): wry asks macOS to
+/// activate Grape whenever it builds a webview, which is part of launching
+/// anyway but would take the keyboard from the app in front on the first
+/// Float. First it starts following which app the user is in, so the
+/// shelf's hide can hand activation back to the one they were last in.
+/// Call it from setup, on the main thread. A failure is logged, and the
+/// first Float tries again to build the window.
+#[cfg(target_os = "macos")]
+pub fn build_at_launch(app: &AppHandle) {
+    // Before the build below can activate Grape.
+    if let Err(err) = grape_platform::macos::follow_app_activations() {
+        log::error!("float: not following app activations: {err}");
+    }
+    if let Err(err) = window::window(app) {
+        log::error!("float: could not build the shelf window at launch: {err}");
+    }
 }
 
 /// Sends the shelf's view to its page.
@@ -370,8 +431,8 @@ fn publish(app: &AppHandle) {
 fn changed(app: &AppHandle) {
     publish(app);
     // Nobody waits: the main thread logs a failure itself.
-    #[cfg(target_os = "windows")]
-    drop(win::sync(app, None));
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    drop(window::sync(app, None));
 }
 
 fn drag_ended(app: &AppHandle, outcome: FloatOutcome) {
@@ -412,9 +473,9 @@ pub async fn float_clear(app: AppHandle) {
     clear(&app);
 }
 
-/// Double-click or Enter on item `id`: shows it in Explorer. An item that's
-/// gone shows nothing (Explorer would open some other folder); the page
-/// gets a view, so its row turns Missing.
+/// Double-click or Enter on item `id`: shows it in Explorer or Finder. An
+/// item that's gone shows nothing (Explorer would open some other folder);
+/// the page gets a view, so its row turns Missing.
 #[tauri::command]
 pub async fn float_reveal(app: AppHandle, id: u64) {
     let Some(path) = app.state::<Shelf>().lock().path(id) else {
@@ -435,27 +496,28 @@ pub async fn float_reveal(app: AppHandle, id: u64) {
 
 /// A drag out of the shelf with items `ids` (unknown ones are ignored).
 /// Returns at once: the drag runs on the main thread, and the page hears
-/// `float://drag-ended` when it's over. Async, so it never runs inside
-/// WebView2's IPC callback.
+/// `float://drag-ended` when it's over. Async, so it never runs inside the
+/// webview's IPC callback.
 ///
 /// The items that are gone are dropped here first, on this thread: a path
 /// on a share that stopped answering can take the network's timeout to
 /// look at, and the main thread must not stall on it while the button is
-/// held. When none is left, no drag is queued. The platform looks again
-/// right before the drag.
+/// held. When none is left, no drag is queued. On Windows the platform
+/// looks again right before the drag; on macOS nothing on the main thread
+/// looks at the disk, and an item gone since just fails at the target.
 #[tauri::command]
 pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
     // Copied out: the lock is never held across the disk or the drag.
-    let paths = app.state::<Shelf>().lock().paths_for(&ids);
-    if paths.is_empty() {
+    let items = app.state::<Shelf>().lock().drag_items(&ids);
+    if items.is_empty() {
         log::info!("float: nothing to drag out");
         drag_ended(&app, FloatOutcome::Nothing);
         return;
     }
-    let asked = paths.len();
+    let asked = items.len();
     let looked = Instant::now();
-    let paths = draggable(paths);
-    let gone = asked - paths.len();
+    let items = draggable(items);
+    let gone = asked - items.len();
     if looked.elapsed() >= STALE_PRESS {
         // A share that stopped answering held the check up. The press that
         // asked for this drag may be over, and a new one (on another row,
@@ -465,7 +527,7 @@ pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
         publish(&app);
         return;
     }
-    if paths.is_empty() {
+    if items.is_empty() {
         log::info!("float: none of the {asked} item(s) to drag out is there any more");
         drag_ended(&app, FloatOutcome::Nothing);
         // Their rows turn Missing.
@@ -473,12 +535,14 @@ pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
         return;
     }
     #[cfg(target_os = "windows")]
-    win::drag_out(&app, paths);
-    #[cfg(not(target_os = "windows"))]
+    window::drag_out(&app, items.into_iter().map(|item| item.path).collect());
+    #[cfg(target_os = "macos")]
+    window::drag_out(&app, items);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         log::warn!(
             "float: dragging {} item(s) out isn't available on this OS",
-            paths.len()
+            items.len()
         );
         drag_ended(&app, FloatOutcome::Failed);
     }
@@ -489,18 +553,18 @@ pub async fn float_drag_out(app: AppHandle, ids: Vec<u64>) {
     }
 }
 
-/// The shelf window's events: a move arms the snap (Windows), and a close
-/// request (Alt+F4 on the active shelf) does what the header's × does
-/// instead of destroying the window while its items stay. wry's drop
-/// handler should never fire once Grape's refusing target is registered;
-/// if it does, a window was missed.
+/// The shelf window's events: a move arms the snap, and a close request
+/// (Alt+F4 on Windows, Cmd+W on macOS, on the active shelf) does what the
+/// header's × does instead of destroying the window while its items stay.
+/// On Windows wry's drop handler should never fire once Grape's refusing
+/// target is registered; if it does, a window was missed.
 pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     if window.label() != FLOAT {
         return;
     }
     match event {
-        #[cfg(target_os = "windows")]
-        tauri::WindowEvent::Moved(_) => win::moved(window.app_handle()),
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        tauri::WindowEvent::Moved(_) => window::moved(window.app_handle()),
         tauri::WindowEvent::CloseRequested { api, .. } => {
             api.prevent_close();
             log::info!("float: close request on the shelf, taken as its ×");
@@ -509,6 +573,9 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
             let app = window.app_handle().clone();
             tauri::async_runtime::spawn_blocking(move || clear(&app));
         }
+        // On macOS wry accepts a drop on the shelf as a copy and ignores
+        // it (D18): nothing to report, and every Enter and Over would log.
+        #[cfg(not(target_os = "macos"))]
         tauri::WindowEvent::DragDrop(_) => {
             log::warn!(
                 "float: wry's drop handler saw a drag; Grape's refusing target missed a window"
@@ -518,10 +585,11 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
-/// The shelf's window, Windows only.
-#[cfg(target_os = "windows")]
-mod win {
-    use std::path::PathBuf;
+/// The shelf's window, on Windows and macOS. Everything here but `native`
+/// is the same on both: building the window, matching it to the model,
+/// placing it and the snap. `native` holds each OS's calls.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod window {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc::{self, Receiver};
     use std::sync::{Arc, Mutex, PoisonError};
@@ -529,16 +597,14 @@ mod win {
     use std::time::{Duration, Instant};
 
     use anyhow::Context as _;
-    use grape_platform::windows::{self as platform, DragOutcome};
     use grape_platform::{DisplayBounds, Rect};
     use tauri::utils::config::BackgroundThrottlingPolicy;
     use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-    use super::{
-        drag_ended, height, place_at_right_edge, publish, resized, snap, Shelf, FLOAT, WIDTH,
-    };
-    use crate::events::FloatOutcome;
-    use crate::ui_windows::{refuse_drops_here, BROWSER_ARGS};
+    use super::{height, place_at_right_edge, resized, snap, Shelf, FLOAT, WIDTH};
+    use crate::ui_windows::BROWSER_ARGS;
+
+    pub(super) use native::drag_out;
 
     /// How long the shelf must be still after a move before it snaps.
     const SNAP_DELAY: Duration = Duration::from_millis(300);
@@ -550,8 +616,11 @@ mod win {
     /// duplicate label once the first window is registered).
     static CREATING: Mutex<()> = Mutex::new(());
 
-    /// The shelf window, built hidden on first use. Off the main thread
-    /// only: building a WebView2 window waits for the main thread.
+    /// The shelf window, built hidden on first use. On Windows off the main
+    /// thread only: building a WebView2 window waits for the main thread.
+    /// On macOS it's built at launch, from setup on the main thread, where
+    /// Tauri builds it inline; the first Float builds it from
+    /// "grape-action" only if that failed.
     pub(super) fn window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         // The lock guards no data: a panic in an earlier holder leaves
         // nothing broken.
@@ -560,13 +629,18 @@ mod win {
             return Ok(window);
         }
         // Not `focusable(false)`: clicking the shelf must activate Grape,
-        // or the drag out can't take the mouse capture. Drag and drop stays
-        // enabled, so WebView2 never handles a drop itself; Grape's
-        // refusing target replaces tao's and wry's handlers. Active, it
-        // hears the window keys: no minimize or maximize (a minimized tool
-        // window has no button to come back from), and Alt+F4 still gets
-        // through as a close request, which `on_window_event` turns into
-        // the header's ×.
+        // or the drag out can't take the mouse capture on Windows, and the
+        // page's keys (Enter, Delete, Tab) need it key on both OSes. Drag
+        // and drop stays enabled, so the webview never handles a drop
+        // itself: on Windows Grape's refusing target replaces tao's and
+        // wry's handlers; on macOS wry takes every drop as a copy and
+        // ignores it (D18). Active, it hears the window keys: no minimize
+        // or maximize (a minimized tool window has no button to come back
+        // from), and Alt+F4 or Cmd+W still gets through as a close
+        // request, which `on_window_event` turns into the header's ×.
+        // `accept_first_mouse` (macOS only): the first press on an inactive
+        // shelf reaches the page, so a drag starts on it.
+        // `additional_browser_args` and `skip_taskbar` do nothing on macOS.
         let window = WebviewWindowBuilder::new(app, FLOAT, WebviewUrl::App("float.html".into()))
             .title("Grape Shelf")
             .inner_size(WIDTH, height(1))
@@ -581,6 +655,7 @@ mod win {
             .maximizable(false)
             .shadow(false)
             .visible_on_all_workspaces(true)
+            .accept_first_mouse(true)
             .background_throttling(BackgroundThrottlingPolicy::Disabled)
             .additional_browser_args(BROWSER_ARGS)
             .build()?;
@@ -589,35 +664,11 @@ mod win {
         Ok(window)
     }
 
-    /// Hardens the new window (tool window: no taskbar button, not in
-    /// Alt-Tab; still activatable) and puts the refusing drop target on it,
-    /// on the main thread, before anything shows it.
+    /// Hardens the new window on the main thread, before anything shows
+    /// it ([`native::prepare`]).
     fn prepare(app: &AppHandle, window: &WebviewWindow) {
         let window = window.clone();
-        let queued = app.run_on_main_thread(move || {
-            let hwnd = match window.hwnd() {
-                Ok(hwnd) => hwnd.0 as isize,
-                Err(err) => {
-                    log::error!("float: no window handle: {err}");
-                    return;
-                }
-            };
-            #[cfg(feature = "overlay-subclass")]
-            match platform::harden_shelf(hwnd) {
-                Ok(()) => log::info!("float: style subclass installed"),
-                Err(err) => log::error!("float: could not install the style subclass: {err}"),
-            }
-            #[cfg(not(feature = "overlay-subclass"))]
-            log::warn!("float: the overlay-subclass feature is off; tao's styles only");
-            match platform::ex_style(hwnd) {
-                Ok(style) => log::info!(
-                    "float ex-style (built): {}",
-                    platform::describe_ex_style(style)
-                ),
-                Err(err) => log::warn!("float ex-style (built): unreadable: {err}"),
-            }
-            refuse_drops_here(&window);
-        });
+        let queued = app.run_on_main_thread(move || native::prepare(&window));
         if let Err(err) = queued {
             log::error!("float: could not reach the main thread: {err}");
         }
@@ -656,14 +707,13 @@ mod win {
             // Never built: nothing to show or hide.
             return Ok(());
         };
-        let hwnd = window.hwnd().context("the shelf has no window handle")?.0 as isize;
         let count = app.state::<Shelf>().lock().items.len();
         let shown = window
             .is_visible()
             .context("could not ask if the shelf is open")?;
         if count == 0 {
             if shown {
-                platform::hide_shelf(hwnd).context("could not hide the shelf")?;
+                native::hide(app, &window)?;
                 log::info!("float: shelf hidden");
             }
             return Ok(());
@@ -671,10 +721,10 @@ mod win {
         // A minimized shelf is still "visible" to Windows, but nobody can
         // see or reach it (a tool window has no taskbar button): it counts
         // as closed, so a drop places it again and `show_shelf` restores
-        // it.
+        // it. The Mac's shelf can't be minimized at all.
         let open = shown && !minimized(&window)?;
         let frame = if open {
-            let frame = frame_of(&window)?;
+            let frame = native::frame_of(&window)?;
             match display_under(frame).or(open_on) {
                 Some(display) => resized(frame, &display, count),
                 None => frame,
@@ -685,15 +735,7 @@ mod win {
             };
             place_at_right_edge(&display, count)
         };
-        // Before every show: WebView2 may have made new child windows.
-        refuse_drops_here(&window);
-        platform::show_shelf(hwnd, frame).context("could not show the shelf")?;
-        // Landing on a monitor with another DPI makes tao rescale the
-        // window it just moved (WM_DPICHANGED), as for the overlay: set the
-        // frame again, now that the DPI is the monitor's.
-        if frame_of(&window)? != frame {
-            platform::show_shelf(hwnd, frame).context("could not size the shelf")?;
-        }
+        native::show(app, &window, frame)?;
         if !open {
             log::info!("float: shelf shown with {count} item(s)");
         }
@@ -712,22 +754,6 @@ mod win {
         Ok(minimized)
     }
 
-    /// The window's frame now, in global physical pixels.
-    fn frame_of(window: &WebviewWindow) -> anyhow::Result<Rect> {
-        let position = window
-            .outer_position()
-            .context("could not read where the shelf is")?;
-        let size = window
-            .outer_size()
-            .context("could not read the shelf's size")?;
-        Ok(Rect {
-            x: position.x,
-            y: position.y,
-            width: i32::try_from(size.width).unwrap_or(i32::MAX),
-            height: i32::try_from(size.height).unwrap_or(i32::MAX),
-        })
-    }
-
     /// The display under the middle of `frame`.
     fn display_under(frame: Rect) -> Option<DisplayBounds> {
         let x = frame.x.saturating_add(frame.width / 2);
@@ -738,69 +764,6 @@ mod win {
                 log::warn!("float: no display under the shelf: {err}");
                 None
             }
-        }
-    }
-
-    /// Queues the drag of `paths` on the main thread, which owns the window
-    /// and tao's OLE apartment, and tells the page when it's over. Tauri's
-    /// other main-thread work waits for the drag.
-    pub(super) fn drag_out(app: &AppHandle, paths: Vec<PathBuf>) {
-        let Some(window) = app.get_webview_window(FLOAT) else {
-            log::error!("float: drag out without a shelf window");
-            drag_ended(app, FloatOutcome::Failed);
-            return;
-        };
-        let app_main = app.clone();
-        let queued = app.run_on_main_thread(move || {
-            let (outcome, skipped) = drag_here(&window, &paths);
-            if skipped > 0 {
-                // They went missing since the view was built: show it, off
-                // this thread (the view looks at the disk).
-                let app = app_main.clone();
-                tauri::async_runtime::spawn_blocking(move || publish(&app));
-            }
-            drag_ended(&app_main, outcome);
-        });
-        if let Err(err) = queued {
-            log::error!("float: could not reach the main thread for a drag: {err}");
-            drag_ended(app, FloatOutcome::Failed);
-        }
-    }
-
-    /// Runs the drag on this, the main thread. Returns how it ended and how
-    /// many items were skipped as missing.
-    fn drag_here(window: &WebviewWindow, paths: &[PathBuf]) -> (FloatOutcome, usize) {
-        let hwnd = match window.hwnd() {
-            Ok(hwnd) => hwnd.0 as isize,
-            Err(err) => {
-                log::error!("float: drag out without a window handle: {err}");
-                return (FloatOutcome::Failed, 0);
-            }
-        };
-        match platform::drag_out(hwnd, paths) {
-            Ok(drag) => {
-                log::info!(
-                    "float: drag out of {} item(s): {:?}, {} missing",
-                    paths.len(),
-                    drag.outcome,
-                    drag.skipped.len()
-                );
-                (outcome(drag.outcome), drag.skipped.len())
-            }
-            Err(err) => {
-                log::error!("float: drag out failed: {err}");
-                (FloatOutcome::Failed, 0)
-            }
-        }
-    }
-
-    /// The page's word for how a drag ended.
-    fn outcome(drag: DragOutcome) -> FloatOutcome {
-        match drag {
-            DragOutcome::Copied => FloatOutcome::Copied,
-            DragOutcome::Linked => FloatOutcome::Linked,
-            DragOutcome::Cancelled => FloatOutcome::Cancelled,
-            DragOutcome::ButtonUp | DragOutcome::NothingToDrag => FloatOutcome::Nothing,
         }
     }
 
@@ -889,7 +852,7 @@ mod win {
     fn wait_and_snap(app: &AppHandle, timer: &SnapTimer) {
         loop {
             let last = timer.last();
-            match next(last.at, Instant::now(), platform::primary_button_down()) {
+            match next(last.at, Instant::now(), native::button_down()) {
                 Next::Wait(wait) => thread::sleep(wait),
                 Next::Snap => {
                     queue_snap(app, last.generation);
@@ -940,7 +903,7 @@ mod win {
         if minimized(&window)? {
             return Ok(());
         }
-        let frame = frame_of(&window)?;
+        let frame = native::frame_of(&window)?;
         let Some(display) = display_under(frame) else {
             return Ok(());
         };
@@ -948,24 +911,329 @@ mod win {
         if snapped == frame {
             return Ok(());
         }
-        let hwnd = window.hwnd().context("the shelf has no window handle")?.0 as isize;
-        platform::show_shelf(hwnd, snapped).context("could not move the shelf")?;
+        native::move_to(app, &window, snapped)?;
         log::info!("float: shelf snapped");
         Ok(())
+    }
+
+    /// The Windows calls (D21): the shelf is a tool window that a click
+    /// activates, shown topmost without activation, and it refuses drops.
+    #[cfg(target_os = "windows")]
+    mod native {
+        use std::path::PathBuf;
+
+        use anyhow::Context as _;
+        use grape_platform::windows as platform;
+        use grape_platform::Rect;
+        use tauri::{AppHandle, Manager, WebviewWindow};
+
+        use super::super::{drag_ended, outcome, publish, FLOAT};
+        use crate::events::FloatOutcome;
+        use crate::ui_windows::refuse_drops_here;
+
+        /// The window's raw handle.
+        fn hwnd(window: &WebviewWindow) -> anyhow::Result<isize> {
+            Ok(window.hwnd().context("the shelf has no window handle")?.0 as isize)
+        }
+
+        /// Hardens the new window (tool window: no taskbar button, not in
+        /// Alt-Tab; still activatable) and puts the refusing drop target on
+        /// it. On the main thread.
+        pub(super) fn prepare(window: &WebviewWindow) {
+            let hwnd = match window.hwnd() {
+                Ok(hwnd) => hwnd.0 as isize,
+                Err(err) => {
+                    log::error!("float: no window handle: {err}");
+                    return;
+                }
+            };
+            #[cfg(feature = "overlay-subclass")]
+            match platform::harden_shelf(hwnd) {
+                Ok(()) => log::info!("float: style subclass installed"),
+                Err(err) => log::error!("float: could not install the style subclass: {err}"),
+            }
+            #[cfg(not(feature = "overlay-subclass"))]
+            log::warn!("float: the overlay-subclass feature is off; tao's styles only");
+            match platform::ex_style(hwnd) {
+                Ok(style) => log::info!(
+                    "float ex-style (built): {}",
+                    platform::describe_ex_style(style)
+                ),
+                Err(err) => log::warn!("float ex-style (built): unreadable: {err}"),
+            }
+            refuse_drops_here(window);
+        }
+
+        /// Shows the shelf at `frame` (physical pixels) without activating
+        /// it. On the main thread.
+        pub(super) fn show(
+            _app: &AppHandle,
+            window: &WebviewWindow,
+            frame: Rect,
+        ) -> anyhow::Result<()> {
+            let hwnd = hwnd(window)?;
+            // Before every show: WebView2 may have made new child windows.
+            refuse_drops_here(window);
+            platform::show_shelf(hwnd, frame).context("could not show the shelf")?;
+            // Landing on a monitor with another DPI makes tao rescale the
+            // window it just moved (WM_DPICHANGED), as for the overlay: set
+            // the frame again, now that the DPI is the monitor's.
+            if frame_of(window)? != frame {
+                platform::show_shelf(hwnd, frame).context("could not size the shelf")?;
+            }
+            Ok(())
+        }
+
+        /// Moves an open shelf to `frame` (the snap). On the main thread.
+        pub(super) fn move_to(
+            _app: &AppHandle,
+            window: &WebviewWindow,
+            frame: Rect,
+        ) -> anyhow::Result<()> {
+            let hwnd = hwnd(window)?;
+            platform::show_shelf(hwnd, frame).context("could not move the shelf")?;
+            Ok(())
+        }
+
+        /// Hides the shelf. On the main thread.
+        pub(super) fn hide(_app: &AppHandle, window: &WebviewWindow) -> anyhow::Result<()> {
+            let hwnd = hwnd(window)?;
+            platform::hide_shelf(hwnd).context("could not hide the shelf")?;
+            Ok(())
+        }
+
+        /// The window's frame now, in global physical pixels.
+        pub(super) fn frame_of(window: &WebviewWindow) -> anyhow::Result<Rect> {
+            let position = window
+                .outer_position()
+                .context("could not read where the shelf is")?;
+            let size = window
+                .outer_size()
+                .context("could not read the shelf's size")?;
+            Ok(Rect {
+                x: position.x,
+                y: position.y,
+                width: i32::try_from(size.width).unwrap_or(i32::MAX),
+                height: i32::try_from(size.height).unwrap_or(i32::MAX),
+            })
+        }
+
+        /// Whether a mouse button is down. Any thread.
+        pub(super) fn button_down() -> bool {
+            platform::primary_button_down()
+        }
+
+        /// Queues the drag of `paths` on the main thread, which owns the
+        /// window and tao's OLE apartment, and tells the page when it's
+        /// over. Tauri's other main-thread work waits for the drag.
+        pub(in super::super) fn drag_out(app: &AppHandle, paths: Vec<PathBuf>) {
+            let Some(window) = app.get_webview_window(FLOAT) else {
+                log::error!("float: drag out without a shelf window");
+                drag_ended(app, FloatOutcome::Failed);
+                return;
+            };
+            let app_main = app.clone();
+            let queued = app.run_on_main_thread(move || {
+                let (outcome, skipped) = drag_here(&window, &paths);
+                if skipped > 0 {
+                    // They went missing since the view was built: show it,
+                    // off this thread (the view looks at the disk).
+                    let app = app_main.clone();
+                    tauri::async_runtime::spawn_blocking(move || publish(&app));
+                }
+                drag_ended(&app_main, outcome);
+            });
+            if let Err(err) = queued {
+                log::error!("float: could not reach the main thread for a drag: {err}");
+                drag_ended(app, FloatOutcome::Failed);
+            }
+        }
+
+        /// Runs the drag on this, the main thread. Returns how it ended and
+        /// how many items were skipped as missing.
+        fn drag_here(window: &WebviewWindow, paths: &[PathBuf]) -> (FloatOutcome, usize) {
+            let hwnd = match window.hwnd() {
+                Ok(hwnd) => hwnd.0 as isize,
+                Err(err) => {
+                    log::error!("float: drag out without a window handle: {err}");
+                    return (FloatOutcome::Failed, 0);
+                }
+            };
+            match platform::drag_out(hwnd, paths) {
+                Ok(drag) => {
+                    log::info!(
+                        "float: drag out of {} item(s): {:?}, {} missing",
+                        paths.len(),
+                        drag.outcome,
+                        drag.skipped.len()
+                    );
+                    (outcome(drag.outcome), drag.skipped.len())
+                }
+                Err(err) => {
+                    log::error!("float: drag out failed: {err}");
+                    (FloatOutcome::Failed, 0)
+                }
+            }
+        }
+    }
+
+    /// The macOS calls (D43): level 3, never key or activating on show,
+    /// activation handed back on hide, the frame in points, and AppKit's
+    /// dragging session for the drag out.
+    #[cfg(target_os = "macos")]
+    mod native {
+        use std::ffi::c_void;
+        use std::sync::PoisonError;
+
+        use anyhow::Context as _;
+        use grape_platform::macos::{self as platform, DragStart, WindowRole};
+        use grape_platform::{DragItem, DragOutcome, Rect};
+        use tauri::{AppHandle, Manager, WebviewWindow};
+
+        use super::super::{drag_ended, outcome, Shelf, FLOAT};
+        use crate::events::FloatOutcome;
+
+        /// The window's `NSWindow` pointer. Only good on the main thread
+        /// until the autorelease pool drains: use it at once.
+        fn ns_window(window: &WebviewWindow) -> anyhow::Result<*mut c_void> {
+            window.ns_window().context("the shelf has no NSWindow")
+        }
+
+        /// Hardens the new window: the floating level (3), under every
+        /// other Grape window; on every Space and over full-screen apps,
+        /// out of Cmd-`; not hidden when Grape isn't active; and the
+        /// `Closable` bit, so Cmd+W is a close request. On the main thread.
+        pub(super) fn prepare(window: &WebviewWindow) {
+            let ns_window = match ns_window(window) {
+                Ok(ns_window) => ns_window,
+                Err(err) => {
+                    log::error!("float: {err:#}");
+                    return;
+                }
+            };
+            // SAFETY: this runs on the main thread, and `ns_window` is the
+            // shelf's NSWindow, which Tauri just returned and keeps alive
+            // while `window` is.
+            match unsafe { platform::harden_window(ns_window, WindowRole::Shelf) } {
+                // SAFETY: as above.
+                Ok(()) => log::info!("float: {}", unsafe { platform::describe_window(ns_window) }),
+                Err(err) => log::error!("float: could not harden the shelf: {err}"),
+            }
+        }
+
+        /// Shows the shelf at `frame` (points) without making it key or
+        /// activating Grape, and remembers the app in front, the hide's
+        /// fallback: a show while Grape is in front keeps the earlier one.
+        /// On the main thread.
+        pub(super) fn show(
+            app: &AppHandle,
+            window: &WebviewWindow,
+            frame: Rect,
+        ) -> anyhow::Result<()> {
+            let ns_window = ns_window(window)?;
+            // SAFETY: as in `prepare`.
+            let shown = unsafe { platform::show_shelf(ns_window, frame) }
+                .context("could not show the shelf")?;
+            let shelf = app.state::<Shelf>();
+            let mut back_to = shelf.back_to.lock().unwrap_or_else(PoisonError::into_inner);
+            *back_to = shown.front_pid.or(*back_to);
+            Ok(())
+        }
+
+        /// Moves an open shelf to `frame` (the snap): the same as a show.
+        pub(super) fn move_to(
+            app: &AppHandle,
+            window: &WebviewWindow,
+            frame: Rect,
+        ) -> anyhow::Result<()> {
+            show(app, window, frame).context("could not move the shelf")
+        }
+
+        /// Hides the shelf and, if a click had made it key, hands
+        /// activation back to the app the user was last in, or else to the
+        /// one recorded at the last show. On the main thread.
+        pub(super) fn hide(app: &AppHandle, window: &WebviewWindow) -> anyhow::Result<()> {
+            let ns_window = ns_window(window)?;
+            let back_to = app
+                .state::<Shelf>()
+                .back_to
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            // SAFETY: as in `prepare`.
+            let handed = unsafe { platform::hide_shelf(ns_window, back_to) }
+                .context("could not hide the shelf")?;
+            log::info!("float: activation handed back: {handed}");
+            Ok(())
+        }
+
+        /// The window's frame now, in Grape's top-left points: never
+        /// Tauri's `outer_position` / `outer_size`, which are backing
+        /// pixels on the Mac. On the main thread.
+        pub(super) fn frame_of(window: &WebviewWindow) -> anyhow::Result<Rect> {
+            let ns_window = ns_window(window)?;
+            // SAFETY: as in `prepare`.
+            unsafe { platform::window_frame(ns_window) }
+                .context("could not read where the shelf is")
+        }
+
+        /// Whether a mouse button is down. Any thread.
+        pub(super) fn button_down() -> bool {
+            platform::mouse_button_down()
+        }
+
+        /// Queues the drag of `items` on the main thread. AppKit's session
+        /// returns at once and doesn't hold the main thread: the page hears
+        /// `float://drag-ended` from the source's end callback, or at once
+        /// when no drag started. Logs counts and outcomes, never a path or
+        /// a name. No Esc watchdog: Esc is AppKit's own.
+        pub(in super::super) fn drag_out(app: &AppHandle, items: Vec<DragItem>) {
+            let Some(window) = app.get_webview_window(FLOAT) else {
+                log::error!("float: drag out without a shelf window");
+                drag_ended(app, FloatOutcome::Failed);
+                return;
+            };
+            let app_main = app.clone();
+            let queued = app.run_on_main_thread(move || {
+                let count = items.len();
+                let ns_window = match ns_window(&window) {
+                    Ok(ns_window) => ns_window,
+                    Err(err) => {
+                        log::error!("float: drag out: {err:#}");
+                        drag_ended(&app_main, FloatOutcome::Failed);
+                        return;
+                    }
+                };
+                let app_end = app_main.clone();
+                let ended = move |drag: DragOutcome| {
+                    log::info!("float: drag out of {count} item(s): {drag:?}");
+                    drag_ended(&app_end, outcome(drag));
+                };
+                // SAFETY: as in `prepare`.
+                match unsafe { platform::drag_out(ns_window, &items, ended) } {
+                    Ok(DragStart::Started) => {
+                        log::info!("float: drag out of {count} item(s) started");
+                    }
+                    Ok(DragStart::NotStarted(drag)) => {
+                        log::info!("float: drag out of {count} item(s): {drag:?}");
+                        drag_ended(&app_main, outcome(drag));
+                    }
+                    Err(err) => {
+                        log::error!("float: drag out failed: {err}");
+                        drag_ended(&app_main, FloatOutcome::Failed);
+                    }
+                }
+            });
+            if let Err(err) = queued {
+                log::error!("float: could not reach the main thread for a drag: {err}");
+                drag_ended(app, FloatOutcome::Failed);
+            }
+        }
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
-
-        #[test]
-        fn drag_outcomes_map_to_the_pages_words() {
-            assert_eq!(outcome(DragOutcome::Copied), FloatOutcome::Copied);
-            assert_eq!(outcome(DragOutcome::Linked), FloatOutcome::Linked);
-            assert_eq!(outcome(DragOutcome::Cancelled), FloatOutcome::Cancelled);
-            assert_eq!(outcome(DragOutcome::ButtonUp), FloatOutcome::Nothing);
-            assert_eq!(outcome(DragOutcome::NothingToDrag), FloatOutcome::Nothing);
-        }
 
         #[test]
         fn the_snap_waits_for_stillness_and_a_released_button() {
@@ -1092,16 +1360,45 @@ mod tests {
     }
 
     #[test]
-    fn paths_come_in_shelf_order_and_unknown_ids_are_ignored() {
+    fn drag_items_come_in_shelf_order_and_unknown_ids_are_ignored() {
         let mut model = Model::default();
-        model.add(&items(&["/a/one.txt", "/b/two.txt", "/c/three.txt"]));
+        model.add(&[
+            SelectionItem::file("/a/one.txt"),
+            SelectionItem::folder("/b/Invoices"),
+            SelectionItem::file("/c/three.txt"),
+        ]);
         assert_eq!(
-            model.paths_for(&[3, 1, 42, 1]),
-            [PathBuf::from("/a/one.txt"), PathBuf::from("/c/three.txt")]
+            model.drag_items(&[3, 1, 42, 1]),
+            [
+                DragItem {
+                    path: PathBuf::from("/a/one.txt"),
+                    folder: false
+                },
+                DragItem {
+                    path: PathBuf::from("/c/three.txt"),
+                    folder: false
+                },
+            ]
         );
-        assert!(model.paths_for(&[7]).is_empty());
-        assert_eq!(model.path(2), Some(PathBuf::from("/b/two.txt")));
+        assert_eq!(
+            model.drag_items(&[2]),
+            [DragItem {
+                path: PathBuf::from("/b/Invoices"),
+                folder: true
+            }]
+        );
+        assert!(model.drag_items(&[7]).is_empty());
+        assert_eq!(model.path(2), Some(PathBuf::from("/b/Invoices")));
         assert_eq!(model.path(9), None);
+    }
+
+    #[test]
+    fn drag_outcomes_map_to_the_pages_words() {
+        assert_eq!(outcome(DragOutcome::Copied), FloatOutcome::Copied);
+        assert_eq!(outcome(DragOutcome::Linked), FloatOutcome::Linked);
+        assert_eq!(outcome(DragOutcome::Cancelled), FloatOutcome::Cancelled);
+        assert_eq!(outcome(DragOutcome::ButtonUp), FloatOutcome::Nothing);
+        assert_eq!(outcome(DragOutcome::NothingToDrag), FloatOutcome::Nothing);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 /**
- * The float shelf window (M5, Windows): one rounded glass panel in a
+ * The float shelf window (M5): one rounded glass panel in a
  * transparent tool window that Rust sizes from the item count (280 wide,
  * the panel inset 6 px for its shadow), places, shows and hides without
  * taking focus. The header reads "Shelf · n", moves the window (its title
@@ -336,7 +336,7 @@ export function mountFloat(root: HTMLElement, options: FloatShelfOptions = {}): 
     return { row, glyph: glyphBox, name, missing, remove, kind: null };
   }
 
-  /** Asks Rust to show item `id` in Explorer, unless the view says it's gone. */
+  /** Asks Rust to show item `id` in Explorer or Finder, unless the view says it's gone. */
   function reveal(id: number): void {
     if (view.items.some((item) => item.id === id && item.missing)) {
       return;

@@ -41,7 +41,7 @@ pub mod job;
 mod overlay;
 mod share;
 
-pub use drag_out::{drag_out, DragOut, DragOutcome};
+pub use drag_out::{drag_out, DragOut};
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{
     describe_ex_style, ex_style, harden_overlay, harden_panel, harden_shelf, hide_panel,

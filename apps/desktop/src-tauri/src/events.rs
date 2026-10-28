@@ -240,9 +240,10 @@ pub struct FloatDragEnded {
 pub enum FloatOutcome {
     /// Dropped somewhere that copied the files.
     Copied,
-    /// Dropped somewhere that made shortcuts.
+    /// Dropped somewhere that made shortcuts (aliases on the Mac).
     Linked,
-    /// Dropped nowhere, or Esc.
+    /// Dropped nowhere, or Esc. On the Mac also a drop on one of Grape's
+    /// own windows.
     Cancelled,
     /// Nothing was there to drag, or the button was already up.
     Nothing,

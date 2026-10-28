@@ -17,6 +17,12 @@
 //! the wheel. Grape reads only the pasteboard's change count and type list,
 //! never its contents: the overlay gets the paths from the drop itself.
 //!
+//! A session that Grape started itself, a drag out of the float shelf
+//! (`drag_out`), never opens the wheel: a press during which Grape asked
+//! AppKit for one ([`own_drags`] moved since the button was last seen up)
+//! never becomes a drag here. The count is read after the pasteboard, so a
+//! drag out that begins in between can't pass for Finder's.
+//!
 //! The drag starts the moment such a session is seen, wherever the pointer
 //! is: AppKit only starts a session once the pointer has passed its own
 //! drag threshold, so Grape adds none ([`DragTracker::start_now`]). The
@@ -45,8 +51,9 @@ use objc2_app_kit::{
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 use objc2_foundation::{ns_string, NSActivityOptions, NSProcessInfo};
 
+use super::drag_out::own_drags;
 use super::{display, io_error};
-use crate::mac_rules::cursor_to_grape;
+use crate::mac_rules::{cursor_to_grape, own_drag_in_press};
 use crate::tracker::DragTracker;
 use crate::{DragMonitor, DragSignal, Modifiers, PlatformError};
 
@@ -55,7 +62,7 @@ const POLL_EVERY: Duration = Duration::from_millis(8);
 /// Polling interval while it's up.
 const IDLE_WAIT: Duration = Duration::from_millis(100);
 /// `pressedMouseButtons` bit for the left button.
-const LEFT_BUTTON: usize = 1;
+pub(super) const LEFT_BUTTON: usize = 1;
 
 /// The macOS [`DragMonitor`]: one polling thread.
 #[derive(Debug, Default)]
@@ -151,6 +158,10 @@ struct Poller {
     /// button is down, and a quick drag may already have bumped the count by
     /// the time the press is seen.
     idle_count: isize,
+    /// [`own_drags`], read with `idle_count`: Grape's own drags out start
+    /// only while the button is down, so any during the next press makes
+    /// the count differ from this.
+    idle_own: u64,
     press: Option<Press>,
 }
 
@@ -158,6 +169,11 @@ struct Poller {
 struct Press {
     /// The change count from before the press.
     idle_count: isize,
+    /// [`own_drags`] from before the press.
+    own_at_press: u64,
+    /// Grape started a drag out of the shelf during this press: it never
+    /// becomes a drag here.
+    own: bool,
     /// The primary screen's height, for the cursor flip.
     primary_height: f64,
     /// A drag that carries files started during this press.
@@ -175,6 +191,7 @@ impl Poller {
             // The thresholds go unused: drags start with `start_now`.
             tracker: DragTracker::new(0, 0),
             idle_count,
+            idle_own: own_drags(),
             press: None,
         }
     }
@@ -191,6 +208,8 @@ impl Poller {
                 let (x, y) = cursor(primary_height);
                 self.press = Some(Press {
                     idle_count: self.idle_count,
+                    own_at_press: self.idle_own,
+                    own: false,
                     primary_height,
                     file_drag: false,
                     last: None,
@@ -204,23 +223,31 @@ impl Poller {
                         press.last = Some(at);
                         out.extend(self.tracker.moved(at.0, at.1, held));
                     }
-                } else if self.pasteboard.changeCount() != press.idle_count
+                } else if !press.own
+                    && self.pasteboard.changeCount() != press.idle_count
                     && carries_files(&self.pasteboard)
                 {
-                    // AppKit started a file drag, so the pointer is already
-                    // past its threshold: start now, even at rest. The keys
-                    // held now are the baseline.
-                    press.file_drag = true;
-                    let at = cursor(press.primary_height);
-                    press.last = Some(at);
-                    let signals = self.tracker.start_now(at.0, at.1, held);
-                    if signals
-                        .iter()
-                        .any(|signal| matches!(signal, DragSignal::Started { .. }))
-                    {
-                        display::request_refresh();
+                    if own_drag_in_press(press.own_at_press, own_drags()) {
+                        // Grape's own drag out of the shelf (the count is
+                        // read after the pasteboard): this press never
+                        // becomes a wheel drag.
+                        press.own = true;
+                    } else {
+                        // AppKit started a file drag, so the pointer is
+                        // already past its threshold: start now, even at
+                        // rest. The keys held now are the baseline.
+                        press.file_drag = true;
+                        let at = cursor(press.primary_height);
+                        press.last = Some(at);
+                        let signals = self.tracker.start_now(at.0, at.1, held);
+                        if signals
+                            .iter()
+                            .any(|signal| matches!(signal, DragSignal::Started { .. }))
+                        {
+                            display::request_refresh();
+                        }
+                        out.extend(signals);
                     }
-                    out.extend(signals);
                 }
             }
         } else {
@@ -228,6 +255,7 @@ impl Poller {
                 out.extend(self.tracker.button_up());
             }
             self.idle_count = self.pasteboard.changeCount();
+            self.idle_own = own_drags();
         }
 
         // Reports keys changed since the baseline, once the drag started.

@@ -63,7 +63,7 @@ describe("the words", () => {
 
   it("uses the spec's sentences", () => {
     expect(NOTES.compress).toEqual({
-      small: "Smallest file. Large photos and videos are scaled down.",
+      small: "Smallest file. Large JPEGs and videos are scaled down.",
       balanced: "Smaller, and hard to tell apart.",
       high: "Best quality. Saves the least space.",
     });
