@@ -573,18 +573,24 @@ fn not_speakers(audio: &StreamInfo) -> bool {
     audio.codec == "opus" && !audio.has_layout
 }
 
-/// The `pan` that labels `audio`, 3 to 8 channels that aren't speakers
-/// ([`not_speakers`]), with the [`NO_LFE`] layout of its count, each
-/// channel kept in its own: FFmpeg's guess has an LFE for 3, 6, 7 and 8
-/// (2.1, 5.1, 6.1, 7.1), which AAC codes band-limited, wiping that
-/// channel. `pan` maps the channels by number, whatever FFmpeg guessed.
-/// `None` for any other track.
+/// The `pan` that labels `audio`, 1 to 8 channels that aren't speakers
+/// ([`not_speakers`]), with the [`NO_LFE`] layout of its count (mono and
+/// stereo for 1 and 2), each channel kept in its own: FFmpeg's guess has an
+/// LFE for 3, 6, 7 and 8 (2.1, 5.1, 6.1, 7.1), which AAC codes
+/// band-limited, wiping that channel, and the Opus decoder hands even 1 or
+/// 2 such channels over with no layout, which AAC refuses. `pan` maps the
+/// channels by number, whatever FFmpeg guessed. `None` for any other
+/// track.
 fn label(audio: &StreamInfo) -> Option<String> {
     if !not_speakers(audio) {
         return None;
     }
     let channels = usize::try_from(audio.channels).ok()?;
-    let layout = NO_LFE.get(channels.checked_sub(3)?)?;
+    let layout = match channels {
+        1 => "mono",
+        2 => "stereo",
+        _ => NO_LFE.get(channels.checked_sub(3)?)?,
+    };
     let mut pan = format!("pan={layout}");
     for c in 0..channels {
         pan.push_str(&format!("|c{c}=c{c}"));
@@ -2400,7 +2406,12 @@ pub(super) mod tests {
             assert_eq!(label(&unlabeled("pcm_s16le", channels)), None);
             assert_eq!(label(&unlabeled("flac", channels)), None);
         }
-        for channels in [0, 1, 2, 9] {
+        // Fewer than 3 get the plain layout: the Opus decoder hands them
+        // over with none, which AAC refuses.
+        assert_eq!(label(&unlabeled("opus", 1)), Some(pan("mono", 1)));
+        assert_eq!(label(&unlabeled("opus", 2)), Some(pan("stereo", 2)));
+        assert_eq!(label(&unlabeled("pcm_s16le", 2)), None);
+        for channels in [0, 9] {
             assert_eq!(label(&unlabeled("opus", channels)), None);
         }
         let surround = at(audio("opus", 16), 48_000, 6);
