@@ -10,8 +10,7 @@
 //!    level is one of that depth's (0 and 255; multiples of 85; of 17);
 //! 4. a palette of up to 256 colors (with `tRNS` for the transparent ones),
 //!    at the fewest bits an index that holds it, for color or gray with
-//!    alpha; for opaque gray, of up to 16 levels (4 bits an index; more
-//!    makes an index no smaller than the gray).
+//!    alpha.
 //!
 //! Gray (from color) and the palette are skipped when the source has an
 //! ICC profile, cICP, mDCV or cLLI, whose meaning depends on the color
@@ -302,10 +301,9 @@ pub(super) fn reduce(img: &DynamicImage, free_color: bool, cancel: &CancelToken)
             return low_gray(img, bits, cancel);
         }
     }
-    // Opaque gray takes a palette only where its index is shorter.
-    let most = if gray && !has_alpha { 16 } else { 256 };
-    if free_color && eight {
-        match palette(img, width, height, has_alpha, most, cancel) {
+    // Gray without alpha stays gray: a palette is no smaller.
+    if free_color && eight && !(gray && !has_alpha) {
+        match palette(img, width, height, has_alpha, cancel) {
             Indexed::Packed(packed) => return Some(packed),
             Indexed::Cancelled => return None,
             Indexed::TooMany => {}
@@ -393,19 +391,18 @@ fn low_gray(img: &DynamicImage, bits: usize, cancel: &CancelToken) -> Option<Pac
 /// What [`palette`] made.
 enum Indexed {
     Packed(Packed),
-    /// More colors than asked for.
+    /// More than 256 colors.
     TooMany,
     Cancelled,
 }
 
-/// An indexed form of 8-bit `img` if it has at most `most` (≤ 256)
-/// colors; the transparent colors first, so `tRNS` is short.
+/// An indexed form of 8-bit `img` if it has at most 256 colors; the
+/// transparent colors first, so `tRNS` is short.
 fn palette(
     img: &DynamicImage,
     width: usize,
     height: usize,
     has_alpha: bool,
-    most: usize,
     cancel: &CancelToken,
 ) -> Indexed {
     let key = |p: &[u16; 4]| {
@@ -418,7 +415,7 @@ fn palette(
         for p in span {
             let c = key(p);
             if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(c) {
-                if colors.len() == most {
+                if colors.len() == 256 {
                     return false;
                 }
                 slot.insert(0u8);
@@ -715,9 +712,8 @@ mod tests {
 
     #[test]
     fn each_exact_reduction_keeps_every_pixel() {
-        // 16-bit that's really 8-bit, opaque, gray of 18 levels: 8-bit
-        // gray.
-        let img = DynamicImage::ImageRgba16(ImageBuffer::from_fn(6, 3, |x, y| {
+        // 16-bit that's really 8-bit, opaque, gray: 8-bit gray.
+        let img = DynamicImage::ImageRgba16(ImageBuffer::from_fn(5, 3, |x, y| {
             let v = u16::try_from(x * 40 + y).unwrap() * 257;
             Rgba([v, v, v, u16::MAX])
         }));
@@ -726,7 +722,7 @@ mod tests {
             (packed.color, packed.depth),
             (ColorType::Grayscale, BitDepth::Eight)
         );
-        assert_eq!(decoded(&packed, 6, 3), img.to_rgba8());
+        assert_eq!(decoded(&packed, 5, 3), img.to_rgba8());
         // With an ICC profile, the color type stays.
         let packed = reduced(&img, false);
         assert_eq!(
@@ -761,16 +757,16 @@ mod tests {
             ])
         }));
         assert_eq!(reduced(&many, true).color, ColorType::Rgb);
-        // Gray of more than 16 levels stays gray (not a palette).
-        let gray = DynamicImage::ImageLuma8(GrayImage::from_fn(18, 2, |x, _| {
-            Luma([u8::try_from(x * 13 + 1).unwrap()])
+        // Gray stays gray (not a palette).
+        let gray = DynamicImage::ImageLuma8(GrayImage::from_fn(9, 2, |x, _| {
+            Luma([u8::try_from(x * 20 + 1).unwrap()])
         }));
         let packed = reduced(&gray, true);
         assert_eq!(
             (packed.color, packed.depth),
             (ColorType::Grayscale, BitDepth::Eight)
         );
-        assert_eq!(decoded(&packed, 18, 2), gray.to_rgba8());
+        assert_eq!(decoded(&packed, 9, 2), gray.to_rgba8());
     }
 
     #[test]
@@ -803,34 +799,6 @@ mod tests {
         let packed = reduced(&page, true);
         assert_eq!(packed.depth, BitDepth::One);
         assert_eq!(decoded(&packed, 13, 2), page.to_rgba8());
-    }
-
-    #[test]
-    fn opaque_gray_with_few_odd_levels_takes_a_short_palette() {
-        let levels = |n: u32| {
-            DynamicImage::ImageLuma8(GrayImage::from_fn(11, 3, move |x, y| {
-                Luma([((x + 11 * y) % n * 3 + 1) as u8])
-            }))
-        };
-        for (n, depth) in [(3, BitDepth::Two), (16, BitDepth::Four)] {
-            let gray = levels(n);
-            let packed = reduced(&gray, true);
-            assert_eq!(
-                (packed.color, packed.depth),
-                (ColorType::Indexed, depth),
-                "{n}"
-            );
-            assert_eq!(decoded(&packed, 11, 3), gray.to_rgba8(), "{n}");
-        }
-        // 17 levels would need 8 bits an index: no smaller than the gray.
-        let packed = reduced(&levels(17), true);
-        assert_eq!(
-            (packed.color, packed.depth),
-            (ColorType::Grayscale, BitDepth::Eight)
-        );
-        // Nor with a profile, which ties the color type.
-        let packed = reduced(&levels(3), false);
-        assert_eq!(packed.color, ColorType::Grayscale);
     }
 
     #[test]
