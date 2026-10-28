@@ -496,7 +496,8 @@ pub(crate) fn run(
         peak(decoded, after)
     };
     let (img, _icc) =
-        crate::image::decode_stored(src, from, Format::Png, &names, cancel, &tool_peak)?;
+        crate::image::decode_stored(src, from, Format::Png, &names, cancel, &tool_peak)
+            .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     progress(0.5);
     let packed = reduce(&img, !chunks.color_bound, cancel).ok_or_else(|| crate::cancelled(src))?;
     drop(img);

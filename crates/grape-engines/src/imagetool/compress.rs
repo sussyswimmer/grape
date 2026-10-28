@@ -249,7 +249,8 @@ pub(crate) fn run(
         peak(width, height, u64::from(color.bytes_per_pixel()), preset)
     };
     let (img, icc) =
-        crate::image::decode_stored(src, from, Format::Jpg, &names, cancel, &tool_peak)?;
+        crate::image::decode_stored(src, from, Format::Jpg, &names, cancel, &tool_peak)
+            .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }

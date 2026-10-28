@@ -40,7 +40,7 @@ tests/              real conversions on fixtures generated in each test (no fixt
 Pure functions in `media/args.rs`: `passes(src, to, &Probe, out, palette) -> Result<Vec<Pass>, Missing>`, from what `ffprobe` said (`media/probe.rs`). Unit-test the exact argv, and keep the invariants: both whitelists, `file:` URLs, a forced `-f`, and only the temp path as output. The arguments are in `docs/ENGINES.md`. Hardware encoders come later: then an `EncoderCaps`, probed once with a test encode, picks them, with x264 as the fallback.
 
 ## Gotchas
-- Apply EXIF orientation before re-encoding images. Removing metadata must not rotate photos.
+- EXIF orientation: conversions apply it and drop the EXIF; Compress keeps the stored pixels and carries the EXIF, Orientation included (`decode_stored`), so it never turns them itself; Remove Metadata writes back an Orientation-only EXIF. No tool may turn a photo.
 - PDF → images: 300 DPI; one page writes a file, several pages write a folder named per the naming rules.
 - GIF output: two-pass palette. Warn for clips over 30 s, because GIFs get huge.
 - Archives: reject entries with `..` or absolute paths (zip-slip). Cap total extracted size (decompression bombs).

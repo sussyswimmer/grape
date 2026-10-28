@@ -434,6 +434,10 @@ pub fn run_job(
         (Some(from), [src], JobOutput::File(dest), Operation::Tool { tool, params })
             if tool_engine(tool, from, sidecars) == Some(Engine::ImageTool) =>
         {
+            // The image tools write the source's own format.
+            if format_of(dest).is_some_and(|to| to != from) {
+                return Err(not_yet_supported(job, Some(from)));
+            }
             imagetool::run(job, src, dest, from, tool, &params, ctx, progress)
         }
         // Create PDF: one page per input, every input an image this build

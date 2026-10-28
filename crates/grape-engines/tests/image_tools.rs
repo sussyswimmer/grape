@@ -585,3 +585,106 @@ fn compress_leaves_an_optimal_png_alone_and_refuses_an_animated_one() {
         "anim.png is animated. Compress works on still PNGs for now."
     );
 }
+
+/// Runs `op` on `bytes` named `name`, cancelling at the `nth` progress
+/// report: it must say Cancelled and leave nothing.
+fn cancelled_at(name: &str, bytes: &[u8], op: Operation, nth: usize) {
+    let dir = TestDir::new("cancel-midway");
+    let (src, job) = plan_one(&dir, name, bytes, op);
+    let before = SourceState::of(&src);
+    let ctx = EngineCtx::default();
+    let cancel = ctx.cancel.clone();
+    let mut reports = 0;
+    let err = run_job(&job, &ctx, &mut |_| {
+        reports += 1;
+        if reports == nth {
+            cancel.cancel();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled, "{name}: {}", err.detail);
+    before.assert_unchanged();
+    assert!(!planned_file(&job).exists());
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
+fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
+    let big = jpeg_of(&photo(1200, 900), 95);
+    assert!(big.len() > 2 * 64 * 1024);
+    let compress = |preset| Operation::Tool {
+        tool: ToolKey::Compress,
+        params: grape_core::ToolParams {
+            compress: preset,
+            ..grape_core::ToolParams::DEFAULT
+        },
+    };
+    // The strip's second report comes after its temp file exists.
+    cancelled_at(
+        "photo.jpg",
+        &big,
+        Operation::tool(ToolKey::RemoveMetadata),
+        2,
+    );
+    // Compress's first report is before it decodes.
+    cancelled_at(
+        "photo.jpg",
+        &big,
+        compress(grape_core::CompressPreset::Small),
+        1,
+    );
+    cancelled_at(
+        "plain.png",
+        &plain_png(),
+        compress(grape_core::CompressPreset::High),
+        1,
+    );
+}
+
+#[test]
+fn the_content_decides_what_each_tool_reads() {
+    let dir = TestDir::new("misnamed");
+    let jpeg = with(&plain_jpeg(), &[exif(1)], b"");
+    // A JPEG named .png is stripped and compressed as a JPEG, and keeps
+    // its name.
+    let out = strip(&dir, "photo.png", &jpeg).unwrap();
+    assert!(out.outputs[0].to_string_lossy().ends_with(".png"));
+    assert!(fs::read(&out.outputs[0])
+        .unwrap()
+        .starts_with(&[0xFF, 0xD8]));
+    let big = jpeg_of(&photo(2400, 1800), 95);
+    let out = compress(&dir, "big.png", &big, grape_core::CompressPreset::Small).unwrap();
+    assert!(fs::read(&out.outputs[0])
+        .unwrap()
+        .starts_with(&[0xFF, 0xD8]));
+    // A WebP named .png is stripped as a WebP.
+    let webp = riff(&[riff_chunk(b"VP8L", b"\x2f\0\0\0\0")]);
+    let out = strip(&dir, "pic.png", &webp).unwrap();
+    assert!(fs::read(&out.outputs[0]).unwrap().starts_with(b"RIFF"));
+    // Compress reads only JPEG and PNG: a GIF named .jpg can't be read.
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
+    let err = compress(&dir, "anim.jpg", gif, grape_core::CompressPreset::Small).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+}
+
+#[test]
+fn an_image_tool_writes_only_its_sources_format() {
+    let dir = TestDir::new("tool-format");
+    let src = dir.join("a.jpg");
+    fs::write(&src, plain_jpeg()).unwrap();
+    for (tool, out) in [
+        (ToolKey::Compress, "a Compressed.webp"),
+        (ToolKey::RemoveMetadata, "a No Metadata.png"),
+    ] {
+        let job = grape_core::Job {
+            inputs: vec![src.clone()],
+            output: grape_core::JobOutput::File(dir.join(out)),
+            op: Operation::tool(tool),
+            used_fallback: false,
+        };
+        let err = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{tool:?}");
+        assert!(!dir.join(out).exists());
+    }
+    assert_no_leftovers(&dir.path);
+}
