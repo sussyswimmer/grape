@@ -171,6 +171,31 @@ fn a_jpeg_shows_upright_in_all_eight_orientations() {
             expected.dimensions(),
             if quarter { (32, 48) } else { (48, 32) }
         );
+        // Passed through, not re-encoded: the stored 48 × 32 DCT image
+        // with the source's scan data, so the page's matrix turns it.
+        let pdf = fs::read(planned_file(&job)).unwrap();
+        let doc = lopdf::Document::load_mem(&pdf).unwrap();
+        let image = doc
+            .objects
+            .values()
+            .filter_map(|object| object.as_stream().ok())
+            .find(|stream| {
+                stream.dict.get(b"Subtype").and_then(|s| s.as_name()).ok() == Some(b"Image")
+            })
+            .unwrap();
+        let dict = &image.dict;
+        assert_eq!(
+            dict.get(b"Filter").unwrap().as_name().unwrap(),
+            b"DCTDecode"
+        );
+        let size = |key: &[u8]| dict.get(key).unwrap().as_i64().unwrap();
+        assert_eq!(
+            (size(b"Width"), size(b"Height")),
+            (48, 32),
+            "{orientation:?}"
+        );
+        let sos = bytes.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+        assert!(image.content.ends_with(&bytes[sos..]), "{orientation:?}");
         let pages = draw(&planned_file(&job));
         assert_eq!(pages.len(), 1);
         let page = &pages[0];

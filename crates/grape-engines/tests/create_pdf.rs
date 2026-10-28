@@ -273,6 +273,61 @@ fn a_rotated_phone_photo_keeps_its_pixels_and_loses_its_exif() {
 }
 
 #[test]
+fn a_jpeg_passes_through_in_all_eight_orientations() {
+    // Stored 40 × 20. Each EXIF orientation keeps the source's scan data
+    // and stored size, and the page's matrix turns it upright.
+    let plain = encode(&gradient(40, 20), ImageFormat::Jpeg);
+    let sos = plain.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    for (exif, page, cm) in [
+        (1u8, [40.0, 20.0], "40 0 0 20 0 0"),
+        (2, [40.0, 20.0], "-40 0 0 20 40 0"),
+        (3, [40.0, 20.0], "-40 0 0 -20 40 20"),
+        (4, [40.0, 20.0], "40 0 0 -20 0 20"),
+        (5, [20.0, 40.0], "0 -40 -20 0 20 40"),
+        (6, [20.0, 40.0], "0 -40 20 0 0 40"),
+        (7, [20.0, 40.0], "0 40 20 0 0 0"),
+        (8, [20.0, 40.0], "0 40 -20 0 20 0"),
+    ] {
+        let dir = TestDir::new("create-orient");
+        let mut payload = b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0".to_vec();
+        payload.extend_from_slice(&[exif, 0, 0, 0, 0, 0, 0]);
+        let len = u16::try_from(payload.len() + 2).unwrap().to_be_bytes();
+        let mut jpeg = plain[..2].to_vec();
+        jpeg.extend_from_slice(&[0xFF, 0xE1, len[0], len[1]]);
+        jpeg.extend(payload);
+        jpeg.extend_from_slice(&plain[2..]);
+        let (src, job) = plan_one(&dir, "photo.jpg", &jpeg, Operation::convert(Format::Pdf));
+        let before = SourceState::of(&src);
+
+        run(&job).0.unwrap();
+
+        let path = planned_file(&job);
+        let (_, pages) = read_pdf(&path);
+        let image = &pages[0].image;
+        assert_eq!(pages[0].media_box, [0.0, 0.0, page[0], page[1]], "{exif}");
+        assert_eq!(name(image, b"Filter"), "DCTDecode", "{exif}");
+        assert_eq!(
+            (int(image, b"Width"), int(image, b"Height")),
+            (40, 20),
+            "{exif}"
+        );
+        assert!(
+            pages[0].data.ends_with(&plain[sos..]),
+            "{exif}: not passed through"
+        );
+        let doc = Document::load_mem(&fs::read(&path).unwrap()).unwrap();
+        let content = doc.get_page_content(doc.get_pages()[&1]);
+        assert_eq!(
+            String::from_utf8(content).unwrap().trim_end(),
+            format!("q {cm} cm /Im0 Do Q"),
+            "{exif}"
+        );
+        before.assert_unchanged();
+        assert_no_leftovers(&dir.path);
+    }
+}
+
+#[test]
 fn a_jpeg_of_thousands_of_segments_is_re_encoded() {
     // Grape's decoder takes 2,000 empty DHT segments before the frame; the
     // passthrough reads at most 1,024 segments, so this one is re-encoded.
