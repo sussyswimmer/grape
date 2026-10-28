@@ -1783,3 +1783,62 @@ fn compress_saves_nothing_from_a_video_it_cant_shrink() {
         "tiny.mp4 is already as small as Grape makes it."
     );
 }
+
+#[test]
+fn a_broadcast_wave_keeps_its_time_reference_through_the_audio_tools() {
+    let dir = TestDir::new("tools-bwf");
+    let plain = dir.join("plain.wav");
+    steady(&plain, -30.0, 2, 48_000, Sample::I24);
+    let take = dir.join("take.wav");
+    ffmpeg(&[
+        "-i",
+        s(&plain),
+        "-c:a",
+        "pcm_s24le",
+        "-write_bext",
+        "1",
+        "-metadata",
+        "time_reference=172800000",
+        "-metadata",
+        "coding_history=A=PCM,F=48000,W=24",
+        "-f",
+        "wav",
+        s(&take),
+    ]);
+    for (tool, params) in [
+        (ToolKey::NormalizeAudio, to_lufs(-16)),
+        (
+            ToolKey::AudioChannels,
+            to_channels(grape_core::Channels::Mono),
+        ),
+    ] {
+        let out = run_tool(&dir, &take, tool, params).unwrap();
+        let got = flat(&out.outputs[0], "format_tags");
+        assert_eq!(
+            got.get("format.tags.time_reference").map(String::as_str),
+            Some("172800000"),
+            "{tool:?}: {got:?}"
+        );
+        fs::remove_file(&out.outputs[0]).unwrap();
+    }
+}
+
+#[test]
+fn compress_and_remove_audio_leave_out_an_mkvs_cover_image() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("tools-mkv-cover");
+    let cover = cover_png(&dir);
+    let mkv = dir.join("movie.mkv");
+    let mut args = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt"]);
+    args.extend(["yuv420p", "-c:a", "aac", "-t", "1", "-attach", s(&cover)]);
+    args.extend(["-metadata:s:t", "mimetype=image/png", "-metadata:s:t"]);
+    args.extend(["filename=cover.png", "-f", "matroska", s(&mkv)]);
+    ffmpeg(&args);
+    assert_eq!(kinds(&mkv), ["video", "audio", "video"]);
+    let out = run_tool(&dir, &mkv, ToolKey::Compress, to_preset(Small)).unwrap();
+    assert_eq!(kinds(&out.outputs[0]), ["video", "audio"]);
+    let out = run_tool(&dir, &mkv, ToolKey::MuteVideo, ToolParams::DEFAULT).unwrap();
+    assert_eq!(kinds(&out.outputs[0]), ["video"]);
+}

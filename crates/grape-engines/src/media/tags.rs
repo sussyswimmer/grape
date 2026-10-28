@@ -81,6 +81,10 @@ pub(crate) struct Tags {
     /// The container has `com.apple.quicktime.*` keys (an iPhone's
     /// location, make, model and date).
     pub(crate) apple_keys: bool,
+    /// A WAV's Broadcast Wave (`bext`) fields: a recorder's time
+    /// reference, UMID and coding history, which FFmpeg writes back only
+    /// when asked (`-write_bext 1`).
+    pub(crate) bext: bool,
     /// The indexes of attachments that are fonts (MKV subtitles need them).
     pub(crate) font_streams: BTreeSet<u32>,
     /// How many chapters there are.
@@ -199,11 +203,23 @@ impl Parser {
     }
 }
 
+/// The keys FFmpeg's WAV demuxer reads only from a `bext` chunk.
+const BEXT: [&str; 5] = [
+    "time_reference",
+    "umid",
+    "coding_history",
+    "origination_date",
+    "origination_time",
+];
+
 /// One `format.tags.` line.
 fn format_tag(tags: &mut Tags, name: &str, value: &str) {
     let key = name.to_ascii_lowercase();
     if key.starts_with(APPLE) {
         tags.apple_keys = true;
+    }
+    if !value.is_empty() && BEXT.contains(&key.as_str()) {
+        tags.bext = true;
     }
     tags.unlisted |= !stays(&key, value);
     if key == "creation_time" && tags.creation_time.is_none() {
@@ -277,12 +293,18 @@ impl Stream {
         if let Some(language) = self.language {
             tags.languages.insert(index, language);
         }
-        tags.unlisted |= self.unlisted;
+        // A font's own tags (its name, a description) are part of the
+        // font, which Remove Metadata keeps with them: neither reported
+        // nor counted against its output.
+        let font = self.codec_type == "attachment" && self.attachment == Some(Attachment::Font);
+        tags.unlisted |= self.unlisted && !font;
         if self.attached_pic {
             tags.fields.insert(MetaField::CoverArt);
             return;
         }
-        tags.fields.extend(&self.fields);
+        if !font {
+            tags.fields.extend(&self.fields);
+        }
         match self.codec_type.as_str() {
             "attachment" => match self.attachment {
                 Some(Attachment::Font) => {
@@ -759,6 +781,7 @@ format.tags.encoder="Lavf60.16.100"
                 languages: BTreeMap::from([(1, "eng".to_owned())]),
                 creation_time: Some("2024-05-01T10:20:30.000000Z".to_owned()),
                 apple_keys: false,
+                bext: false,
                 font_streams: BTreeSet::new(),
                 chapters: 0,
                 unlisted: true,
@@ -841,6 +864,38 @@ format.tags.encoder="Lavf60.16.100"
     }
 
     #[test]
+    fn a_fonts_own_tags_stay_with_it() {
+        let font = "streams.stream.0.index=0\n\
+                    streams.stream.0.codec_type=\"attachment\"\n\
+                    streams.stream.0.tags.filename=\"a.ttf\"\n\
+                    streams.stream.0.tags.title=\"Font title\"\n\
+                    streams.stream.0.tags.comment=\"by someone\"\n\
+                    streams.stream.0.tags.mimetype=\"application/x-truetype-font\"\n";
+        let tags = parse(font);
+        assert!(tags.fields.is_empty(), "{:?}", tags.fields);
+        assert!(!tags.unlisted);
+        assert_eq!(tags.font_streams, BTreeSet::from([0]));
+        // The same tags on another attachment are reported, and unlisted.
+        let other = font.replace("application/x-truetype-font", "application/octet-stream");
+        let tags = parse(&other);
+        assert_eq!(tags.fields, set([Title, Comment, Other]));
+        assert!(tags.unlisted);
+    }
+
+    #[test]
+    fn a_broadcast_waves_fields_are_noticed() {
+        let bwf = "format.tags.encoded_by=\"Zoom\"\n\
+                   format.tags.time_reference=\"172800000\"\n\
+                   format.tags.coding_history=\"A=PCM,F=48000\"\n";
+        let tags = parse(bwf);
+        assert!(tags.bext);
+        assert_eq!(tags.fields, set([Software, CreationDate]));
+        // INFO alone isn't a bext chunk; an empty field isn't one either.
+        assert!(!parse("format.tags.encoded_by=\"Zoom\"\n").bext);
+        assert!(!parse("format.tags.umid=\"\"\n").bext);
+    }
+
+    #[test]
     fn mkv_chapters_languages_fonts_and_cover() {
         let tags = parse(MOVIE_MKV);
         assert_eq!(
@@ -854,6 +909,7 @@ format.tags.encoder="Lavf60.16.100"
                 ]),
                 creation_time: None,
                 apple_keys: false,
+                bext: false,
                 font_streams: BTreeSet::from([4]),
                 chapters: 2,
                 unlisted: true,

@@ -31,7 +31,7 @@ mod argv;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use grape_core::{Channels, CompressPreset, Format, Job, ToolKey, ToolParams};
+use grape_core::{Channels, Format, Job, ToolKey, ToolParams};
 
 use super::args::{Missing, Pass};
 use super::loudness::{self, Correction, Plan};
@@ -40,7 +40,7 @@ use super::run::{self, RunError, SlotGuard};
 use super::tags::{self, Tags};
 use super::{
     absolute, begin, ffmpeg_failed, no_stream, probe_failed, probe_output, run_passes,
-    source_is_a_file, worth_a_retry, Bar, Begun, COPY_SHARE, PASSES_SHARE, PROBE_TIMEOUT,
+    source_is_a_file, worth_a_retry, Bar, Begun, PASSES_SHARE, PROBE_TIMEOUT,
 };
 use crate::output::TempFile;
 use crate::publish;
@@ -332,14 +332,13 @@ impl Tool<'_> {
         let chain = match loudness::plan(measured, goal, ceiling) {
             Plan::TooQuiet => {
                 let detail = format!("measured {measured:?} in {}", src.display());
-                return Err(
-                    names.no_change("is too short or too quiet to measure its loudness.", detail)
-                );
+                let why = "is too short or too quiet to measure its loudness.";
+                return Err(self.settled(names.no_change(why, detail)));
             }
             Plan::AtTarget => {
                 let detail = format!("measured {measured:?} in {}", src.display());
                 let why = format!("is already at {} LUFS.", minus(target));
-                return Err(names.no_change(&why, detail));
+                return Err(self.settled(names.no_change(&why, detail)));
             }
             Plan::Linear(gain) => loudness::linear(gain),
             Plan::Limited(mut gain) => {
@@ -484,7 +483,9 @@ impl Tool<'_> {
             (pass, shrink.copies)
         };
         let (first, copies) = shrink(true);
-        let share = if copies { COPY_SHARE } else { PASSES_SHARE };
+        // A copy the muxer refuses is rare: the encode fills most of the
+        // bar, and a retry what's left.
+        let share = if copies { RETRY_FROM } else { PASSES_SHARE };
         let warnings = match run_passes(ffmpeg, &[first], info.duration, self.ctx, bar, share) {
             Ok(warnings) => warnings,
             Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
@@ -515,7 +516,7 @@ impl Tool<'_> {
             probe,
             _slot: slot,
         };
-        let try_small = preset != CompressPreset::Small;
+        let try_small = argv::small_does_more(self.to, info, preset);
         self.publish_smaller(written, before, true, try_small, bar)
     }
 
@@ -575,7 +576,7 @@ impl Tool<'_> {
                 "{after} bytes from {before} in {}",
                 self.begun.src.display()
             );
-            return Err(self.begun.names.not_smaller(try_small, detail));
+            return Err(self.settled(self.begun.names.not_smaller(try_small, detail)));
         }
         let mut outcome = self.publish(written, bar)?;
         outcome.notes.push(Note::Compressed { before, after });
@@ -730,11 +731,20 @@ impl Tool<'_> {
             .map_err(|e| publish::or_cancelled(&self.ctx.cancel, src, e))
     }
 
-    /// The error for an output `out` that isn't what the tool planned.
+    /// The error for an output `out` that isn't what the tool planned, or
+    /// the cancel that may have cut it short.
     fn wrote_wrong(&self, out: &Path, detail: String) -> GrapeError {
-        self.begun
+        let e = self
+            .begun
             .names
-            .encode_failed(format!("check {}: {detail}", out.display()))
+            .encode_failed(format!("check {}: {detail}", out.display()));
+        publish::or_cancelled(&self.ctx.cancel, self.begun.src, e)
+    }
+
+    /// A verdict reached after a pass ([`ErrorKind::NoChange`], say), or the
+    /// cancel that came meanwhile: a cancelled job always says so.
+    fn settled(&self, e: GrapeError) -> GrapeError {
+        publish::or_cancelled(&self.ctx.cancel, self.begun.src, e)
     }
 
     /// The error for an output `out` whose tags probe failed: it can't be
@@ -752,6 +762,10 @@ impl Tool<'_> {
             .publish_checked(written.temp, &written.out, self.ctx, bar)
     }
 }
+
+/// Where Compress on a video's first pass stops when it copies a track,
+/// so a retry has the rest of the bar.
+const RETRY_FROM: f32 = PASSES_SHARE * 0.9;
 
 /// Normalize Volume's measuring pass's share of the passes' bar.
 const MEASURE_SHARE: f32 = 0.25;
@@ -1225,7 +1239,10 @@ mod tests {
         assert_eq!(outcome.outputs, [case.dir.0.join("song Mono.mp3")]);
         assert!(outcome.notes.is_empty());
         let ran = ran();
-        assert!(has(&ran[2], ["-af", "pan=mono|c0=0.5*c0+0.5*c1"]));
+        assert!(has(
+            &ran[2],
+            ["-af", "aformat=sample_fmts=dbl,pan=mono|c0=0.5*c0+0.5*c1"]
+        ));
         assert!(has(&ran[2], ["-c:a", "libmp3lame"]));
         assert!(has(&ran[2], ["-metadata", "REPLAYGAIN_TRACK_GAIN="]));
         assert_forward_to_done(&seen);

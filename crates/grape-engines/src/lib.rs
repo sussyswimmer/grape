@@ -39,7 +39,7 @@ use std::sync::{
     Arc,
 };
 
-use grape_core::{Format, Job, JobOutput, Operation, ToolKey};
+use grape_core::{Category, Format, Job, JobOutput, Operation, ToolKey};
 
 /// Sidecar locations injected by the app: absolute paths, which it finds
 /// next to its own executable at startup
@@ -267,7 +267,11 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// PNG, WebP, TIFF and BMP with `heif` (10). Tools: Extract
 /// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
 /// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`; with
-/// `ffmpeg` and `ffprobe` (D26), Remove Audio on MP4, MOV and MKV. Pure:
+/// `ffmpeg` and `ffprobe` (D26), Remove Audio on MP4, MOV and MKV, Remove
+/// Metadata and Compress on MP3, M4A, WAV, FLAC, MP4, MOV and MKV, and
+/// Audio Channels and Normalize Volume on MP3, M4A, WAV and FLAC; with no
+/// sidecar (D26), Remove Metadata on JPG, PNG, WebP and GIF and Compress
+/// on JPG and PNG. Pure:
 /// it doesn't check that the sidecar files are there; [`run_job`] fails
 /// cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
@@ -408,7 +412,10 @@ pub fn run_job(
             // format, or FLAC for Compress on a WAV (by its content, which
             // may be named otherwise).
             let to = format_of(dest).unwrap_or(from);
-            if to != from && !(tool == ToolKey::Compress && to == Format::Flac) {
+            let compress = tool == ToolKey::Compress;
+            let to_flac = compress && to == Format::Flac && from.category() == Category::Audio;
+            // Compress on a WAV always writes FLAC.
+            if (to != from && !to_flac) || (compress && to == Format::Wav) {
                 return Err(not_yet_supported(job, Some(from)));
             }
             media::tools::run(job, src, dest, from, to, tool, &params, ctx, progress)

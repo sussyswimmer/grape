@@ -44,7 +44,8 @@ fn muxer_of(to: Format) -> &'static str {
 ///   M4A, where it would move the iTunes tags into keys.
 /// - Otherwise each container's own options, as conversions have them:
 ///   `faststart` for MP4, MOV and M4A, ID3v2.3 for MP3, RF64 past 4 GiB for
-///   WAV.
+///   WAV, and a Broadcast Wave's `bext` chunk written again
+///   (`-write_bext 1`) when the source had one.
 pub(super) fn keep(args: &mut Vec<OsString>, to: Format, tags: &Tags) {
     if let Some(time) = &tags.creation_time {
         push(args, &["-metadata", &format!("creation_time={time}")]);
@@ -65,7 +66,12 @@ pub(super) fn keep(args: &mut Vec<OsString>, to: Format, tags: &Tags) {
         ),
         Format::Mp4 | Format::Mov | Format::M4a => push(args, &["-movflags", "+faststart"]),
         Format::Mp3 => push(args, &["-id3v2_version", "3"]),
-        Format::Wav => push(args, &["-rf64", "auto"]),
+        Format::Wav => {
+            push(args, &["-rf64", "auto"]);
+            if tags.bext {
+                push(args, &["-write_bext", "1"]);
+            }
+        }
         _ => {}
     }
 }
@@ -106,7 +112,11 @@ pub(super) fn mute(
 /// The streams [`mute`] keeps.
 pub(super) fn muted(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamInfo> {
     probe.streams.iter().filter(move |s| match to {
-        Format::Mkv => !matches!(s.kind, StreamKind::Audio | StreamKind::Data),
+        // An MKV's cover art is an image attachment, which the demuxer
+        // shows as cover art and a copy writes back as a one-frame video
+        // track (6.1 and 9.0.2 alike, whatever the disposition): it's left
+        // out.
+        Format::Mkv => !matches!(s.kind, StreamKind::Audio | StreamKind::Data) && !s.attached_pic,
         _ => s.kind == StreamKind::Video || is_mov_text(s),
     })
 }
@@ -398,8 +408,15 @@ pub(super) enum Mix {
 ///   FL 1.0, FC 0.707, SL 0.707). 5.1 → stereo: FL 0.414, FC 0.293, SL
 ///   0.293, no LFE;
 /// - 3 or more unlabeled channels average to mono, and can't be stereo.
+///
+/// Each mixes in double precision ([`MIX_IN`]): `pan` and swresample
+/// otherwise mix 16-bit audio in 16 bits, rounding without the dither
+/// [`DITHER`] adds after, which then has nothing to do.
 pub(super) fn mix(target: Channels, channels: u32, has_layout: bool) -> Mix {
-    let filter = |filter: String, unlabeled| Mix::Filter { filter, unlabeled };
+    let filter = |filter: String, unlabeled| Mix::Filter {
+        filter: format!("{MIX_IN},{filter}"),
+        unlabeled,
+    };
     match (target, channels) {
         (Channels::Mono, 1) | (Channels::Stereo, 2) => Mix::Already,
         (Channels::Mono, 2) => filter("pan=mono|c0=0.5*c0+0.5*c1".to_owned(), false),
@@ -419,6 +436,9 @@ pub(super) fn mix(target: Channels, channels: u32, has_layout: bool) -> Mix {
         }
     }
 }
+
+/// The start of Audio Channels' filters: the samples as doubles.
+const MIX_IN: &str = "aformat=sample_fmts=dbl";
 
 /// The formats an audio tool keeps cover art in.
 fn holds_cover(to: Format) -> bool {
@@ -574,7 +594,8 @@ pub(super) fn small_enough(before: u64, after: u64, lossy: bool) -> bool {
 ///
 /// "Try Small" ([`Squeeze::try_small`]) when Small would do more: for MP3
 /// and M4A whenever the preset isn't Small (and Small wouldn't skip the
-/// file too), for FLAC when the source is over 16 bits or 48 kHz.
+/// file too), for FLAC when the source is over 16 bits, or over 48 kHz at
+/// High.
 pub(super) fn squeeze(
     to: Format,
     audio: &StreamInfo,
@@ -660,7 +681,9 @@ pub(super) fn squeeze(
                 filter,
                 sample_rate: capped,
                 lossy: fewer_bits || slower,
-                try_small: !small && (deep || rate > 48_000),
+                // Small cuts more only bits Balanced keeps, or a rate High
+                // keeps.
+                try_small: !small && (deep || (rate > 48_000 && preset == CompressPreset::High)),
                 skip: false,
             })
         }
@@ -707,13 +730,24 @@ pub(super) fn is_pq(video: &StreamInfo) -> bool {
     video.color_transfer == "smpte2084"
 }
 
-/// The first video stream that isn't cover art: the one Compress encodes.
+/// The video Compress encodes: the first that isn't cover art, and isn't
+/// a still image either when there's real video too. (A cover FFmpeg
+/// copied into an MKV comes back as a one-frame PNG or JPEG video track
+/// without the cover-art mark, often before the movie.)
 pub(super) fn picture(probe: &Probe) -> Option<&StreamInfo> {
-    probe
+    let mut videos = probe
         .streams
         .iter()
-        .find(|s| s.kind == StreamKind::Video && !s.attached_pic)
+        .filter(|s| s.kind == StreamKind::Video && !s.attached_pic);
+    let first = videos.clone().next();
+    videos
+        .find(|s| !STILL_CODECS.contains(&s.codec.as_str()))
+        .or(first)
 }
+
+/// Codecs of still images, which a video track rarely is but cover art
+/// copied into one is.
+const STILL_CODECS: [&str; 5] = ["png", "mjpeg", "bmp", "webp", "gif"];
 
 /// The streams Compress on a video keeps, in the source's order: the
 /// first video that isn't cover art (encoded), every audio track, cover
@@ -723,10 +757,24 @@ pub(super) fn picture(probe: &Probe) -> Option<&StreamInfo> {
 pub(super) fn shrunk(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamInfo> {
     let first = picture(probe).map(|s| s.index);
     probe.streams.iter().filter(move |s| match s.kind {
-        StreamKind::Video => s.attached_pic || Some(s.index) == first,
+        // MKV cover art can't be written back ([`muted`]).
+        StreamKind::Video if s.attached_pic => to != Format::Mkv,
+        StreamKind::Video => Some(s.index) == first,
         StreamKind::Audio => true,
         _ => muted(to, probe).any(|kept| kept.index == s.index),
     })
+}
+
+/// Whether Small would make a video smaller than `preset` does: always
+/// with a picture to encode; for sound alone, when some audio track isn't
+/// already AAC within Small's bitrate, which Small would copy too.
+pub(super) fn small_does_more(to: Format, probe: &Probe, preset: CompressPreset) -> bool {
+    preset != CompressPreset::Small
+        && (picture(probe).is_some()
+            || shrunk(to, probe).any(|s| {
+                let target = aac_rate(aac_per_channel(CompressPreset::Small), s.channels);
+                s.kind == StreamKind::Audio && !(s.codec == "aac" && within(s.bit_rate, target))
+            }))
 }
 
 /// Compress's argv for a video ([`shrink`]), and whether it copies an
@@ -742,8 +790,9 @@ pub(super) struct Shrink {
 ///
 /// - the picture ([`picture`]): x264 at CRF 28, 23 or 20 (`medium`,
 ///   `high`, `yuv420p`), its short side at most 720, 1080 or 2160
-///   ([`fit`], Lanczos), and at Small at most 30 fps ([`fps_cap`]). HLG
-///   stays tagged as HLG;
+///   ([`fit`], Lanczos), and at Small at most 30 fps ([`fps_cap`]), which
+///   leaves out an MP4 or MOV timecode (`-write_tmcd 0`). HLG stays
+///   tagged as HLG;
 /// - each audio track: AAC at 48k, 64k or 96k a channel ([`aac_rate`]),
 ///   at most 48 kHz, unless it is AAC already within 1.1 × that bitrate
 ///   and `copy_audio`, when it is copied.
@@ -767,6 +816,7 @@ pub(super) fn shrink(
     push(&mut args, &["-c", "copy"]);
     let picture = picture(probe).map(|s| s.index);
     let mut copies = false;
+    let mut retimed = false;
     for (o, stream) in kept.iter().enumerate() {
         let o = o.to_string();
         let spec = |option: &str| format!("-{option}:{o}");
@@ -774,7 +824,12 @@ pub(super) fn shrink(
             let (crf, short) = x264(preset);
             let mut chain = Vec::new();
             if preset == CompressPreset::Small {
-                chain.extend(fps_cap(stream.avg_fps).map(|rate| format!("fps={rate}")));
+                if let Some(rate) = fps_cap(stream.avg_fps) {
+                    chain.push(format!("fps={rate}"));
+                    // A camera timecode's frame number would be read at
+                    // the new rate, so it's left out.
+                    retimed = true;
+                }
             }
             chain.push(format!("{}:flags=lanczos", fit(short)));
             push(
@@ -807,6 +862,9 @@ pub(super) fn shrink(
                 push(&mut args, &[&spec("ar"), &capped.to_string()]);
             }
         }
+    }
+    if retimed && matches!(to, Format::Mp4 | Format::Mov) {
+        push(&mut args, &["-write_tmcd", "0"]);
     }
     keep(&mut args, to, tags);
     Shrink {
@@ -1327,7 +1385,7 @@ pub(super) mod tests {
     fn channels_mix_by_count_and_layout() {
         use Channels::{Mono, Stereo};
         let filter = |filter: &str, unlabeled| Mix::Filter {
-            filter: filter.to_owned(),
+            filter: format!("aformat=sample_fmts=dbl,{filter}"),
             unlabeled,
         };
         for has_layout in [true, false] {
@@ -1709,6 +1767,7 @@ pub(super) mod tests {
                 false,
                 true,
             ),
+            // Small would write the same 16-bit 44.1 kHz file.
             (
                 "pcm_s16le",
                 16,
@@ -1718,6 +1777,17 @@ pub(super) mod tests {
                 Some(format!("aresample=44100:{dither}")),
                 44_100,
                 true,
+                false,
+            ),
+            (
+                "pcm_s16le",
+                16,
+                88_200,
+                High,
+                "s16",
+                None,
+                88_200,
+                false,
                 true,
             ),
             (
@@ -1860,13 +1930,25 @@ pub(super) mod tests {
         let mut two = movie();
         two.streams.push(stream(7, StreamKind::Video, "hevc"));
         assert_eq!(indexes(Format::Mp4, &two), [0, 1, 2, 3, 6]);
-        assert_eq!(indexes(Format::Mkv, &mkv()), [0, 1, 2, 3, 4]);
+        // MKV cover art is left out: a copy would make it a video track.
+        assert_eq!(indexes(Format::Mkv, &mkv()), [0, 1, 2, 3]);
         // Cover art first doesn't count as the picture.
         let covered = probe_of(
             "mov,mp4,m4a,3gp,3g2,mj2",
             vec![cover(0), stream(1, StreamKind::Video, "h264")],
         );
         assert_eq!(picture(&covered).map(|s| s.index), Some(1));
+        // A cover FFmpeg wrote as a video track, before the movie.
+        let copied = probe_of(
+            "matroska,webm",
+            vec![
+                stream(0, StreamKind::Video, "png"),
+                stream(1, StreamKind::Video, "h264"),
+            ],
+        );
+        assert_eq!(picture(&copied).map(|s| s.index), Some(1));
+        let stills = probe_of("matroska,webm", vec![stream(0, StreamKind::Video, "mjpeg")]);
+        assert_eq!(picture(&stills).map(|s| s.index), Some(0));
         let song = probe_of(
             "mov,mp4,m4a,3gp,3g2,mj2",
             vec![stream(0, StreamKind::Audio, "aac"), cover(1)],
@@ -1953,6 +2035,7 @@ pub(super) mod tests {
             shrink.args
         );
         assert!(has(&shrink.args, ["-crf:0", "28"]));
+        assert!(has(&shrink.args, ["-write_tmcd", "0"]));
         assert!(has(&shrink.args, ["-b:1", "96k"]));
         assert!(has(&shrink.args, ["-b:2", "96k"]));
 
@@ -1984,7 +2067,7 @@ pub(super) mod tests {
             ["-movflags", "+faststart+use_metadata_tags"]
         ));
 
-        // An audio-only MKV: no x264 at all, cover art copied.
+        // An audio-only MKV: no x264 at all, and its cover art left out.
         let probe = probe_of(
             "matroska,webm",
             vec![stream(0, StreamKind::Audio, "flac"), cover(1)],
@@ -1998,13 +2081,30 @@ pub(super) mod tests {
             true,
             &out(),
         );
-        let middle = [
-            "-map", "0:0", "-map", "0:1", "-c", "copy", "-c:0", "aac", "-b:0", "128k",
-        ];
+        let middle = ["-map", "0:0", "-c", "copy", "-c:0", "aac", "-b:0", "128k"];
         assert_eq!(shrink.args, expect(&[], &middle, "matroska"));
     }
 
-    /// Whether `args` has `pair` one after the other.
+    #[test]
+    fn small_does_more_unless_it_would_copy_every_track_too() {
+        use CompressPreset::{Balanced, High, Small};
+        // A picture: always, but at Small.
+        assert!(small_does_more(Format::Mp4, &movie(), Balanced));
+        assert!(!small_does_more(Format::Mp4, &movie(), Small));
+        // Sound alone: AAC at 90k stereo is within Small's 96k, so Small
+        // copies it as Balanced does.
+        let mut aac = stream(0, StreamKind::Audio, "aac");
+        aac.bit_rate = Some(90_000);
+        let song = probe_of("mov,mp4,m4a,3gp,3g2,mj2", vec![aac.clone()]);
+        assert!(!small_does_more(Format::Mp4, &song, High));
+        aac.bit_rate = Some(160_000);
+        let song = probe_of("mov,mp4,m4a,3gp,3g2,mj2", vec![aac]);
+        assert!(small_does_more(Format::Mp4, &song, Balanced));
+        let flac = probe_of("matroska,webm", vec![stream(0, StreamKind::Audio, "flac")]);
+        assert!(small_does_more(Format::Mkv, &flac, High));
+    }
+
+    /// Whether `args` has `pair` one after the other.    /// Whether `args` has `pair` one after the other.
     fn has(args: &[OsString], pair: [&str; 2]) -> bool {
         crate::media::tests::has(args, pair)
     }
@@ -2084,6 +2184,15 @@ pub(super) mod tests {
         let none = Tags::default();
         assert_eq!(argv(Format::Mp3, &none), ["-id3v2_version", "3"]);
         assert_eq!(argv(Format::Wav, &none), ["-rf64", "auto"]);
+        let bwf = Tags {
+            bext: true,
+            ..Tags::default()
+        };
+        assert_eq!(
+            argv(Format::Wav, &bwf),
+            ["-rf64", "auto", "-write_bext", "1"]
+        );
+        assert_eq!(argv(Format::Flac, &bwf), Vec::<String>::new());
         assert!(argv(Format::Flac, &none).is_empty());
         assert!(argv(Format::Mkv, &none).is_empty());
         assert_eq!(argv(Format::Mkv, &dated(true)), date);
@@ -2121,7 +2230,8 @@ pub(super) mod tests {
             mute(&src(), Format::Mkv, &mkv(), &Tags::default(), &out()),
             expect(
                 &[],
-                &["-map", "0:0", "-map", "0:2", "-map", "0:3", "-map", "0:4", "-c", "copy"],
+                // Not the cover art (0:4), which a copy makes a video.
+                &["-map", "0:0", "-map", "0:2", "-map", "0:3", "-c", "copy"],
                 "matroska"
             )
         );
