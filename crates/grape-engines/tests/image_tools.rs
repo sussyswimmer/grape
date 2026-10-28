@@ -477,6 +477,24 @@ fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
         image.write_data(&[1, 2, 3, 4]).unwrap();
         out.into_inner()
     };
+    // A strip of JPEG data (compression 7): a progressive JPEG whose first
+    // scan runs past the first 64 KiB, so what follows can't be seen.
+    let progressive = {
+        let jpeg = [
+            &b"\xFF\xD8\xFF\xC2\0\x0B\x08\0\x08\0\x08\x01\x01\x11\0"[..],
+            b"\xFF\xDA\0\x08\x01\x01\0\0\x3F\0",
+            &[0x55; 70_000],
+            b"\xFF\xD9",
+        ]
+        .concat();
+        let mut out = Cursor::new(Vec::new());
+        let mut e = TiffEncoder::new(&mut out).unwrap();
+        let width = u32::try_from(jpeg.len()).unwrap();
+        let mut image = e.new_image::<colortype::Gray8>(width, 1).unwrap();
+        image.encoder().write_tag(Tag::Compression, 7u16).unwrap();
+        image.write_data(&jpeg).unwrap();
+        out.into_inner()
+    };
     for (name, bytes, kind, message) in [
         (
             "raw.tif",
@@ -489,6 +507,12 @@ fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
             one(Tag::ImageDescription, b"ImageJ=1.54f\nimages=2\n\0"),
             ErrorKind::NotYetSupported,
             "stack.tif keeps its layout in its description, so Remove Metadata would break it.",
+        ),
+        (
+            "scans.tif",
+            progressive,
+            ErrorKind::NotYetSupported,
+            "scans.tif has JPEG data Grape can't check for metadata yet.",
         ),
         (
             "cut.tif",

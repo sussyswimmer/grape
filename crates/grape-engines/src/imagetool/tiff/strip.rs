@@ -19,9 +19,9 @@
 //! - **Refused:** DNG and old-style JPEG (both tools); metadata inside
 //!   JPEG data (an APP1, APP13 or COM in its JPEGTables, or in a block:
 //!   up to its first scan when that's a sequential frame's only one, and
-//!   through every scan otherwise; or segments or scans that run past the
-//!   first [`MAX_SCAN`] bytes read before that); ImageJ and OME files,
-//!   whose layout is in their description.
+//!   through every scan otherwise), and JPEG data Grape can't check, whose
+//!   segments or scans run past the first [`MAX_SCAN`] bytes read before
+//!   that; ImageJ and OME files, whose layout is in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -57,6 +57,9 @@ const MAX_SCAN: u64 = 64 * 1024;
 
 /// Why a file with metadata inside its JPEG data is refused.
 const IN_DATA: &str = "has metadata inside its image data, which Grape can't remove yet.";
+
+/// Why a file whose JPEG data runs on past what's read of it is refused.
+const UNCHECKED: &str = "has JPEG data Grape can't check for metadata yet.";
 
 /// Why an ImageJ or OME file is refused.
 const DESCRIBED: &str = "keeps its layout in its description, so Remove Metadata would break it.";
@@ -147,8 +150,10 @@ impl Plan {
                 left,
             };
             for ifd in jpegs {
-                if scan.holds_metadata(r, ifd)? {
-                    return Err(Error::Refused(IN_DATA.into()));
+                match scan.seen(r, ifd)? {
+                    Seen::Clean => {}
+                    Seen::Metadata => return Err(Error::Refused(IN_DATA.into())),
+                    Seen::Unseen => return Err(Error::Refused(UNCHECKED.into())),
                 }
             }
         }
@@ -334,7 +339,7 @@ fn look(
 
 /// The scan of JPEG data for metadata, which reads a block, or a
 /// JPEGTables value, once however many times IFDs list it: one that held
-/// metadata ended the scan.
+/// metadata, or couldn't be seen through, ended the scan.
 struct JpegScan<'s> {
     /// The blocks listed more than once, sorted ([`Tiff::shared`]).
     shared: &'s [Block],
@@ -347,13 +352,15 @@ struct JpegScan<'s> {
 }
 
 impl JpegScan<'_> {
-    /// Whether the JPEG data of `ifd` (compression 7) holds metadata, or
-    /// may: in its JPEGTables, or in a block before its first scan.
-    fn holds_metadata(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
+    /// What the JPEG data of `ifd` (compression 7) holds, as [`segments`]
+    /// reads its JPEGTables and each of its blocks: the first that isn't
+    /// clean.
+    fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<Seen, Error> {
         if let Some(tables) = ifd.get(347).filter(|e| self.tables.insert(e.value)) {
             if let Some((tables, whole)) = look(r, tables, MAX_SCAN, &mut self.left)? {
-                if segments_hold_metadata(&tables, whole) {
-                    return Ok(true);
+                let seen = segments(&tables, whole);
+                if seen != Seen::Clean {
+                    return Ok(seen);
                 }
             }
         }
@@ -368,25 +375,40 @@ impl JpegScan<'_> {
             buf.resize(block.len.min(MAX_SCAN) as usize, 0);
             seek(r, block.offset)?;
             read_exact(r, &mut buf)?;
-            if segments_hold_metadata(&buf, block.len <= MAX_SCAN) {
-                return Ok(true);
+            let seen = segments(&buf, block.len <= MAX_SCAN);
+            if seen != Seen::Clean {
+                return Ok(seen);
             }
         }
-        Ok(false)
+        Ok(Seen::Clean)
     }
 }
 
-/// Whether the JPEG stream `jpeg` has an APP1, APP13 or COM segment, or
-/// may have: when `jpeg` is only the stream's first bytes (not `whole`)
-/// and they end too soon, what follows can't be seen. Its segments are
-/// read up to its first scan when that holds every component of a
-/// sequential frame, which then has no other scan, so only its end
-/// follows; otherwise past every scan, each to the marker after its coded
-/// data, to the end. Anything that isn't a stream of segments says no:
-/// it's copied as it is.
-fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
+/// What JPEG data holds, as far as it's read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// No APP1, APP13 or COM segment, or not segments Grape knows, which
+    /// are copied as they are.
+    Clean,
+    /// An APP1, APP13 or COM segment.
+    Metadata,
+    /// Segments or scans that run on past what was read: what follows
+    /// can't be seen.
+    Unseen,
+}
+
+/// What the JPEG stream `jpeg` holds ([`Seen`]): when `jpeg` is only the
+/// stream's first bytes (not `whole`) and they end too soon, what follows
+/// can't be seen. Its segments are read up to its first scan when that
+/// holds every component of a sequential frame, which then has no other
+/// scan, so only its end follows; otherwise past every scan, each to the
+/// marker after its coded data, to the end. Anything that isn't a stream
+/// of segments is clean: it's copied as it is.
+fn segments(jpeg: &[u8], whole: bool) -> Seen {
+    // Where what was read ends too soon.
+    let cut = if whole { Seen::Clean } else { Seen::Unseen };
     let Some(mut rest) = jpeg.strip_prefix(&[0xFF, 0xD8]) else {
-        return false;
+        return Seen::Clean;
     };
     // The frame's components, and whether it's sequential (each component
     // in one scan).
@@ -395,24 +417,24 @@ fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
         // A marker, after any fill bytes.
         let fill = rest.iter().take_while(|&&b| b == 0xFF).count();
         let Some(&marker) = rest.get(fill) else {
-            return !whole;
+            return cut;
         };
         if fill == 0 {
-            return false;
+            return Seen::Clean;
         }
         rest = &rest[fill + 1..];
         match marker {
-            0xE1 | 0xED | 0xFE => return true,
-            0xD9 => return false,
+            0xE1 | 0xED | 0xFE => return Seen::Metadata,
+            0xD9 => return Seen::Clean,
             0x01 | 0xD0..=0xD7 => continue,
             _ => {}
         }
         let Some(len) = rest.get(..2) else {
-            return !whole;
+            return cut;
         };
         let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
         let (Some(segment), Some(next)) = (rest.get(..len), rest.get(len..)) else {
-            return !whole;
+            return cut;
         };
         rest = next;
         match marker {
@@ -424,13 +446,13 @@ fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
             0xDA => {
                 let (Some((components, sequential)), Some(&n)) = (frame, segment.get(2)) else {
                     // A scan with no frame: not a stream Grape knows.
-                    return false;
+                    return Seen::Clean;
                 };
                 if sequential && n == components {
-                    return false;
+                    return Seen::Clean;
                 }
                 let Some(at) = coded_end(rest) else {
-                    return !whole;
+                    return cut;
                 };
                 rest = &rest[at..];
             }
@@ -1155,10 +1177,10 @@ mod tests {
             }
         }
         // A scan with no frame before it isn't a stream Grape knows.
-        assert!(!segments_hold_metadata(
-            b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1",
-            false
-        ));
+        assert_eq!(
+            segments(b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1", false),
+            Seen::Clean
+        );
     }
 
     /// A segment: `marker` and `body`, with its length.
@@ -1199,20 +1221,20 @@ mod tests {
         // Progressive: scans until the end.
         let progressive =
             |between: &[u8]| [&soi, &frame(0xC2, 1), &scan(1), between, &scan(1), &eoi].concat();
-        assert!(segments_hold_metadata(&progressive(&app1), true));
-        assert!(!segments_hold_metadata(&progressive(&tables), true));
+        assert_eq!(segments(&progressive(&app1), true), Seen::Metadata);
+        assert_eq!(segments(&progressive(&tables), true), Seen::Clean);
         // The first scan's coded data running past what was read.
         let cut = [soi.clone(), frame(0xC2, 1), scan(1)].concat();
-        assert!(segments_hold_metadata(&cut, false));
-        assert!(!segments_hold_metadata(&cut, true));
+        assert_eq!(segments(&cut, false), Seen::Unseen);
+        assert_eq!(segments(&cut, true), Seen::Clean);
         // Sequential, its first scan of one of three components.
         let partial = [&soi[..], &frame(0xC0, 3), &scan(1), &app1, &scan(2), &eoi].concat();
-        assert!(segments_hold_metadata(&partial, true));
+        assert_eq!(segments(&partial, true), Seen::Metadata);
         // Sequential, its first scan of every component: only the end
         // follows, so nothing past it is read, however long the data.
         let only = [&soi[..], &frame(0xC0, 3), &scan(3), &app1, &eoi].concat();
-        assert!(!segments_hold_metadata(&only, true));
-        assert!(!segments_hold_metadata(&only, false));
+        assert_eq!(segments(&only, true), Seen::Clean);
+        assert_eq!(segments(&only, false), Seen::Clean);
         // Through the plan: refused, or kept as it is.
         let Err(Error::Refused(why)) = plan(&jpeg_page(progressive(&app1), None)) else {
             panic!("not refused")
@@ -1235,36 +1257,53 @@ mod tests {
         let filled = [scan(1), b"\x78\xFF\xFF\xD0\x9A\xFF\xFF".to_vec()].concat();
         let progressive =
             |between: &[u8]| [&soi[..], &frame(0xC2, 1), &filled, between, &scan(1), &eoi].concat();
-        assert!(segments_hold_metadata(&progressive(&app1), true));
-        assert!(!segments_hold_metadata(&progressive(b""), true));
+        assert_eq!(segments(&progressive(&app1), true), Seen::Metadata);
+        assert_eq!(segments(&progressive(b""), true), Seen::Clean);
         // Fill bytes to the end of what was read: what follows can't be
         // seen.
         let cut = [&soi[..], &frame(0xC2, 1), &scan(1), b"\xFF\xFF"].concat();
-        assert!(segments_hold_metadata(&cut, false));
-        assert!(!segments_hold_metadata(&cut, true));
+        assert_eq!(segments(&cut, false), Seen::Unseen);
+        assert_eq!(segments(&cut, true), Seen::Clean);
+    }
+
+    #[test]
+    fn jpeg_data_whose_scans_pass_the_window_is_refused_as_unchecked() {
+        // A progressive strip, and a sequential one whose first scan holds
+        // one component of three, with no metadata, whose first scan's
+        // coded data runs past the 64 KiB read.
+        let long = [segment(0xDA, &[1, 1, 0, 0, 63, 0]), vec![0x55; 70_000]].concat();
+        let (soi, eoi) = (b"\xFF\xD8".to_vec(), b"\xFF\xD9".to_vec());
+        for frame in [frame(0xC2, 1), frame(0xC0, 3)] {
+            let file = jpeg_page([&soi[..], &frame, &long, &scan(1), &eoi].concat(), None);
+            let Err(Error::Refused(why)) = plan(&file) else {
+                panic!("not refused")
+            };
+            assert_eq!(why, UNCHECKED);
+        }
     }
 
     #[test]
     fn jpeg_data_whose_segments_pass_the_window_is_refused() {
         // An APP2 of 65,535 bytes: the first 64 KiB end inside it, before
-        // the APP1 and the scan.
+        // the APP1 and the scan, which can't be seen.
         let app2 = [&b"\xFF\xE2\xFF\xFF"[..], &[7; 65_533]].concat();
         let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
-        for segments in [[&app2[..], app1].concat(), app2.clone()] {
-            let file = jpeg_page(jpeg(&segments), None);
+        let tables = [&b"\xFF\xD8"[..], &app2, b"\xFF\xD9"].concat();
+        for file in [
+            jpeg_page(jpeg(&[&app2[..], app1].concat()), None),
+            jpeg_page(jpeg(&app2), None),
+            // Tables as long.
+            jpeg_page(jpeg(b""), Some(tables)),
+        ] {
             let Err(Error::Refused(why)) = plan(&file) else {
                 panic!("not refused")
             };
-            assert_eq!(why, IN_DATA);
+            assert_eq!(why, UNCHECKED);
         }
-        // Tables as long.
-        let tables = [&b"\xFF\xD8"[..], &app2, b"\xFF\xD9"].concat();
-        let file = jpeg_page(jpeg(b""), Some(tables));
-        assert!(matches!(plan(&file), Err(Error::Refused(_))));
         // A stream that ends there, read whole, has nothing after it.
-        assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", true));
-        assert!(segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", false));
-        assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xDA\0\x02", false));
+        assert_eq!(segments(b"\xFF\xD8\xFF\xE2\0\x10ab", true), Seen::Clean);
+        assert_eq!(segments(b"\xFF\xD8\xFF\xE2\0\x10ab", false), Seen::Unseen);
+        assert_eq!(segments(b"\xFF\xD8\xFF\xDA\0\x02", false), Seen::Clean);
     }
 
     /// A source that counts the bytes read from it.
