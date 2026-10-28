@@ -823,6 +823,7 @@ jobs:
             $want = [ordered]@{
               "sidecars line naming all five" = '\]\[grape_app::sidecars\]\[INFO\] sidecars: found ffmpeg, ffprobe, grape-heif, bsdtar, pdfium$'
               "overlay's tool-window, no-activate style (D11)" = '\]\[grape_app::ui_windows::windows_overlay\]\[INFO\] overlay ex-style \(at startup\): 0x[0-9a-f]+ TOOLWINDOW\|NOACTIVATE(\||$)'
+              "toast's tool-window, no-activate style (D11)" = '\]\[grape_app::ui_windows::windows_overlay\]\[INFO\] toast ex-style \(at startup\): 0x[0-9a-f]+ TOOLWINDOW\|NOACTIVATE(\||$)'
               "overlay's drop target (D13)" = '\]\[grape_app::wheel\]\[INFO\] overlay drop target on [1-9][0-9]* of [0-9]+ window\(s\)$'
             }
             if ($first) {
