@@ -118,11 +118,15 @@ impl Plan {
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
         let tiff = Tiff::read(r, len)?;
         let order = tiff.layout.order;
+        // What's read of descriptions and JPEG tables, each value once,
+        // may come to what the file holds: only values that overlap come
+        // to more.
+        let mut left = len;
         // A description that IFDs share is read once.
         let mut descriptions = HashSet::new();
         for ifd in tiff.ifds() {
             if let Some(entry) = ifd.get(270).filter(|e| descriptions.insert(e.value)) {
-                let text = head(r, entry, MAX_JUDGED)?.map(|(text, _)| text);
+                let text = look(r, entry, MAX_JUDGED, &mut left)?.map(|(text, _)| text);
                 let text = text.unwrap_or_default();
                 if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
                     return Err(Error::Refused(DESCRIBED.into()));
@@ -140,6 +144,7 @@ impl Plan {
                 shared: &shared,
                 scanned: vec![false; shared.len()],
                 tables: HashSet::new(),
+                left,
             };
             for ifd in jpegs {
                 if scan.holds_metadata(r, ifd)? {
@@ -309,6 +314,24 @@ fn head(r: &mut dyn In, entry: &Entry, max: u64) -> Result<Option<(Vec<u8>, bool
     }
 }
 
+/// The first `max` bytes of `entry`'s value, as [`head`] reads them,
+/// taken from `left`: past it, the file is too large.
+fn look(
+    r: &mut dyn In,
+    entry: &Entry,
+    max: u64,
+    left: &mut u64,
+) -> Result<Option<(Vec<u8>, bool)>, Error> {
+    if let Value::At { len, .. } = entry.value {
+        *left = left.checked_sub(len.min(max)).ok_or_else(|| {
+            Error::TooLarge(
+                "descriptions or JPEG tables that overlap, more to read than it holds".into(),
+            )
+        })?;
+    }
+    head(r, entry, max)
+}
+
 /// The scan of JPEG data for metadata, which reads a block, or a
 /// JPEGTables value, once however many times IFDs list it: one that held
 /// metadata ended the scan.
@@ -319,6 +342,8 @@ struct JpegScan<'s> {
     scanned: Vec<bool>,
     /// The JPEGTables values it has read, by where they are.
     tables: HashSet<Value>,
+    /// What's left of the bytes it may read of JPEGTables values ([`look`]).
+    left: u64,
 }
 
 impl JpegScan<'_> {
@@ -326,7 +351,7 @@ impl JpegScan<'_> {
     /// may: in its JPEGTables, or in a block before its first scan.
     fn holds_metadata(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
         if let Some(tables) = ifd.get(347).filter(|e| self.tables.insert(e.value)) {
-            if let Some((tables, whole)) = head(r, tables, MAX_SCAN)? {
+            if let Some((tables, whole)) = look(r, tables, MAX_SCAN, &mut self.left)? {
                 if segments_hold_metadata(&tables, whole) {
                     return Ok(true);
                 }
@@ -1347,6 +1372,36 @@ mod tests {
         let (found, read) = tallied(&blanks(260, &[305], 64 * 1024, 2));
         assert_eq!(found, [Software].into());
         assert!(read < JUDGE_BUDGET + (1 << 20), "{read} bytes read");
+    }
+
+    #[test]
+    fn descriptions_or_jpeg_tables_that_overlap_are_read_up_to_the_files_size() {
+        // 40 JPEG pages whose descriptions, or JPEG tables, are 64 KiB of
+        // one run of text, each 2 bytes further on: 2.5 MiB to read from
+        // a file of under 100 KB.
+        let run = b"A scan ".repeat(10_000);
+        for (tag, kind) in [(270, 2), (347, 7)] {
+            let pages = (0..40)
+                .map(|n| {
+                    let mut page = gray(8, 8, 8, vec![B::Data(jpeg(b""))]);
+                    let value = if n == 0 { run.clone() } else { vec![0] };
+                    page.tags
+                        .extend([(259, V::Short(vec![7])), (tag, V::Bytes(kind, value))]);
+                    page.tags.sort_by_key(|t| t.0);
+                    page
+                })
+                .collect();
+            let mut file = Builder::new(b'I', false, pages).build();
+            let tiff = read(&file);
+            let Value::At { offset, .. } = tiff.pages[0].get(tag).unwrap().value else {
+                panic!("an inline {tag}")
+            };
+            for (n, page) in (0..).zip(&tiff.pages) {
+                set_entry(&mut file, page.at, tag, 64 * 1024, offset + 2 * n);
+            }
+            assert!(file.len() < 100_000);
+            assert!(matches!(plan(&file), Err(Error::TooLarge(_))), "{tag}");
+        }
     }
 
     #[test]
