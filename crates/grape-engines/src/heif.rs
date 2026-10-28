@@ -1516,8 +1516,11 @@ pub(crate) mod tests {
     //! The engine with the test binary itself as a fake helper: it runs
     //! only [`fake_helper`] (`--exact … --ignored`) with [`FAKE`] set to a
     //! mode, and serves the request with `grape_heif_proto::serve` and
-    //! [`FakeCodec`], whose "HEIC" (and "AVIF") is an `ftyp` box followed by
-    //! raw pixels.
+    //! [`FakeCodec`], whose "HEIC" (and "AVIF") is real HEIF around raw
+    //! pixels ([`fake_file`]): its primary item's data, found through `pitm`
+    //! and `iloc` ([`parse_fake`]), so a file another engine rewrote around
+    //! it still decodes. An encode records the quality it was asked for
+    //! ([`fake_quality`]).
     //! Every test checks that the source is unchanged, that nothing is left
     //! in the destination folder, and that no work folder is left.
 
@@ -1569,9 +1572,86 @@ pub(crate) mod tests {
     /// codec no helper reads.
     const AVCI_BRAND: [u8; 32] = *b"\0\0\0\x18ftypavci\0\0\0\0mif1avci\0\0\0\0\0\0\0\0";
 
-    /// A fake HEIC file: [`FTYP`], `FAKE`, the width and height (u32 LE),
-    /// the channels, the ICC profile's length (u32 LE), the profile, the
-    /// rows.
+    /// The start of a fake image's coded data, the primary item's payload.
+    const PAYLOAD_MAGIC: &[u8; 4] = b"FAKE";
+
+    /// An 8-bit 4:2:0 Main profile `hvcC` record (ISO/IEC 14496-15
+    /// 8.3.3.1), 23 bytes, with no parameter sets: version 1, Main, level
+    /// 3.0, `lengthSizeMinusOne` 3.
+    const HVCC: [u8; 23] = [
+        1, 0x01, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 90, 0xF0, 0x00, 0xFC, 0xFD, 0xF8, 0xF8, 0, 0,
+        0x0F, 0,
+    ];
+
+    /// An 8-bit 4:2:0 Main profile `av1C` record (AV1-ISOBMFF 2.3.3), with
+    /// no OBUs.
+    const AV1C: [u8; 4] = [0x81, 0x00, 0x0C, 0x00];
+
+    /// A box: its 32-bit size, its type, its body.
+    fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let size = u32::try_from(8 + body.len()).unwrap();
+        let mut bytes = size.to_be_bytes().to_vec();
+        bytes.extend_from_slice(kind);
+        bytes.extend_from_slice(body);
+        bytes
+    }
+
+    /// A full box: [`mp4_box`] with a version and 24 bits of flags first.
+    fn full_box(kind: &[u8; 4], version: u8, flags: u32, body: &[u8]) -> Vec<u8> {
+        let mut full = (u32::from(version) << 24 | flags).to_be_bytes().to_vec();
+        full.extend_from_slice(body);
+        mp4_box(kind, &full)
+    }
+
+    /// The `meta` box of a fake file whose one image item, the primary
+    /// one, is `item` (`hvc1` or `av01`) with `config` (`hvcC` or `av1C`),
+    /// `width`×`height`, coded in `length` bytes at file offset `offset`.
+    fn fake_meta(
+        item: &[u8; 4],
+        config: (&[u8; 4], &[u8]),
+        width: u32,
+        height: u32,
+        offset: u32,
+        length: u32,
+    ) -> Vec<u8> {
+        let mut hdlr = vec![0; 4];
+        hdlr.extend_from_slice(b"pict");
+        hdlr.extend_from_slice(&[0; 13]); // reserved, and an empty name
+        let pitm = 1u16.to_be_bytes();
+        let mut infe = 1u16.to_be_bytes().to_vec(); // item_ID
+        infe.extend_from_slice(&0u16.to_be_bytes()); // item_protection_index
+        infe.extend_from_slice(item);
+        infe.push(0); // an empty item_name
+        let mut iinf = 1u16.to_be_bytes().to_vec();
+        iinf.extend_from_slice(&full_box(b"infe", 2, 0, &infe));
+        // Version 1: 4-byte offsets and lengths, no base offset or index.
+        let mut iloc = vec![0x44, 0x00];
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_count
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // item_ID
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // construction_method 0
+        iloc.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc.extend_from_slice(&offset.to_be_bytes());
+        iloc.extend_from_slice(&length.to_be_bytes());
+        let mut ispe = width.to_be_bytes().to_vec();
+        ispe.extend_from_slice(&height.to_be_bytes());
+        let mut ipco = mp4_box(config.0, config.1);
+        ipco.extend_from_slice(&full_box(b"ispe", 0, 0, &ispe));
+        // Item 1: property 1 (the codec's, essential), then 2 (`ispe`).
+        let mut ipma = 1u32.to_be_bytes().to_vec();
+        ipma.extend_from_slice(&1u16.to_be_bytes());
+        ipma.extend_from_slice(&[2, 0x81, 0x02]);
+        let mut iprp = mp4_box(b"ipco", &ipco);
+        iprp.extend_from_slice(&full_box(b"ipma", 0, 0, &ipma));
+        let mut meta = full_box(b"hdlr", 0, 0, &hdlr);
+        meta.extend_from_slice(&full_box(b"pitm", 0, 0, &pitm));
+        meta.extend_from_slice(&full_box(b"iinf", 0, 0, &iinf));
+        meta.extend_from_slice(&full_box(b"iloc", 1, 0, &iloc));
+        meta.extend_from_slice(&mp4_box(b"iprp", &iprp));
+        full_box(b"meta", 0, 0, &meta)
+    }
+
+    /// A fake HEIC file: [`fake_image`]'s.
     pub(crate) fn fake_heic(
         width: u32,
         height: u32,
@@ -1582,7 +1662,8 @@ pub(crate) mod tests {
         fake_image(HeifFormat::Heic, width, height, channels, rows, icc)
     }
 
-    /// [`fake_heic`], or the same after [`FTYP_AVIF`] for AVIF.
+    /// A fake HEIC or AVIF file, as the fake helper writes one: real HEIF
+    /// around raw pixels ([`fake_file`]), with no quality recorded.
     pub(crate) fn fake_image(
         format: HeifFormat,
         width: u32,
@@ -1591,38 +1672,201 @@ pub(crate) mod tests {
         rows: &[u8],
         icc: Option<&[u8]>,
     ) -> Vec<u8> {
-        let icc = icc.unwrap_or_default();
-        let mut bytes = match format {
-            HeifFormat::Heic => FTYP.to_vec(),
-            HeifFormat::Avif => FTYP_AVIF.to_vec(),
-        };
-        bytes.extend_from_slice(b"FAKE");
-        bytes.extend_from_slice(&width.to_le_bytes());
-        bytes.extend_from_slice(&height.to_le_bytes());
-        bytes.push(channels);
-        bytes.extend_from_slice(&u32::try_from(icc.len()).unwrap().to_le_bytes());
-        bytes.extend_from_slice(icc);
-        bytes.extend_from_slice(rows);
-        bytes
+        fake_file(format, width, height, channels, rows, icc, None)
     }
 
-    /// What a fake HEIC or AVIF file holds.
-    #[derive(Debug)]
-    struct FakeImage {
+    /// A fake HEIC or AVIF file, real HEIF that sniffs as `format`: `ftyp`
+    /// ([`FTYP`] or [`FTYP_AVIF`]), then `meta` (`hdlr` `pict`, `pitm` 1,
+    /// `iinf` with one `infe` v2, item 1 of type `hvc1` or `av01`, `iloc`
+    /// v1 with one extent, `iprp` with `ipco` [`HVCC`] or [`AV1C`] and
+    /// `ispe`, and `ipma` 1 → [1, 2]), then `mdat`, whose data is item 1's:
+    /// [`PAYLOAD_MAGIC`], the quality it was encoded at (0: the default),
+    /// the width and height (u32 LE), the channels, the ICC profile's
+    /// length (u32 LE), the profile and the rows.
+    fn fake_file(
         format: HeifFormat,
         width: u32,
         height: u32,
         channels: u8,
-        icc: Option<Vec<u8>>,
-        rows: Vec<u8>,
+        rows: &[u8],
+        icc: Option<&[u8]>,
+        quality: Option<u8>,
+    ) -> Vec<u8> {
+        let icc = icc.unwrap_or_default();
+        let mut payload = PAYLOAD_MAGIC.to_vec();
+        payload.push(quality.unwrap_or(0));
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
+        payload.push(channels);
+        payload.extend_from_slice(&u32::try_from(icc.len()).unwrap().to_le_bytes());
+        payload.extend_from_slice(icc);
+        payload.extend_from_slice(rows);
+        let (ftyp, item, config) = match format {
+            HeifFormat::Heic => (FTYP, b"hvc1", (b"hvcC", &HVCC[..])),
+            HeifFormat::Avif => (FTYP_AVIF, b"av01", (b"av1C", &AV1C[..])),
+        };
+        let length = u32::try_from(payload.len()).unwrap();
+        // The offset doesn't change the meta box's size (4 bytes either
+        // way), so it's measured with 0 first.
+        let meta_len = fake_meta(item, config, width, height, 0, length).len();
+        let offset = u32::try_from(ftyp.len() + meta_len + 8).unwrap();
+        let mut bytes = ftyp.to_vec();
+        bytes.extend_from_slice(&fake_meta(item, config, width, height, offset, length));
+        bytes.extend_from_slice(&mp4_box(b"mdat", &payload));
+        bytes
     }
 
-    fn parse_fake(bytes: &[u8]) -> Option<FakeImage> {
-        let (format, rest) = match bytes.strip_prefix(&FTYP) {
-            Some(rest) => (HeifFormat::Heic, rest),
-            None => (HeifFormat::Avif, bytes.strip_prefix(&FTYP_AVIF)?),
+    /// The quality a file the fake helper encoded was encoded at: `None`
+    /// for its default (no quality in the request), or for a file that
+    /// isn't one of the fake's ([`parse_fake`]).
+    pub(crate) fn fake_quality(heic: &[u8]) -> Option<u8> {
+        parse_fake(heic)?.quality
+    }
+
+    /// What a fake HEIC or AVIF file holds.
+    #[derive(Debug)]
+    pub(crate) struct FakeImage {
+        /// By the primary item's type: `hvc1` is HEIC, `av01` AVIF.
+        pub(crate) format: HeifFormat,
+        pub(crate) width: u32,
+        pub(crate) height: u32,
+        pub(crate) channels: u8,
+        pub(crate) icc: Option<Vec<u8>>,
+        pub(crate) rows: Vec<u8>,
+        /// The quality it was encoded at; `None` for the default.
+        pub(crate) quality: Option<u8>,
+    }
+
+    /// The boxes in `data`, in order: each one's type and body. `None` when
+    /// one runs past the end. A size of 0 runs to the end, 1 is 64-bit.
+    fn mp4_boxes(data: &[u8]) -> Option<Vec<([u8; 4], &[u8])>> {
+        let mut boxes = Vec::new();
+        let mut rest = data;
+        while !rest.is_empty() {
+            let size = u32::from_be_bytes(rest.get(..4)?.try_into().ok()?);
+            let kind: [u8; 4] = rest.get(4..8)?.try_into().ok()?;
+            let (len, header) = match size {
+                0 => (rest.len(), 8),
+                1 => {
+                    let large = u64::from_be_bytes(rest.get(8..16)?.try_into().ok()?);
+                    (usize::try_from(large).ok()?, 16)
+                }
+                n => (usize::try_from(n).ok()?, 8),
+            };
+            boxes.push((kind, rest.get(header..len)?));
+            rest = &rest[len..];
+        }
+        Some(boxes)
+    }
+
+    /// The body of the first `kind` box among `boxes`.
+    fn find<'a>(boxes: &[([u8; 4], &'a [u8])], kind: &[u8; 4]) -> Option<&'a [u8]> {
+        boxes.iter().find(|(k, _)| k == kind).map(|&(_, body)| body)
+    }
+
+    /// Reads big-endian unsigned fields in turn.
+    struct Fields<'a>(&'a [u8]);
+
+    impl Fields<'_> {
+        /// The next `n` bytes (0 to 8) as a number.
+        fn uint(&mut self, n: usize) -> Option<u64> {
+            let (head, rest) = self.0.split_at_checked(n)?;
+            self.0 = rest;
+            Some(head.iter().fold(0, |value, &b| value << 8 | u64::from(b)))
+        }
+
+        fn take(&mut self, n: usize) -> Option<&[u8]> {
+            let (head, rest) = self.0.split_at_checked(n)?;
+            self.0 = rest;
+            Some(head)
+        }
+    }
+
+    /// The primary item's type and data in a HEIF file: through `pitm`,
+    /// `iinf` and `iloc` (versions 0 to 2, any field sizes, every extent in
+    /// order), from the file (construction method 0) or `idat` (1). So a
+    /// file another tool rewrote, with more items and boxes, still reads.
+    fn primary_item(bytes: &[u8]) -> Option<([u8; 4], Vec<u8>)> {
+        let top = mp4_boxes(bytes)?;
+        let meta = mp4_boxes(find(&top, b"meta")?.get(4..)?)?;
+        let pitm = find(&meta, b"pitm")?;
+        let primary = Fields(pitm.get(4..)?).uint(if pitm[0] == 0 { 2 } else { 4 })?;
+
+        let iinf = find(&meta, b"iinf")?;
+        let count_len = if iinf[0] == 0 { 2 } else { 4 };
+        let mut item_type = None;
+        for (kind, infe) in mp4_boxes(iinf.get(4 + count_len..)?)? {
+            if &kind != b"infe" || infe[0] < 2 {
+                continue;
+            }
+            let mut fields = Fields(infe.get(4..)?);
+            let id = fields.uint(if infe[0] == 2 { 2 } else { 4 })?;
+            fields.uint(2)?; // item_protection_index
+            if id == primary {
+                item_type = Some(fields.take(4)?.try_into().ok()?);
+            }
+        }
+
+        let iloc = find(&meta, b"iloc")?;
+        let version = iloc[0];
+        let mut fields = Fields(iloc.get(4..)?);
+        let sizes = fields.uint(1)?;
+        let (offset_size, length_size) = ((sizes >> 4) as usize, (sizes & 15) as usize);
+        let sizes = fields.uint(1)?;
+        let base_size = (sizes >> 4) as usize;
+        let index_size = if version >= 1 {
+            (sizes & 15) as usize
+        } else {
+            0
         };
-        let rest = rest.strip_prefix(b"FAKE")?;
+        let id_len = if version < 2 { 2 } else { 4 };
+        let count = fields.uint(id_len)?;
+        for _ in 0..count {
+            let id = fields.uint(id_len)?;
+            let method = if version >= 1 {
+                fields.uint(2)? & 15
+            } else {
+                0
+            };
+            fields.uint(2)?; // data_reference_index
+            let base = fields.uint(base_size)?;
+            let extents = fields.uint(2)?;
+            let mut data = Vec::new();
+            for _ in 0..extents {
+                fields.uint(index_size)?;
+                let offset = usize::try_from(base + fields.uint(offset_size)?).ok()?;
+                let length = usize::try_from(fields.uint(length_size)?).ok()?;
+                let source = match method {
+                    0 => bytes,
+                    1 => find(&meta, b"idat")?,
+                    _ => return None,
+                };
+                // A length of 0 runs to the end.
+                let end = if length == 0 {
+                    source.len()
+                } else {
+                    offset.checked_add(length)?
+                };
+                data.extend_from_slice(source.get(offset..end)?);
+            }
+            if id == primary {
+                return Some((item_type?, data));
+            }
+        }
+        None
+    }
+
+    /// What a fake file holds ([`fake_file`]): `None` for anything else.
+    pub(crate) fn parse_fake(bytes: &[u8]) -> Option<FakeImage> {
+        let (item_type, payload) = primary_item(bytes)?;
+        let format = match &item_type {
+            b"hvc1" => HeifFormat::Heic,
+            b"av01" => HeifFormat::Avif,
+            _ => return None,
+        };
+        let rest = payload.strip_prefix(PAYLOAD_MAGIC)?;
+        let quality = (*rest.first()? != 0).then_some(rest[0]);
+        let rest = &rest[1..];
         let u32_at = |at: usize| -> Option<u32> {
             Some(u32::from_le_bytes(rest.get(at..at + 4)?.try_into().ok()?))
         };
@@ -1640,6 +1884,7 @@ pub(crate) mod tests {
             channels,
             icc: (!icc.is_empty()).then(|| icc.to_vec()),
             rows: rows.to_vec(),
+            quality,
         })
     }
 
@@ -1742,7 +1987,7 @@ pub(crate) mod tests {
             &self,
             pixels: &Pixels,
             format: HeifFormat,
-            _quality: Option<u8>,
+            quality: Option<u8>,
             _limits: &proto::Limits,
         ) -> Result<Vec<u8>, Failure> {
             self.check_mode()?;
@@ -1751,14 +1996,16 @@ pub(crate) mod tests {
                 "noencoder" => return Err(Failure::new(FailKind::NoEncoder, "fake")),
                 _ => {}
             }
-            // The format asked for, so the tests can see which it was.
-            Ok(fake_image(
+            // The format and the quality asked for, so the tests can see
+            // them ([`fake_quality`]).
+            Ok(fake_file(
                 format,
                 pixels.width,
                 pixels.height,
                 pixels.channels,
                 &pixels.data,
                 pixels.icc.as_deref(),
+                quality,
             ))
         }
     }
@@ -4003,5 +4250,234 @@ pub(crate) mod tests {
         );
         assert_eq!(err.detail, "HEIF: its ftyp names another codec");
         tool.check();
+    }
+
+    #[test]
+    fn an_encoder_sends_the_quality_and_a_conversion_none() {
+        let tool = Tool::new();
+        for format in HeifFormat::ALL {
+            let encoder = Encoder::new(fake("ok"), tool.limits(), format);
+            for quality in [Some(1), Some(40), Some(60), Some(100), None] {
+                let (result, _) = encode_with(
+                    &encoder,
+                    &rgb_image(3, 2),
+                    None,
+                    quality,
+                    &tool,
+                    &CancelToken::new(),
+                );
+                let bytes = result.unwrap();
+                assert_eq!(fake_quality(&bytes), quality, "{format:?}");
+                assert_eq!(parse_fake(&bytes).unwrap().rows, gradient(3, 2, 3));
+            }
+        }
+        tool.check();
+        // A conversion leaves the quality to the helper.
+        let source = png(2, 2, &[5; 12], ExtendedColorType::Rgb8, None);
+        let case = case("photo.png", &source, Format::Heic);
+        case.run(&fake("ok")).result.unwrap();
+        let written = fs::read(case.dest()).unwrap();
+        assert!(parse_fake(&written).is_some());
+        assert_eq!(fake_quality(&written), None);
+        case.check();
+        // Not the fake's.
+        assert_eq!(fake_quality(&AVCI_BRAND), None);
+        assert_eq!(fake_quality(b""), None);
+    }
+
+    /// `body`'s boxes, by a walk of its own: each box's type and body,
+    /// with 32-bit sizes only (what the fake writes).
+    fn walk(mut body: &[u8]) -> Vec<(String, Vec<u8>)> {
+        let mut boxes = Vec::new();
+        while !body.is_empty() {
+            let size = u32::from_be_bytes(body[..4].try_into().unwrap()) as usize;
+            assert!(size >= 8 && size <= body.len(), "a box of {size} bytes");
+            let kind = String::from_utf8(body[4..8].to_vec()).unwrap();
+            boxes.push((kind, body[8..size].to_vec()));
+            body = &body[size..];
+        }
+        boxes
+    }
+
+    fn kinds(boxes: &[(String, Vec<u8>)]) -> Vec<&str> {
+        boxes.iter().map(|(kind, _)| kind.as_str()).collect()
+    }
+
+    fn be32(bytes: &[u8]) -> u32 {
+        u32::from_be_bytes(bytes[..4].try_into().unwrap())
+    }
+
+    fn be16(bytes: &[u8]) -> u16 {
+        u16::from_be_bytes(bytes[..2].try_into().unwrap())
+    }
+
+    #[test]
+    fn the_fakes_files_are_real_heif() {
+        let rows = gradient(3, 2, 3);
+        let profile = rgb_profile();
+        for (format, brand, item, config, config_len) in [
+            (HeifFormat::Heic, "heic", "hvc1", "hvcC", 23),
+            (HeifFormat::Avif, "avif", "av01", "av1C", 4),
+        ] {
+            let bytes = fake_image(format, 3, 2, 3, &rows, Some(&profile));
+            // It sniffs as its format under protocol 2's brand rules.
+            let head = &bytes[..bytes.len().min(proto::SNIFF_BYTES)];
+            assert_eq!(proto::sniff(head).format(), Some(format));
+
+            let top = walk(&bytes);
+            assert_eq!(kinds(&top), ["ftyp", "meta", "mdat"], "{format:?}");
+            let ftyp = &top[0].1;
+            assert_eq!(&ftyp[..4], brand.as_bytes());
+            assert_eq!(&ftyp[8..], [b"mif1", brand.as_bytes()].concat());
+
+            let meta = &top[1].1;
+            assert_eq!(be32(meta), 0, "meta is a version 0 full box");
+            let meta = walk(&meta[4..]);
+            assert_eq!(kinds(&meta), ["hdlr", "pitm", "iinf", "iloc", "iprp"]);
+            let hdlr = &meta[0].1;
+            assert_eq!(&hdlr[8..12], b"pict");
+            let pitm = &meta[1].1;
+            assert_eq!((pitm[0], be16(&pitm[4..])), (0, 1));
+
+            let iinf = &meta[2].1;
+            assert_eq!((iinf[0], be16(&iinf[4..])), (0, 1));
+            let infe = walk(&iinf[6..]);
+            assert_eq!(kinds(&infe), ["infe"]);
+            let infe = &infe[0].1;
+            assert_eq!(infe[0], 2, "infe version 2");
+            assert_eq!((be16(&infe[4..]), be16(&infe[6..])), (1, 0));
+            assert_eq!(&infe[8..12], item.as_bytes());
+
+            // iloc v1, 4-byte offsets and lengths: item 1's one extent is
+            // the whole of mdat's body.
+            let iloc = &meta[3].1;
+            assert_eq!((iloc[0], iloc[4], iloc[5]), (1, 0x44, 0x00));
+            assert_eq!(be16(&iloc[6..]), 1, "one item");
+            assert_eq!(be16(&iloc[8..]), 1, "item 1");
+            assert_eq!(be16(&iloc[10..]) & 15, 0, "in the file");
+            assert_eq!(be16(&iloc[14..]), 1, "one extent");
+            let (offset, length) = (be32(&iloc[16..]) as usize, be32(&iloc[20..]) as usize);
+            let mdat = &top[2].1;
+            assert_eq!(offset, bytes.len() - mdat.len());
+            assert_eq!(length, mdat.len());
+            assert!(mdat.starts_with(PAYLOAD_MAGIC));
+
+            let iprp = walk(&meta[4].1);
+            assert_eq!(kinds(&iprp), ["ipco", "ipma"]);
+            let ipco = walk(&iprp[0].1);
+            assert_eq!(kinds(&ipco), [config, "ispe"]);
+            assert_eq!(ipco[0].1.len(), config_len);
+            if format == HeifFormat::Heic {
+                let hvcc = &ipco[0].1;
+                assert_eq!(hvcc[0], 1, "configurationVersion");
+                assert_eq!(hvcc[16] & 3, 1, "4:2:0");
+                assert_eq!((hvcc[17] & 7, hvcc[18] & 7), (0, 0), "8-bit");
+                assert_eq!(hvcc[22], 0, "no arrays");
+            }
+            let ispe = &ipco[1].1;
+            assert_eq!((be32(&ispe[4..]), be32(&ispe[8..])), (3, 2));
+            let ipma = &iprp[1].1;
+            assert_eq!(be32(&ipma[4..]), 1, "one entry");
+            assert_eq!(be16(&ipma[8..]), 1, "item 1");
+            assert_eq!(&ipma[10..], [2, 0x81, 0x02], "→ [1 (essential), 2]");
+
+            let parsed = parse_fake(&bytes).unwrap();
+            assert_eq!(parsed.format, format);
+            assert_eq!((parsed.width, parsed.height, parsed.channels), (3, 2, 3));
+            assert_eq!(
+                (parsed.icc, parsed.rows, parsed.quality),
+                (Some(profile.clone()), rows.clone(), None)
+            );
+        }
+    }
+
+    /// A file the fake didn't write, as another tool might rewrite one: a
+    /// `free` box first, `pitm` and `iinf` version 1, an `Exif` item stored
+    /// in `idat` (construction method 1) listed before the primary item,
+    /// whose data is in two extents of `mdat` from a base offset, in
+    /// `iloc` version 2 with 8-byte offsets.
+    fn rewritten(original: &[u8]) -> Vec<u8> {
+        let top = walk(original);
+        let payload = &top[2].1;
+        let half = payload.len() / 2;
+        let infe_exif = full_box(b"infe", 2, 0, &[0, 3, 0, 0, b'E', b'x', b'i', b'f', 0]);
+        let infe_image = full_box(
+            b"infe",
+            3,
+            0,
+            &[0, 0, 0, 7, 0, 0, b'h', b'v', b'c', b'1', 0],
+        );
+        let mut iinf = 2u32.to_be_bytes().to_vec();
+        iinf.extend_from_slice(&infe_exif);
+        iinf.extend_from_slice(&infe_image);
+        let idat = b"\0\0\0\0Exif\0\0".to_vec();
+        let iloc_for = |base: u64| {
+            // offset 8 bytes, length 4, base offset 4, index 0.
+            let mut iloc = vec![0x84, 0x40];
+            iloc.extend_from_slice(&2u32.to_be_bytes());
+            // Item 3: in idat, from 4, 6 bytes.
+            iloc.extend_from_slice(&3u32.to_be_bytes());
+            iloc.extend_from_slice(&1u16.to_be_bytes());
+            iloc.extend_from_slice(&0u16.to_be_bytes());
+            iloc.extend_from_slice(&0u32.to_be_bytes());
+            iloc.extend_from_slice(&1u16.to_be_bytes());
+            iloc.extend_from_slice(&4u64.to_be_bytes());
+            iloc.extend_from_slice(&6u32.to_be_bytes());
+            // Item 7: in the file, two extents from `base`.
+            iloc.extend_from_slice(&7u32.to_be_bytes());
+            iloc.extend_from_slice(&0u16.to_be_bytes());
+            iloc.extend_from_slice(&0u16.to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(base).unwrap().to_be_bytes());
+            iloc.extend_from_slice(&2u16.to_be_bytes());
+            iloc.extend_from_slice(&0u64.to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(half).unwrap().to_be_bytes());
+            iloc.extend_from_slice(&u64::try_from(half).unwrap().to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(payload.len() - half).unwrap().to_be_bytes());
+            full_box(b"iloc", 2, 0, &iloc)
+        };
+        let old_meta = walk(&top[1].1[4..]);
+        let meta_with = |base: u64| {
+            let mut meta = mp4_box(b"hdlr", &old_meta[0].1);
+            meta.extend_from_slice(&full_box(b"pitm", 1, 0, &7u32.to_be_bytes()));
+            meta.extend_from_slice(&full_box(b"iinf", 1, 0, &iinf));
+            meta.extend_from_slice(&mp4_box(b"iprp", &old_meta[4].1));
+            meta.extend_from_slice(&mp4_box(b"idat", &idat));
+            meta.extend_from_slice(&iloc_for(base));
+            full_box(b"meta", 0, 0, &meta)
+        };
+        let free = mp4_box(b"free", &[0; 16]);
+        let ftyp = mp4_box(b"ftyp", &top[0].1);
+        let base = (ftyp.len() + free.len() + meta_with(0).len() + 8) as u64;
+        let mut bytes = ftyp;
+        bytes.extend_from_slice(&free);
+        bytes.extend_from_slice(&meta_with(base));
+        bytes.extend_from_slice(&mp4_box(b"mdat", payload));
+        bytes
+    }
+
+    #[test]
+    fn a_rewritten_heic_still_decodes_through_the_fake() {
+        let rows = gradient(4, 3, 4);
+        let original = fake_heic(4, 3, 4, &rows, None);
+        let bytes = rewritten(&original);
+        assert_ne!(bytes, original);
+        assert_eq!(proto::sniff(&bytes), Sniff::Heic);
+        let parsed = parse_fake(&bytes).unwrap();
+        assert_eq!(
+            (parsed.format, parsed.channels, parsed.rows),
+            (HeifFormat::Heic, 4, rows.clone())
+        );
+        // Through the helper, as a conversion reads it.
+        let case = case("photo.heic", &bytes, Format::Png);
+        case.run(&fake("ok")).result.unwrap();
+        assert_eq!(
+            ::image::open(case.dest()).unwrap().to_rgba8().as_raw(),
+            &rows
+        );
+        case.check();
+        // Item 1 in the wrong place isn't read as anything.
+        let mut cut = fake_heic(4, 3, 4, &rows, None);
+        cut.truncate(cut.len() - 1);
+        assert!(parse_fake(&cut).is_none());
     }
 }
