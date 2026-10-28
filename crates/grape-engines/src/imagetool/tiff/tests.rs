@@ -10,7 +10,9 @@
 
 #![allow(clippy::unwrap_used)]
 
-use super::read::Order;
+use std::io::Cursor;
+
+use super::read::{Order, Tiff};
 
 /// An entry's value; its type and count follow from it.
 #[derive(Debug, Clone)]
@@ -78,9 +80,10 @@ pub(crate) fn gray(w: u32, h: u32, rows: u32, strips: Vec<B>) -> Page {
     }
 }
 
-/// Sets the count and the value field (a number inline, or where the value
-/// is) of the entry for `tag` in the IFD at `at` of `file`, a TIFF the
-/// builder made: so entries can point where the builder wouldn't.
+/// Sets the count and the value field of the entry for `tag` in the IFD
+/// at `at` of `file`, a TIFF the builder made, so entries can point where
+/// the builder wouldn't: `value` is the one number the entry holds when
+/// `count` of its type fit in it, and where its value is otherwise.
 pub(crate) fn set_entry(file: &mut [u8], at: u64, tag: u16, count: u64, value: u64) {
     let o = if file[0] == b'M' {
         Order::Big
@@ -95,8 +98,41 @@ pub(crate) fn set_entry(file: &mut [u8], at: u64, tag: u16, count: u64, value: u
         .map(|i| at + count_len + i * entry_len)
         .find(|&e| o.uint(&file[e..e + 2]) == u64::from(tag))
         .unwrap();
+    let size = super::read::type_size(o.uint(&file[e + 2..e + 4]) as u16).unwrap() as usize;
+    let mut field = if size * count as usize <= word {
+        o.bytes(value, size)
+    } else {
+        o.bytes(value, word)
+    };
+    field.resize(word, 0);
     file[e + 4..e + 4 + word].copy_from_slice(&o.bytes(count, word));
-    file[e + 4 + word..e + 4 + 2 * word].copy_from_slice(&o.bytes(value, word));
+    file[e + 4 + word..e + 4 + 2 * word].copy_from_slice(&field);
+}
+
+/// Two pages, the second's Exif and GPS pointers set to the first's Exif
+/// and GPS IFDs. The Exif IFD says Adobe RGB the DCF way (ColorSpace
+/// 0xFFFF, Interop `R03`) and holds a date.
+pub(crate) fn shared_meta(order: u8, big: bool) -> Vec<u8> {
+    let mut first = gray(1, 1, 1, vec![B::data(b"x")]);
+    first.exif = Some(vec![
+        (0x9003, V::Ascii("2024:05:01 10:20:30")),
+        (0xA001, V::Short(vec![0xFFFF])),
+    ]);
+    first.interop = Some(vec![(1, V::Ascii("R03"))]);
+    first.gps = Some(vec![(2, V::Rational(vec![(48, 1), (8, 1), (0, 1)]))]);
+    let mut second = gray(1, 1, 1, vec![B::data(b"y")]);
+    second
+        .tags
+        .extend([(34665, V::Long(vec![0])), (34853, V::Long(vec![0]))]);
+    let mut file = Builder::new(order, big, vec![first, second]).build();
+    let tiff = Tiff::read(&mut Cursor::new(&file), file.len() as u64).unwrap();
+    let [first, second] = &tiff.pages[..] else {
+        panic!("{} pages", tiff.pages.len())
+    };
+    for (tag, meta) in [(34665, &first.exif), (34853, &first.gps)] {
+        set_entry(&mut file, second.at, tag, 1, meta.as_ref().unwrap().at);
+    }
+    file
 }
 
 /// A TIFF to build.

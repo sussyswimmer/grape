@@ -7,11 +7,12 @@
 //!   and Orientation among them; Photoshop's resources, filtered
 //!   ([`irb`](super::irb)).
 //! - **Dropped and reported:** every other tag ([`field`]), and the Exif
-//!   and GPS IFDs, walked as [`exif::classify`] does. Padding, and values
-//!   that are blank as far as they're read, go unsaid.
+//!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
+//!   once). Padding, and values that are blank as far as they're read, go
+//!   unsaid.
 //! - **Written back:** the DCF Adobe RGB Exif (ColorSpace uncalibrated,
 //!   Interop `R03`), when that's how an IFD with no ICC profile said its
-//!   color.
+//!   color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG and old-style JPEG (both tools); metadata inside
 //!   JPEG data (an APP1, APP13 or COM before a block's first scan, or in
 //!   its JPEGTables, or segments that run past the first [`MAX_SCAN`]
@@ -129,6 +130,7 @@ impl Plan {
             r,
             order,
             found: Found::default(),
+            reported: HashSet::new(),
         };
         let pages = pages
             .into_iter()
@@ -186,6 +188,7 @@ impl Plan {
             r,
             order: out.layout.order,
             found: Found::default(),
+            reported: HashSet::new(),
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -335,6 +338,9 @@ struct Walk<'r> {
     r: &'r mut dyn In,
     order: Order,
     found: Found,
+    /// The Exif, GPS and Interop IFDs reported, by offset: one that IFDs
+    /// share is reported once.
+    reported: HashSet<u64>,
 }
 
 impl Walk<'_> {
@@ -406,10 +412,14 @@ impl Walk<'_> {
         Ok(())
     }
 
-    /// Reports what the Exif, GPS or Interop IFD `meta` holds.
+    /// Reports what the Exif, GPS or Interop IFD `meta` holds, unless
+    /// another IFD that shares it did.
     fn meta(&mut self, meta: &Meta, kind: exif::Ifd) -> Result<(), Error> {
         if meta.unread {
             self.found.fields.insert(MetaField::Other);
+        }
+        if !self.reported.insert(meta.at) {
+            return Ok(());
         }
         for entry in &meta.entries {
             if let Some(found) = exif::classify(kind, entry.tag) {
@@ -481,7 +491,7 @@ mod tests {
 
     use super::super::irb::tests::res;
     use super::super::read::Order;
-    use super::super::tests::{gray, set_entry, Builder, Page, B, V};
+    use super::super::tests::{gray, set_entry, shared_meta, Builder, Page, B, V};
     use super::*;
     use MetaField::*;
 
@@ -751,6 +761,22 @@ mod tests {
         ] {
             let (out, _) = strip(&file);
             assert!(read(&out).pages[0].exif.is_none());
+        }
+    }
+
+    #[test]
+    fn pages_that_share_an_exif_and_a_gps_ifd_are_stripped_and_keep_their_color() {
+        for (order, big) in [(b'I', false), (b'M', false), (b'I', true), (b'M', true)] {
+            let (out, found) = strip(&shared_meta(order, big));
+            assert_eq!(found, [CreationDate, Location].into());
+            let tiff = read(&out);
+            assert_eq!(tiff.pages.len(), 2);
+            // Each page said Adobe RGB the DCF way, so each gets it back.
+            for page in &tiff.pages {
+                assert!(dcf_only(page.exif.as_ref().unwrap()));
+                assert!(page.gps.is_none());
+            }
+            assert!(!out.windows(7).any(|w| w == b"2024:05"));
         }
     }
 

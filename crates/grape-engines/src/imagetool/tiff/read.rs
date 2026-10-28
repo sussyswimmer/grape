@@ -9,9 +9,12 @@
 //!   SubIFDs (330), each a chain, at most [`MAX_DEPTH`] deep; and its Exif
 //!   (34665) and GPS (34853) IFDs, with the Exif IFD's Interop (40965). An
 //!   IFD is read once: a page's `next` that comes back to a page, or that
-//!   points outside the file, ends the chain, as libtiff does; any other
-//!   IFD reached twice is [`Error::Broken`]. An Exif, GPS or Interop IFD
-//!   that can't be read is kept as such ([`Meta::unread`]).
+//!   points outside the file, ends the chain, as libtiff does; an Exif, GPS
+//!   or Interop IFD that several IFDs point at is shared, as Pillow,
+//!   tifffile and ImageMagick read it; any other IFD reached twice (a
+//!   SubIFD, or an IFD that is two kinds of IFD) is [`Error::Broken`]. An
+//!   Exif, GPS or Interop IFD that can't be read is kept as such
+//!   ([`Meta::unread`]).
 //! - **What it holds:** each image IFD's entries, their values inline or as
 //!   a place in the file (never byte-swapped, never held: Photoshop types
 //!   its IPTC as LONG), and its strips or tiles. A missing byte count is
@@ -19,12 +22,12 @@
 //!   (GDAL's sparse tiles); blocks that are the same bytes are fine, and any
 //!   other overlap, between blocks or with an IFD, is [`Error::Broken`].
 //! - **Caps:** [`MAX_IFDS`] image IFDs, [`MAX_ENTRIES`] entries in an IFD
-//!   and [`MAX_ALL_ENTRIES`] in all, [`MAX_BLOCKS`] blocks, SubIFDs
-//!   [`MAX_DEPTH`] deep. Over one, the file is refused
-//!   ([`Error::TooLarge`], or [`Error::Broken`] for an IFD's entries),
-//!   never cut short.
+//!   and [`MAX_ALL_ENTRIES`] in all (a shared IFD's each time it's
+//!   shared), [`MAX_BLOCKS`] blocks, SubIFDs [`MAX_DEPTH`] deep. Over one,
+//!   the file is refused ([`Error::TooLarge`], or [`Error::Broken`] for an
+//!   IFD's entries), never cut short.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::super::exif;
 use super::super::strip::{read_exact, Error, In};
@@ -275,7 +278,7 @@ impl Tiff {
         let mut walk = Walk {
             r,
             layout,
-            seen: HashSet::new(),
+            seen: HashMap::new(),
             ifds: 0,
             entries: 0,
             blocks: 0,
@@ -284,7 +287,7 @@ impl Tiff {
         let mut at_pages = HashSet::new();
         let mut at = first;
         while at != 0 {
-            if !walk.seen.insert(at) {
+            if walk.seen.insert(at, Seen::Image).is_some() {
                 // Back to a page: the chain loops, and ends there. Any
                 // other IFD is something else's.
                 if at_pages.contains(&at) {
@@ -371,7 +374,9 @@ impl Tiff {
             .map(|w| w[0])
             .collect();
         blocks.dedup();
+        // An Exif, GPS or Interop IFD that IFDs share is listed for each.
         ifds.sort_unstable();
+        ifds.dedup();
         let apart = |w: &[(u64, u64)]| w[1].0 >= w[0].1;
         let spans: Vec<(u64, u64)> = blocks
             .iter()
@@ -423,12 +428,20 @@ fn usize_of(n: u64) -> Result<usize, Error> {
     usize::try_from(n).map_err(|_| Error::TooLarge(format!("a value of {n} bytes")))
 }
 
+/// What the walk read at an offset.
+enum Seen {
+    /// A page or a SubIFD.
+    Image,
+    /// An Exif, GPS or Interop IFD, kept for the IFDs that share it.
+    Meta(exif::Ifd, Meta),
+}
+
 /// The walk's state: what it has read, and its counts against the caps.
 struct Walk<'r> {
     r: &'r mut dyn In,
     layout: Layout,
-    /// The offsets of the IFDs read.
-    seen: HashSet<u64>,
+    /// The IFDs read, by offset.
+    seen: HashMap<u64, Seen>,
     ifds: usize,
     entries: usize,
     blocks: usize,
@@ -450,12 +463,7 @@ impl Walk<'_> {
         if n > MAX_ENTRIES {
             return Err(Error::Broken(format!("an IFD of {n} entries")));
         }
-        self.entries += n as usize;
-        if self.entries > MAX_ALL_ENTRIES {
-            return Err(Error::TooLarge(format!(
-                "over {MAX_ALL_ENTRIES} IFD entries"
-            )));
-        }
+        self.count(n as usize)?;
         let mut bytes = vec![0; (n * l.entry_len()) as usize];
         read_exact(self.r, &mut bytes)?;
         let end = at + l.count_len() + bytes.len() as u64;
@@ -471,6 +479,17 @@ impl Walk<'_> {
             .map(|e| self.entry(e))
             .collect();
         Ok(Some((entries, next)))
+    }
+
+    /// Counts `n` more entries against [`MAX_ALL_ENTRIES`].
+    fn count(&mut self, n: usize) -> Result<(), Error> {
+        self.entries += n;
+        if self.entries > MAX_ALL_ENTRIES {
+            return Err(Error::TooLarge(format!(
+                "over {MAX_ALL_ENTRIES} IFD entries"
+            )));
+        }
+        Ok(())
     }
 
     /// The entry `e` (its 12 or 20 bytes).
@@ -536,8 +555,8 @@ impl Walk<'_> {
                 }
             }
         }
-        ifd.exif = self.meta(ifd.get(34665).cloned(), true)?;
-        ifd.gps = self.meta(ifd.get(34853).cloned(), false)?;
+        ifd.exif = self.meta(ifd.get(34665).cloned(), exif::Ifd::Exif)?;
+        ifd.gps = self.meta(ifd.get(34853).cloned(), exif::Ifd::Gps)?;
         Ok(ifd)
     }
 
@@ -545,7 +564,7 @@ impl Walk<'_> {
     fn chain(&mut self, mut at: u64, depth: usize) -> Result<Vec<Ifd>, Error> {
         let mut chain = Vec::new();
         while at != 0 {
-            if !self.seen.insert(at) {
+            if self.seen.insert(at, Seen::Image).is_some() {
                 return Err(Error::Broken("an IFD reached twice".into()));
             }
             let Some((entries, next)) = self.raw(at)? else {
@@ -557,9 +576,10 @@ impl Walk<'_> {
         Ok(chain)
     }
 
-    /// The Exif, GPS or Interop IFD `entry` points at, if any; with its
-    /// Interop IFD when it's an Exif IFD (`exif`).
-    fn meta(&mut self, entry: Option<Entry>, exif: bool) -> Result<Option<Meta>, Error> {
+    /// The Exif, GPS or Interop IFD (`kind`) `entry` points at, if any;
+    /// with its Interop IFD when it's an Exif IFD. One that other IFDs
+    /// point at too is read once, and its entries counted each time.
+    fn meta(&mut self, entry: Option<Entry>, kind: exif::Ifd) -> Result<Option<Meta>, Error> {
         let Some(entry) = entry else {
             return Ok(None);
         };
@@ -568,27 +588,38 @@ impl Walk<'_> {
             Some(at) if matches!(entry.kind, 4 | 13 | 16 | 18) => at,
             _ => return Ok(Some(Meta::unread(0))),
         };
-        if !self.seen.insert(at) {
-            return Err(Error::Broken("an IFD reached twice".into()));
+        match self.seen.get(&at) {
+            Some(Seen::Meta(seen, meta)) if *seen == kind => {
+                let meta = meta.clone();
+                let interop = meta.interop.as_ref().map_or(0, |i| i.entries.len());
+                self.count(meta.entries.len() + interop)?;
+                return Ok(Some(meta));
+            }
+            Some(_) => return Err(Error::Broken("an IFD reached twice".into())),
+            None => {}
         }
-        match self.raw(at) {
+        // Unread while it's read, so that it can't lead back to itself.
+        self.seen.insert(at, Seen::Meta(kind, Meta::unread(at)));
+        let meta = match self.raw(at) {
             Ok(Some((entries, _))) => {
-                let interop = if exif {
+                let interop = if kind == exif::Ifd::Exif {
                     let entry = entries.iter().find(|e| e.tag == 40965).cloned();
-                    self.meta(entry, false)?.map(Box::new)
+                    self.meta(entry, exif::Ifd::Interop)?.map(Box::new)
                 } else {
                     None
                 };
-                Ok(Some(Meta {
+                Meta {
                     at,
                     entries,
                     unread: false,
                     interop,
-                }))
+                }
             }
-            Ok(None) | Err(Error::Broken(_)) => Ok(Some(Meta::unread(at))),
-            Err(e) => Err(e),
-        }
+            Ok(None) | Err(Error::Broken(_)) => Meta::unread(at),
+            Err(e) => return Err(e),
+        };
+        self.seen.insert(at, Seen::Meta(kind, meta.clone()));
+        Ok(Some(meta))
     }
 
     /// Reads `ifd`'s strips or tiles into its blocks.
@@ -758,7 +789,7 @@ mod tests {
 
     use std::io::Cursor;
 
-    use super::super::tests::{gray, Builder, Page, B, V};
+    use super::super::tests::{gray, set_entry, shared_meta, Builder, Page, B, V};
     use super::*;
 
     fn read(bytes: &[u8]) -> Result<Tiff, Error> {
@@ -987,6 +1018,62 @@ mod tests {
         page.tags.push((34665, V::Long(vec![8])));
         let file = Builder::new(b'I', false, vec![page]).build();
         assert!(matches!(read(&file), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn an_exif_gps_or_interop_ifd_that_ifds_share_is_read_once() {
+        for big in [false, true] {
+            let tiff = read(&shared_meta(b'I', big)).unwrap();
+            let [first, second] = &tiff.pages[..] else {
+                panic!("{} pages", tiff.pages.len())
+            };
+            assert!(first.exif.as_ref().unwrap().interop.is_some());
+            assert_eq!(second.exif, first.exif);
+            assert_eq!(second.gps, first.gps);
+        }
+        // Two Exif IFDs that share an Interop IFD.
+        let mut first = gray(1, 1, 1, vec![B::data(b"x")]);
+        first.exif = Some(vec![(0xA001, V::Short(vec![1]))]);
+        first.interop = Some(vec![(1, V::Ascii("R98"))]);
+        let mut second = gray(1, 1, 1, vec![B::data(b"y")]);
+        second.exif = Some(vec![(0xA001, V::Short(vec![1])), (40965, V::Long(vec![0]))]);
+        let mut file = Builder::new(b'I', false, vec![first, second]).build();
+        let tiff = read(&file).unwrap();
+        let exifs: Vec<&Meta> = tiff.pages.iter().flat_map(|p| p.exif.as_ref()).collect();
+        let interop = exifs[0].interop.as_ref().unwrap().at;
+        let at = exifs[1].at;
+        set_entry(&mut file, at, 40965, 1, interop);
+        let tiff = read(&file).unwrap();
+        let interops: Vec<_> = tiff
+            .pages
+            .iter()
+            .map(|page| page.exif.as_ref().unwrap().interop.clone())
+            .collect();
+        assert!(interops[0].is_some());
+        assert_eq!(interops[0], interops[1]);
+    }
+
+    #[test]
+    fn an_ifd_that_is_two_kinds_of_ifd_is_broken() {
+        let file = shared_meta(b'I', false);
+        let tiff = read(&file).unwrap();
+        let [first, second] = &tiff.pages[..] else {
+            panic!("{} pages", tiff.pages.len())
+        };
+        let exif = first.exif.as_ref().unwrap();
+        let gps = first.gps.as_ref().unwrap().at;
+        // The second page's Exif pointer at the GPS IFD.
+        let mut crossed = file.clone();
+        set_entry(&mut crossed, second.at, 34665, 1, gps);
+        assert!(matches!(read(&crossed), Err(Error::Broken(_))));
+        // An Exif IFD that is its own Interop IFD.
+        let mut own = file.clone();
+        set_entry(&mut own, exif.at, 40965, 1, exif.at);
+        assert!(matches!(read(&own), Err(Error::Broken(_))));
+        // A GPS pointer at the other page.
+        let mut page = file;
+        set_entry(&mut page, second.at, 34853, 1, first.at);
+        assert!(matches!(read(&page), Err(Error::Broken(_))));
     }
 
     #[test]

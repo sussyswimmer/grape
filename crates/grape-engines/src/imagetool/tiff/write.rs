@@ -459,7 +459,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::super::read::{read_value, Ifd, Meta, Tiff};
-    use super::super::tests::{gray, set_entry, Builder, Page, B, V};
+    use super::super::tests::{gray, set_entry, shared_meta, Builder, Page, B, V};
     use super::*;
 
     fn read(bytes: &[u8]) -> Tiff {
@@ -789,6 +789,26 @@ mod tests {
             assert!(matches!(result, Err(Error::TooLarge(_))), "{result:?}");
             // Nothing past the blocks was written.
             assert!(out.into_inner().len() < 64);
+        }
+    }
+
+    #[test]
+    fn a_shared_exif_ifd_is_written_for_each_page_that_points_at_it() {
+        for (order, big) in [(b'I', false), (b'M', false), (b'I', true), (b'M', true)] {
+            let file = shared_meta(order, big);
+            let out = rewrite(&file);
+            let (a, b) = (read(&file), read(&out));
+            for (pa, pb) in a.pages.iter().zip(&b.pages) {
+                same(&file, pa, &out, pb);
+            }
+            // Two Exif IFDs now, whose date is written once.
+            let [first, second] = &b.pages[..] else {
+                panic!("{} pages", b.pages.len())
+            };
+            let (e1, e2) = (first.exif.as_ref().unwrap(), second.exif.as_ref().unwrap());
+            assert_ne!(e1.at, e2.at);
+            assert_eq!(out.windows(7).filter(|w| *w == b"2024:05").count(), 1);
+            assert_eq!(rewrite(&out), out);
         }
     }
 
