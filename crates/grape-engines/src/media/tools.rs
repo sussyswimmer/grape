@@ -420,7 +420,7 @@ impl Tool<'_> {
         }
         let before = self.source_size()?;
         let encode = argv::Encode {
-            reading: &[],
+            reading: squeeze.reading,
             filter: squeeze.filter.as_deref(),
             codec: &squeeze.codec,
             blank_replaygain: false,
