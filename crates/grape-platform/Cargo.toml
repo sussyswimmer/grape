@@ -56,7 +56,8 @@ ravif = { version = "=0.13.0", default-features = false, features = [
 # share sheet), so those and the two Win32 ones add new bindings to the build
 # (DECISIONS D9, D13). Win32_Security (CreateJobObjectW's attributes) and
 # Win32_System_JobObjects are the image helper's Job Object (`windows::job`,
-# D33): bindings only, no new package.
+# D33), and Win32_System_Registry reads the `Run` keys for launch at login
+# (`windows::run_key`, D19): bindings only, no new package.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "ApplicationModel_DataTransfer",
@@ -74,6 +75,7 @@ windows = { version = "0.62.2", features = [
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Ole",
+    "Win32_System_Registry",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_UI_HiDpi",
