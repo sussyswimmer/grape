@@ -8,7 +8,8 @@
 //!   - every Exif item ([`exif::walk`] on its payload after its 4-byte
 //!     header offset and an `Exif\0\0`; the first [`MAX_EXIF`] of it, and
 //!     Other beyond), `mime` item (XMP, or Other) and `uri ` item: its
-//!     entries go, and its bytes are zeroed in `mdat` or `idat`;
+//!     entries and references go (an `iref` left with none too), and its
+//!     bytes are zeroed in `mdat` or `idat`;
 //!   - the `udes` (title, description, tags), `crtt` and `mdft`
 //!     properties, the non-empty ones reported: each box is removed from
 //!     `ipco`, its associations from `ipma`, and every later index is
@@ -529,7 +530,11 @@ fn rebuild(s: &Survey) -> Vec<u8> {
         } else if i == m.iloc.0 {
             rebuild_iloc(s, child)
         } else if m.iref.is_some_and(|(at, _)| at == i) {
-            rebuild_iref(s, child)
+            // An iref left with no references goes.
+            match rebuild_iref(s, child) {
+                Some(iref) => iref,
+                None => continue,
+            }
         } else if m.iprp.as_ref().is_some_and(|p| p.child == i) {
             rebuild_iprp(s, child)
         } else if m.idat == Some(i) {
@@ -591,11 +596,14 @@ fn rebuild_iloc(s: &Survey, child: &Child) -> Vec<u8> {
     boxed(b"iloc", child.form, &c)
 }
 
-fn rebuild_iref(s: &Survey, child: &Child) -> Vec<u8> {
+/// `iref` without the dropped ids, and its boxes left with none; `None`
+/// when no box is left.
+fn rebuild_iref(s: &Survey, child: &Child) -> Option<Vec<u8>> {
     let m = &s.meta;
     let start = child.content().start;
     let wide = m.iref.is_some_and(|(_, v)| v == 1);
     let mut c = m.bytes[start..start + 4].to_vec();
+    let mut any = false;
     for r in m.refs.iter().filter(|r| !s.dropped.contains(&r.from)) {
         let to = m.to(r);
         let kept: Vec<u32> = to
@@ -612,9 +620,12 @@ fn rebuild_iref(s: &Survey, child: &Child) -> Vec<u8> {
                 body.extend_from_slice(&id_bytes(id, wide));
             }
             c.extend_from_slice(&boxed(&r.kind, r.child.form, &body));
+        } else {
+            continue;
         }
+        any = true;
     }
-    boxed(b"iref", child.form, &c)
+    any.then(|| boxed(b"iref", child.form, &c))
 }
 
 fn rebuild_iprp(s: &Survey, child: &Child) -> Vec<u8> {
@@ -1569,12 +1580,27 @@ mod tests {
 
     #[test]
     fn wide_ids_and_wide_fields_are_rebuilt_as_they_were() {
-        let (src, layout) = super::super::isobmff::tests::wide().build();
+        let mut b = super::super::isobmff::tests::wide();
+        // A thumbnail whose reference loses the Exif's id.
+        b.items.push(Item::picture(70_001, 0xC0, 40));
+        b.refs.push((*b"thmb", 70_001, vec![70_000, 70_002]));
+        let (src, layout) = b.build();
         let (out, found) = strip(&src);
         assert_eq!(found, [Location, Camera, CreationDate, Xmp].into());
         let m = meta(&out);
         assert_eq!((m.iinf.1, m.iloc.1, m.iref.unwrap().1), (1, 2, 1));
         assert_eq!(read(&out, &m, 70_000), layout.data(70_000));
-        assert!(m.refs.is_empty());
+        let refs: Vec<_> = m.refs.iter().map(|r| (r.kind, r.from, m.to(r))).collect();
+        assert_eq!(refs, [(*b"thmb", 70_001, &[70_000][..])]);
+    }
+
+    #[test]
+    fn an_iref_left_with_no_references_goes() {
+        for b in [simple(), super::super::isobmff::tests::wide()] {
+            let (src, _) = b.build();
+            let (out, _) = strip(&src);
+            assert!(meta(&out).iref.is_none());
+            assert!(!has(&out, b"iref"));
+        }
     }
 }
