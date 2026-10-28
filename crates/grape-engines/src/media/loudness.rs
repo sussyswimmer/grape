@@ -289,6 +289,14 @@ size=N/A time=00:00:02.90 bitrate=N/A speed= 126x
             parse(&SUMMARY_902.replace('\n', "\r\n")),
             parse(SUMMARY_902)
         );
+        // A later line of the filter's own isn't a summary.
+        let warned = format!("{SUMMARY_902}[Parsed_ebur128_0 @ 0x1] warning\n");
+        assert_eq!(parse(&warned), parse(SUMMARY_902));
+        // A value that isn't a number is no measurement.
+        let nan_peak = SUMMARY_902.replace("Peak:      -18.1 dBFS", "Peak:        nan dBFS");
+        assert_eq!(parse(&nan_peak), None);
+        let nan_lufs = SUMMARY_902.replace("I:         -21.1 LUFS", "I:           nan LUFS");
+        assert_eq!(parse(&nan_lufs), None);
     }
 
     /// The gain of a linear or limited plan, to 0.01 dB, and whether it
@@ -310,6 +318,15 @@ size=N/A time=00:00:02.90 bitrate=N/A speed= 126x
         assert_eq!(
             plan(m(-70.0, f64::NEG_INFINITY), -16.0, -1.0),
             Plan::TooQuiet
+        );
+        // Quiet, but over the gate.
+        assert_eq!(
+            gain(plan(m(-60.0, -50.0), -16.0, -1.0)),
+            Some((44.0, false))
+        );
+        assert_eq!(
+            gain(plan(m(-69.9, -60.0), -16.0, -1.0)),
+            Some((53.9, false))
         );
         // Already there: within 0.5 LU with the peaks under the ceiling.
         assert_eq!(plan(m(-16.4, -3.0), -16.0, -1.0), Plan::AtTarget);

@@ -753,6 +753,49 @@ fn remove_metadata_strips_video_and_keeps_tracks_languages_and_fonts() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+#[test]
+fn remove_metadata_drops_an_mkvs_cover_copied_as_a_video_track() {
+    use grape_engines::MetaField::CoverArt;
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-strip-copied-cover");
+    // An MKV whose cover, an image attachment, was copied as FFmpeg copies
+    // one: back as a one-frame PNG video track, not marked cover art.
+    let cover = cover_png(&dir);
+    let attached = dir.join("attached.mkv");
+    let mut args = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264", "-pix_fmt"]);
+    args.extend(["yuv420p", "-c:a", "aac", "-t", "1", "-attach", s(&cover)]);
+    args.extend(["-metadata:s:t", "mimetype=image/png", "-metadata:s:t"]);
+    args.extend(["filename=cover.png", "-f", "matroska", s(&attached)]);
+    ffmpeg(&args);
+    let src = dir.join("movie.mkv");
+    ffmpeg(&[
+        "-i",
+        s(&attached),
+        "-map",
+        "0",
+        "-c",
+        "copy",
+        "-f",
+        "matroska",
+        s(&src),
+    ]);
+    assert_eq!(kinds(&src), ["video", "audio", "video"]);
+    let got = tags(&src);
+    assert_eq!(got["streams.stream.2.codec_name"], "png");
+    assert_eq!(got["streams.stream.2.disposition.attached_pic"], "0");
+
+    let out = run_tool(&dir, &src, ToolKey::RemoveMetadata, ToolParams::default()).unwrap();
+    let stripped = &out.outputs[0];
+    assert_eq!(kinds(stripped), ["video", "audio"]);
+    assert_eq!(left_over(stripped), Vec::<String>::new());
+    let Note::MetadataRemoved(fields) = &out.notes[0] else {
+        panic!("{:?}", out.notes);
+    };
+    assert!(fields.contains(&CoverArt), "{fields:?}");
+}
+
 /// How the samples of a test WAV are stored.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Sample {
@@ -1347,6 +1390,56 @@ fn normalize_volume_keeps_the_format_and_leaves_alone_what_it_cant_help() {
     assert_eq!(err.user_message, "at.wav is already at \u{2212}23 LUFS.");
 }
 
+/// The keys of `got` that hold a gain: ReplayGain, R128 or `iTunNORM`.
+fn gain_keys(got: &HashMap<String, String>) -> Vec<String> {
+    let mut keys: Vec<String> = got
+        .keys()
+        .filter(|k| {
+            let k = k.to_ascii_lowercase();
+            k.contains("replaygain") || k.contains("r128") || k.contains("itunnorm")
+        })
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[test]
+fn normalize_volume_drops_the_gain_tags_its_change_makes_wrong() {
+    let dir = TestDir::new("tools-normalize-gain");
+    let quiet = dir.join("quiet.wav");
+    steady(&quiet, -30.0, 2, 48_000, Sample::I16);
+    let mut failures = Vec::new();
+    for (name, codec, muxer) in [
+        ("song.flac", "flac", "flac"),
+        ("song.mp3", "libmp3lame", "mp3"),
+    ] {
+        let src = dir.join(name);
+        let mut args = vec!["-i", s(&quiet), "-c:a", codec];
+        args.extend(["-metadata", "REPLAYGAIN_TRACK_GAIN=-3.20 dB"]);
+        args.extend(["-metadata", "R128_TRACK_GAIN=-819"]);
+        args.extend(["-metadata", "iTunNORM= 0000044C 0000044C"]);
+        args.extend(["-metadata", "title=Song", "-f", muxer, s(&src)]);
+        ffmpeg(&args);
+        assert_eq!(gain_keys(&tags(&src)).len(), 3, "{name}: {:?}", tags(&src));
+        let out = match run_tool(&dir, &src, ToolKey::NormalizeAudio, to_lufs(-16)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{name}: {e} ({})", e.detail));
+                continue;
+            }
+        };
+        let got = tags(&out.outputs[0]);
+        if !gain_keys(&got).is_empty() {
+            failures.push(format!("{name}: kept {:?}", gain_keys(&got)));
+        }
+        if got.get("format.tags.title").map(String::as_str) != Some("Song") {
+            failures.push(format!("{name}: title {got:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn a_cancel_in_normalizes_second_pass_leaves_nothing() {
     let dir = TestDir::new("tools-normalize-cancel");
@@ -1768,6 +1861,105 @@ fn compress_keeps_every_track_of_a_movie_and_an_iphones_keys() {
     assert_eq!(kinds(&out.outputs[0]), ["video", "audio", "data"]);
 }
 
+/// A tone for each of up to 8 tracks, each a whole number of cycles in
+/// half a second at 48 kHz.
+const TRACK_TONES: [f64; 8] = [440.0, 660.0, 880.0, 1100.0, 1320.0, 1540.0, 1760.0, 1980.0];
+
+/// The layout of 3 to 8 tracks without one that Compress writes: none
+/// has an LFE.
+const NO_LFE: [&str; 6] = ["3.0", "quad", "5.0", "hexagonal", "7.0", "octagonal"];
+
+/// The channel layout of `path`'s first audio track.
+fn audio_layout(path: &Path) -> String {
+    let got = flat(path, "stream=codec_type,channel_layout");
+    (0..)
+        .map_while(|i| {
+            let kind = got.get(&format!("streams.stream.{i}.codec_type"))?;
+            Some((i, kind))
+        })
+        .find(|(_, kind)| *kind == "audio")
+        .and_then(|(i, _)| got.get(&format!("streams.stream.{i}.channel_layout")))
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The level of each of `tones` in each track of `samples` at `rate`,
+/// relative to 0.25, to 0.01.
+fn track_levels(samples: &[Vec<f64>], rate: f64, tones: &[f64]) -> Vec<Vec<f64>> {
+    samples
+        .iter()
+        .map(|track| {
+            tones
+                .iter()
+                .map(|&tone| (level(track, rate, tone) / 0.25 * 100.0).round() / 100.0)
+                .collect()
+        })
+        .collect()
+}
+
+#[test]
+fn compress_keeps_each_track_of_audio_without_a_layout() {
+    use grape_core::CompressPreset::{Balanced, Small};
+    let dir = TestDir::new("tools-compress-unlabeled");
+    let mut failures = Vec::new();
+    for channels in 3..=8 {
+        let tones = &TRACK_TONES[..channels];
+        let layout = NO_LFE[channels - 3];
+        // A recorder's WAV without a channel mask, in a video (an MKV, or
+        // a MOV for 6) as AAC, and on its own as FLAC.
+        let wav = dir.join(&format!("take{channels}.wav"));
+        write_tones(&wav, 48_000, tones, 0.25, None, Sample::I16);
+        let (muxer, ext) = if channels == 6 {
+            ("mov", "mov")
+        } else {
+            ("matroska", "mkv")
+        };
+        let video = dir.join(&format!("take{channels}.{ext}"));
+        let mut args = TESTSRC.to_vec();
+        args.extend(["-guess_layout_max", "0", "-i", s(&wav)]);
+        args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264"]);
+        args.extend(["-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        args.extend(["-f", muxer, s(&video)]);
+        ffmpeg(&args);
+        for (src, preset) in [(&video, Small), (&wav, Balanced)] {
+            let what = format!("{channels} in {}", src.display());
+            let out = match run_tool(&dir, src, ToolKey::Compress, to_preset(preset)) {
+                Ok(out) => out,
+                Err(e) => {
+                    failures.push(format!("{what}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let path = &out.outputs[0];
+            // Each track keeps its own tone, and only its own: none was
+            // cut as an LFE.
+            let (samples, rate) = decode(path);
+            let levels = track_levels(&samples, rate, tones);
+            let kept = levels.len() == channels
+                && levels.iter().enumerate().all(|(c, track)| {
+                    track
+                        .iter()
+                        .enumerate()
+                        .all(|(t, &got)| if t == c { got > 0.9 } else { got < 0.05 })
+                });
+            if !kept {
+                failures.push(format!("{what}: levels {levels:?}"));
+            }
+            // FFmpeg 6.1 reads AAC's own (PCE) layouts back as unknown.
+            let got = audio_layout(path);
+            if got != layout && !(got == "unknown" && src == &video) {
+                failures.push(format!("{what}: layout {got}"));
+            }
+            // FLAC keeps the samples exactly.
+            if src == &wav && samples != decode(&wav).0 {
+                failures.push(format!("{what}: samples differ"));
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn compress_saves_nothing_from_a_video_it_cant_shrink() {
     use grape_core::CompressPreset::{High, Small};
@@ -1825,6 +2017,65 @@ fn a_broadcast_wave_keeps_its_time_reference_through_the_audio_tools() {
         );
         fs::remove_file(&out.outputs[0]).unwrap();
     }
+}
+
+/// A 1 s H.264 and AAC clip with a PNG cover, written by the MP4 muxer:
+/// FFmpeg's MOV muxer can't write cover art, so named `.mov` it stands for
+/// another app's MOV holding one in its iTunes-style metadata.
+fn covered_clip(dir: &TestDir, name: &str) -> PathBuf {
+    let cover = cover_png(dir);
+    let path = dir.join(name);
+    let mut args = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-i", s(&cover), "-map", "0:v", "-map", "1:a", "-map", "2:v"]);
+    args.extend(["-c:v:0", "libx264", "-pix_fmt", "yuv420p", "-c:v:1", "png"]);
+    args.extend(["-disposition:v:1", "attached_pic", "-c:a", "aac"]);
+    args.extend(["-f", "mp4", s(&path)]);
+    ffmpeg(&args);
+    path
+}
+
+#[test]
+fn remove_audio_and_compress_keep_an_mp4s_cover_and_leave_out_a_movs() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("tools-cover");
+    let mut failures = Vec::new();
+    // (source, Remove Audio's streams, Compress's)
+    for (name, muted, compressed) in [
+        (
+            "clip.mp4",
+            &["video", "video"][..],
+            &["video", "audio", "video"][..],
+        ),
+        ("clip.mov", &["video"], &["video", "audio"]),
+    ] {
+        let src = covered_clip(&dir, name);
+        assert_eq!(kinds(&src), ["video", "audio", "video"], "{name}");
+        for (tool, params, want) in [
+            (ToolKey::MuteVideo, ToolParams::DEFAULT, muted),
+            (ToolKey::Compress, to_preset(Small), compressed),
+        ] {
+            let out = match run_tool(&dir, &src, tool, params) {
+                Ok(out) => out,
+                Err(e) => {
+                    failures.push(format!("{name} {tool:?}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let path = &out.outputs[0];
+            if kinds(path) != want {
+                failures.push(format!("{name} {tool:?}: kinds {:?}", kinds(path)));
+            }
+            // The MP4's cover stays cover art.
+            let last = format!("streams.stream.{}.disposition.attached_pic", want.len() - 1);
+            let cover = tags(path).get(&last).map(String::as_str) == Some("1");
+            if cover != (name == "clip.mp4") {
+                failures.push(format!("{name} {tool:?}: {last} {:?}", tags(path)));
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

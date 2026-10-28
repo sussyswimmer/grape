@@ -44,7 +44,7 @@ use super::{
 };
 use crate::output::TempFile;
 use crate::publish;
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
+use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
 
 /// True when this engine runs `tool` on a file of format `from` (with
 /// `ffmpeg` and `ffprobe`; the caller checks those).
@@ -159,21 +159,26 @@ impl Tool<'_> {
                 format!("no video stream but cover art in {}", src.display()),
             ));
         }
-        let subtitles = argv::muted(self.to, info)
+        let kept: Vec<&StreamInfo> = argv::muted(self.to, info, self.tags).collect();
+        let subtitles = kept
+            .iter()
             .filter(|s| s.kind == StreamKind::Subtitle)
             .count();
+        let cover_art = covers(kept.iter().copied());
         let written = self.write(bar, |out| {
             argv::mute(&self.begun.src_abs, self.to, info, self.tags, out)
         })?;
         let out = &written.probe;
         let (video, audio) = (count(out, StreamKind::Video), count(out, StreamKind::Audio));
-        if video == 0 || audio > 0 || count(out, StreamKind::Subtitle) != subtitles {
+        let (wrote_subtitles, wrote_cover_art) =
+            (count(out, StreamKind::Subtitle), covers(out.streams.iter()));
+        if video == 0 || audio > 0 || wrote_subtitles != subtitles || wrote_cover_art != cover_art {
             return Err(self.wrote_wrong(
                 &written.out,
                 format!(
-                    "{video} video, {audio} audio and {} subtitle streams, {subtitles} \
-                     subtitles planned",
-                    count(out, StreamKind::Subtitle)
+                    "{video} video, {audio} audio, {wrote_subtitles} subtitle and \
+                     {wrote_cover_art} cover art streams, {subtitles} subtitles planned and \
+                     {cover_art} cover art"
                 ),
             ));
         }
@@ -232,9 +237,21 @@ impl Tool<'_> {
                 ),
             ));
         }
+        let mut removed = self.tags.fields.clone();
+        // A video track left out is a cover FFmpeg copied as one, which
+        // the tags probe can't tell from video ([`argv::stripped`]).
+        let dropped = info
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
+            .any(|s| !kept.iter().any(|k| k.index == s.index));
+        if dropped {
+            removed.insert(MetaField::CoverArt);
+        }
         let mut outcome = self.publish(written, bar)?;
-        let removed = self.tags.fields.iter().copied().collect();
-        outcome.notes.push(Note::MetadataRemoved(removed));
+        outcome
+            .notes
+            .push(Note::MetadataRemoved(removed.into_iter().collect()));
         Ok(outcome)
     }
 
@@ -415,7 +432,7 @@ impl Tool<'_> {
         }
         let before = self.source_size()?;
         let encode = argv::Encode {
-            reading: &[],
+            reading: squeeze.reading,
             filter: squeeze.filter.as_deref(),
             codec: &squeeze.codec,
             blank_replaygain: false,
@@ -453,7 +470,7 @@ impl Tool<'_> {
             src_abs,
             ..
         } = self.begun;
-        let kept: Vec<&StreamInfo> = argv::shrunk(self.to, info).collect();
+        let kept: Vec<&StreamInfo> = argv::shrunk(self.to, info, self.tags).collect();
         if !kept
             .iter()
             .any(|s| !s.attached_pic && matches!(s.kind, StreamKind::Video | StreamKind::Audio))
@@ -516,7 +533,7 @@ impl Tool<'_> {
             probe,
             _slot: slot,
         };
-        let try_small = argv::small_does_more(self.to, info, preset);
+        let try_small = argv::small_does_more(self.to, info, self.tags, preset);
         self.publish_smaller(written, before, true, try_small, bar)
     }
 
@@ -791,12 +808,13 @@ fn nothing_in_it(names: &publish::Names, src: &Path) -> GrapeError {
     )
 }
 
-/// How many video (cover art not counted), audio, subtitle and attachment
-/// streams there are among `streams`.
-fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 4] {
-    let mut counts = [0; 4];
-    for s in streams.filter(|s| !s.attached_pic) {
+/// How many video (cover art not counted), audio, subtitle, attachment and
+/// cover art streams there are among `streams`.
+fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 5] {
+    let mut counts = [0; 5];
+    for s in streams {
         match s.kind {
+            _ if s.attached_pic => counts[4] += 1,
             StreamKind::Video => counts[0] += 1,
             StreamKind::Audio => counts[1] += 1,
             StreamKind::Subtitle => counts[2] += 1,
@@ -805,6 +823,11 @@ fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 4] {
         }
     }
     counts
+}
+
+/// How many cover art streams there are among `streams`.
+fn covers<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> usize {
+    streams.filter(|s| s.attached_pic).count()
 }
 
 /// How many streams of `kind` `probe` lists, cover art not counted as
@@ -936,6 +959,26 @@ mod tests {
         Fake::Prints(String::new())
     }
 
+    /// `ffprobe`'s lines for stream `index`, of `kind` and `codec`, cover
+    /// art if `cover`.
+    fn track(index: u32, kind: &str, codec: &str, cover: bool) -> String {
+        format!(
+            "streams.stream.{index}.index={index}\n\
+             streams.stream.{index}.codec_name=\"{codec}\"\n\
+             streams.stream.{index}.codec_type=\"{kind}\"\n\
+             streams.stream.{index}.disposition.attached_pic={}\n",
+            u8::from(cover)
+        )
+    }
+
+    /// `ffprobe`'s view of a `format_name` file holding only cover art.
+    fn cover_only(format_name: &str) -> Fake {
+        Fake::Prints(format!(
+            "{}format.format_name=\"{format_name}\"\nformat.duration=\"2.000000\"\n",
+            track(0, "video", "mjpeg", true)
+        ))
+    }
+
     #[test]
     fn mute_copies_every_track_but_the_audio() {
         let case = Case::new("clip.mp4", ToolKey::MuteVideo);
@@ -1010,6 +1053,62 @@ mod tests {
         assert_eq!(err.user_message, "Grape couldn't write a MP4 file.");
         assert!(err.detail.contains("1 audio"), "{}", err.detail);
         assert!(!case.dest().exists());
+        case.assert_clean();
+
+        // Nor one with only the cover of an MP4 that has one.
+        let case = Case::new("clip.mp4", ToolKey::MuteVideo);
+        let mp4 = flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mp4}", track(2, "video", "png", true))),
+            no_tags(),
+            Fake::Child("write", "cover".to_owned()),
+            cover_only("mov,mp4,m4a,3gp,3g2,mj2"),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("0 video"), "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+
+        // Nor an MKV that lost its subtitles.
+        let case = Case::new("clip.mkv", ToolKey::MuteVideo);
+        let mkv = flat("matroska,webm", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mkv}", track(2, "subtitle", "subrip", false))),
+            no_tags(),
+            Fake::Child("write", "muted".to_owned()),
+            Fake::Prints(flat("matroska,webm", true, "")),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("1 subtitles planned"), "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+
+        // Nor an MP4 whose cover art the muxer dropped.
+        let covered = format!("{}{mp4}", track(2, "video", "png", true));
+        let case = Case::new("clip.mp4", ToolKey::MuteVideo);
+        script([
+            Fake::Prints(covered.clone()),
+            no_tags(),
+            Fake::Child("write", "muted".to_owned()),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "")),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("0 cover art streams"), "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+        // A MOV's isn't even mapped: the MOV muxer has nowhere to put it.
+        let case = Case::new("clip.mov", ToolKey::MuteVideo);
+        script([
+            Fake::Prints(covered),
+            no_tags(),
+            Fake::Child("write", "muted".to_owned()),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "")),
+        ]);
+        case.run().0.unwrap();
+        assert!(!ran_args(2).iter().any(|a| a == "0:2"), "{:?}", ran_args(2));
         case.assert_clean();
     }
 
@@ -1111,6 +1210,46 @@ mod tests {
         let case = Case::new("take.wav", ToolKey::RemoveMetadata);
         let (result, _) = case.run();
         assert_eq!(result.unwrap().notes, [Note::MetadataRemoved(Vec::new())]);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn remove_metadata_drops_a_cover_copied_as_a_video_track() {
+        // An MKV whose cover FFmpeg copied back as a PNG video track.
+        let case = Case::new("movie.mkv", ToolKey::RemoveMetadata);
+        let mkv = flat("matroska,webm", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mkv}", track(2, "video", "png", false))),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            Fake::Prints(mkv),
+            no_tags(),
+        ]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![crate::MetaField::CoverArt])]
+        );
+        assert!(!ran_args(2).iter().any(|a| a == "0:2"), "{:?}", ran_args(2));
+        case.assert_clean();
+    }
+
+    #[test]
+    fn remove_metadata_asks_an_m4a_and_its_output_for_xmp() {
+        let case = Case::new("song.m4a", ToolKey::RemoveMetadata);
+        let m4a = || song("mov,mp4,m4a,3gp,3g2,mj2", "aac", 2, true, 16);
+        script([
+            m4a(),
+            no_tags(),
+            Fake::Child("write", "stripped".to_owned()),
+            m4a(),
+            no_tags(),
+        ]);
+        case.run().0.unwrap();
+        // The source's tags probe, then the output's.
+        let ran = ran();
+        assert!(has(&ran[1], ["-export_xmp", "1"]));
+        assert!(has(&ran[4], ["-export_xmp", "1"]));
         case.assert_clean();
     }
 
@@ -1261,6 +1400,19 @@ mod tests {
         assert!(has(&ran_args(2), ["-c:a", "pcm_s24le"]));
         assert!(!case.dest().exists());
         case.assert_clean();
+
+        // 5.1 AAC at 384k made stereo: 64k a channel, for the two out.
+        let case = channels_case("surround.m4a", Channels::Stereo);
+        let m4a = |channels| song("mov,mp4,m4a,3gp,3g2,mj2", "aac", channels, true, 16);
+        script([
+            tuned(m4a(6), 48_000, Some(384_000)),
+            no_tags(),
+            Fake::Child("write", "stereo".to_owned()),
+            m4a(2),
+        ]);
+        case.run().0.unwrap();
+        assert!(has(&ran_args(2), ["-b:a", "128k"]), "{:?}", ran_args(2));
+        case.assert_clean();
     }
 
     /// The argv of the scripted run `n`.
@@ -1389,10 +1541,27 @@ mod tests {
              aresample=osf=s16:dither_method=triangular"
         );
         assert!(has(&ran[3], ["-sample_fmt", "s16"]));
+        // The gain makes ReplayGain wrong.
+        assert!(has(&ran[3], ["-metadata", "REPLAYGAIN_TRACK_GAIN="]));
         // The measure fills a quarter of the passes' share, the write the
         // rest.
         assert_forward_to_done(&seen);
         assert!(seen.iter().any(|&f| (f - 0.245).abs() < 1e-6), "{seen:?}");
+        case.assert_clean();
+
+        // An output at another rate isn't published.
+        let case = normalize_case("song.flac", -16);
+        script([
+            stereo_flac(),
+            no_tags(),
+            measured("-21.1", "-18.1"),
+            Fake::Child("write", "louder".to_owned()),
+            tuned(stereo_flac(), 44_100, None),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("rate Some(44100)"), "{}", err.detail);
+        assert!(!case.dest().exists());
         case.assert_clean();
     }
 
@@ -1834,6 +2003,22 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
         assert!(!case.dest().exists());
         case.assert_clean();
+
+        // Nor one that lost its cover art.
+        let case = compress_case("clip.mp4", CompressPreset::Balanced);
+        let mp4 = flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mp4}", track(2, "video", "png", true))),
+            no_tags(),
+            writes(100),
+            Fake::Prints(mp4),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        let counts = "streams by kind [1, 1, 0, 0, 0], [1, 1, 0, 0, 1] planned";
+        assert!(err.detail.contains(counts), "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
     }
 
     #[test]
@@ -1855,7 +2040,30 @@ mod tests {
         assert!(!first.iter().any(|a| a == "-c:1"), "{first:?}");
         assert!(has(&again, ["-c:1", "aac"]), "{again:?}");
         assert_forward_to_done(&seen);
+        // The copy fills the bar to RETRY_FROM, the retry the rest.
+        let at = |f: f32| seen.iter().any(|&s| (s - f).abs() < 1e-4);
+        let retry = RETRY_FROM + (PASSES_SHARE - RETRY_FROM) / 4.0;
+        assert!(at(RETRY_FROM / 4.0) && at(retry), "{seen:?}");
         case.assert_clean();
+
+        // A copy that timed out, or a full disk, would fail the same way
+        // re-encoded.
+        let full = "[out#0/mp4 @ 0x1] Error writing trailer: No space left on device";
+        for (first, kind) in [
+            (Fake::Fails(RunError::TimedOut), ErrorKind::EncodeFailed),
+            (
+                Fake::Child("error", full.to_owned()),
+                ErrorKind::WriteFailed,
+            ),
+        ] {
+            let case = compress_case("clip.mp4", CompressPreset::Balanced);
+            script([mp4(), no_tags(), first, writes(400), mp4()]);
+            let err = case.run().0.unwrap_err();
+            assert_eq!(err.kind, kind, "{}", err.detail);
+            assert_eq!(ran().len(), 3);
+            assert!(!case.dest().exists());
+            case.assert_clean();
+        }
 
         // Nothing copied: nothing to retry.
         let case = compress_case("clip.mp4", CompressPreset::Balanced);
@@ -1904,6 +2112,23 @@ mod tests {
         assert_eq!(err.user_message, "empty.mkv has no sound or video in it.");
         assert_eq!(ran().len(), 2);
         case.assert_clean();
+
+        // Cover art alone isn't sound or video.
+        for (name, format_name) in [
+            ("cover.mkv", "matroska,webm"),
+            ("cover.mp4", "mov,mp4,m4a,3gp,3g2,mj2"),
+        ] {
+            let case = compress_case(name, CompressPreset::Balanced);
+            script([cover_only(format_name), no_tags()]);
+            let err = case.run().0.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+            assert_eq!(
+                err.user_message,
+                format!("{name} has no sound or video in it.")
+            );
+            assert_eq!(ran().len(), 2);
+            case.assert_clean();
+        }
     }
 
     #[test]
