@@ -157,8 +157,8 @@ Every CI run builds `Grape-macOS-universal`, a DMG with a universal (Apple silic
 
 1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-macOS-universal` and unzip it.
 2. Open the `.dmg` and drag **Grape** into **Applications**.
-3. Launch Grape once. macOS says it can't check it for malware. Click **Done**.
-4. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to "Grape was blocked". Confirm with your password.
+3. Launch Grape once. macOS won't open it. Close the message with **Done**, **OK** or **Cancel**, whichever it shows. Don't click **Move to Trash**.
+4. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to "Grape was blocked". In the message that follows, click **Open** or **Open Anyway**, and enter your password if macOS asks.
    - Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Grape.app`, then open Grape normally.
 5. Grape appears in the menu bar (no Dock icon). Quit it from its menu.
 

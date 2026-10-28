@@ -48,8 +48,8 @@ Grape {{VERSION}} runs on macOS 13 Ventura or later, on Apple silicon and Intel 
 
 1. Download **Grape-macOS-universal.dmg** from the files below.
 2. Open it and drag **Grape** into **Applications**.
-3. Open Grape from Applications. macOS says it can't check it for malware. Click **Done**. Grape isn't notarized by Apple yet, so macOS blocks its first open.
-4. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to "Grape was blocked". Confirm with your password.
+3. Open Grape from Applications. macOS won't open it, because Grape isn't notarized by Apple yet. Close the message with **Done**, **OK** or **Cancel**, whichever it shows. Don't click **Move to Trash**.
+4. Open **System Settings → Privacy & Security**, scroll to Security, and click **Open Anyway** next to "Grape was blocked". In the message that follows, click **Open** or **Open Anyway**, and enter your password if macOS asks.
    - Or, in Terminal: `xattr -dr com.apple.quarantine /Applications/Grape.app`, then open Grape normally.
 
 ### Check the download
