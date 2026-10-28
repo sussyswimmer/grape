@@ -11,8 +11,9 @@
  * `float://drag-ended` arrives. A press ends without a drag when the
  * button comes up, which the page may only learn from a pointermove with
  * no button held. While dragging, the page ignores every pointer gesture:
- * after an OS drag WebView2 sends no mouseup, so only Rust's event (or the
- * `DRAG_FALLBACK_MS` fallback) ends it.
+ * after an OS drag WebView2, and WKWebView as far as is known, send no
+ * mouseup, so only Rust's event (or the `DRAG_FALLBACK_MS` fallback) ends
+ * it.
  */
 
 import type { FloatItem, FloatView } from "../shared/events";

@@ -6,7 +6,7 @@
 //! a dialog, Share on the sheet) and words the toast. Terminal opens the app
 //! chosen in Settings. Share is the share sheet on Windows and AirDrop on
 //! macOS. Float puts the items on the shelf ([`crate::float`]) on Windows
-//! and arrives later on macOS.
+//! and macOS.
 
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -19,7 +19,7 @@ use grape_platform::{DisplayBounds, PlatformError};
 use tauri::{AppHandle, Manager};
 
 use crate::events::{ToastShow, ToastTone};
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 use crate::float::{Added, CAPACITY};
 use crate::settings;
 use crate::toast::{self, Toaster};
@@ -69,7 +69,7 @@ pub fn run(
             let report = match action {
                 // The shelf is a window, so Float needs the app; `perform`
                 // doesn't take it.
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "macos"))]
                 ActionKey::Float => floated(crate::float::add(&app_for_thread, &items, &display)),
                 _ => {
                     let paths: Vec<PathBuf> = items.iter().map(|item| item.path.clone()).collect();
@@ -96,8 +96,8 @@ pub fn run(
 /// Runs the action and words the result. `None`: nothing to say (the
 /// terminal or the share sheet opened, or the user closed the folder
 /// picker). Terminal opens `terminal_app` in `terminal_dir`; Share opens
-/// near `anchor`, the wheel's center. Float on Windows never comes here:
-/// [`run`] puts the items on the shelf.
+/// near `anchor`, the wheel's center. Float on Windows and macOS never
+/// comes here: [`run`] puts the items on the shelf.
 fn perform(
     action: ActionKey,
     paths: &[PathBuf],
@@ -278,7 +278,7 @@ fn left_out(skipped: &[Skipped]) -> Option<String> {
 
 /// Words a Float: the shelf is the answer, unless some items didn't fit
 /// or it couldn't open.
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn floated(result: anyhow::Result<Added>) -> Option<Report> {
     match result {
         Err(err) => Some(Report::new(
@@ -361,8 +361,8 @@ fn moved_report(to: &Path, moved: &[MovedItem], unsure: &[PathBuf], of: usize) -
     report.revealing(first.now.clone())
 }
 
-/// An action this OS doesn't have yet: Float off Windows, Share off Windows
-/// and macOS, everything on other hosts.
+/// An action this OS doesn't have yet: Float and Share off Windows and
+/// macOS, everything on other hosts.
 fn later(action: ActionKey) -> Report {
     let detail = match action {
         ActionKey::Share => "Sharing is coming.",
@@ -672,8 +672,9 @@ mod tests {
         assert_eq!(failed.title, "Couldn't open the shelf");
     }
 
-    // On Windows Float goes to the shelf in `run`, never `perform`.
-    #[cfg(not(target_os = "windows"))]
+    // On Windows and macOS Float goes to the shelf in `run`, never
+    // `perform`.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     #[test]
     fn float_is_coming_where_there_is_no_shelf() {
         let float = perform(

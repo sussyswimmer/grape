@@ -1,6 +1,6 @@
 //! Grape's Tauri app: a tray icon, a hidden overlay window, the wheel
 //! controller, the tool panels, the Settings window's settings and, on
-//! Windows, the float shelf. See `CLAUDE.md` in this crate.
+//! Windows and macOS, the float shelf. See `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it's a menu-bar accessory app with no Dock icon
@@ -82,8 +82,8 @@ pub fn run() -> anyhow::Result<()> {
         .manage(toast::Toaster::default())
         // One cancel token per running drop, so quitting can stop them.
         .manage(jobs::Running::default())
-        // Empty, and only ever filled on Windows; the commands work on it
-        // everywhere.
+        // Empty, and only ever filled on Windows and macOS; the commands
+        // work on it everywhere.
         .manage(float::Shelf::default())
         // At most one tool panel, and what it waits on.
         .manage(panel::PanelState::default())
@@ -111,7 +111,9 @@ pub fn run() -> anyhow::Result<()> {
         .on_window_event(float::on_window_event)
         .on_window_event(panel::on_window_event)
         .setup(|app| {
-            // A menu-bar app on macOS: no Dock icon, no app menu.
+            // A menu-bar app on macOS: no Dock icon and no menu bar shown.
+            // Tauri's default menu still exists: its Close Window (Cmd+W)
+            // is the float shelf's close request.
             #[cfg(target_os = "macos")]
             app.handle()
                 .set_activation_policy(tauri::ActivationPolicy::Accessory)?;
@@ -130,6 +132,10 @@ pub fn run() -> anyhow::Result<()> {
             if let Err(err) = ui_windows::prepare_panel(app.handle()) {
                 log::error!("could not prepare the panel window: {err:#}");
             }
+            // Hidden, now: building a webview activates Grape, which the
+            // first Float mustn't (D43). Not fatal: that Float tries again.
+            #[cfg(target_os = "macos")]
+            float::build_at_launch(app.handle());
             panel::set_preview(app.handle(), panel::preview_from_env());
             // Before any drop runs: the engines put each helper process
             // they start into a Job Object on Windows (D33).
