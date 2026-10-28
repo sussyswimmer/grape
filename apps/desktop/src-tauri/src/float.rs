@@ -24,10 +24,10 @@
 //!   other Grape window; the `Closable` bit, so Cmd+W is a close request)
 //!   and shown, resized and hidden through `show_shelf` / `hide_shelf`
 //!   (`grape_platform::macos`) on the main thread: never key, never
-//!   activating Grape, and hiding hands activation back to the app that was
-//!   in front if a click had made the shelf key. Its frame is read in
-//!   points (`window_frame`), never Tauri's backing pixels. wry takes every
-//!   drop on it as a copy and ignores it (D18).
+//!   activating Grape, and hiding hands activation back to the app the user
+//!   was last in (followed from launch) if a click had made the shelf key.
+//!   Its frame is read in points (`window_frame`), never Tauri's backing
+//!   pixels. wry takes every drop on it as a copy and ignores it (D18).
 //! - Moved by its header and left within reach of a screen edge, it snaps
 //!   flush to that edge once the mouse button is up.
 //! - It can't be minimized or maximized, and a close request (Alt+F4 on
@@ -341,9 +341,10 @@ pub struct Shelf {
     /// Debounces the snap after the user moves the shelf.
     #[cfg(any(target_os = "windows", target_os = "macos"))]
     snap: std::sync::Arc<window::SnapTimer>,
-    /// The app to hand activation back to when the shelf hides, if a click
-    /// made it key meanwhile: the app in front at the last show that wasn't
-    /// Grape. Main thread only.
+    /// The app in front at the last show that wasn't Grape. When the shelf
+    /// hides after a click made it key, activation goes back to the app the
+    /// user was last in (`grape_platform::macos::follow_app_activations`);
+    /// this one only when none of those is known. Main thread only.
     #[cfg(target_os = "macos")]
     back_to: Mutex<Option<i32>>,
 }
@@ -398,10 +399,16 @@ pub fn add(
 /// Builds the shelf's window, hidden, at launch (macOS): wry asks macOS to
 /// activate Grape whenever it builds a webview, which is part of launching
 /// anyway but would take the keyboard from the app in front on the first
-/// Float. Call it from setup, on the main thread. A failure is logged, and
-/// the first Float tries again.
+/// Float. First it starts following which app the user is in, so the
+/// shelf's hide can hand activation back to the one they were last in.
+/// Call it from setup, on the main thread. A failure is logged, and the
+/// first Float tries again to build the window.
 #[cfg(target_os = "macos")]
 pub fn build_at_launch(app: &AppHandle) {
+    // Before the build below can activate Grape.
+    if let Err(err) = grape_platform::macos::follow_app_activations() {
+        log::error!("float: not following app activations: {err}");
+    }
     if let Err(err) = window::window(app) {
         log::error!("float: could not build the shelf window at launch: {err}");
     }
@@ -1115,9 +1122,9 @@ mod window {
         }
 
         /// Shows the shelf at `frame` (points) without making it key or
-        /// activating Grape, and remembers the app in front to hand
-        /// activation back to: a show while Grape is in front keeps the
-        /// earlier one. On the main thread.
+        /// activating Grape, and remembers the app in front, the hide's
+        /// fallback: a show while Grape is in front keeps the earlier one.
+        /// On the main thread.
         pub(super) fn show(
             app: &AppHandle,
             window: &WebviewWindow,
@@ -1143,8 +1150,8 @@ mod window {
         }
 
         /// Hides the shelf and, if a click had made it key, hands
-        /// activation back to the app recorded at the last show. On the
-        /// main thread.
+        /// activation back to the app the user was last in, or else to the
+        /// one recorded at the last show. On the main thread.
         pub(super) fn hide(app: &AppHandle, window: &WebviewWindow) -> anyhow::Result<()> {
             let ns_window = ns_window(window)?;
             let back_to = app

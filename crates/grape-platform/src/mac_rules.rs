@@ -2,7 +2,7 @@
 //! Grape's top-left points and back, the screen under a point, the text and
 //! arguments the file actions use, how Move judges each item, and the float
 //! shelf's drag out (what it offers, how it ended, whose drag it is, its
-//! icons and frames).
+//! icons and frames) and hand-back (the apps the user was last in).
 //!
 //! No AppKit here, so these build and are tested on every OS, not only on a
 //! Mac. The `macos` module is the only caller outside the tests.
@@ -445,6 +445,24 @@ pub(crate) fn drag_item_frames(count: usize, at: (f64, f64), size: f64) -> Vec<C
             }
         })
         .collect()
+}
+
+/// How many of the apps the user was last in [`note_activation`] keeps.
+pub(crate) const RECENT_APPS: usize = 8;
+
+/// Notes that the app with `pid` became active: it moves to the front of
+/// `recent` (most recent first, each pid once), and the oldest goes past
+/// [`RECENT_APPS`]. Grape's own activations (`grape`) and pids that name no
+/// process (0 or less) aren't noted, so the list only holds the apps the
+/// user came from. The float shelf hands activation back to the first one
+/// that still runs.
+pub(crate) fn note_activation(recent: &mut Vec<i32>, pid: i32, grape: i32) {
+    if pid == grape || pid <= 0 {
+        return;
+    }
+    recent.retain(|&noted| noted != pid);
+    recent.insert(0, pid);
+    recent.truncate(RECENT_APPS);
 }
 
 #[cfg(test)]
@@ -902,5 +920,36 @@ mod tests {
             assert!((frame.width - 48.0).abs() < 1e-9 && (frame.height - 48.0).abs() < 1e-9);
         }
         assert!(drag_item_frames(0, (0.0, 0.0), 48.0).is_empty());
+    }
+
+    #[test]
+    fn the_app_last_activated_comes_first_once() {
+        const GRAPE: i32 = 500;
+        let mut recent = Vec::new();
+        // Finder, then Mail: Mail is where the user came from.
+        note_activation(&mut recent, 101, GRAPE);
+        note_activation(&mut recent, 202, GRAPE);
+        assert_eq!(recent, [202, 101]);
+        // A click on the shelf activates Grape: still Mail first.
+        note_activation(&mut recent, GRAPE, GRAPE);
+        assert_eq!(recent, [202, 101]);
+        // Back to Finder: it moves to the front, and is listed once.
+        note_activation(&mut recent, 101, GRAPE);
+        assert_eq!(recent, [101, 202]);
+        // No process: never listed.
+        note_activation(&mut recent, 0, GRAPE);
+        note_activation(&mut recent, -1, GRAPE);
+        assert_eq!(recent, [101, 202]);
+    }
+
+    #[test]
+    fn the_oldest_app_goes_once_the_list_is_full() {
+        let mut recent = Vec::new();
+        for pid in 1..=20 {
+            note_activation(&mut recent, pid, 500);
+        }
+        assert_eq!(recent.len(), RECENT_APPS);
+        assert_eq!(recent[0], 20);
+        assert_eq!(recent[RECENT_APPS - 1], 20 - RECENT_APPS as i32 + 1);
     }
 }

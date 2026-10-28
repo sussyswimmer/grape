@@ -29,10 +29,13 @@
 //! [`show_shelf`] sets its frame and orders it front with
 //! `orderFrontRegardless`, never key and never activating Grape, and
 //! records the app in front; [`hide_shelf`] orders it out and, if a click
-//! had made it key, hands activation back as [`hide_panel`] does. It sits
-//! at the floating level (3), under every other Grape window and above
-//! normal windows. [`window_frame`] reads its frame in points: Tauri's
-//! `outer_position` and `outer_size` give backing pixels on the Mac.
+//! had made it key, hands activation back to the app the user was last in
+//! (`super::activations`), since the shelf stays open while the user
+//! switches apps; the app in front at the last show is only the fallback.
+//! It sits at the floating level (3), under every other Grape window and
+//! above normal windows. [`window_frame`] reads its frame in points:
+//! Tauri's `outer_position` and `outer_size` give backing pixels on the
+//! Mac.
 //!
 //! tao resets the level that [`harden_window`] sets in `set_always_on_top`
 //! and `set_always_on_bottom` (queued on the main queue: floating, below
@@ -56,7 +59,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::actions::{activate, frontmost_other_app, hand_back};
-use super::{display, NO_CODE};
+use super::{activations, display, NO_CODE};
 use crate::mac_rules::{to_cocoa, to_grape, CocoaRect};
 use crate::{PlatformError, Rect};
 
@@ -100,7 +103,8 @@ impl WindowRole {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelShown {
     /// The app that was in front (never Grape), to hand activation back to
-    /// when the panel or the shelf closes.
+    /// when the panel closes. For the shelf it's only the fallback when no
+    /// app the user was last in still runs ([`hide_shelf`]).
     pub front_pid: Option<i32>,
 }
 
@@ -226,7 +230,9 @@ pub unsafe fn hide_panel(
 ) -> Result<bool, PlatformError> {
     // SAFETY: the caller's contract is the one `retain_window` needs.
     let (window, mtm) = unsafe { retain_window(ns_window) }?;
-    Ok(order_out_and_hand_back(&window, mtm, back_to_pid))
+    Ok(order_out_and_hand_back(&window, mtm, || {
+        back_to_pid.and_then(NSRunningApplication::runningApplicationWithProcessIdentifier)
+    }))
 }
 
 /// Shows the float shelf at `frame` (Grape's top-left points) without
@@ -257,11 +263,15 @@ pub unsafe fn show_shelf(ns_window: *mut c_void, frame: Rect) -> Result<PanelSho
 }
 
 /// Hides the float shelf (`orderOut`). If a click had made it the key
-/// window and Grape is still the active app, it hands activation back to
-/// the app with `back_to_pid` when that one is still running, as
+/// window and Grape is still the active app, it hands activation back, as
 /// [`hide_panel`] does: an active Mac app with no window keeps the
-/// keyboard, so the user's next keystrokes would go nowhere. Returns
-/// whether it handed back. Never `NSApp.hide`.
+/// keyboard, so the user's next keystrokes would go nowhere. It goes to
+/// the app the user was last in, other than Grape, that still runs (seen
+/// since [`super::follow_app_activations`]): the shelf stays open while
+/// the user switches apps, so the app in front when it was shown is often
+/// not the one they came from. Only when none is known does it go to the
+/// app with `back_to_pid` (from [`show_shelf`]), if that one still runs.
+/// Returns whether it handed back. Never `NSApp.hide`.
 ///
 /// # Safety
 /// As [`harden_window`].
@@ -275,7 +285,9 @@ pub unsafe fn hide_shelf(
 ) -> Result<bool, PlatformError> {
     // SAFETY: the caller's contract is the one `retain_window` needs.
     let (window, mtm) = unsafe { retain_window(ns_window) }?;
-    Ok(order_out_and_hand_back(&window, mtm, back_to_pid))
+    Ok(order_out_and_hand_back(&window, mtm, || {
+        activations::latest_running_app().or_else(|| back_to_pid.and_then(activations::running_app))
+    }))
 }
 
 /// The window's frame now, in Grape's top-left points. Read it here, never
@@ -310,19 +322,17 @@ pub unsafe fn window_frame(ns_window: *mut c_void) -> Result<Rect, PlatformError
 
 /// [`hide_panel`]'s and [`hide_shelf`]'s work: `orderOut`, then, if the
 /// window was key and Grape is still active, activation back to the app
-/// with `back_to_pid` when it still runs. Returns whether it handed back.
+/// `target` picks (only asked then). Returns whether it handed back.
 fn order_out_and_hand_back(
     window: &NSWindow,
     mtm: MainThreadMarker,
-    back_to_pid: Option<i32>,
+    target: impl FnOnce() -> Option<Retained<NSRunningApplication>>,
 ) -> bool {
     autoreleasepool(|_| {
         let was_key = window.isKeyWindow();
         window.orderOut(None);
         let active = NSApplication::sharedApplication(mtm).isActive();
-        let target = back_to_pid
-            .filter(|_| was_key && active)
-            .and_then(NSRunningApplication::runningApplicationWithProcessIdentifier);
+        let target = if was_key && active { target() } else { None };
         match target {
             Some(app) => {
                 hand_back(mtm, &app);

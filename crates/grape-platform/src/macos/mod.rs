@@ -21,6 +21,10 @@
 //!   [`show_shelf`] (never key, never activating), [`hide_shelf`]
 //!   (activation handed back if a click made it key) and [`window_frame`]
 //!   (its frame in points).
+//! - `activations`: the apps the user was last in, other than Grape, from
+//!   the workspace's activation notifications ([`follow_app_activations`],
+//!   at launch): [`hide_shelf`] hands activation back to the latest that
+//!   still runs (D43).
 //! - `drag_out`: dragging items out of the shelf ([`drag_out`], D43): an
 //!   AppKit dragging session that offers copy or link, never move. It
 //!   returns at once; the source reports how the drag ended.
@@ -46,12 +50,14 @@
 //! pool.
 
 mod actions;
+mod activations;
 mod display;
 mod drag;
 mod drag_out;
 pub mod heif;
 mod window;
 
+pub use activations::follow_app_activations;
 pub use display::refresh_screens;
 pub use drag_out::{drag_out, DragStart};
 pub use window::{
