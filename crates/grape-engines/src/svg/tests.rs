@@ -384,16 +384,12 @@ fn gradient(width: u32, height: u32) -> DynamicImage {
     }))
 }
 
-/// heif.rs's fake HEIC or AVIF: its ftyp, `FAKE`, the size (u32 LE), the
-/// channels, the profile's length and the rows.
+/// heif.rs's fake HEIC or AVIF, real HEIF around raw pixels: its ftyp,
+/// then the size, the channels and the rows its primary item holds.
 fn parse_fake(bytes: &[u8]) -> ([u8; 24], u32, u32, u8, Vec<u8>) {
     let ftyp: [u8; 24] = bytes[..24].try_into().unwrap();
-    let rest = bytes[24..].strip_prefix(b"FAKE").unwrap();
-    let width = u32::from_le_bytes(rest[0..4].try_into().unwrap());
-    let height = u32::from_le_bytes(rest[4..8].try_into().unwrap());
-    let channels = rest[8];
-    let icc = u32::from_le_bytes(rest[9..13].try_into().unwrap()) as usize;
-    (ftyp, width, height, channels, rest[13 + icc..].to_vec())
+    let fake = crate::heif::tests::parse_fake(bytes).unwrap();
+    (ftyp, fake.width, fake.height, fake.channels, fake.rows)
 }
 
 #[test]

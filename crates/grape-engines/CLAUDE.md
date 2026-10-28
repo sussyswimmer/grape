@@ -27,7 +27,9 @@ src/
                     tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
                     tools/argv.rs (the five FFmpeg tools, D26)
   pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
-  heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels
+  heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels,
+                    and HEIC Compress (D28) has Encoder (check_encode probes once per helper; encode takes a quality and hands the bytes back)
+                    and Decoder::decode_within (held to the tool's peak); the tests' fake helper writes real HEIF (fake_quality reads its quality)
   svg/              SVG in a worker process: resvg (D39; lane A's module by agreement): protocol.rs (the worker's own JSON), worker.rs
                     (`Grape --grape-svg-worker`: read, gunzip, parse, draw), resolve.rs (data: references only, a job-wide budget),
                     size.rs (the size rule, pure), run.rs (the parent: start, watch, read the pixels)

@@ -257,8 +257,10 @@ jobs:
           if ($script:bad -gt 0) { exit 1 }
           Write-Output 'Every check passed.'
           exit 0
-      # The HEIC and AVIF fixtures (heic-spec §5.6, D41), each sniffed as what
-      # its name says before it's written. ci.yml's heif-it jobs read them on
+      # The HEIC and AVIF fixtures (heic-spec §5.6, D41, D28), each sniffed as
+      # what its name says before it's written; D28's are also read back with
+      # libheif (their Exif and XMP, their thumbnail, their nclx), and must
+      # start with HEIC's own ftyp here. ci.yml's heif-it jobs read them on
       # Windows (grape-heif.exe) and macOS (ImageIO decodes the AVIF ones).
       - name: Write the HEIC and AVIF test fixtures
         run: |
@@ -267,17 +269,23 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'heif-fixtures'
           ./tools/grape-heif/target/release/grape-heif-fixtures.exe $out --icc $icc
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $names = 'opaque.heic', 'alpha.heic', 'rotate90.heic', 'grid.heic', 'odd.heic', 'icc.heic', 'truncated.heic', 'avci-brand.heic',
-            'opaque.avif', 'alpha.avif', 'odd-3x5.avif', 'deep.avif', 'grid.avif', 'icc.avif', 'damaged.avif'
+          $d28 = 'exif-xmp.heic', 'thumb.heic', 'nclx-p3.heic', 'q95.heic'
+          $names = @('opaque.heic', 'alpha.heic', 'rotate90.heic', 'grid.heic', 'odd.heic', 'icc.heic', 'truncated.heic', 'avci-brand.heic',
+            'opaque.avif', 'alpha.avif', 'odd-3x5.avif', 'deep.avif', 'grid.avif', 'icc.avif', 'damaged.avif') + $d28
           $missing = @($names | Where-Object { -not (Test-Path -LiteralPath (Join-Path $out $_) -PathType Leaf) })
           if ($missing.Count -gt 0) { Write-Output "::error::No $($missing -join ', ') among the fixtures."; exit 1 }
+          foreach ($name in $d28) {
+            $head = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes((Join-Path $out $name)), 4, 8)
+            if ($head -cne 'ftypheic') { Write-Output "::error::$name starts with $head, not ftypheic."; exit 1 }
+          }
           exit 0
       # Through the worker, as Grape runs it: every AVIF fixture decodes to
-      # its size (dav1d, D41), a damaged one is refused, and the decoded
-      # pixels encode again as AVIF (libaom) and HEIC (x265). libheif's own
-      # limits come from its compiled-in defaults, so an inherited
-      # LIBHEIF_SECURITY_LIMITS=off changes nothing (Grape removes it too,
-      # heic-spec J38).
+      # its size (dav1d, D41), and so do D28's HEICs (exif-xmp.heic turned by
+      # its irot, nclx-p3.heic with no profile), a damaged one is refused, and
+      # the decoded pixels encode again as AVIF (libaom) and HEIC (x265).
+      # libheif's own limits come from its compiled-in defaults, so an
+      # inherited LIBHEIF_SECURITY_LIMITS=off changes nothing (Grape removes it
+      # too, heic-spec J38).
       - name: Decodes and encodes through the worker, with LIBHEIF_SECURITY_LIMITS=off
         run: |
           $exe = (Resolve-Path tools/grape-heif/target/out/grape-heif.exe).Path
@@ -308,6 +316,10 @@ jobs:
             'deep.avif' = '{"done":{"width":64,"height":48,"channels":3}}'
             'grid.avif' = '{"done":{"width":128,"height":128,"channels":3}}'
             'icc.avif' = '{"done":{"width":64,"height":64,"channels":3,"iccBytes":' + $iccLength + '}}'
+            'exif-xmp.heic' = '{"done":{"width":64,"height":96,"channels":3}}'
+            'thumb.heic' = '{"done":{"width":320,"height":240,"channels":3}}'
+            'nclx-p3.heic' = '{"done":{"width":64,"height":64,"channels":3}}'
+            'q95.heic' = '{"done":{"width":1600,"height":1200,"channels":3}}'
           }
           $pixels = $null
           foreach ($name in $decodes.Keys) {

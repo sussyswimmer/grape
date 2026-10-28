@@ -489,6 +489,13 @@ jobs:
           Copy-Item -LiteralPath (Join-Path $bsdtar 'bsdtar-x86_64-pc-windows-msvc.exe') -Destination $bins
           Copy-Item -LiteralPath $heif -Destination (Join-Path $bins 'grape-heif-x86_64-pc-windows-msvc.exe')
           Get-ChildItem -File -LiteralPath $bins | Format-Table -AutoSize Name, Length
+      # D28: libwebp-sys's build script compiles libwebp with
+      # -march=$TARGET_CPU, so a build with it set (to native, say) would
+      # ship a Grape that runs only on CPUs like this runner's.
+      - name: Refuse a TARGET_CPU
+        shell: pwsh
+        run: |
+          if (Test-Path Env:TARGET_CPU) { Write-Output "::error::TARGET_CPU is set ($env:TARGET_CPU): libwebp would be built for this runner's CPU (-march), not every PC. Unset it."; exit 1 }
       # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
       # bundle.resources. The Windows sidecars overlay is the one overlay
       # that sets externalBin (ffmpeg, ffprobe, bsdtar, grape-heif), adds

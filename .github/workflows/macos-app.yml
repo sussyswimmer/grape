@@ -106,6 +106,13 @@ jobs:
             chmod 755 "$bins/ffmpeg-$triple" "$bins/ffprobe-$triple" "$bins/bsdtar-$triple"
           done
           ls -l "$bins"
+      # D28: libwebp-sys's build script compiles libwebp with
+      # -march=$TARGET_CPU, so a build with it set (to native, say) would
+      # ship a Grape that runs only on CPUs like this runner's.
+      - name: Refuse a TARGET_CPU
+        shell: bash
+        run: |
+          if [ -n "${TARGET_CPU+set}" ]; then echo "::error::TARGET_CPU is set ($TARGET_CPU): libwebp would be built for this runner's CPU (-march), not every Mac. Unset it."; exit 1; fi
       # The PDFium overlay adds binaries/macos/libpdfium.dylib to
       # bundle.macOS.frameworks and licenses/pdfium/ to bundle.resources. The
       # macOS sidecars overlay is the one overlay that sets externalBin
