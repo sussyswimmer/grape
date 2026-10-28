@@ -9,16 +9,19 @@
 	<!-- The reason macOS shows under its "would like to access files in
 	     your … folder" prompt, which comes the first time a drop reads or
 	     writes there (docs/PLATFORM_MACOS.md, "Folder prompts"). Grape's
-	     own words; one plain sentence each. -->
+	     own words, one plain sentence each. The prompt names the folder,
+	     and the access may be the dropped file, an output written to the
+	     folder chosen in Settings, or Move's destination, so the sentence
+	     names none. -->
 	<key>NSDesktopFolderUsageDescription</key>
-	<string>Grape reads the files you drop on its wheel from your Desktop and saves the converted copy next to them.</string>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
 	<key>NSDocumentsFolderUsageDescription</key>
-	<string>Grape reads the files you drop on its wheel from your Documents folder and saves the converted copy next to them.</string>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
 	<key>NSDownloadsFolderUsageDescription</key>
-	<string>Grape reads the files you drop on its wheel and saves the converted copy next to them, or in Downloads/Grape when it can't save next to a file.</string>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them, in a folder you chose, or in Downloads/Grape when it can't save next to a file.</string>
 	<key>NSRemovableVolumesUsageDescription</key>
-	<string>Grape reads the files you drop on its wheel from this drive and saves the converted copy next to them.</string>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
-	<string>Grape reads the files you drop on its wheel from this network drive and saves the converted copy next to them.</string>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
 </dict>
 </plist>
