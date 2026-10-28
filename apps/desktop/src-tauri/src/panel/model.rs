@@ -890,7 +890,8 @@ mod tests {
         let preview = |op: &Operation, items: &[SelectionItem]| {
             preview_check(op, items, &SidecarPaths::default())
         };
-        // Where this build can't run them yet: Compress on TIFF.
+        // Wherever they're offered, whether this build runs them or not:
+        // Compress on TIFF (which runs from lane B's D28 on).
         let tiffs = files(&["/a/one.tiff", "/a/two.tiff"]);
         assert_eq!(
             route(WheelEntry::Tool(ToolKey::Compress), &tiffs, V1, preview),

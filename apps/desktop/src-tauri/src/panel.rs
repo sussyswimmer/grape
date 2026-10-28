@@ -13,8 +13,9 @@
 //!   Grape's PDF library is found, Compress on JPG and PNG always, and
 //!   Compress, Audio Channels and Normalize Volume on audio and video when
 //!   FFmpeg is (D26). `GRAPE_PREVIEW_PANELS=1` (QA) also opens the four
-//!   where they're offered but can't run yet (Compress on TIFF), and their
-//!   Run meets the same check and shows the same info toast.
+//!   where they're offered but can't run (Compress on MP3s without
+//!   FFmpeg), and their Run meets the same check and shows the same info
+//!   toast.
 //! - **One at a time.** A new request replaces the open panel, which counts
 //!   as cancelled. Run, Cancel, ×, Esc, Alt+F4, Pause and Quit close it.
 //!   Losing the focus doesn't.
