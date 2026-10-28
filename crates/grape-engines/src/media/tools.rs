@@ -499,7 +499,7 @@ impl Tool<'_> {
         // bar, and a retry what's left.
         let share = if copies { RETRY_FROM } else { PASSES_SHARE };
         let warnings = match run_passes(ffmpeg, &[first], info.duration, self.ctx, bar, share) {
-            Ok(warnings) => warnings,
+            Ok(finished) => finished.warnings(),
             Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
             Err(e) => {
                 let refused = matches!(e, RunError::Exit { .. });
@@ -619,7 +619,8 @@ impl Tool<'_> {
         };
         let end = PASSES_SHARE * share;
         match run_passes(ffmpeg, &[pass], info.duration, self.ctx, bar, end) {
-            Ok(stderr) => Ok(loudness::parse(&stderr)),
+            // FFmpeg's own words only: not why it ran uncontained.
+            Ok(finished) => Ok(loudness::parse(&finished.stderr_tail)),
             Err(e) => {
                 let detail = format!("measure {}: {e}", src.display());
                 let mut failed = ffmpeg_failed(names, e, src);
@@ -709,7 +710,8 @@ impl Tool<'_> {
     }
 
     /// Runs `passes`, filling the bar to `end`; returns what the last one
-    /// wrote to stderr.
+    /// wrote to stderr, with why it ran uncontained, if it did
+    /// ([`run::Finished::warnings`]).
     fn run(&self, passes: &[Pass], bar: &mut Bar, end: f32) -> Result<String, GrapeError> {
         let Begun {
             ffmpeg,
@@ -719,6 +721,7 @@ impl Tool<'_> {
             ..
         } = self.begun;
         run_passes(ffmpeg, passes, info.duration, self.ctx, bar, end)
+            .map(run::Finished::warnings)
             .map_err(|e| ffmpeg_failed(names, e, src))
             .map_err(|e| publish::or_cancelled(&self.ctx.cancel, src, e))
     }
