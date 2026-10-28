@@ -39,6 +39,7 @@ use png::{BitDepth, ColorType, Compression, Filter};
 
 use super::strip::{read_exact, Error};
 use crate::cancel::Cancellable;
+use crate::headers::PNG_TEXT_ENTRY;
 use crate::image::PNG_METADATA_LIMIT;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -62,8 +63,9 @@ struct Chunks {
     /// The bytes in `after`.
     after_bytes: u64,
     /// The bytes of the text chunks before the image data, which the
-    /// `png` crate's header read holds.
+    /// `png` crate's header read holds, and how many there are.
     text_bytes: u64,
+    text_chunks: u64,
     /// More text after the image data than `limit`: the walk stopped there.
     too_much: bool,
 }
@@ -107,6 +109,7 @@ fn walk(r: &mut dyn BufRead, limit: u64) -> Result<Chunks, Error> {
         }
         if !image_data && matches!(&kind, b"tEXt" | b"zTXt" | b"iTXt") {
             found.text_bytes = found.text_bytes.saturating_add(len as u64);
+            found.text_chunks += 1;
         }
         match &kind {
             b"acTL" if !image_data => found.animated = true,
@@ -558,11 +561,13 @@ pub(crate) fn run(
     drop(reader);
     progress(0.1);
 
-    // Text read as Latin-1 can take twice its bytes as a string.
+    // The text before the image data, as the `png` crate holds it: twice
+    // its bytes as strings (from Latin-1), an entry each, and while it's
+    // written a Latin-1 copy and the chunk's buffer besides the PNG (so
+    // 5 times its bytes with [`peak`]'s doubling).
     let size = |data: Option<&[u8]>| data.map_or(0, |d| d.len() as u64);
-    let metadata = chunks
-        .text_bytes
-        .saturating_mul(2)
+    let metadata = (chunks.text_bytes.saturating_mul(5) / 2)
+        .saturating_add(chunks.text_chunks.saturating_mul(PNG_TEXT_ENTRY))
         .saturating_add(chunks.after_bytes)
         .saturating_add(size(info.icc_profile.as_deref()))
         .saturating_add(size(info.exif_metadata.as_deref()));
@@ -898,7 +903,7 @@ mod tests {
         assert_eq!(after, [b"tEXt", b"eXIf"]);
         assert_eq!(found.after_bytes, 16);
         // "Title\0early": the text before the image data.
-        assert_eq!(found.text_bytes, 11);
+        assert_eq!((found.text_bytes, found.text_chunks), (11, 1));
         assert!(!found.too_much);
         // Over the limit, the walk stops at the text that passes it.
         let found = walk(&mut Cursor::new(hdr), 15).unwrap();

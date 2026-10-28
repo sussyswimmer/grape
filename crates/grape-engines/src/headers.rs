@@ -255,7 +255,7 @@ const MAX_PNG_CHUNKS: u32 = 1 << 20;
 
 /// What the PNG decoder keeps for each text chunk besides its text: the
 /// parsed entry, its keyword and their share of the list.
-const PNG_TEXT_ENTRY: u64 = 128;
+pub(crate) const PNG_TEXT_ENTRY: u64 = 128;
 
 /// What the PNG decoder will keep of the metadata ahead of the first image
 /// data, which it reads before any pixel: the buffer it reads chunks into
