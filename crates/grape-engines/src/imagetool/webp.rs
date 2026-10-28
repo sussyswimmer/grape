@@ -6,6 +6,10 @@
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
 //!   `XMP `, unknown chunks (inside a frame too), and anything after the
 //!   RIFF's end.
+//! - **Refused:** a frame holding `ANMF`, `VP8X`, `ANIM` or `ICCP`. libwebp
+//!   ends such a frame at its image and reads the rest as top-level chunks,
+//!   while the `image` crate trusts its size, so dropping them could lose a
+//!   frame.
 //! - **Patched afterwards:** the RIFF size, and VP8X's flags: XMP off, and
 //!   EXIF on only when the minimal EXIF ([`exif::minimal`]) went back where
 //!   the old one was. Without a VP8X (a simple WebP) there's no flag to
@@ -219,6 +223,14 @@ fn frame(
                 skip(r, body)?;
                 found.fields.insert(MetaField::Xmp);
             }
+            // Chunks only a file's top level holds: decoders disagree on
+            // where such a frame ends, so it can't be kept for sure.
+            b"ANMF" | b"VP8X" | b"ANIM" | b"ICCP" => {
+                return Err(Error::Broken(format!(
+                    "a {} chunk inside an ANMF",
+                    String::from_utf8_lossy(&fourcc).trim_end()
+                )));
+            }
             _ => {
                 skip(r, body)?;
                 found.fields.insert(MetaField::Other);
@@ -424,6 +436,26 @@ mod tests {
             ]),
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_frame_holding_a_top_level_chunk_is_refused() {
+        // libwebp ends a frame at its image and reads the next frame from
+        // inside it; the `image` crate trusts the size and doesn't. Either
+        // way, dropping it would lose a picture someone sees.
+        for inner in [
+            anmf(&[chunk(b"VP8L", b"two")]),
+            vp8x(0x02),
+            chunk(b"ANIM", &[0; 6]),
+            chunk(b"ICCP", b"profile"),
+        ] {
+            let src = webp(&[
+                vp8x(0x02),
+                chunk(b"ANIM", &[0; 6]),
+                anmf(&[chunk(b"VP8L", b"one"), inner]),
+            ]);
+            assert!(matches!(run(&src), Err(Error::Broken(_))), "{src:?}");
         }
     }
 
