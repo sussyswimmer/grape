@@ -24,9 +24,10 @@
 //! decoder reads it: the last `Exif` APP1 wins.
 //!
 //! Anything else, a marker this module doesn't know before the first SOS,
-//! an APPn or COM between scans, or a malformed structure (a length past
-//! the end, no SOS, no EOI) doesn't pass: the decoder accepted the file,
-//! so the caller re-encodes its pixels instead.
+//! an APPn or COM between scans, more than [`MAX_SEGMENTS`] segments
+//! before the first SOS, or a malformed structure (a length past the end,
+//! no SOS, no EOI) doesn't pass: the decoder accepted the file, so the
+//! caller re-encodes its pixels instead.
 
 use std::ops::Range;
 
@@ -52,11 +53,13 @@ pub(crate) struct Passthrough {
 
 impl Passthrough {
     /// The kept bytes of `bytes`, the source this was read from, in order.
-    pub(crate) fn parts<'a>(&self, bytes: &'a [u8]) -> Vec<&'a [u8]> {
+    pub(crate) fn parts<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = &'a [u8]> + Clone + 'a {
         self.keep
             .iter()
-            .filter_map(|range| bytes.get(range.clone()))
-            .collect()
+            .filter_map(move |range| bytes.get(range.clone()))
     }
 
     /// How many bytes are kept.
@@ -79,6 +82,12 @@ const APP14: u8 = 0xEE;
 const APP15: u8 = 0xEF;
 const COM: u8 = 0xFE;
 
+/// The most segments read before the first SOS. Real JPEGs have a few
+/// dozen (an ICC profile split over many APP2s among them); a file with
+/// more takes the re-encode path, whose memory is bounded, so a crafted
+/// file of millions of tiny segments never gets a kept range for each.
+pub(crate) const MAX_SEGMENTS: usize = 1024;
+
 /// The frame header's facts.
 struct Frame {
     width: u16,
@@ -96,6 +105,7 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
     let mut keep: Vec<Range<usize>> = Vec::with_capacity(8);
     keep.push(0..2);
     let mut at = 2;
+    let mut segments = 0;
     let mut frame: Option<Frame> = None;
     let mut jfif = false;
     let mut adobe: Option<u8> = None;
@@ -105,6 +115,10 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
         if code == SOS {
             break marker_at;
         }
+        segments += 1;
+        if segments > MAX_SEGMENTS {
+            return None;
+        }
         let end = segment_end(bytes, marker_at)?;
         let payload = &bytes[marker_at + 4..end];
         let whole = marker_at..end;
@@ -113,7 +127,7 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
                 if let Some(thumbnail) = jfif_thumbnail(payload) {
                     jfif = true;
                     if !thumbnail {
-                        keep.push(whole);
+                        push(&mut keep, whole);
                     }
                 }
             }
@@ -128,13 +142,13 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
             }
             APP2 => {
                 if payload.starts_with(b"ICC_PROFILE\0") {
-                    keep.push(whole);
+                    push(&mut keep, whole);
                 }
             }
             APP14 => {
                 if payload.len() >= 12 && payload.starts_with(b"Adobe") {
                     adobe = Some(payload[11]);
-                    keep.push(whole);
+                    push(&mut keep, whole);
                 }
             }
             0xE3..=0xED | APP15 | COM => {}
@@ -143,9 +157,9 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
                     return None;
                 }
                 frame = Some(read_frame(payload)?);
-                keep.push(whole);
+                push(&mut keep, whole);
             }
-            DQT | DHT | DRI => keep.push(whole),
+            DQT | DHT | DRI => push(&mut keep, whole),
             // Lossless, hierarchical and arithmetic frames, DAC, DNL, the
             // reserved JPGn and anything else.
             _ => return None,
@@ -154,7 +168,7 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
     };
     let frame = frame?;
     let eoi_end = scans_end(bytes, sos_at)?;
-    keep.push(sos_at..eoi_end);
+    push(&mut keep, sos_at..eoi_end);
     let rgb = match frame.ids.as_slice() {
         [_] => false,
         ids @ [_, _, _] => color_is_rgb(ids, jfif, adobe)?,
@@ -168,6 +182,15 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
         rgb,
         orientation,
     })
+}
+
+/// Adds `range` to the kept bytes, joined to the last range when it starts
+/// where that one ends.
+fn push(keep: &mut Vec<Range<usize>>, range: Range<usize>) {
+    match keep.last_mut() {
+        Some(last) if last.end == range.start => last.end = range.end,
+        _ => keep.push(range),
+    }
 }
 
 /// For 3 components: `Some(true)` for RGB data, `Some(false)` for YCbCr,
@@ -356,7 +379,7 @@ pub(crate) mod tests {
     }
 
     fn kept(bytes: &[u8], pass: &Passthrough) -> Vec<u8> {
-        pass.parts(bytes).concat()
+        pass.parts(bytes).flatten().copied().collect()
     }
 
     #[test]
@@ -506,6 +529,46 @@ pub(crate) mod tests {
         let bytes = jpeg(&[adobe(0), sof(&[1, 2, 3])], b"");
         let pass = passthrough(&bytes).unwrap();
         assert!(kept(&bytes, &pass).windows(5).any(|w| w == b"Adobe"));
+    }
+
+    #[test]
+    fn more_segments_than_the_cap_take_the_re_encode_path() {
+        let sof = frame(0xC0, 8, &[1]);
+        let empty_dht = segment(DHT, &[]);
+        // At the cap it passes, and the kept bytes, all in a row, are one
+        // range.
+        let mut segments = vec![sof.clone()];
+        segments.extend(std::iter::repeat_n(empty_dht.clone(), MAX_SEGMENTS - 1));
+        let bytes = jpeg(&segments, b"");
+        let pass = passthrough(&bytes).unwrap();
+        assert_eq!(pass.keep, vec![0..bytes.len()]);
+        // One more: re-encoded.
+        segments.push(empty_dht);
+        assert!(passthrough(&jpeg(&segments, b"")).is_none());
+        // Dropped segments count too.
+        let mut segments = vec![sof];
+        segments.extend(std::iter::repeat_n(segment(COM, b"c"), MAX_SEGMENTS));
+        assert!(passthrough(&jpeg(&segments, b"")).is_none());
+    }
+
+    #[test]
+    fn kept_segments_in_a_row_are_one_range() {
+        let sof = frame(0xC0, 8, &[1]);
+        let dqt = segment(DQT, &[0; 65]);
+        // SOI, DQT, SOF | COM dropped | DHT, scans | trailer dropped.
+        let bytes = jpeg(
+            &[
+                dqt.clone(),
+                sof.clone(),
+                segment(COM, b"x"),
+                segment(DHT, &[0; 17]),
+            ],
+            b"after",
+        );
+        let pass = passthrough(&bytes).unwrap();
+        let first = 2 + dqt.len() + sof.len();
+        let second = first + 5;
+        assert_eq!(pass.keep, [0..first, second..bytes.len() - 5]);
     }
 
     #[test]

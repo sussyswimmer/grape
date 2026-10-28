@@ -37,7 +37,8 @@
 //!   stream's buffer is reserved once at its bound and never grows
 //!   ([`Sink`]). A JPEG re-encode that would be larger than that bound is
 //!   given up for the lossless Flate stream, which always fits. A JPEG
-//!   passed through holds the file and no pixels.
+//!   passed through holds the file and no pixels, and the list of its kept
+//!   byte ranges, at most one a segment and [`jpeg::MAX_SEGMENTS`].
 //!
 //!   Decoding is held to [`image::WORKING_SET_LIMIT`] by the raster engine's
 //!   estimate for a stand-in target, [`FIT`] (`Format::Png`), not for
@@ -659,7 +660,7 @@ fn write_page<W: Write>(
                 // Adobe marker that is kept says the same.
                 entries.push_str(" /DecodeParms << /ColorTransform 0 >>");
             }
-            pdf.stream_parts(image, &entries, &pass.parts(&bytes))
+            pdf.stream_parts(image, &entries, pass.parts(&bytes))
                 .map_err(write)?;
             drop(bytes);
             if let (Some(number), Some(icc)) = (profile, icc) {

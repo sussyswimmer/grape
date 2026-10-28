@@ -273,6 +273,32 @@ fn a_rotated_phone_photo_keeps_its_pixels_and_loses_its_exif() {
 }
 
 #[test]
+fn a_jpeg_of_thousands_of_segments_is_re_encoded() {
+    // Grape's decoder takes 2,000 empty DHT segments before the frame; the
+    // passthrough reads at most 1,024 segments, so this one is re-encoded.
+    let dir = TestDir::new("create-segments");
+    let plain = encode(&gradient(24, 16), ImageFormat::Jpeg);
+    let mut jpeg = plain[..2].to_vec();
+    for _ in 0..2_000 {
+        jpeg.extend_from_slice(&[0xFF, 0xC4, 0, 2]);
+    }
+    jpeg.extend_from_slice(&plain[2..]);
+    let (src, job) = plan_one(&dir, "padded.jpg", &jpeg, Operation::convert(Format::Pdf));
+    let before = SourceState::of(&src);
+
+    run(&job).0.unwrap();
+
+    let (_, pages) = read_pdf(&planned_file(&job));
+    assert_eq!(pages[0].media_box, [0.0, 0.0, 24.0, 16.0]);
+    assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
+    let sos = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    assert!(!pages[0].data.ends_with(&jpeg[sos..]));
+    assert!(!contains(&pages[0].data, &[0xFF, 0xC4, 0, 2]));
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
 fn transparency_becomes_a_soft_mask_and_opaque_alpha_does_not() {
     let dir = TestDir::new("create-alpha");
     let clear = RgbaImage::from_fn(10, 6, |x, _| {

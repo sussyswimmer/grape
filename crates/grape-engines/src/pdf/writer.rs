@@ -81,18 +81,16 @@ impl<W: Write> Writer<W> {
     /// Writes object `n` as a stream of `data` with the dictionary entries
     /// `entries` (`/Length` is added).
     pub(crate) fn stream(&mut self, n: u32, entries: &str, data: &[u8]) -> io::Result<()> {
-        self.stream_parts(n, entries, &[data])
+        self.stream_parts(n, entries, [data])
     }
 
     /// [`Writer::stream`] with the data in `parts`, written one after the
-    /// other.
-    pub(crate) fn stream_parts(
-        &mut self,
-        n: u32,
-        entries: &str,
-        parts: &[&[u8]],
-    ) -> io::Result<()> {
-        let length: usize = parts.iter().map(|part| part.len()).sum();
+    /// other (gone through twice: once for the length, once to write).
+    pub(crate) fn stream_parts<'a, I>(&mut self, n: u32, entries: &str, parts: I) -> io::Result<()>
+    where
+        I: IntoIterator<Item = &'a [u8]> + Clone,
+    {
+        let length: usize = parts.clone().into_iter().map(<[u8]>::len).sum();
         self.start(n)?;
         let dict = if entries.is_empty() {
             format!("<< /Length {length} >>\nstream\n")
