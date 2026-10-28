@@ -7,21 +7,27 @@ name: macos-app
 # called this. It's ad-hoc signed, not notarized (D4). ci.yml calls it on
 # every run and uploads the DMG as Grape-macOS-universal, which
 # docs/PLATFORM_MACOS.md → "Running a CI build" tells people to download.
+# release.yml calls it from its tag with release: true, which uploads the
+# DMG as Grape-macOS-universal.dmg with its hash instead, for the draft (D45).
 on:
   workflow_call:
     inputs:
       cache:
-        description: Use the PDFium cache.
+        description: Use the PDFium cache (release.yml fetches it fresh).
         type: boolean
         default: true
       ref:
-        description: What to check out; empty for the caller's own ref.
+        description: What to check out (release.yml passes its tag); empty for the caller's own ref.
         type: string
         default: ""
       ffmpeg-sums:
         description: The ffmpeg workflow's macos-sums output (the SHA-256 of the ffmpeg-apple-darwin artifact's SHA256SUMS).
         type: string
         required: true
+      release:
+        description: Upload Grape-macOS-universal.dmg and its SHA256SUMS (artifact Grape-macOS-universal-release) instead of CI's Grape-macOS-universal.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -260,8 +266,36 @@ jobs:
           [ "$(head -c 12 "$work/out.avif" | tail -c 4)" = avif ] || { echo "::error::out.avif isn't an AVIF."; exit 1; }
           ls -l "$work/out.avif"
           rm -rf "$work"
-      - uses: actions/upload-artifact@v7
+      - if: ${{ !inputs.release }}
+        uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal
           path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+      # Tauri names the DMG Grape_<version>_universal.dmg. The release file
+      # has one name for every version, so the latest-release link works.
+      - name: Name the DMG and hash it
+        if: inputs.release
+        run: |
+          shopt -s nullglob
+          dmgs=(target/universal-apple-darwin/release/bundle/dmg/*.dmg)
+          if [ "${#dmgs[@]}" -ne 1 ]; then
+            echo "::error::Expected one .dmg in target/universal-apple-darwin/release/bundle/dmg, found ${#dmgs[@]}: ${dmgs[*]}"
+            exit 1
+          fi
+          out="$RUNNER_TEMP/grape-release"
+          mkdir -p "$out"
+          cp "${dmgs[0]}" "$out/Grape-macOS-universal.dmg"
+          hash=$(shasum -a 256 < "$out/Grape-macOS-universal.dmg" | cut -d ' ' -f 1)
+          # sha256sum's format, with LF, so `sha256sum -c` reads it too.
+          printf '%s  %s\n' "$hash" Grape-macOS-universal.dmg > "$out/SHA256SUMS"
+          echo "Copied $(basename "${dmgs[0]}") to Grape-macOS-universal.dmg"
+          cat "$out/SHA256SUMS"
+      - if: inputs.release
+        uses: actions/upload-artifact@v7
+        with:
+          name: Grape-macOS-universal-release
+          path: |
+            ${{ runner.temp }}/grape-release/Grape-macOS-universal.dmg
+            ${{ runner.temp }}/grape-release/SHA256SUMS
           if-no-files-found: error

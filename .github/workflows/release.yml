@@ -1,12 +1,13 @@
 name: Release
 
-# A version tag (v1.2.3) builds the Windows installer and makes a DRAFT
-# GitHub Release with it, and with the complete source of the two GPL
-# programs the installer carries: Grape's own FFmpeg (grape-ffmpeg-sources.tar,
-# D24) and grape-heif.exe, the image helper for HEIC and AVIF (D33, D41).
-# Every sidecar is built here, clean, from the tag. Nothing is published
-# here: Maxwell checks the draft, writes "What's new" and publishes it by
-# hand. The steps are in docs/PLATFORM_WINDOWS.md → "Releasing".
+# A version tag (v1.2.3) builds the Windows installer and the macOS DMG and
+# makes a DRAFT GitHub Release with them (D45), and with the complete source
+# of the GPL programs they carry: Grape's own FFmpeg, in both
+# (grape-ffmpeg-sources.tar, D24), and grape-heif.exe, the installer's image
+# helper for HEIC and AVIF (D33, D41). Every sidecar is built here, clean,
+# from the tag. Nothing is published here: Maxwell checks the draft, writes
+# "What's new" and publishes it by hand. The steps are in
+# docs/PLATFORM_WINDOWS.md → "Releasing".
 on:
   push:
     tags:
@@ -108,7 +109,8 @@ jobs:
 
   # Grape's own FFmpeg (D24), built clean from the tag (no dist or download
   # cache), with its GPL source bundle, which goes on the draft. It builds
-  # the Mac halves too: their source bundles must match the Windows one.
+  # the Mac halves too, for the DMG, and their source bundles must match the
+  # Windows one.
   ffmpeg:
     name: ffmpeg
     needs: version
@@ -117,7 +119,7 @@ jobs:
       cache: false
       ref: refs/tags/${{ inputs.tag || github.ref_name }}
 
-  # Grape's bsdtar (D27), built clean from the tag.
+  # Grape's bsdtar (D27), built clean from the tag, for both OSes.
   bsdtar:
     name: bsdtar
     needs: version
@@ -301,11 +303,25 @@ jobs:
             ${{ runner.temp }}/grape-release/SHA256SUMS.txt
           if-no-files-found: error
 
+  # The same build as ci.yml's build-macos job (macos-app.yml, D45), from the
+  # tag, with PDFium fetched fresh. With release: true it names the DMG
+  # Grape-macOS-universal.dmg and hashes it for the draft. It's ad-hoc
+  # signed and not notarized, as CI's (D4). It has a read-only token too.
+  build-macos:
+    name: Build (macOS DMG)
+    needs: [version, ffmpeg, bsdtar]
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      cache: false
+      release: true
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      ffmpeg-sums: ${{ needs.ffmpeg.outputs.macos-sums }}
+
   # The only job that can write: it makes or updates the draft and runs no
   # build code.
   release:
     name: Draft the GitHub Release
-    needs: [version, build, grape-heif, ffmpeg]
+    needs: [version, build, build-macos, grape-heif, ffmpeg]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -327,6 +343,25 @@ jobs:
       - name: Check the installer against SHA256SUMS.txt
         working-directory: release
         run: sha256sum -c SHA256SUMS.txt
+      # The DMG (D45). Its line goes after the installer's, which stays first:
+      # the notes' PowerShell check reads the file's first hash.
+      - uses: actions/download-artifact@v8
+        with:
+          name: Grape-macOS-universal-release
+          path: ${{ runner.temp }}/macos
+      - name: Check the DMG and add it to SHA256SUMS.txt
+        run: |
+          dmg=Grape-macOS-universal.dmg
+          cd "$RUNNER_TEMP/macos"
+          test -f "$dmg" || { echo "::error::$dmg is missing from the Grape-macOS-universal-release artifact."; exit 1; }
+          # Exactly the DMG's one line, so nothing else gets into SHA256SUMS.txt.
+          [ "$(cat SHA256SUMS)" = "$(sha256sum "$dmg")" ] ||
+            { echo "::error::The artifact's SHA256SUMS should be exactly '$(sha256sum "$dmg")', but it's: $(cat SHA256SUMS)"; exit 1; }
+          sha256sum -c SHA256SUMS
+          mv "$dmg" "$GITHUB_WORKSPACE/release/"
+          cat SHA256SUMS >> "$GITHUB_WORKSPACE/release/SHA256SUMS.txt"
+          cd "$GITHUB_WORKSPACE/release"
+          sha256sum -c SHA256SUMS.txt
       # The installer carries grape-heif.exe, which is GPL, so its complete
       # source goes on the same release (GPL-3.0 section 6; heic-spec J37).
       - uses: actions/download-artifact@v8
@@ -342,10 +377,10 @@ jobs:
           cat "$bundle.sha256" >> SHA256SUMS.txt
           rm "$bundle.sha256"
           sha256sum -c SHA256SUMS.txt
-      # The installer carries Grape's own FFmpeg, which is GPL-2.0-or-later,
-      # so its complete source goes on the same release too (GPL-2.0
-      # section 3(a); D24): the bundle the ffmpeg workflow checked against
-      # the Mac runs' (its sources job).
+      # The installer and the DMG carry Grape's own FFmpeg, which is
+      # GPL-2.0-or-later, so its complete source goes on the same release too
+      # (GPL-2.0 section 3(a); D24): the bundle the ffmpeg workflow checked
+      # against the Mac runs' (its sources job).
       - uses: actions/download-artifact@v8
         with:
           name: ffmpeg-source
@@ -376,7 +411,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files=(release/Grape-Setup-x64.exe release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz" release/grape-ffmpeg-sources.tar)
+          files=(release/Grape-Setup-x64.exe release/Grape-macOS-universal.dmg release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz" release/grape-ffmpeg-sources.tar)
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != "true" ]; then
               echo "::error::$TAG is already published, so its files stay as they are. Release a new version instead."
