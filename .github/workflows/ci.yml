@@ -898,12 +898,14 @@ jobs:
           $null = $p.Handle
           if (-not $p.WaitForExit(120000)) { Fail "uninstall.exe /S didn't finish in 2 minutes." }
           if ($p.ExitCode -ne 0) { Fail "uninstall.exe /S exited with code $($p.ExitCode)." }
+          # The temp copy deletes Grape.exe first and the folder last, so
+          # this waits for the folder.
           $deadline = [DateTime]::UtcNow.AddSeconds(60)
-          while ((Test-Path -LiteralPath $exe) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          while ((Test-Path -LiteralPath $dir) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 500 }
           if (Test-Path -LiteralPath $exe) { Fail "$exe is still there 60 s after the uninstaller ran." }
           if (Test-Path -LiteralPath $dir) {
-            $left = @(Get-ChildItem -Force -Recurse -LiteralPath $dir | ForEach-Object { $_.FullName.Substring($dir.Length + 1) })
-            Write-Output "::warning::$dir is still there, with: $($left -join ', ')"
+            $left = @(Get-ChildItem -Force -Recurse -LiteralPath $dir -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length + 1) })
+            Write-Output "::warning::$dir is still there 60 s after the uninstaller ran, with: $(if ($left) { $left -join ', ' } else { 'nothing in it' })"
           } else {
             Write-Output "Uninstalled: $dir is gone."
           }
