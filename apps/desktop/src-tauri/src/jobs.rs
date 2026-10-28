@@ -957,6 +957,7 @@ mod tests {
             Format::Webp,
             Format::Tiff,
             Format::Bmp,
+            Format::Pdf,
         ] {
             let op = Operation::Convert { to };
             assert_eq!(
@@ -974,7 +975,7 @@ mod tests {
                 "{from}"
             );
         }
-        // HEIC ⇄ AVIF and HEIC → PDF wait for their engines (D33).
+        // HEIC ⇄ AVIF waits for an AVIF engine.
         let to_avif = Operation::Convert { to: Format::Avif };
         assert_eq!(
             check_runnable(&to_avif, &heic, &with_heic_helper())
@@ -1311,6 +1312,191 @@ mod tests {
                 title: "Not in this build yet".to_owned(),
                 detail: Some("Compress on PDF is coming.".to_owned()),
             })
+        );
+    }
+
+    #[test]
+    fn images_to_pdf_run_in_grapes_own_process() {
+        // Grape writes the PDF itself (D37): no PDFium, no worker, no
+        // helper for the five raster formats.
+        let to_pdf = Operation::Convert { to: Format::Pdf };
+        for from in [
+            "/a/photo.jpg",
+            "/a/photo.png",
+            "/a/photo.webp",
+            "/a/scan.tiff",
+            "/a/scan.bmp",
+        ] {
+            let items = [SelectionItem::file(from)];
+            assert_eq!(check_runnable(&to_pdf, &items, &none()), Ok(()), "{from}");
+            assert_eq!(
+                check_runnable(&to_pdf, &items, &installed()),
+                Ok(()),
+                "{from}"
+            );
+        }
+        // SVG and AVIF wait for their decoders, whatever is installed.
+        for (from, coming) in [
+            ("/a/logo.svg", "SVG to PDF is coming."),
+            ("/a/photo.avif", "AVIF to PDF is coming."),
+        ] {
+            assert_eq!(
+                check_runnable(&to_pdf, &[SelectionItem::file(from)], &with_heic_helper()),
+                Err(NotRunnable {
+                    title: "Not in this build yet".to_owned(),
+                    detail: Some(coming.to_owned()),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn create_pdf_runs_on_the_images_the_wheel_offers_it_for() {
+        let create = Operation::tool(ToolKey::CreatePdf);
+        let jpgs = [
+            SelectionItem::file("/a/1.jpg"),
+            SelectionItem::file("/a/2.jpg"),
+            SelectionItem::file("/a/3.jpg"),
+        ];
+        assert_eq!(check_runnable(&create, &jpgs, &none()), Ok(()));
+        // JPG, PNG, WEBP and TIFF (FORMAT_MATRIX gives BMP no tools, so
+        // the wheel never offers Create PDF with a BMP selected).
+        let mixed = [
+            SelectionItem::file("/a/1.jpg"),
+            SelectionItem::file("/a/2.png"),
+            SelectionItem::file("/a/3.webp"),
+            SelectionItem::file("/a/4.tiff"),
+        ];
+        assert_eq!(check_runnable(&create, &mixed, &installed()), Ok(()));
+        // One input it can't read yet stops the whole PDF, and names it.
+        let with_svg = [
+            SelectionItem::file("/a/1.jpg"),
+            SelectionItem::file("/a/2.svg"),
+            SelectionItem::file("/a/3.png"),
+        ];
+        assert_eq!(
+            check_runnable(&create, &with_svg, &with_heic_helper()),
+            Err(NotRunnable {
+                title: "Not in this build yet".to_owned(),
+                detail: Some("Create PDF on SVG is coming.".to_owned()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_heic_in_a_pdf_needs_the_heic_helper() {
+        let to_pdf = Operation::Convert { to: Format::Pdf };
+        let create = Operation::tool(ToolKey::CreatePdf);
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let mixed = [
+            SelectionItem::file("/a/photo.jpg"),
+            SelectionItem::file("/a/IMG_0001.HEIC"),
+        ];
+        assert_eq!(check_runnable(&to_pdf, &heic, &with_heic_helper()), Ok(()));
+        assert_eq!(check_runnable(&create, &mixed, &with_heic_helper()), Ok(()));
+        // The HEIC helper alone does it: PDFium plays no part.
+        let heif_only = SidecarPaths {
+            heif: Some(PathBuf::from("grape-heif.exe")),
+            ..none()
+        };
+        assert_eq!(check_runnable(&create, &mixed, &heif_only), Ok(()));
+
+        let missing = NotRunnable {
+            title: "Grape's HEIC helper is missing".to_owned(),
+            detail: Some("Reinstall Grape to convert HEIC files.".to_owned()),
+        };
+        let coming = |detail: &str| NotRunnable {
+            title: "Not in this build yet".to_owned(),
+            detail: Some(detail.to_owned()),
+        };
+        let cases = [
+            (&to_pdf, &heic[..], "HEIC to PDF is coming."),
+            (&create, &mixed[..], "Create PDF on HEIC is coming."),
+        ];
+        for (op, items, detail) in cases {
+            // Without PDFium too: it's never the reason.
+            for sidecars in [installed(), none()] {
+                let why = check_runnable(op, items, &sidecars).unwrap_err();
+                if cfg!(windows) {
+                    assert_eq!(why, missing, "{op:?}");
+                } else {
+                    // macOS always has its helper (Grape itself); Linux none.
+                    assert_eq!(why, coming(detail), "{op:?}");
+                }
+            }
+            // Each OS's case, on every OS: the helper shipped, and not.
+            let shipped = [Helper {
+                ships: true,
+                ..HELPERS[2]
+            }];
+            let unshipped = [Helper {
+                ships: false,
+                ..HELPERS[2]
+            }];
+            assert_eq!(
+                runnable_with(op, items, &none(), &shipped),
+                Err(missing.clone()),
+                "{op:?}"
+            );
+            assert_eq!(
+                runnable_with(op, items, &none(), &unshipped),
+                Err(coming(detail)),
+                "{op:?}"
+            );
+        }
+        // A HEIC and an SVG: even with the helper the SVG can't go in, so
+        // the SVG names the toast and the helper is never blamed.
+        let with_svg = [
+            SelectionItem::file("/a/IMG_0001.HEIC"),
+            SelectionItem::file("/a/logo.svg"),
+        ];
+        let shipped = [Helper {
+            ships: true,
+            ..HELPERS[2]
+        }];
+        assert_eq!(
+            runnable_with(&create, &with_svg, &none(), &shipped),
+            Err(coming("Create PDF on SVG is coming."))
+        );
+    }
+
+    #[test]
+    fn create_pdf_names_its_one_output() {
+        let create = Job {
+            inputs: vec![
+                PathBuf::from("/a/a.jpg"),
+                PathBuf::from("/a/b.png"),
+                PathBuf::from("/a/c.heic"),
+            ],
+            output: JobOutput::File(PathBuf::from("/a/a Combined.pdf")),
+            op: Operation::tool(ToolKey::CreatePdf),
+            used_fallback: false,
+        };
+        let jobs = [create];
+        assert_eq!(working(&jobs, 0, None).title, "Making a Combined.pdf…");
+        let report = finished(&jobs, &[wrote("/a/a Combined.pdf")], &settings());
+        assert_eq!(report.tone, ToastTone::Done);
+        assert_eq!(report.title, "Done");
+        assert_eq!(report.detail.as_deref(), Some("a Combined.pdf"));
+        assert_eq!(report.reveal, Some(PathBuf::from("/a/a Combined.pdf")));
+        // A file it can't read stops the whole PDF: the toast has the
+        // engine's words, which name that file; the log names none.
+        let report = finished(
+            &jobs,
+            &[failed("b.png isn't a readable image.")],
+            &settings(),
+        );
+        assert_eq!(report.tone, ToastTone::Error);
+        assert_eq!(report.title, "b.png isn't a readable image.");
+        assert_eq!(report.reveal, None);
+        let err = GrapeError {
+            kind: ErrorKind::DecodeFailed,
+            user_message: "b.png isn't a readable image.".to_owned(),
+            detail: "decode /a/b.png: bad".to_owned(),
+        };
+        assert_eq!(
+            failure_log(&err, &jobs[0]),
+            "jobs: DecodeFailed (decode <path>: bad)"
         );
     }
 

@@ -733,6 +733,7 @@ mod tests {
         for entry in [
             WheelEntry::Tool(ToolKey::RemoveMetadata),
             WheelEntry::Tool(ToolKey::MuteVideo),
+            WheelEntry::Tool(ToolKey::CreatePdf),
             WheelEntry::Convert(Format::Png),
         ] {
             assert_eq!(route(entry, &items, anything), Route::Direct, "{entry:?}");
