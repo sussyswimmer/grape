@@ -62,33 +62,54 @@ fn field(id: u16, data: &[u8]) -> Vec<MetaField> {
 }
 
 /// Keeps the resources of `irb` that describe the picture ([module
-/// docs](self)).
+/// docs](self)). They're walked twice, to size what's kept and then to
+/// keep it, so it's held at its size and never grown.
 pub(super) fn filter(irb: &[u8]) -> Filtered {
-    let mut filtered = Filtered::default();
+    let mut fields = BTreeSet::new();
+    let mut size = 0;
+    let read = each(irb, |id, whole, data| {
+        if kept(id) {
+            // Padded to even.
+            size += whole.len() + data.len() % 2;
+        } else {
+            fields.extend(field(id, data));
+        }
+    });
+    if !read {
+        return Filtered {
+            kept: Vec::new(),
+            fields: [MetaField::Iptc, MetaField::Other].into(),
+        };
+    }
+    let mut held = Vec::with_capacity(size);
+    each(irb, |id, whole, data| {
+        if kept(id) {
+            held.extend_from_slice(whole);
+            if data.len() % 2 == 1 {
+                held.push(0);
+            }
+        }
+    });
+    Filtered { kept: held, fields }
+}
+
+/// Gives `f` each resource of `irb`: its id, its bytes and its data, both
+/// without the padding; `false` when `irb` isn't resources Grape can read,
+/// or holds more than [`MAX_RESOURCES`].
+fn each(irb: &[u8], mut f: impl FnMut(u16, &[u8], &[u8])) -> bool {
     let mut rest = irb;
     let mut n = 0;
     // Trailing NULs pad the block.
     while !rest.iter().all(|&b| b == 0) {
         n += 1;
         let Some((id, end, size)) = resource(rest).filter(|_| n <= MAX_RESOURCES) else {
-            return Filtered {
-                kept: Vec::new(),
-                fields: [MetaField::Iptc, MetaField::Other].into(),
-            };
+            return false;
         };
         let whole = &rest[..end];
-        if kept(id) {
-            filtered.kept.extend_from_slice(whole);
-            if size % 2 == 1 {
-                filtered.kept.push(0);
-            }
-        } else {
-            let data = &whole[whole.len() - size..];
-            filtered.fields.extend(field(id, data));
-        }
+        f(id, whole, &whole[end - size..]);
         rest = rest.get(end + size % 2..).unwrap_or_default();
     }
-    filtered
+    true
 }
 
 /// The resource `irb` starts with: its id, where its data ends, and the
@@ -182,6 +203,19 @@ pub(super) mod tests {
         let mut cut = res(1007, "", b"odd");
         cut.pop();
         assert_eq!(filter(&cut).kept, res(1007, "", b"odd"));
+    }
+
+    #[test]
+    fn what_is_kept_is_held_at_its_size() {
+        // An odd size, whose padding goes back, and enough resources that
+        // a list grown as they're added would have room to spare.
+        let odd = res(2000, "", &[7; 1001]);
+        let many: Vec<u8> = (0..5).flat_map(|_| res(2001, "", &[1; 100])).collect();
+        for irb in [odd.clone(), many, [odd, res(1028, "", b"x")].concat()] {
+            let kept = filter(&irb).kept;
+            assert!(!kept.is_empty());
+            assert_eq!(kept.capacity(), kept.len());
+        }
     }
 
     #[test]
