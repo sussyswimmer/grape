@@ -197,8 +197,10 @@ fn note_exif(
 /// says: its field, if its text isn't empty, and an EXIF blob for
 /// ImageMagick's "Raw profile type exif" (or "APP1"). Inflates no more
 /// than is left of `budget`, and takes what it inflates from it; a raw
-/// EXIF profile takes from `exif_budget` first, so the text before it
-/// can't cost the picture its Orientation.
+/// EXIF profile takes from `exif_budget` first, then from `budget`, so
+/// the text before it can't cost the picture its Orientation. A profile
+/// cut short is reported as Other too, and one that holds no EXIF header
+/// as Other alone.
 fn text(
     kind: &[u8; 4],
     data: &[u8],
@@ -219,21 +221,25 @@ fn text(
     };
     let field = text_field(keyword);
     if matches!(keyword, b"Raw profile type exif" | b"Raw profile type APP1") {
-        let budget = if *exif_budget > 0 {
-            exif_budget
-        } else {
-            budget
-        };
+        let limit = exif_budget.saturating_add(*budget).min(MAX_READ as u64);
+        let mut left = limit;
         let body = body.and_then(|(compressed, text)| {
             if compressed {
-                inflate(text, whole, budget)
+                inflate(text, whole, &mut left)
             } else {
                 Some(text.to_vec())
             }
         });
+        let used = limit - left;
+        let from_exif = used.min(*exif_budget);
+        *exif_budget -= from_exif;
+        *budget -= used - from_exif;
+        // Cut short by the read or the budget: more may have been there.
+        let cut = !whole || (used == limit && limit < MAX_READ as u64);
+        let other = cut.then_some(MetaField::Other);
         return match body.as_deref().and_then(unhex_profile) {
-            Some(blob) => (None, Some(blob)),
-            None => (Some(MetaField::Other), None),
+            Some(blob) if holds_exif(&blob) => (other, Some(blob)),
+            _ => (Some(MetaField::Other), None),
         };
     }
     let blank = body.and_then(|(compressed, text)| {
@@ -310,27 +316,38 @@ fn inflate(data: &[u8], whole: bool, budget: &mut u64) -> Option<Vec<u8>> {
 }
 
 /// The bytes of an ImageMagick raw profile: a newline, the profile's
-/// name, its length, then the bytes in hex over many lines.
+/// name, its length, then the bytes in hex over many lines. Read in one
+/// pass; a profile cut short can end in half a byte, which goes.
 fn unhex_profile(body: &[u8]) -> Option<Vec<u8>> {
     let mut lines = body.splitn(4, |&b| b == b'\n');
     let _empty = lines.next()?;
     let _name = lines.next()?;
     let _length = lines.next()?;
     let hex = lines.next()?;
-    let digits: Vec<u8> = hex
-        .iter()
-        .copied()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
-    // A profile cut short can end in half a byte, which goes.
-    let bytes = digits.len() & !1;
-    digits[..bytes]
-        .chunks(2)
-        .map(|pair| {
-            let text = std::str::from_utf8(pair).ok()?;
-            u8::from_str_radix(text, 16).ok()
-        })
-        .collect()
+    let mut out = Vec::with_capacity(hex.len() / 2);
+    let mut high = None;
+    for &b in hex {
+        let nibble = match b {
+            b'0'..=b'9' => b - b'0',
+            b'a'..=b'f' => b - b'a' + 10,
+            b'A'..=b'F' => b - b'A' + 10,
+            _ if b.is_ascii_whitespace() => continue,
+            _ => return None,
+        };
+        match high.take() {
+            None => high = Some(nibble),
+            Some(h) => out.push(h << 4 | nibble),
+        }
+    }
+    Some(out)
+}
+
+/// Whether `blob` holds at least an EXIF header (a TIFF's byte order, 42
+/// and IFD0's offset), after an optional `Exif\0\0`: less can't be the
+/// picture's EXIF, so it doesn't take its place.
+fn holds_exif(blob: &[u8]) -> bool {
+    let tiff = blob.strip_prefix(b"Exif\0\0").unwrap_or(blob);
+    tiff.len() >= 8 && (tiff.starts_with(b"II*\0") || tiff.starts_with(b"MM\0*"))
 }
 
 /// The field a PNG text keyword names (D26's table).
@@ -613,13 +630,32 @@ mod tests {
         let (field, blob) = text(b"zTXt", &ztxt, true, &mut budget, &mut own);
         assert_eq!((field, orientation(blob)), (None, Some(6)));
         assert!(own < MAX_READ as u64);
-        // Cut short mid-byte, past its first IFD: that IFD is still read.
+        // An allowance spent on an earlier profile: the text budget pays.
+        let (mut budget, mut own) = (INFLATE_BUDGET, 16);
+        let (field, blob) = text(b"zTXt", &ztxt, true, &mut budget, &mut own);
+        assert_eq!((field, orientation(blob)), (None, Some(6)));
+        assert_eq!(own, 0);
+        // Cut short mid-byte, past its first IFD: that IFD is still read,
+        // and the rest is reported as Other.
         let header = b"\nexif\n      40\n".len();
         let cut = raw.len() - 7;
         assert_eq!((cut - header) % 2, 1, "an odd number of digits");
         let cut = cut as u64;
         let (field, blob) = text(b"zTXt", &ztxt, true, &mut 0, &mut { cut });
-        assert_eq!((field, orientation(blob)), (None, Some(6)));
+        assert_eq!(
+            (field, orientation(blob)),
+            (Some(MetaField::Other), Some(6))
+        );
+        // Cut before its EXIF header: Other, and no EXIF to take the place
+        // of a later one.
+        for keep in [16, 23] {
+            let (field, blob) = text(b"zTXt", &ztxt, true, &mut 0, &mut { keep });
+            assert_eq!((field, blob), (Some(MetaField::Other), None), "{keep}");
+        }
+        // Not hex at all.
+        let mut bad = b"Raw profile type exif\0".to_vec();
+        bad.extend_from_slice(b"\nexif\n      4\nzz");
+        assert_eq!(text_of(b"tEXt", &bad, true), (Some(MetaField::Other), None));
     }
 
     #[test]
