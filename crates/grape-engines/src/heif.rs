@@ -1080,7 +1080,7 @@ fn report(failure: Failure, names: &Names, side: Side) -> GrapeError {
         (FailKind::TooLarge, Side::Encode(format)) => too_large_to_save(names, format, detail),
         (FailKind::NoEncoder, Side::Encode(format)) => GrapeError::new(
             ErrorKind::NotYetSupported,
-            format!("This Mac can't write {} files.", format.name()),
+            no_encoder(format, cfg!(target_os = "macos")),
             detail,
         ),
         (FailKind::Encode, Side::Encode(_)) => names.encode_failed(detail),
@@ -1099,6 +1099,23 @@ fn other_heif(names: &Names, detail: &str) -> GrapeError {
         ),
         format!("HEIF: {detail}"),
     )
+}
+
+/// What a helper that can't write `format` (`noEncoder`) means, in
+/// Grape's words. On a Mac (`mac`) the helper is Grape itself and the
+/// machine decides: ImageIO writes HEIC only with a HEVC encoder (CI's VMs
+/// have none), and a build without `avif-encode` writes no AVIF. On Windows
+/// `grape-heif.exe` always has both encoders, so one without isn't the
+/// helper this Grape came with.
+fn no_encoder(format: HeifFormat, mac: bool) -> String {
+    if mac {
+        format!("This Mac can't write {} files.", format.name())
+    } else {
+        format!(
+            "Grape's image helper can't write {} files. Reinstall Grape.",
+            format.name()
+        )
+    }
 }
 
 /// The image is larger than the one picture Grape encodes in `format`.
@@ -1918,7 +1935,7 @@ pub(crate) mod tests {
         case_encode.refused(
             ran,
             ErrorKind::NotYetSupported,
-            "This Mac can't write AVIF files.",
+            &no_encoder(HeifFormat::Avif, cfg!(target_os = "macos")),
         );
         // An AVIF to a Mac that can't write HEIC (CI's VMs).
         let avif = fake_image(HeifFormat::Avif, 2, 2, 3, &[5; 12], None);
@@ -1927,7 +1944,7 @@ pub(crate) mod tests {
         case_heic.refused(
             ran,
             ErrorKind::NotYetSupported,
-            "This Mac can't write HEIC files.",
+            &no_encoder(HeifFormat::Heic, cfg!(target_os = "macos")),
         );
         // Cancelled while the second run encodes.
         let case_cancel = case("photo.avif", &avif, Format::Heic);
@@ -1960,6 +1977,22 @@ pub(crate) mod tests {
         }
         assert!(pairs.contains(&(Format::Heic, Format::Avif)));
         assert!(pairs.contains(&(Format::Avif, Format::Heic)));
+    }
+
+    /// `noEncoder` names the machine on a Mac and the helper elsewhere: on
+    /// Windows it's a `grape-heif.exe` that isn't this Grape's (D41).
+    #[test]
+    fn no_encoder_says_this_mac_only_on_a_mac() {
+        for (format, name) in [(HeifFormat::Heic, "HEIC"), (HeifFormat::Avif, "AVIF")] {
+            assert_eq!(
+                no_encoder(format, true),
+                format!("This Mac can't write {name} files.")
+            );
+            assert_eq!(
+                no_encoder(format, false),
+                format!("Grape's image helper can't write {name} files. Reinstall Grape.")
+            );
+        }
     }
 
     #[test]
@@ -2599,10 +2632,8 @@ pub(crate) mod tests {
         }
 
         let source = png(2, 2, &[5; 12], ExtendedColorType::Rgb8, None);
-        let no_encoder = (
-            ErrorKind::NotYetSupported,
-            "This Mac can't write HEIC files.",
-        );
+        let heic_no_encoder = no_encoder(HeifFormat::Heic, cfg!(target_os = "macos"));
+        let no_encoder = (ErrorKind::NotYetSupported, heic_no_encoder.as_str());
         for (mode, (error, message)) in [
             (
                 "error-tooLarge",
@@ -2676,10 +2707,8 @@ pub(crate) mod tests {
             let err = case.refused(ran, error, message);
             assert!(err.detail.contains("fake failure"), "{kind}: {err:?}");
         }
-        let no_encoder = (
-            ErrorKind::NotYetSupported,
-            "This Mac can't write AVIF files.",
-        );
+        let avif_no_encoder = super::no_encoder(HeifFormat::Avif, cfg!(target_os = "macos"));
+        let no_encoder = (ErrorKind::NotYetSupported, avif_no_encoder.as_str());
         for (mode, (error, message)) in [
             (
                 "error-tooLarge",
