@@ -9,8 +9,10 @@
 //! - Otherwise, on a thread of its own: build the selection
 //!   (`grape_engines::build_selection`, which reads the disk), plan it
 //!   (`grape_core::plan`), show "Making …", run each job with
-//!   `grape_engines::run_job`, and finish with done, partial or error.
-//!   Clicking the finished toast reveals the first output.
+//!   `grape_engines::run_job`, and finish with done, partial or error, or
+//!   "Nothing to change" when every job was one a tool had nothing to do
+//!   for (`ErrorKind::NoChange`, D26: not a failure). Clicking the finished
+//!   toast reveals the first output.
 //! - Tools run like conversions. A tool's panel hands its choices over
 //!   through [`submit_op`], with the items in the panel's order.
 //! - Where outputs go and the fallback folder come from Settings
@@ -32,11 +34,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use grape_core::{
-    plan, Format, Job, JobOutput, Operation, SelectionItem, Settings, ToolParams, WheelEntry,
+    plan, Channels, Format, Job, JobOutput, Operation, SelectionItem, Settings, ToolKey,
+    ToolParams, WheelEntry,
 };
 use grape_engines::{
-    build_selection, run_job, supports_with, CancelToken, EngineCtx, GrapeError, JobOutcome,
-    MetaField, Note, SidecarPaths,
+    build_selection, run_job, supports_with, CancelToken, EngineCtx, ErrorKind, GrapeError,
+    JobOutcome, MetaField, Note, SidecarPaths,
 };
 use grape_platform::DisplayBounds;
 use tauri::{AppHandle, Manager};
@@ -506,6 +509,13 @@ fn run(
                 if outcome.renamed { " (renamed)" } else { "" },
                 log_notes(&outcome.notes)
             ),
+            // Not a failure, and nothing was written: the kind and the
+            // count only.
+            Err(err) if err.kind == ErrorKind::NoChange => log::info!(
+                "jobs: {} input(s) -> nothing to change ({:?})",
+                job.inputs.len(),
+                err.kind
+            ),
             // The kind and the detail without the job's paths: the user
             // message names the file, so it's only for the toast.
             Err(err) => log::warn!("{}", failure_log(err, job)),
@@ -552,7 +562,10 @@ fn working(jobs: &[Job], done: usize, fraction: Option<f32>) -> Report {
     report
 }
 
-/// The toast once every job ran: done, partial or error.
+/// The toast once every job ran: done, partial or error, or "Nothing to
+/// change". A job that ended `NoChange` (D26: a tool with nothing to do,
+/// nothing written) is no failure: it counts as done in "{ok} of {n}
+/// done", and a drop where every job ended so is an info toast.
 fn finished(
     jobs: &[Job],
     results: &[Result<JobOutcome, GrapeError>],
@@ -574,14 +587,22 @@ fn finished(
         })
         .map(|(job, _)| &job.output)
         .collect();
-    let first_error = results.iter().find_map(|result| result.as_ref().err());
+    // Counted from the kind, never from the engine's words.
+    let unchanged = results.iter().filter(|result| no_change(result)).count();
+    let first_error = results
+        .iter()
+        .filter(|result| !no_change(result))
+        .find_map(|result| result.as_ref().err());
     let reveal = outputs.first().map(|path| path.to_path_buf());
     let mut report = match (outputs.as_slice(), first_error) {
+        ([], None) if unchanged > 0 => nothing_to_change(jobs, results, unchanged),
         (_, None) => {
             let what = match outputs.as_slice() {
                 [one] => name(one),
                 _ => several(&written),
             };
+            // "2 already compact": the jobs that had nothing to do.
+            let rest = (unchanged > 0).then(|| format!("{unchanged} {}", unchanged_words(jobs)));
             // Only the jobs that wrote something count. The detail row is
             // one line cut with an ellipsis, so where the files went leads.
             let fell_back = jobs
@@ -590,47 +611,117 @@ fn finished(
                 .filter(|(job, result)| job.used_fallback && result.is_ok())
                 .count();
             let folder = short(&settings.fallback_dir);
+            let titled = || noted(jobs, results).unwrap_or_else(|| "Done".to_owned());
+            // The count of unchanged jobs takes the place of why the
+            // outputs went to the fallback folder: the title says where.
+            let read_only = |why: &str| match &rest {
+                Some(rest) => format!("{what}; {rest}"),
+                None => format!("{what}; {why}"),
+            };
             match (fell_back, outputs.as_slice()) {
                 (0, _) => Report::new(
                     ToastTone::Done,
-                    noted(results).unwrap_or_else(|| "Done".to_owned()),
-                    Some(what),
+                    titled(),
+                    Some(match &rest {
+                        Some(rest) => format!("{what}; {rest}"),
+                        None => what.clone(),
+                    }),
                 ),
                 (1, [_]) => Report::new(
                     ToastTone::Done,
                     format!("Saved in {folder}"),
-                    Some(format!("{what}; its folder is read-only")),
+                    Some(read_only("its folder is read-only")),
                 ),
                 (all, many) if all == many.len() => Report::new(
                     ToastTone::Done,
                     format!("Saved in {folder}"),
-                    Some(format!("{what}; their folders are read-only")),
+                    Some(read_only("their folders are read-only")),
                 ),
                 // The detail says where some went, so the notes keep the
                 // title.
                 (some, _) => Report::new(
                     ToastTone::Done,
-                    noted(results).unwrap_or_else(|| "Done".to_owned()),
-                    Some(format!("{what}; {some} in {folder}")),
+                    titled(),
+                    Some(match &rest {
+                        Some(rest) => format!("{what}; {some} in {folder}; {rest}"),
+                        None => format!("{what}; {some} in {folder}"),
+                    }),
                 ),
             }
         }
-        ([], Some(err)) => Report::new(ToastTone::Error, err.user_message.clone(), None),
-        (some, Some(err)) => Report::new(
-            ToastTone::Error,
-            format!("{} of {} done", some.len(), results.len()),
-            Some(err.user_message.clone()),
-        ),
+        (some, Some(err)) => match some.len() + unchanged {
+            0 => Report::new(ToastTone::Error, err.user_message.clone(), None),
+            done => Report::new(
+                ToastTone::Error,
+                format!("{done} of {} done", results.len()),
+                Some(err.user_message.clone()),
+            ),
+        },
     };
     report.reveal = reveal;
     report
 }
 
+/// A job a tool had nothing to do for (D26): nothing was written.
+fn no_change(result: &Result<JobOutcome, GrapeError>) -> bool {
+    result
+        .as_ref()
+        .is_err_and(|err| err.kind == ErrorKind::NoChange)
+}
+
+/// The info toast when no job wrote anything and none failed, because
+/// every one had nothing to do: one file's own sentence from the engine,
+/// which names it and says why ("song.mp3 is already mono."), or a count
+/// for several ("3 files already compact").
+fn nothing_to_change(
+    jobs: &[Job],
+    results: &[Result<JobOutcome, GrapeError>],
+    unchanged: usize,
+) -> Report {
+    let only = match results {
+        [Err(err)] if err.kind == ErrorKind::NoChange => Some(err.user_message.clone()),
+        _ => None,
+    };
+    let detail = only.unwrap_or_else(|| {
+        let files = if unchanged == 1 { "file" } else { "files" };
+        format!("{unchanged} {files} {}", unchanged_words(jobs))
+    });
+    Report::new(ToastTone::Info, "Nothing to change", Some(detail))
+}
+
+/// What the jobs that ended `NoChange` were, from the drop's tool and its
+/// params (every job of a drop has the same operation), never from the
+/// engine's sentence: "already compact" (Compress), "already mono" or
+/// "already stereo" (Audio Channels), "had no sound" (Remove Audio), or
+/// "unchanged" (Normalize Volume, which ends so both at its target and
+/// when a file is too quiet to measure, and anything else).
+fn unchanged_words(jobs: &[Job]) -> &'static str {
+    match jobs.first().map(|job| &job.op) {
+        Some(Operation::Tool {
+            tool: ToolKey::Compress,
+            ..
+        }) => "already compact",
+        Some(Operation::Tool {
+            tool: ToolKey::AudioChannels,
+            params,
+        }) => match params.channels {
+            Channels::Mono => "already mono",
+            Channels::Stereo => "already stereo",
+        },
+        Some(Operation::Tool {
+            tool: ToolKey::MuteVideo,
+            ..
+        }) => "had no sound",
+        _ => "unchanged",
+    }
+}
+
 /// The done toast's title when the jobs' notes say more than "Done":
-/// what was left out, pages drawn below 300 DPI, or what Remove Metadata
-/// removed. macOS metadata left out of an archive isn't mentioned (it's
-/// never the user's content); the log counts it.
-fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
+/// what was left out, pages drawn below 300 DPI, what Remove Metadata
+/// removed, or how much smaller Compress made the files. macOS metadata
+/// left out of an archive isn't mentioned (it's never the user's content);
+/// the log counts it. Only the jobs that wrote something have notes.
+fn noted(jobs: &[Job], results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
     let notes: Vec<&Note> = results
         .iter()
         .filter_map(|result| result.as_ref().ok())
@@ -638,6 +729,8 @@ fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
         .collect();
     let (mut links, mut specials, mut copies, mut scaled) = (0u32, 0u32, 0u32, 0u32);
     let mut removed: Option<Vec<MetaField>> = None;
+    // Summed over the drop's jobs in u128, so no sum of u64s overflows.
+    let mut sizes: Option<(u128, u128)> = None;
     for note in &notes {
         match note {
             Note::LeftOut(left) => {
@@ -647,6 +740,11 @@ fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
             }
             Note::PagesScaled(pages) => scaled = scaled.saturating_add(*pages),
             Note::MetadataRemoved(fields) => removed.get_or_insert_with(Vec::new).extend(fields),
+            Note::Compressed { before, after } => {
+                let (all_before, all_after) = sizes.get_or_insert((0, 0));
+                *all_before += u128::from(*before);
+                *all_after += u128::from(*after);
+            }
             _ => {}
         }
     }
@@ -670,36 +768,71 @@ fn noted(results: &[Result<JobOutcome, GrapeError>]) -> Option<String> {
             count(scaled, "page", "pages")
         ));
     }
-    removed.map(|fields| removed_title(&fields))
+    if let Some(fields) = removed {
+        // A PDF keeps page-level XMP and its images' metadata, so for a
+        // drop with a PDF it's only the document's that was none.
+        let pdf = jobs
+            .iter()
+            .zip(results)
+            .any(|(job, result)| is_pdf(job) && result.as_ref().is_ok_and(removed_metadata));
+        return Some(removed_title(&fields, pdf));
+    }
+    sizes.and_then(|(before, after)| smaller(before, after))
 }
 
-/// "Removed author and title", "Removed author, title and 3 more",
+/// Whether `outcome` has a Remove Metadata report.
+fn removed_metadata(outcome: &JobOutcome) -> bool {
+    outcome
+        .notes
+        .iter()
+        .any(|note| matches!(note, Note::MetadataRemoved(_)))
+}
+
+/// Whether `job` reads a PDF, by its first input's name, as the engines
+/// pick it.
+fn is_pdf(job: &Job) -> bool {
+    job.inputs
+        .first()
+        .and_then(|path| path.file_name())
+        .and_then(|name| Format::from_file_name(&name.to_string_lossy()))
+        == Some(Format::Pdf)
+}
+
+/// "62% smaller": how much smaller Compress made the drop's files, from
+/// their sizes in bytes summed over its jobs, in whole percent (half up).
+/// `None` when nothing got smaller, or by less than half a percent; never
+/// "100%" while a byte is left.
+fn smaller(before: u128, after: u128) -> Option<String> {
+    if before == 0 || after >= before {
+        return None;
+    }
+    let saved = before - after;
+    let mut percent = (saved * 200 + before) / (before * 2);
+    if percent >= 100 && after > 0 {
+        percent = 99;
+    }
+    (percent > 0).then(|| format!("{percent}% smaller"))
+}
+
+/// "Removed author and title", "Removed camera, title and 1 more",
 /// "Removed keywords and 4 more" when two names would make the title too
-/// wide, or "No document metadata found". PDFs keep page-level XMP and
-/// their images' metadata (ENGINES.md → Metadata removal), so it never
-/// says the file has none.
-fn removed_title(fields: &[MetaField]) -> String {
+/// wide. A file without any says "No metadata found", but a PDF (`pdf`)
+/// "No document metadata found": PDFs keep page-level XMP and their
+/// images' metadata (ENGINES.md → Metadata removal), so it never says the
+/// file has none.
+fn removed_title(fields: &[MetaField], pdf: bool) -> String {
     let mut names: Vec<&str> = Vec::new();
     let mut sorted = fields.to_vec();
     sorted.sort();
     for field in sorted {
-        let name = match field {
-            MetaField::Author => "author",
-            MetaField::Title => "title",
-            MetaField::Subject => "subject",
-            MetaField::Keywords => "keywords",
-            MetaField::Creator => "creator",
-            MetaField::Producer => "producer",
-            MetaField::CreationDate | MetaField::ModDate => "dates",
-            MetaField::Xmp => "XMP",
-            _ => "other fields",
-        };
+        let name = meta_word(field);
         if !names.contains(&name) {
             names.push(name);
         }
     }
     let title = match names.as_slice() {
-        [] => return "No document metadata found".to_owned(),
+        [] if pdf => return "No document metadata found".to_owned(),
+        [] => return "No metadata found".to_owned(),
         [one] => return format!("Removed {one}"),
         [one, two] => format!("Removed {one} and {two}"),
         [one, two, rest @ ..] => format!("Removed {one}, {two} and {} more", rest.len()),
@@ -711,10 +844,39 @@ fn removed_title(fields: &[MetaField]) -> String {
     }
 }
 
+/// A field as the toast names it, lowercase but for the acronyms, in
+/// `MetaField`'s order, which is the order the toast names them in. Both
+/// dates are "dates". A field lane B adds later is "other fields" until it
+/// gets a word here.
+fn meta_word(field: MetaField) -> &'static str {
+    match field {
+        MetaField::Location => "location",
+        MetaField::Camera => "camera",
+        MetaField::Author => "author",
+        MetaField::Title => "title",
+        MetaField::Subject => "subject",
+        MetaField::Keywords => "keywords",
+        MetaField::Comment => "comments",
+        MetaField::Copyright => "copyright",
+        MetaField::Creator => "creator",
+        MetaField::Producer => "producer",
+        MetaField::Software => "software",
+        MetaField::CreationDate | MetaField::ModDate => "dates",
+        MetaField::Xmp => "XMP",
+        MetaField::Iptc => "IPTC",
+        MetaField::Thumbnail => "thumbnail",
+        MetaField::CoverArt => "cover art",
+        MetaField::Chapters => "chapters",
+        MetaField::Embedded => "embedded media",
+        _ => "other fields",
+    }
+}
+
 /// The longest "Removed …" title with two names: 33 characters. The
-/// widest of those is about 231 px in the title's 13 px semibold, measured
-/// with Inter (the system fonts differ a little), and the toast's title
-/// has 248 px.
+/// widest of those, "Removed camera and embedded media", is 247.9 px in
+/// the title's 13 px semibold, measured with Inter, and the toast's title
+/// has 248 px, so it fits with no room to spare. Segoe UI's and SF Pro's
+/// widths are QA items (TESTING.md → "Image tools, M4").
 const REMOVED_MAX: usize = 33;
 
 /// "1 link", "2 links".
@@ -778,6 +940,7 @@ fn log_notes(notes: &[Note]) -> String {
             ),
             Note::PagesScaled(pages) => format!("; {pages} page(s) below 300 DPI"),
             Note::MetadataRemoved(fields) => format!("; removed {fields:?}"),
+            Note::Compressed { before, after } => format!("; {before} -> {after} bytes"),
             other => format!("; {other:?}"),
         })
         .collect()
@@ -859,8 +1022,6 @@ fn sentence(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use grape_core::{JobOutput, ToolKey};
-    use grape_engines::ErrorKind;
 
     fn job(input: &str, output: &str, used_fallback: bool) -> Job {
         Job {
@@ -1600,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn done_says_what_remove_metadata_removed() {
+    fn done_says_what_remove_metadata_removed_from_a_pdf() {
         let jobs = [job("/a/doc.pdf", "/a/doc No Metadata.pdf", false)];
         let cases: [(Vec<MetaField>, &str); 5] = [
             (vec![], "No document metadata found"),
@@ -1649,44 +1810,453 @@ mod tests {
             MetaField::Xmp,
             MetaField::Other,
         ];
-        assert_eq!(removed_title(&fields), "Removed keywords and 4 more");
+        assert_eq!(removed_title(&fields, true), "Removed keywords and 4 more");
         assert_eq!(
-            removed_title(&[MetaField::Subject, MetaField::Keywords, MetaField::Creator]),
+            removed_title(
+                &[MetaField::Subject, MetaField::Keywords, MetaField::Creator],
+                true
+            ),
             "Removed subject and 2 more"
         );
         // These fit with two names.
         assert_eq!(
-            removed_title(&[MetaField::Author, MetaField::Title, MetaField::Xmp]),
+            removed_title(&[MetaField::Author, MetaField::Title, MetaField::Xmp], true),
             "Removed author, title and 1 more"
         );
-        // Every set of fields: at most 33 characters, about 231 px in the
-        // title's font (the title has 248 px).
-        let all = [
-            MetaField::Author,
-            MetaField::Title,
-            MetaField::Subject,
-            MetaField::Keywords,
-            MetaField::Creator,
-            MetaField::Producer,
-            MetaField::CreationDate,
-            MetaField::ModDate,
-            MetaField::Xmp,
-            MetaField::Other,
-        ];
-        for mask in 0u32..(1 << all.len()) {
-            let fields: Vec<MetaField> = all
+        assert_eq!(
+            removed_title(&[MetaField::Keywords, MetaField::Other], true),
+            "Removed keywords and other fields"
+        );
+        // The widest that fits with two names: 33 characters.
+        assert_eq!(
+            removed_title(&[MetaField::Embedded, MetaField::Camera], false),
+            "Removed camera and embedded media"
+        );
+        // 39 characters with two names.
+        assert_eq!(
+            removed_title(&[MetaField::Other, MetaField::Embedded], false),
+            "Removed embedded media and 1 more"
+        );
+        // Every set of fields: at most 33 characters (the title has 248 px;
+        // the widest is 247.9 px in Inter's 13 px semibold).
+        for mask in 0u32..(1 << ALL_FIELDS.len()) {
+            let fields: Vec<MetaField> = ALL_FIELDS
                 .iter()
                 .enumerate()
                 .filter(|(bit, _)| mask & (1 << bit) != 0)
                 .map(|(_, field)| *field)
                 .collect();
-            let title = removed_title(&fields);
-            assert!(title.chars().count() <= 33, "{title}");
+            let title = removed_title(&fields, false);
+            assert!(title.chars().count() <= REMOVED_MAX, "{title}");
         }
+    }
+
+    /// Every `MetaField` there is, in its order.
+    const ALL_FIELDS: [MetaField; 20] = [
+        MetaField::Location,
+        MetaField::Camera,
+        MetaField::Author,
+        MetaField::Title,
+        MetaField::Subject,
+        MetaField::Keywords,
+        MetaField::Comment,
+        MetaField::Copyright,
+        MetaField::Creator,
+        MetaField::Producer,
+        MetaField::Software,
+        MetaField::CreationDate,
+        MetaField::ModDate,
+        MetaField::Xmp,
+        MetaField::Iptc,
+        MetaField::Thumbnail,
+        MetaField::CoverArt,
+        MetaField::Chapters,
+        MetaField::Embedded,
+        MetaField::Other,
+    ];
+
+    #[test]
+    fn each_metadata_field_has_its_word_in_the_enums_order() {
+        let words: Vec<&str> = ALL_FIELDS.iter().map(|&field| meta_word(field)).collect();
         assert_eq!(
-            removed_title(&[MetaField::Keywords, MetaField::Other]),
-            "Removed keywords and other fields"
+            words,
+            [
+                "location",
+                "camera",
+                "author",
+                "title",
+                "subject",
+                "keywords",
+                "comments",
+                "copyright",
+                "creator",
+                "producer",
+                "software",
+                "dates",
+                "dates",
+                "XMP",
+                "IPTC",
+                "thumbnail",
+                "cover art",
+                "chapters",
+                "embedded media",
+                "other fields",
+            ]
         );
+        // The enum's order is the toast's order, whatever order they came in.
+        let mut sorted = ALL_FIELDS;
+        sorted.reverse();
+        sorted.sort();
+        assert_eq!(sorted, ALL_FIELDS);
+        assert_eq!(
+            removed_title(&[MetaField::Embedded, MetaField::Title], false),
+            "Removed title and embedded media"
+        );
+    }
+
+    fn tool_job(input: &str, output: &str, op: Operation) -> Job {
+        Job {
+            op,
+            ..job(input, output, false)
+        }
+    }
+
+    fn removed(path: &str, fields: Vec<MetaField>) -> Result<JobOutcome, GrapeError> {
+        noting(path, vec![Note::MetadataRemoved(fields)])
+    }
+
+    #[test]
+    fn remove_metadata_on_images_and_media_names_what_went() {
+        let op = Operation::tool(ToolKey::RemoveMetadata);
+        let photo = [tool_job("/a/IMG_1.jpg", "/a/IMG_1 No Metadata.jpg", op)];
+        let cases: [(Vec<MetaField>, &str); 5] = [
+            (vec![], "No metadata found"),
+            (vec![MetaField::Location], "Removed location"),
+            (
+                vec![MetaField::Camera, MetaField::Location],
+                "Removed location and camera",
+            ),
+            (
+                vec![
+                    MetaField::Location,
+                    MetaField::Camera,
+                    MetaField::Software,
+                    MetaField::CreationDate,
+                    MetaField::ModDate,
+                    MetaField::Thumbnail,
+                ],
+                // "Removed location, camera and 3 more" is 35 characters.
+                "Removed location and 4 more",
+            ),
+            (
+                vec![MetaField::CoverArt, MetaField::Chapters],
+                "Removed cover art and chapters",
+            ),
+        ];
+        for (fields, title) in cases {
+            let report = finished(
+                &photo,
+                &[removed("/a/IMG_1 No Metadata.jpg", fields)],
+                &settings(),
+            );
+            assert_eq!(report.tone, ToastTone::Done);
+            assert_eq!(report.title, title);
+            assert_eq!(report.detail.as_deref(), Some("IMG_1 No Metadata.jpg"));
+        }
+        // A song: "No metadata found" too.
+        let song = [tool_job("/m/song.mp3", "/m/song No Metadata.mp3", op)];
+        let report = finished(
+            &song,
+            &[removed("/m/song No Metadata.mp3", vec![])],
+            &settings(),
+        );
+        assert_eq!(report.title, "No metadata found");
+        // Several files: the union, in the toast's order.
+        let two = [
+            tool_job("/a/1.jpg", "/a/1 No Metadata.jpg", op),
+            tool_job("/a/2.mp4", "/a/2 No Metadata.mp4", op),
+        ];
+        let results = [
+            removed("/a/1 No Metadata.jpg", vec![MetaField::Title]),
+            removed(
+                "/a/2 No Metadata.mp4",
+                vec![MetaField::Camera, MetaField::Comment],
+            ),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.title, "Removed camera, title and 1 more");
+        assert_eq!(report.detail.as_deref(), Some("2 files"));
+        // A PDF in the drop: only the document's metadata was none.
+        let mixed = [
+            tool_job("/a/1.jpg", "/a/1 No Metadata.jpg", op),
+            tool_job("/a/doc.PDF", "/a/doc No Metadata.PDF", op),
+        ];
+        let results = [
+            removed("/a/1 No Metadata.jpg", vec![]),
+            removed("/a/doc No Metadata.PDF", vec![]),
+        ];
+        assert_eq!(
+            finished(&mixed, &results, &settings()).title,
+            "No document metadata found"
+        );
+    }
+
+    fn unchanged(message: &str) -> Result<JobOutcome, GrapeError> {
+        Err(GrapeError {
+            kind: ErrorKind::NoChange,
+            user_message: message.to_owned(),
+            detail: "test".to_owned(),
+        })
+    }
+
+    fn compressed(path: &str, before: u64, after: u64) -> Result<JobOutcome, GrapeError> {
+        noting(path, vec![Note::Compressed { before, after }])
+    }
+
+    fn compress_jobs(n: usize) -> Vec<Job> {
+        (1..=n)
+            .map(|i| {
+                tool_job(
+                    &format!("/m/{i}.mp3"),
+                    &format!("/m/{i} Compressed.mp3"),
+                    Operation::tool(ToolKey::Compress),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn one_file_with_nothing_to_change_is_info_with_the_engines_sentence() {
+        let jobs = compress_jobs(1);
+        let report = finished(
+            &jobs,
+            &[unchanged("1.mp3 is already compact. Try Small.")],
+            &settings(),
+        );
+        assert_eq!(report.tone, ToastTone::Info);
+        assert_eq!(report.title, "Nothing to change");
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("1.mp3 is already compact. Try Small.")
+        );
+        assert_eq!(report.reveal, None);
+    }
+
+    #[test]
+    fn some_with_nothing_to_change_read_as_done_with_their_count() {
+        let jobs = compress_jobs(8);
+        let mut results: Vec<Result<JobOutcome, GrapeError>> = (1..=6)
+            .map(|i| compressed(&format!("/m/{i} Compressed.mp3"), 1000, 380))
+            .collect();
+        // The engine's words are never read: the count comes from the kind.
+        results.push(unchanged("7.mp3 is already mono."));
+        results.push(unchanged("8.mp3 is already as small as Grape makes it."));
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.tone, ToastTone::Done);
+        assert_eq!(report.title, "62% smaller");
+        assert_eq!(report.detail.as_deref(), Some("6 files; 2 already compact"));
+        assert_eq!(report.reveal, Some(PathBuf::from("/m/1 Compressed.mp3")));
+        // One written and one unchanged: the output's name.
+        let two = compress_jobs(2);
+        let results = [
+            unchanged("1.mp3 is already compact. Try Small."),
+            wrote("/m/2 Compressed.mp3"),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.title, "Done");
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("2 Compressed.mp3; 1 already compact")
+        );
+    }
+
+    #[test]
+    fn every_job_with_nothing_to_change_is_info_not_a_failure() {
+        let channels = |channels| Operation::Tool {
+            tool: ToolKey::AudioChannels,
+            params: ToolParams {
+                channels,
+                ..ToolParams::default()
+            },
+        };
+        let cases = [
+            (
+                Operation::tool(ToolKey::Compress),
+                "3 files already compact",
+            ),
+            (channels(Channels::Mono), "3 files already mono"),
+            (channels(Channels::Stereo), "3 files already stereo"),
+            (Operation::tool(ToolKey::MuteVideo), "3 files had no sound"),
+            (
+                Operation::tool(ToolKey::NormalizeAudio),
+                "3 files unchanged",
+            ),
+        ];
+        for (op, detail) in cases {
+            let jobs: Vec<Job> = (1..=3)
+                .map(|i| tool_job(&format!("/m/{i}.wav"), &format!("/m/{i} out.wav"), op))
+                .collect();
+            let results = [
+                unchanged("1.wav is already at \u{2212}16 LUFS."),
+                unchanged("2.wav is too short or too quiet to measure its loudness."),
+                unchanged("3.wav is already mono."),
+            ];
+            let report = finished(&jobs, &results, &settings());
+            assert_eq!(report.tone, ToastTone::Info, "{op:?}");
+            assert_eq!(report.title, "Nothing to change");
+            assert_eq!(report.detail.as_deref(), Some(detail));
+            assert_eq!(report.reveal, None);
+        }
+    }
+
+    #[test]
+    fn nothing_to_change_counts_as_done_beside_a_failure() {
+        let jobs = compress_jobs(3);
+        let results = [
+            wrote("/m/1 Compressed.mp3"),
+            unchanged("2.mp3 is already compact. Try Small."),
+            failed("3.mp3 isn't a readable MP3."),
+        ];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.tone, ToastTone::Error);
+        assert_eq!(report.title, "2 of 3 done");
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("3.mp3 isn't a readable MP3.")
+        );
+        assert_eq!(report.reveal, Some(PathBuf::from("/m/1 Compressed.mp3")));
+        // Nothing written: the failure's words still come with the count.
+        let two = compress_jobs(2);
+        let results = [
+            unchanged("1.mp3 is already compact. Try Small."),
+            failed("2.mp3 isn't a readable MP3."),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.tone, ToastTone::Error);
+        assert_eq!(report.title, "1 of 2 done");
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("2.mp3 isn't a readable MP3.")
+        );
+        assert_eq!(report.reveal, None);
+    }
+
+    #[test]
+    fn nothing_to_change_beside_a_fallback() {
+        let op = Operation::tool(ToolKey::Compress);
+        let saved = "/home/max/Downloads/Grape/1 Compressed.jpg";
+        let jobs = [
+            Job {
+                used_fallback: true,
+                ..tool_job("/ro/1.jpg", saved, op)
+            },
+            tool_job("/ro/2.jpg", "/ro/2 Compressed.jpg", op),
+        ];
+        let results = [
+            compressed(saved, 1000, 500),
+            unchanged("2.jpg is already compact. Try Small."),
+        ];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+        assert_eq!(
+            report.detail.as_deref(),
+            Some("1 Compressed.jpg; 1 already compact")
+        );
+        // Only some fell back: where they went, then the count.
+        let jobs = [
+            tool_job("/a/1.jpg", "/a/1 Compressed.jpg", op),
+            Job {
+                used_fallback: true,
+                ..tool_job(
+                    "/ro/2.jpg",
+                    "/home/max/Downloads/Grape/2 Compressed.jpg",
+                    op,
+                )
+            },
+            tool_job("/a/3.jpg", "/a/3 Compressed.jpg", op),
+        ];
+        let results = [
+            compressed("/a/1 Compressed.jpg", 1000, 500),
+            compressed("/home/max/Downloads/Grape/2 Compressed.jpg", 1000, 500),
+            unchanged("3.jpg is already compact. Try Small."),
+        ];
+        let report = finished(&jobs, &results, &settings());
+        assert_eq!(report.title, "50% smaller");
+        let expected = format!("2 files; 1 in {}; 1 already compact", grape_folder());
+        assert_eq!(report.detail.as_deref(), Some(expected.as_str()));
+    }
+
+    #[test]
+    fn compressed_says_how_much_smaller_in_whole_percent() {
+        assert_eq!(smaller(1000, 380).as_deref(), Some("62% smaller"));
+        // Half a percent rounds up; less than half is no claim at all.
+        assert_eq!(smaller(200, 101).as_deref(), Some("50% smaller"));
+        assert_eq!(smaller(1000, 995).as_deref(), Some("1% smaller"));
+        assert_eq!(smaller(1000, 996), None);
+        // Never larger, never "100%" while a byte is left.
+        assert_eq!(smaller(1000, 1000), None);
+        assert_eq!(smaller(1000, 1500), None);
+        assert_eq!(smaller(0, 0), None);
+        assert_eq!(smaller(1_000_000, 1).as_deref(), Some("99% smaller"));
+        assert_eq!(smaller(1000, 0).as_deref(), Some("100% smaller"));
+    }
+
+    #[test]
+    fn compressed_sums_the_drops_sizes() {
+        let one = compress_jobs(1);
+        let report = finished(
+            &one,
+            &[compressed("/m/1 Compressed.mp3", 4_000_000, 1_520_000)],
+            &settings(),
+        );
+        assert_eq!(report.tone, ToastTone::Done);
+        assert_eq!(report.title, "62% smaller");
+        assert_eq!(report.detail.as_deref(), Some("1 Compressed.mp3"));
+        // 4000 → 1100 bytes is 72.5 % smaller: 73 %, not the average of
+        // the two jobs' 50 % and 80 %.
+        let two = compress_jobs(2);
+        let results = [
+            compressed("/m/1 Compressed.mp3", 1000, 500),
+            compressed("/m/2 Compressed.mp3", 3000, 600),
+        ];
+        let report = finished(&two, &results, &settings());
+        assert_eq!(report.title, "73% smaller");
+        assert_eq!(report.detail.as_deref(), Some("2 files"));
+        // Sizes near u64::MAX add up without overflowing.
+        let results = [
+            compressed("/m/1 Compressed.mp3", u64::MAX, u64::MAX / 2),
+            compressed("/m/2 Compressed.mp3", u64::MAX, u64::MAX / 2),
+        ];
+        assert_eq!(finished(&two, &results, &settings()).title, "50% smaller");
+        // A job that didn't get smaller can't make the drop claim it did.
+        let results = [
+            compressed("/m/1 Compressed.mp3", 1000, 1000),
+            compressed("/m/2 Compressed.mp3", 1000, 1200),
+        ];
+        assert_eq!(finished(&two, &results, &settings()).title, "Done");
+        // Every output fell back: the folder takes the title.
+        let fell = [Job {
+            used_fallback: true,
+            ..compress_jobs(1).remove(0)
+        }];
+        let report = finished(
+            &fell,
+            &[compressed("/m/1 Compressed.mp3", 1000, 380)],
+            &settings(),
+        );
+        assert_eq!(report.title, format!("Saved in {}", grape_folder()));
+    }
+
+    #[test]
+    fn the_log_has_sizes_and_kinds_never_names() {
+        let notes = [
+            Note::Compressed {
+                before: 1000,
+                after: 380,
+            },
+            Note::MetadataRemoved(vec![MetaField::Location]),
+        ];
+        assert_eq!(log_notes(&notes), "; 1000 -> 380 bytes; removed [Location]");
     }
 
     #[test]
