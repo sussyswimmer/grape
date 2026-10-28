@@ -32,9 +32,15 @@ serde.workspace = true
 serde_json.workspace = true
 grape-core.workspace = true
 grape-engines.workspace = true
-# `main.rs` checks the HEIC worker's flag on every OS (D33).
+# `main.rs` checks the image helper worker's flag on every OS (D33).
 grape-heif-proto.workspace = true
 grape-platform.workspace = true
+
+# The Mac worker writes AVIF with rav1e through ravif (DECISIONS D41), in
+# Grape's own executable: macOS builds only, so Windows and Linux builds
+# never compile rav1e.
+[target.'cfg(target_os = "macos")'.dependencies]
+grape-platform = { workspace = true, features = ["avif-encode"] }
 
 [features]
 default = ["overlay-subclass"]

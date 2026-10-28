@@ -1,4 +1,7 @@
-//! The PDF worker's heap bound (DECISIONS D29).
+//! The workers' heap bound: the PDF worker's (DECISIONS D29), and since
+//! D41 the Mac image helper worker's too (`Grape --grape-heif-worker`, at
+//! `grape_heif_proto::WORKER_HEAP_BYTES`), where it counts rav1e's encoder
+//! and Grape's buffers but not ImageIO's own `malloc`.
 //!
 //! lopdf can be made to hold far more than a file's size: a few hundred
 //! bytes of object stream whose entries all point at one huge array parse
@@ -6,17 +9,19 @@
 //! the bytes they came from. No decompression bound stops that, so the
 //! worker bounds its own heap instead.
 //!
-//! The worker's executables (the app's `main.rs`, and `grape-pdf-worker`
+//! The workers' executables (the app's `main.rs`, and `grape-pdf-worker`
 //! for the tests) install a global allocator that wraps the system one and
 //! calls [`reserve`] before and [`release`] after every change. This module
 //! is only the bookkeeping, so `grape-engines` stays free of `unsafe`.
-//! Nothing is counted until [`arm`] runs, which only the worker does, once
-//! it has its request: in the app's own process the allocator just passes
+//! Nothing is counted until [`arm`] runs, which only a worker does (the
+//! PDF worker once it has its request, the image helper worker before it
+//! reads one): in the app's own process the allocator just passes
 //! everything through. Past the bound the worker exits at once with
 //! [`OVER_HEAP_EXIT`], which the parent reports as "needs too much memory".
 //!
-//! Only Rust's heap is counted (lopdf, Grape's buffers and bitmap copies).
-//! PDFium allocates with its own `malloc`, which this can't see.
+//! Only Rust's heap is counted (lopdf, rav1e, Grape's buffers and bitmap
+//! copies). PDFium and ImageIO allocate with their own `malloc`, which this
+//! can't see.
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 

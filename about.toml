@@ -21,10 +21,14 @@ private = { ignore = true }
 
 # Exactly the licenses the shipped crates use, in the order Grape picks them
 # when a crate offers a choice. MPL-2.0 is allowed per crate below, never here.
+# BSD-2-Clause is D23's amendment (D41, shared with D39): rav1e, v_frame and
+# av1-grain, in the macOS app only. It comes after MIT, Apache-2.0 and
+# BSD-3-Clause, so a crate that also offers one of those keeps it.
 accepted = [
     "MIT",
     "Apache-2.0",
     "BSD-3-Clause",
+    "BSD-2-Clause",
     "Zlib",
     "Unicode-3.0",
     "ISC",
@@ -244,6 +248,19 @@ license = "MIT"
 path = "LICENSE"
 license = "MIT"
 checksum = "1954992a2b32e8a2af24a4c11b726902e344c1934b947a77f04d404908f8db30"
+
+# rav1e (macOS only, D41): cargo-about takes an x86 assembly file, code and
+# all (src/x86/filmgrain_common.asm, never built for a Mac), for a second
+# license text. The crate's own text is LICENSE. The notices of the arm64
+# assembly from dav1d that the Apple silicon slice builds in, and rav1e's
+# PATENTS (the AOM Patent License 1.0), go in about.hbs's hand-written
+# rav1e section.
+[rav1e.clarify]
+license = "BSD-2-Clause"
+[[rav1e.clarify.files]]
+path = "LICENSE"
+license = "BSD-2-Clause"
+checksum = "2dd0a109751e939dec3f80ddcfbc1ba91553f18c574399e85c159632182a2c0a"
 
 # Not clarified, because no license text exists to point at:
 # - objc2, block2, dispatch2 and the objc2-* framework crates (macOS only).

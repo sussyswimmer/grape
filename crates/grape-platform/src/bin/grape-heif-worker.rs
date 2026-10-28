@@ -1,8 +1,11 @@
-//! ImageIO behind the HEIC protocol, as its own program (DECISIONS D33):
-//! what `Grape --grape-heif-worker` runs, without the rest of Grape. CI's
-//! `heif-it-macos` job points grape-engines' HEIC tests at it
-//! (`GRAPE_TEST_HEIF`). Built only with the `heif-it` feature and never
-//! shipped. Elsewhere it says "macOS only" and exits 2.
+//! ImageIO behind the image helper's protocol, as its own program
+//! (DECISIONS D33, D41): what `Grape --grape-heif-worker` runs, without the
+//! rest of Grape. CI's `heif-it-macos` job points grape-engines' HEIC and
+//! AVIF tests at it (`GRAPE_TEST_HEIF`). Built only with the `heif-it`
+//! feature and never shipped; with `avif-encode` too it writes AVIF with
+//! ravif, as Grape's macOS build does. Unlike Grape's worker it arms no
+//! heap bound (that's grape-engines' `pdf::heap`, which this crate doesn't
+//! use). Elsewhere it says "macOS only" and exits 2.
 
 use std::process::ExitCode;
 

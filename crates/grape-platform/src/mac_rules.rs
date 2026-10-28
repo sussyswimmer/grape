@@ -326,7 +326,7 @@ fn round(value: f64) -> i32 {
     value.round() as i32
 }
 
-/// About how many bytes the Mac HEIC worker holds at most for a `width` ×
+/// About how many bytes the Mac image helper worker holds at most for a `width` ×
 /// `height` image of `depth` bits a sample (`kCGImagePropertyDepth`;
 /// `None` counts as 8): ImageIO's decoded picture (4 bytes a pixel at 8
 /// bits, 8 above, since float is off), plus the larger of its YUV planes

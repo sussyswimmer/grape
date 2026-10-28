@@ -1,15 +1,20 @@
-//! The HEIC worker's codec: ImageIO behind `grape_heif_proto`'s [`Codec`]
-//! (DECISIONS D33).
+//! The image helper's codec on macOS: ImageIO behind `grape_heif_proto`'s
+//! [`Codec`] (DECISIONS D33), for HEIC and AVIF (protocol 2, D41).
 //!
 //! Only the worker process runs this: `Grape --grape-heif-worker` (the
 //! app's `main.rs`) and the `grape-heif-worker` test bin. Grape's own
-//! process never decodes a HEIC, so a crash in ImageIO can't take the tray
-//! and the drag with it.
+//! process never decodes a HEIC or an AVIF, so a crash in ImageIO can't
+//! take the tray and the drag with it.
 //!
-//! - **Decode** takes the primary image, upright, as ImageIO's full-size
-//!   "thumbnail" built from the image itself with its transform applied.
-//!   Its size and bit depth come from the image's properties first, so a
-//!   picture over the pixel limit, or whose decode wouldn't fit the
+//! - **Decode** (HEIC, and AVIF on macOS 13 and later) takes the primary
+//!   image, upright, as ImageIO's full-size "thumbnail" built from the
+//!   image itself with its transform applied. ImageIO is hinted with the
+//!   format the source sniffed as, and the type it then reads must be one
+//!   of HEIC's or AVIF's ([`ALLOWED`]), whichever the sniff said: ImageIO
+//!   types some AVIFs as `public.heif`, and libheif writes AV1 grids with
+//!   no codec brand, which sniff as HEIC (D33's "the decoder decides").
+//!   Its size and bit depth come from the image's properties first,
+//!   so a picture over the pixel limit, or whose decode wouldn't fit the
 //!   request's decoder budget (`max_decoder_memory`, as libheif's on
 //!   Windows), is refused before anything is decoded. The `image` line
 //!   goes out once ImageIO has decoded it (only then is the upright size
@@ -18,18 +23,19 @@
 //!   own RGB color space (with that space's ICC profile), Display P3 for PQ
 //!   or HLG, or sRGB for anything else; ImageIO's picture is let go once
 //!   it's drawn, and alpha is un-premultiplied row by row.
-//! - **Encode** checks that this Mac can write `public.heic` at all
+//! - **HEIC encode** checks that this Mac can write `public.heic` at all
 //!   (Macs without a hardware HEVC encoder, and GitHub's macOS VMs, can't),
 //!   then writes one picture at ImageIO's lossy quality 0.8 by default. A
 //!   finish that fails is the same "this Mac can't write HEIC": that's how
 //!   ImageIO fails on hardware without an encoder that still lists the type.
-//! - **AVIF** (protocol 2's other format, D41) isn't read or written yet:
-//!   its caps are false, a decode is `unsupported` and an encode
-//!   `noEncoder`.
+//! - **AVIF encode** is never ImageIO's (it has none before macOS 26, and
+//!   tiles big pictures into grids that Firefox can't show): it's
+//!   [`crate::avif`], rav1e through ravif, with the `avif-encode` feature,
+//!   which the app turns on for macOS. Without it, "noEncoder".
 //! - First thing, before ImageIO does anything else and while it has one
-//!   thread, the worker restricts ImageIO to the HEIF types with
-//!   `CGImageSourceSetAllowableTypes` on macOS 14.2 and later
-//!   ([`ImageIo::restrict_process`]), looked up with `dlsym`: a bound
+//!   thread, the worker restricts ImageIO to the HEIF types (AVIF's
+//!   included) with `CGImageSourceSetAllowableTypes` on macOS 14.2 and
+//!   later ([`ImageIo::restrict_process`]), looked up with `dlsym`: a bound
 //!   import would stop Grape from launching on macOS 13. The codec's own
 //!   calls never set it, so tests can use it on many threads.
 //!
@@ -62,10 +68,17 @@ use objc2_image_io::{
     kCGImageSourceTypeIdentifierHint, CGImageDestination, CGImageSource, CGImageSourceStatus,
 };
 
-/// The HEIC types ImageIO may read in the worker, and the one it writes.
+/// The types ImageIO may read in the worker, and the one it writes (HEIC).
 const HEIC: &str = "public.heic";
 const HEIF: &str = "public.heif";
 const HEICS: &str = "public.heics";
+const AVIF: &str = "public.avif";
+const AVIS: &str = "public.avis";
+
+/// Every type the worker lets ImageIO read: HEIC's and AVIF's. WebKit
+/// allows HEIF for AVIF too, because ImageIO has typed AVIFs as
+/// `public.heif` (WebKit bug 241904).
+const ALLOWED: [&str; 5] = [HEIC, HEIF, HEICS, AVIF, AVIS];
 
 /// ImageIO's lossy quality when the request has none (heic-spec J27).
 /// Apple doesn't document ImageIO's own default; 0.8 keeps a HEIC from
@@ -75,17 +88,17 @@ const DEFAULT_QUALITY: f64 = 0.8;
 /// Upright, the only orientation Grape writes: the pixels already are.
 const UPRIGHT: i32 = 1;
 
-/// ImageIO on this Mac, as a HEIC [`Codec`] for the worker
-/// (`grape_heif_proto::worker_main`).
+/// ImageIO on this Mac (and ravif for AVIF output), as the image helper's
+/// [`Codec`] for the worker (`grape_heif_proto::worker_main`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ImageIo;
 
 impl ImageIo {
-    /// Restricts ImageIO in this whole process to the HEIF types (macOS
-    /// 14.2 and later; a no-op before). The worker calls it first thing,
-    /// before ImageIO does anything else and while it's the only thread:
-    /// on CI, setting it while another thread used ImageIO crashed the
-    /// process. Never call it in Grape's own process.
+    /// Restricts ImageIO in this whole process to the HEIC and AVIF types
+    /// (macOS 14.2 and later; a no-op before). The worker calls it first
+    /// thing, before ImageIO does anything else and while it's the only
+    /// thread: on CI, setting it while another thread used ImageIO crashed
+    /// the process. Never call it in Grape's own process.
     pub fn restrict_process() {
         restrict_to_heif();
     }
@@ -95,12 +108,19 @@ impl Codec for ImageIo {
     fn caps(&self) -> Caps {
         autoreleasepool(|_| Caps {
             heic: FormatCaps {
-                decode: can_read_heic(),
+                decode: can_read(HEIC),
                 encode: can_write_heic(),
             },
-            // Not yet (D41).
-            avif: FormatCaps::default(),
-            codec: "ImageIO".to_owned(),
+            avif: FormatCaps {
+                decode: can_read(AVIF),
+                // ravif is software: every Mac, when it's built in.
+                encode: cfg!(feature = "avif-encode"),
+            },
+            codec: if cfg!(feature = "avif-encode") {
+                "ImageIO, ravif".to_owned()
+            } else {
+                "ImageIO".to_owned()
+            },
         })
     }
 
@@ -111,10 +131,7 @@ impl Codec for ImageIo {
         limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure> {
-        match format {
-            HeifFormat::Heic => autoreleasepool(|_| decode(source, limits, out)),
-            HeifFormat::Avif => Err(not_yet(FailKind::Unsupported, "decode")),
-        }
+        autoreleasepool(|_| decode(source, format, limits, out))
     }
 
     fn encode(
@@ -126,28 +143,50 @@ impl Codec for ImageIo {
     ) -> Result<Vec<u8>, Failure> {
         match format {
             HeifFormat::Heic => autoreleasepool(|_| encode(pixels, quality)),
-            HeifFormat::Avif => Err(not_yet(FailKind::NoEncoder, "encode")),
+            HeifFormat::Avif => encode_avif(pixels, quality),
         }
     }
 }
 
-/// What this worker answers for AVIF until it reads and writes it (D41).
-fn not_yet(kind: FailKind, op: &str) -> Failure {
-    fail(kind, format!("this worker doesn't {op} AVIF yet"))
+/// The type ImageIO is hinted with for a source that sniffed as `format`.
+/// Whatever the hint, ImageIO may then read it as any of [`ALLOWED`]: an
+/// AV1 grid can sniff as HEIC (no codec brand), and ImageIO types some
+/// AVIFs as `public.heif` (D41).
+fn hint_for(format: HeifFormat) -> &'static str {
+    match format {
+        HeifFormat::Heic => HEIC,
+        HeifFormat::Avif => AVIF,
+    }
 }
 
-/// True when ImageIO can open `public.heic` on this Mac.
-fn can_read_heic() -> bool {
+/// An AVIF from ravif (D41), when this build has it: ImageIO isn't used.
+#[cfg(feature = "avif-encode")]
+fn encode_avif(pixels: &Pixels, quality: Option<u8>) -> Result<Vec<u8>, Failure> {
+    crate::avif::encode(pixels, quality)
+}
+
+/// A build without `avif-encode` (a dev build) writes no AVIF: "This Mac
+/// can't write AVIF files."
+#[cfg(not(feature = "avif-encode"))]
+fn encode_avif(_pixels: &Pixels, _quality: Option<u8>) -> Result<Vec<u8>, Failure> {
+    Err(fail(
+        FailKind::NoEncoder,
+        "this build has no AVIF encoder (avif-encode)",
+    ))
+}
+
+/// True when ImageIO can open the type `uti` on this Mac.
+fn can_read(uti: &str) -> bool {
     // SAFETY: CGImageSourceCopyTypeIdentifiers takes nothing and returns a
     // new array (the Copy rule), which the binding owns and releases.
     let types = unsafe { CGImageSource::type_identifiers() };
-    has_type(&types, HEIC)
+    has_type(&types, uti)
 }
 
 /// True when ImageIO can write `public.heic` on this Mac: false without a
 /// hardware HEVC encoder, and on GitHub's macOS VMs.
 fn can_write_heic() -> bool {
-    // SAFETY: as in `can_read_heic`, for CGImageDestinationCopyTypeIdentifiers.
+    // SAFETY: as in `can_read`, for CGImageDestinationCopyTypeIdentifiers.
     let types = unsafe { CGImageDestination::type_identifiers() };
     has_type(&types, HEIC)
 }
@@ -166,12 +205,13 @@ fn has_type(types: &CFArray, uti: &str) -> bool {
         })
 }
 
-/// Restricts ImageIO in this process to the HEIF types (heic-spec J16),
-/// once, on macOS 14.2 and later. It's looked up with `dlsym`, never
-/// imported: objc2-image-io binds `CGImageSourceSetAllowableTypes` as an
-/// ordinary import, which dyld refuses on macOS 13, so Grape wouldn't
-/// launch there. Older systems skip it. Its `OSStatus` is ignored: the
-/// decode works either way, only with a wider attack surface.
+/// Restricts ImageIO in this process to the HEIC and AVIF types
+/// ([`ALLOWED`]; heic-spec J16, D41), once, on macOS 14.2 and later. It's
+/// looked up with `dlsym`, never imported: objc2-image-io binds
+/// `CGImageSourceSetAllowableTypes` as an ordinary import, which dyld
+/// refuses on macOS 13, so Grape wouldn't launch there. Older systems skip
+/// it. Its `OSStatus` is ignored: the decode works either way, only with a
+/// wider attack surface.
 fn restrict_to_heif() {
     static RESTRICT: Once = Once::new();
     RESTRICT.call_once(|| {
@@ -191,11 +231,7 @@ fn restrict_to_heif() {
         // `OSStatus CGImageSourceSetAllowableTypes(CFArrayRef)` (macOS
         // 14.2+, `CGImageSource.h`): one pointer in, an `i32` out.
         let set = unsafe { std::mem::transmute::<*mut c_void, SetAllowableTypes>(symbol) };
-        let types = [
-            CFString::from_static_str(HEIC),
-            CFString::from_static_str(HEIF),
-            CFString::from_static_str(HEICS),
-        ];
+        let types = ALLOWED.map(CFString::from_static_str);
         let array = CFArray::from_retained_objects(&types);
         let array: *const CFArray<CFString> = CFRetained::as_ptr(&array).as_ptr();
         // SAFETY: `array` is a valid CFArray of CFStrings for the whole
@@ -332,15 +368,20 @@ impl Layout {
     }
 }
 
-/// heic-spec §7, decode.
-fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(), Failure> {
+/// heic-spec §7, decode, for a source that sniffed as `format` (D41).
+fn decode(
+    source: &Path,
+    format: HeifFormat,
+    limits: &Limits,
+    out: &mut dyn PixelSink,
+) -> Result<(), Failure> {
     let url = CFURL::from_file_path(source)
         .ok_or_else(|| fail(FailKind::Read, "the source path isn't a file URL"))?;
     // SAFETY: the keys are constant CFStrings ImageIO exports.
     let (should_cache, hint) =
         unsafe { (kCGImageSourceShouldCache, kCGImageSourceTypeIdentifierHint) };
-    let heic = CFString::from_static_str(HEIC);
-    let source_options = options(&[(should_cache, CFBoolean::new(false)), (hint, &heic)]);
+    let hinted = CFString::from_static_str(hint_for(format));
+    let source_options = options(&[(should_cache, CFBoolean::new(false)), (hint, &hinted)]);
     // SAFETY: the options' keys are CFStrings and their values the types
     // ImageIO documents for them (a CFBoolean, a CFString).
     let src = unsafe { CGImageSource::with_url(&url, Some(source_options.as_opaque())) }
@@ -355,9 +396,9 @@ fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(),
             src.primary_image_index(),
         )
     };
-    let heif_types = [HEIC, HEIF, HEICS].map(CFString::from_static_str);
+    let types = ALLOWED.map(CFString::from_static_str);
     match kind {
-        Some(kind) if heif_types.iter().any(|t| **t == *kind) => {}
+        Some(kind) if types.iter().any(|t| **t == *kind) => {}
         Some(_) => {
             return Err(fail(
                 FailKind::Unsupported,
@@ -861,49 +902,113 @@ mod tests {
     }
 
     #[test]
-    fn this_mac_reads_heic() {
-        // Every macOS since 10.13 reads HEIC; writing depends on the
-        // hardware, so it's only reported.
+    fn this_mac_reads_heic_and_says_what_it_does_with_avif() {
+        // Every macOS since 10.13 reads HEIC, and 13.0 and later AVIF
+        // (D41: CI's probe job says which runners do). Writing HEIC depends
+        // on the hardware, so it's only reported; AVIF is ravif's.
         let caps = ImageIo.caps();
         assert!(caps.heic.decode);
-        assert_eq!(caps.codec, "ImageIO");
+        assert!(caps.codec.starts_with("ImageIO"), "{}", caps.codec);
         println!("ImageIO encodes HEIC here: {}", caps.heic.encode);
-        // Not yet (D41).
-        assert_eq!(caps.avif, FormatCaps::default());
+        println!("ImageIO decodes AVIF here: {}", caps.avif.decode);
+        assert_eq!(caps.avif.encode, cfg!(feature = "avif-encode"));
     }
 
     #[test]
-    fn avif_isnt_read_or_written_yet() {
-        struct Nothing;
-        impl PixelSink for Nothing {
-            fn begin(&mut self, _: &ImageInfo, _: Option<&[u8]>) -> Result<(), Failure> {
-                panic!("nothing is decoded")
-            }
-            fn row(&mut self, _: &[u8]) -> Result<(), Failure> {
-                panic!("nothing is decoded")
+    fn each_format_has_its_hint_and_reads_as_any_allowed_type() {
+        assert_eq!(hint_for(HeifFormat::Heic), HEIC);
+        assert_eq!(hint_for(HeifFormat::Avif), AVIF);
+        for format in HeifFormat::ALL {
+            assert!(ALLOWED.contains(&hint_for(format)), "{format:?}");
+        }
+        assert_eq!(ALLOWED, [HEIC, HEIF, HEICS, AVIF, AVIS]);
+    }
+
+    /// A smooth RGB gradient.
+    fn gradient(width: u32, height: u32) -> Pixels {
+        let mut data = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&[
+                    (x * 255 / (width - 1)) as u8,
+                    (y * 255 / (height - 1)) as u8,
+                    128,
+                ]);
             }
         }
-        // Not even opened: the path doesn't exist.
-        let missing = std::env::temp_dir().join("grape-no-such-file.avif");
-        let decoded = ImageIo.decode(&missing, HeifFormat::Avif, &Limits::DEFAULT, &mut Nothing);
-        let failure = decoded.expect_err("no AVIF decode yet");
-        assert_eq!(failure.kind, FailKind::Unsupported);
-        assert_eq!(failure.detail, "this worker doesn't decode AVIF yet");
-        let pixels = Pixels {
-            width: 1,
-            height: 1,
+        Pixels {
+            width,
+            height,
             channels: 3,
-            data: vec![1, 2, 3],
+            data,
             icc: None,
-        };
-        let encoded = ImageIo.encode(&pixels, HeifFormat::Avif, None, &Limits::DEFAULT);
-        let failure = encoded.expect_err("no AVIF encode yet");
+        }
+    }
+
+    #[cfg(not(feature = "avif-encode"))]
+    #[test]
+    fn a_build_without_avif_encode_writes_no_avif() {
+        let encoded = ImageIo.encode(&gradient(4, 4), HeifFormat::Avif, None, &Limits::DEFAULT);
+        let failure = encoded.expect_err("no AVIF encoder");
         assert_eq!(failure.kind, FailKind::NoEncoder);
-        assert_eq!(failure.detail, "this worker doesn't encode AVIF yet");
+        assert_eq!(
+            failure.detail,
+            "this build has no AVIF encoder (avif-encode)"
+        );
+    }
+
+    #[cfg(feature = "avif-encode")]
+    #[test]
+    fn ravif_writes_the_avif_and_imageio_reads_it_back() {
+        use grape_heif_proto::{sniff, Sniff, SNIFF_BYTES};
+
+        #[derive(Default)]
+        struct Collect {
+            info: Option<ImageInfo>,
+            data: Vec<u8>,
+        }
+        impl PixelSink for Collect {
+            fn begin(&mut self, info: &ImageInfo, _: Option<&[u8]>) -> Result<(), Failure> {
+                self.info = Some(*info);
+                Ok(())
+            }
+            fn row(&mut self, row: &[u8]) -> Result<(), Failure> {
+                self.data.extend_from_slice(row);
+                Ok(())
+            }
+        }
+
+        let pixels = gradient(64, 48);
+        let avif = ImageIo
+            .encode(&pixels, HeifFormat::Avif, None, &Limits::DEFAULT)
+            .expect("an AVIF from ravif");
+        assert_eq!(sniff(&avif[..avif.len().min(SNIFF_BYTES)]), Sniff::Avif);
+        if !ImageIo.caps().avif.decode {
+            println!("ImageIO doesn't list public.avif here: not read back");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("grape-imageio-avif-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp folder");
+        let path = dir.join("round-trip.avif");
+        std::fs::write(&path, &avif).expect("a temp file");
+        let mut back = Collect::default();
+        let decoded = ImageIo.decode(&path, HeifFormat::Avif, &Limits::DEFAULT, &mut back);
+        std::fs::remove_dir_all(&dir).expect("the temp folder removed");
+        decoded.expect("ImageIO reads ravif's AVIF");
+        let info = back.info.expect("an image");
+        assert_eq!((info.width, info.height, info.channels), (64, 48, 3));
+        let error: u64 = pixels
+            .data
+            .iter()
+            .zip(&back.data)
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum();
+        let mean = error as f64 / pixels.data.len() as f64;
+        assert!(mean < 4.0, "mean error {mean}");
     }
 
     #[test]
-    fn a_png_isnt_read_as_heic() {
+    fn a_png_isnt_read_as_heic_or_avif() {
         let dir = std::env::temp_dir().join(format!("grape-imageio-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("a temp folder");
         let png = dir.join("one.png");
@@ -931,15 +1036,17 @@ mod tests {
         }
         // `serve` sniffs first; called directly, ImageIO's own type check
         // still refuses it (with the hint, the restriction, or by type).
-        let result = autoreleasepool(|_| decode(&png, &Limits::DEFAULT, &mut Nothing));
-        let kind = result.expect_err("a PNG isn't HEIC").kind;
-        assert!(
-            matches!(
-                kind,
-                FailKind::Unsupported | FailKind::NotHeif | FailKind::Damaged
-            ),
-            "{kind:?}"
-        );
+        for format in HeifFormat::ALL {
+            let result = autoreleasepool(|_| decode(&png, format, &Limits::DEFAULT, &mut Nothing));
+            let kind = result.expect_err("a PNG isn't HEIC or AVIF").kind;
+            assert!(
+                matches!(
+                    kind,
+                    FailKind::Unsupported | FailKind::NotHeif | FailKind::Damaged
+                ),
+                "{format:?}: {kind:?}"
+            );
+        }
         std::fs::remove_dir_all(&dir).expect("the temp folder removed");
     }
 }

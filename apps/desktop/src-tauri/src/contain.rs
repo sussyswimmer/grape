@@ -1,6 +1,6 @@
 //! Puts the helper processes Grape starts into an OS container (D33).
 //!
-//! On Windows every HEIC helper (`grape-heif.exe`) runs in a Job Object of
+//! On Windows every image helper (`grape-heif.exe`) runs in a Job Object of
 //! its own (`grape_platform::windows::job`): its memory is capped, it ends
 //! when Grape does or when its job is dropped, it can't start another
 //! process, an unhandled exception ends it without a dialog, and it's kept
@@ -13,13 +13,13 @@
 //! engine fails closed: a helper it can't contain is killed and its job
 //! says the helper couldn't start.
 //!
-//! On macOS and elsewhere there's nothing to install: the HEIC worker
-//! (Grape itself) ends on its own once Grape is gone, and a memory cap
-//! there is a follow-up (D33).
+//! On macOS and elsewhere there's nothing to install: the image helper
+//! worker (Grape itself) ends on its own once Grape is gone, and caps its
+//! own memory with the 2 GiB heap bound it arms (D41, `main.rs`).
 
-/// Removes, off the calling thread, the HEIC work folders a Grape that
-/// crashed or was killed left in the OS temp folder (D33), raw pixels
-/// included. Called once in setup, on every OS. Logs only the count.
+/// Removes, off the calling thread, the image helper's work folders a
+/// Grape that crashed or was killed left in the OS temp folder (D33), raw
+/// pixels included. Called once in setup, on every OS. Logs only the count.
 pub fn remove_leftovers() {
     let spawned = std::thread::Builder::new()
         .name("grape-leftovers".to_owned())

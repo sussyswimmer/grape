@@ -2,12 +2,13 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
-- **313 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **348 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **libarchive**, whose `bsdtar` program Grape reads RAR archives with. It ships as a separate program, with its license texts in the `licenses/libarchive` folder.
 - **grape-heif**, the program Grape converts HEIC and AVIF images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
 - **FFmpeg and ffprobe**, the programs Grape converts audio and video with, and the libraries built into them. They ship as separate programs under the GPL, with their license texts and where their source is in the `licenses/ffmpeg` folder.
+- **rav1e's patent license and notices**: Grape for macOS writes AVIF images with rav1e, one of the Rust crates. Its AV1 patent license, and the notices of the code it took from libaom and dav1d, have a section of their own.
 - **Not here yet:** the other helper programs Grape will ship as separate files. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -29,10 +30,11 @@ The Rust crates use these, most used first:
 - BSD 3-Clause "New" or "Revised" License (`BSD-3-Clause`)
 - Apache License 2.0 (`Apache-2.0`)
 - Mozilla Public License 2.0 (`MPL-2.0`)
+- BSD 2-Clause "Simplified" License (`BSD-2-Clause`)
 - ISC License (`ISC`)
 - zlib License (`Zlib`)
 
-The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive, FFmpeg and grape-heif.
+The JavaScript is all MIT. PDFium and the libraries built into it have their own section, and so do libarchive, FFmpeg and grape-heif. So does rav1e's AV1 patent license, with the notices of the code rav1e took from libaom and dav1d.
 
 ## The MPL-2.0 crates
 
@@ -188,7 +190,7 @@ Some of their source files hold code from other projects, like MIPS's fixed-poin
 
 ## grape-heif (HEIC and AVIF on Windows)
 
-Grape converts HEIC and AVIF images on Windows with `grape-heif.exe`, a small program of Grape's own (`tools/grape-heif`) that Grape's CI builds. It's a separate program next to `Grape.exe`, which Grape starts for each HEIC or AVIF image; none of it is inside Grape itself. It links the libraries below statically, and because x265 is under the GPL, the program as a whole is under the **GNU General Public License, version 3 or later**. Its license texts ship with it in the `licenses/grape-heif` folder, where `SOURCE.md` says exactly how it was built. On macOS Grape uses the system's ImageIO instead, so the Mac build has no grape-heif.
+Grape converts HEIC and AVIF images on Windows with `grape-heif.exe`, a small program of Grape's own (`tools/grape-heif`) that Grape's CI builds. It's a separate program next to `Grape.exe`, which Grape starts for each HEIC or AVIF image; none of it is inside Grape itself. It links the libraries below statically, and because x265 is under the GPL, the program as a whole is under the **GNU General Public License, version 3 or later**. Its license texts ship with it in the `licenses/grape-heif` folder, where `SOURCE.md` says exactly how it was built. On macOS Grape uses the system's ImageIO instead, and rav1e (its own section, below) to write AVIF, so the Mac build has no grape-heif.
 
 | Component | License | Text in `licenses/grape-heif` |
 |---|---|---|
@@ -205,6 +207,170 @@ Grape converts HEIC and AVIF images on Windows with `grape-heif.exe`, a small pr
 **The source.** Every build of the installer comes with grape-heif's complete source, `grape-heif-1.23.7-grape.2-source.tar.gz`, on the GitHub Release that ships the installer and in the CI run that built it. It holds Grape's code for the program, every Rust crate it uses, the five libraries' source archives, vcpkg's build recipes and how to build it again.
 
 This section is written by hand: check it again when `tools/grape-heif/vcpkg.lock.json` changes a version.
+
+## rav1e (AVIF on macOS)
+
+Grape for macOS writes AVIF images with [rav1e](https://crates.io/crates/rav1e/0.8.1) 0.8.1, an AV1 encoder, through [ravif](https://crates.io/crates/ravif/0.13.0) 0.13.0. Both are compiled into Grape itself on macOS; Grape for Windows doesn't have them. rav1e and two crates it's built from, v_frame and av1-grain, are under the BSD 2-Clause License and the Alliance for Open Media Patent License 1.0. Their BSD 2-Clause texts are with the Rust crates below. The patent license, and the notices of the code rav1e took from libaom and dav1d, are here.
+
+### Code from libaom and dav1d
+
+Some of rav1e's Rust code comes from libaom, the Alliance for Open Media's AV1 library. On Apple silicon, Grape also builds in rav1e's arm64 assembly: one of its files comes partly from libaom, and most of the others from dav1d. The Intel build has none of the assembly.
+
+The code from libaom is under the BSD 2-Clause License text in rav1e's `LICENSE`, which is with the Rust crates below, and the patent license further down. Its notices:
+
+- Copyright (c) 2001-2016, Alliance for Open Media. All rights reserved (rav1e's Rust code, in both Mac builds)
+- Copyright (c) 2016, Alliance for Open Media. All rights reserved (the arm64 assembly, Apple silicon only)
+
+The code from dav1d (the arm64 assembly, Apple silicon only) is under this text:
+
+~~~text
+Copyright © 2018, VideoLAN and dav1d authors
+Copyright © 2018, Two Orioles, LLC
+Copyright © 2015 Janne Grunau
+Copyright © 2018, Janne Grunau
+Copyright © 2015 Martin Storsjo
+Copyright © 2018, Martin Storsjo
+Copyright © 2019, Martin Storsjo
+Copyright © 2020, Martin Storsjo
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+~~~
+
+### The AV1 patent license
+
+This is rav1e's `PATENTS` file. rav1e, v_frame and av1-grain are under it, and it asks to be reproduced with any binary built from them:
+
+~~~text
+Alliance for Open Media Patent License 1.0
+
+1. License Terms.
+
+1.1. Patent License. Subject to the terms and conditions of this License, each
+     Licensor, on behalf of itself and successors in interest and assigns,
+     grants Licensee a non-sublicensable, perpetual, worldwide, non-exclusive,
+     no-charge, royalty-free, irrevocable (except as expressly stated in this
+     License) patent license to its Necessary Claims to make, use, sell, offer
+     for sale, import or distribute any Implementation.
+
+1.2. Conditions.
+
+1.2.1. Availability. As a condition to the grant of rights to Licensee to make,
+       sell, offer for sale, import or distribute an Implementation under
+       Section 1.1, Licensee must make its Necessary Claims available under
+       this License, and must reproduce this License with any Implementation
+       as follows:
+
+       a. For distribution in source code, by including this License in the
+          root directory of the source code with its Implementation.
+
+       b. For distribution in any other form (including binary, object form,
+          and/or hardware description code (e.g., HDL, RTL, Gate Level Netlist,
+          GDSII, etc.)), by including this License in the documentation, legal
+          notices, and/or other written materials provided with the
+          Implementation.
+
+1.2.2. Additional Conditions. This license is directly from Licensor to
+       Licensee.  Licensee acknowledges as a condition of benefiting from it
+       that no rights from Licensor are received from suppliers, distributors,
+       or otherwise in connection with this License.
+
+1.3. Defensive Termination. If any Licensee, its Affiliates, or its agents
+     initiates patent litigation or files, maintains, or voluntarily
+     participates in a lawsuit against another entity or any person asserting
+     that any Implementation infringes Necessary Claims, any patent licenses
+     granted under this License directly to the Licensee are immediately
+     terminated as of the date of the initiation of action unless 1) that suit
+     was in response to a corresponding suit regarding an Implementation first
+     brought against an initiating entity, or 2) that suit was brought to
+     enforce the terms of this License (including intervention in a third-party
+     action by a Licensee).
+
+1.4. Disclaimers. The Reference Implementation and Specification are provided
+     "AS IS" and without warranty. The entire risk as to implementing or
+     otherwise using the Reference Implementation or Specification is assumed
+     by the implementer and user. Licensor expressly disclaims any warranties
+     (express, implied, or otherwise), including implied warranties of
+     merchantability, non-infringement, fitness for a particular purpose, or
+     title, related to the material. IN NO EVENT WILL LICENSOR BE LIABLE TO
+     ANY OTHER PARTY FOR LOST PROFITS OR ANY FORM OF INDIRECT, SPECIAL,
+     INCIDENTAL, OR CONSEQUENTIAL DAMAGES OF ANY CHARACTER FROM ANY CAUSES OF
+     ACTION OF ANY KIND WITH RESPECT TO THIS LICENSE, WHETHER BASED ON BREACH
+     OF CONTRACT, TORT (INCLUDING NEGLIGENCE), OR OTHERWISE, AND WHETHER OR
+     NOT THE OTHER PARTRY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+2. Definitions.
+
+2.1. Affiliate.  “Affiliate” means an entity that directly or indirectly
+     Controls, is Controlled by, or is under common Control of that party.
+
+2.2. Control. “Control” means direct or indirect control of more than 50% of
+     the voting power to elect directors of that corporation, or for any other
+     entity, the power to direct management of such entity.
+
+2.3. Decoder.  "Decoder" means any decoder that conforms fully with all
+     non-optional portions of the Specification.
+
+2.4. Encoder.  "Encoder" means any encoder that produces a bitstream that can
+     be decoded by a Decoder only to the extent it produces such a bitstream.
+
+2.5. Final Deliverable.  “Final Deliverable” means the final version of a
+     deliverable approved by the Alliance for Open Media as a Final
+     Deliverable.
+
+2.6. Implementation.  "Implementation" means any implementation, including the
+     Reference Implementation, that is an Encoder and/or a Decoder. An
+     Implementation also includes components of an Implementation only to the
+     extent they are used as part of an Implementation.
+
+2.7. License. “License” means this license.
+
+2.8. Licensee. “Licensee” means any person or entity who exercises patent
+     rights granted under this License.
+
+2.9. Licensor.  "Licensor" means (i) any Licensee that makes, sells, offers
+     for sale, imports or distributes any Implementation, or (ii) a person
+     or entity that has a licensing obligation to the Implementation as a
+     result of its membership and/or participation in the Alliance for Open
+     Media working group that developed the Specification.
+
+2.10. Necessary Claims.  "Necessary Claims" means all claims of patents or
+      patent applications, (a) that currently or at any time in the future,
+      are owned or controlled by the Licensor, and (b) (i) would be an
+      Essential Claim as defined by the W3C Policy as of February 5, 2004
+      (https://www.w3.org/Consortium/Patent-Policy-20040205/#def-essential)
+      as if the Specification was a W3C Recommendation; or (ii) are infringed
+      by the Reference Implementation.
+
+2.11. Reference Implementation. “Reference Implementation” means an Encoder
+      and/or Decoder released by the Alliance for Open Media as a Final
+      Deliverable.
+
+2.12. Specification. “Specification” means the specification designated by
+      the Alliance for Open Media as a Final Deliverable for which this
+      License was issued.
+~~~
+
+This section is written by hand: check it again when `Cargo.lock` changes rav1e's version, or when `crates/grape-platform/Cargo.toml` changes ravif's features.
 
 ## Rust crates
 
@@ -292,6 +458,37 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+~~~
+
+Used by: [rayon-core 1.13.0](https://crates.io/crates/rayon-core/1.13.0), [rayon 1.12.0](https://crates.io/crates/rayon/1.12.0)
+
+~~~text
+Copyright (c) 2010 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 
 ~~~
 
@@ -470,7 +667,7 @@ THE SOFTWARE.
 
 ~~~
 
-Used by: [bitflags 1.3.2](https://crates.io/crates/bitflags/1.3.2), [bitflags 2.13.2](https://crates.io/crates/bitflags/2.13.2), [glob 0.3.4](https://crates.io/crates/glob/0.3.4), [log 0.4.34](https://crates.io/crates/log/0.4.34), [num-traits 0.2.19](https://crates.io/crates/num-traits/0.2.19), [regex-automata 0.4.18](https://crates.io/crates/regex-automata/0.4.18), [regex-syntax 0.8.11](https://crates.io/crates/regex-syntax/0.8.11), [regex 1.13.1](https://crates.io/crates/regex/1.13.1)
+Used by: [bitflags 1.3.2](https://crates.io/crates/bitflags/1.3.2), [bitflags 2.13.2](https://crates.io/crates/bitflags/2.13.2), [glob 0.3.4](https://crates.io/crates/glob/0.3.4), [log 0.4.34](https://crates.io/crates/log/0.4.34), [num-bigint 0.4.8](https://crates.io/crates/num-bigint/0.4.8), [num-derive 0.4.2](https://crates.io/crates/num-derive/0.4.2), [num-integer 0.1.47](https://crates.io/crates/num-integer/0.1.47), [num-rational 0.4.2](https://crates.io/crates/num-rational/0.4.2), [num-traits 0.2.19](https://crates.io/crates/num-traits/0.2.19), [regex-automata 0.4.18](https://crates.io/crates/regex-automata/0.4.18), [regex-syntax 0.8.11](https://crates.io/crates/regex-syntax/0.8.11), [regex 1.13.1](https://crates.io/crates/regex/1.13.1)
 
 ~~~text
 Copyright (c) 2014 The Rust Project Developers
@@ -634,7 +831,7 @@ DEALINGS IN THE SOFTWARE.
 
 ~~~
 
-Used by: [either 1.19.0](https://crates.io/crates/either/1.19.0), [itertools 0.15.0](https://crates.io/crates/itertools/0.15.0), [serde_with 3.24.0](https://crates.io/crates/serde_with/3.24.0), [serde_with_macros 3.24.0](https://crates.io/crates/serde_with_macros/3.24.0)
+Used by: [either 1.19.0](https://crates.io/crates/either/1.19.0), [itertools 0.14.0](https://crates.io/crates/itertools/0.14.0), [itertools 0.15.0](https://crates.io/crates/itertools/0.15.0), [serde_with 3.24.0](https://crates.io/crates/serde_with/3.24.0), [serde_with_macros 3.24.0](https://crates.io/crates/serde_with_macros/3.24.0)
 
 ~~~text
 Copyright (c) 2015
@@ -1145,10 +1342,72 @@ DEALINGS IN THE SOFTWARE.
 
 ~~~
 
+Used by: [bitstream-io 4.10.0](https://crates.io/crates/bitstream-io/4.10.0)
+
+~~~text
+Copyright (c) 2017 Brian Langenberger
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+~~~
+
 Used by: [fnv 1.0.7](https://crates.io/crates/fnv/1.0.7)
 
 ~~~text
 Copyright (c) 2017 Contributors
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+~~~
+
+Used by: [aligned 0.4.3](https://crates.io/crates/aligned/0.4.3)
+
+~~~text
+Copyright (c) 2017 Jorge Aparicio
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -1410,6 +1669,37 @@ Used by: [bytes 1.12.1](https://crates.io/crates/bytes/1.12.1)
 
 ~~~text
 Copyright (c) 2018 Carl Lerche
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+~~~
+
+Used by: [as-slice 0.2.1](https://crates.io/crates/as-slice/0.2.1)
+
+~~~text
+Copyright (c) 2018 Jorge Aparicio
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -1804,6 +2094,31 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+
+~~~
+
+Used by: [no_std_io2 0.9.4](https://crates.io/crates/no_std_io2/0.9.4)
+
+~~~text
+Copyright (c) 2020-2021  Brendan Molloy <brendan@bbqsrc.net>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ~~~
 
@@ -2355,6 +2670,37 @@ DEALINGS IN THE SOFTWARE.
 
 ~~~
 
+Used by: [arrayvec 0.7.8](https://crates.io/crates/arrayvec/0.7.8)
+
+~~~text
+Copyright (c) Ulrik Sverdrup "bluss" 2015-2023
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
+~~~
+
 Used by: [synstructure 0.14.0](https://crates.io/crates/synstructure/0.14.0)
 
 ~~~text
@@ -2729,6 +3075,33 @@ SOFTWARE.
 
 ~~~
 
+Used by: [arg_enum_proc_macro 0.3.4](https://crates.io/crates/arg_enum_proc_macro/0.3.4)
+
+~~~text
+MIT License
+
+Copyright (c) 2018 Luca Barbato
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
 Used by: [ico 0.5.0](https://crates.io/crates/ico/0.5.0)
 
 ~~~text
@@ -2858,6 +3231,87 @@ Used by: [schemars 0.8.22](https://crates.io/crates/schemars/0.8.22), [schemars_
 MIT License
 
 Copyright (c) 2019 Graham Esau
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
+Used by: [rgb 0.8.53](https://crates.io/crates/rgb/0.8.53)
+
+~~~text
+MIT License
+
+Copyright (c) 2019 Kornel
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
+Used by: [noop_proc_macro 0.3.0](https://crates.io/crates/noop_proc_macro/0.3.0)
+
+~~~text
+MIT License
+
+Copyright (c) 2019 Luca Barbato
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
+Used by: [av-scenechange 0.14.1](https://crates.io/crates/av-scenechange/0.14.1)
+
+~~~text
+MIT License
+
+Copyright (c) 2019 Multimedia and Rust
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -3103,6 +3557,33 @@ SOFTWARE.
 
 ~~~
 
+Used by: [maybe-rayon 0.1.1](https://crates.io/crates/maybe-rayon/0.1.1)
+
+~~~text
+MIT License
+
+Copyright (c) 2021 Joshua Holmer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
 Used by: [urlpattern 0.6.0](https://crates.io/crates/urlpattern/0.6.0)
 
 ~~~text
@@ -3136,6 +3617,33 @@ Used by: [jsonptr 0.7.1](https://crates.io/crates/jsonptr/0.7.1)
 MIT License
 
 Copyright (c) 2022 Chance Dinkins
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
+Used by: [aligned-vec 0.6.4](https://crates.io/crates/aligned-vec/0.6.4)
+
+~~~text
+MIT License
+
+Copyright (c) 2022 sarah
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -3270,6 +3778,33 @@ SOFTWARE.
 
 ~~~
 
+Used by: [equator-macro 0.4.2](https://crates.io/crates/equator-macro/0.4.2), [equator 0.4.2](https://crates.io/crates/equator/0.4.2)
+
+~~~text
+MIT License
+
+Copyright (c) 2023 sarah
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
 Used by: [smappservice-rs 0.1.3](https://crates.io/crates/smappservice-rs/0.1.3)
 
 ~~~text
@@ -3296,7 +3831,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4)
+Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4), [profiling-procmacros 1.0.18](https://crates.io/crates/profiling-procmacros/1.0.18), [profiling 1.0.18](https://crates.io/crates/profiling/1.0.18), [simd_helpers 0.1.0](https://crates.io/crates/simd_helpers/0.1.0)
 
 *The standard text, because these crates don't ship it. The copyright holders are the authors named on each crate's page.*
 
@@ -3572,7 +4107,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ~~~
 
-Used by: [adler2 2.0.1](https://crates.io/crates/adler2/2.0.1), [anyhow 1.0.104](https://crates.io/crates/anyhow/1.0.104), [camino 1.2.6](https://crates.io/crates/camino/1.2.6), [cargo-platform 0.1.9](https://crates.io/crates/cargo-platform/0.1.9), [cargo_metadata 0.19.2](https://crates.io/crates/cargo_metadata/0.19.2), [displaydoc 0.2.7](https://crates.io/crates/displaydoc/0.2.7), [dtoa 1.0.11](https://crates.io/crates/dtoa/1.0.11), [dyn-clone 1.0.20](https://crates.io/crates/dyn-clone/1.0.20), [erased-serde 0.4.10](https://crates.io/crates/erased-serde/0.4.10), [fastrand 2.5.0](https://crates.io/crates/fastrand/2.5.0), [itoa 1.0.18](https://crates.io/crates/itoa/1.0.18), [once_cell 1.21.4](https://crates.io/crates/once_cell/1.21.4), [pin-project-lite 0.2.17](https://crates.io/crates/pin-project-lite/0.2.17), [proc-macro2 1.0.107](https://crates.io/crates/proc-macro2/1.0.107), [quote 1.0.47](https://crates.io/crates/quote/1.0.47), [semver 1.0.28](https://crates.io/crates/semver/1.0.28), [serde-untagged 0.1.9](https://crates.io/crates/serde-untagged/0.1.9), [serde 1.0.229](https://crates.io/crates/serde/1.0.229), [serde_core 1.0.229](https://crates.io/crates/serde_core/1.0.229), [serde_derive 1.0.229](https://crates.io/crates/serde_derive/1.0.229), [serde_derive_internals 0.29.1](https://crates.io/crates/serde_derive_internals/0.29.1), [serde_json 1.0.151](https://crates.io/crates/serde_json/1.0.151), [serde_repr 0.1.21](https://crates.io/crates/serde_repr/0.1.21), [servo_arc 0.4.3](https://crates.io/crates/servo_arc/0.4.3), [syn 2.0.119](https://crates.io/crates/syn/2.0.119), [syn 3.0.6](https://crates.io/crates/syn/3.0.6), [thiserror-impl 2.0.21](https://crates.io/crates/thiserror-impl/2.0.21), [thiserror 2.0.21](https://crates.io/crates/thiserror/2.0.21), [typed-path 0.12.3](https://crates.io/crates/typed-path/0.12.3), [typeid 1.0.3](https://crates.io/crates/typeid/1.0.3), [unicode-ident 1.0.26](https://crates.io/crates/unicode-ident/1.0.26), [zmij 1.0.23](https://crates.io/crates/zmij/1.0.23)
+Used by: [adler2 2.0.1](https://crates.io/crates/adler2/2.0.1), [anyhow 1.0.104](https://crates.io/crates/anyhow/1.0.104), [camino 1.2.6](https://crates.io/crates/camino/1.2.6), [cargo-platform 0.1.9](https://crates.io/crates/cargo-platform/0.1.9), [cargo_metadata 0.19.2](https://crates.io/crates/cargo_metadata/0.19.2), [displaydoc 0.2.7](https://crates.io/crates/displaydoc/0.2.7), [dtoa 1.0.11](https://crates.io/crates/dtoa/1.0.11), [dyn-clone 1.0.20](https://crates.io/crates/dyn-clone/1.0.20), [erased-serde 0.4.10](https://crates.io/crates/erased-serde/0.4.10), [fastrand 2.5.0](https://crates.io/crates/fastrand/2.5.0), [itoa 1.0.18](https://crates.io/crates/itoa/1.0.18), [once_cell 1.21.4](https://crates.io/crates/once_cell/1.21.4), [paste 1.0.15](https://crates.io/crates/paste/1.0.15), [pastey 0.1.1](https://crates.io/crates/pastey/0.1.1), [pin-project-lite 0.2.17](https://crates.io/crates/pin-project-lite/0.2.17), [proc-macro2 1.0.107](https://crates.io/crates/proc-macro2/1.0.107), [quote 1.0.47](https://crates.io/crates/quote/1.0.47), [semver 1.0.28](https://crates.io/crates/semver/1.0.28), [serde-untagged 0.1.9](https://crates.io/crates/serde-untagged/0.1.9), [serde 1.0.229](https://crates.io/crates/serde/1.0.229), [serde_core 1.0.229](https://crates.io/crates/serde_core/1.0.229), [serde_derive 1.0.229](https://crates.io/crates/serde_derive/1.0.229), [serde_derive_internals 0.29.1](https://crates.io/crates/serde_derive_internals/0.29.1), [serde_json 1.0.151](https://crates.io/crates/serde_json/1.0.151), [serde_repr 0.1.21](https://crates.io/crates/serde_repr/0.1.21), [servo_arc 0.4.3](https://crates.io/crates/servo_arc/0.4.3), [syn 2.0.119](https://crates.io/crates/syn/2.0.119), [syn 3.0.6](https://crates.io/crates/syn/3.0.6), [thiserror-impl 2.0.21](https://crates.io/crates/thiserror-impl/2.0.21), [thiserror 2.0.21](https://crates.io/crates/thiserror/2.0.21), [typed-path 0.12.3](https://crates.io/crates/typed-path/0.12.3), [typeid 1.0.3](https://crates.io/crates/typeid/1.0.3), [unicode-ident 1.0.26](https://crates.io/crates/unicode-ident/1.0.26), [zmij 1.0.23](https://crates.io/crates/zmij/1.0.23)
 
 ~~~text
 Permission is hereby granted, free of charge, to any
@@ -3943,6 +4478,34 @@ SOFTWARE.
 
 ~~~
 
+Used by: [y4m 0.8.0](https://crates.io/crates/y4m/0.8.0)
+
+~~~text
+The MIT License (MIT)
+
+Copyright (c) 2015-2019 PistonDevelopers
+Copyright (c) 2019 image-rs contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+~~~
+
 Used by: [derive_more-impl 2.1.1](https://crates.io/crates/derive_more-impl/2.1.1), [derive_more 2.1.1](https://crates.io/crates/derive_more/2.1.1)
 
 ~~~text
@@ -4053,7 +4616,7 @@ SOFTWARE.
 
 ~~~
 
-Used by: [crossbeam-channel 0.5.17](https://crates.io/crates/crossbeam-channel/0.5.17), [crossbeam-utils 0.8.23](https://crates.io/crates/crossbeam-utils/0.8.23)
+Used by: [crossbeam-channel 0.5.17](https://crates.io/crates/crossbeam-channel/0.5.17), [crossbeam-deque 0.8.8](https://crates.io/crates/crossbeam-deque/0.8.8), [crossbeam-epoch 0.9.21](https://crates.io/crates/crossbeam-epoch/0.9.21), [crossbeam-utils 0.8.23](https://crates.io/crates/crossbeam-utils/0.8.23)
 
 ~~~text
 The MIT License (MIT)
@@ -4224,6 +4787,19 @@ have been licensed under extremely permissive terms.
 
 ~~~
 
+Used by: [loop9 0.1.5](https://crates.io/crates/loop9/0.1.5)
+
+~~~text
+© Kornel Lesiński
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+~~~
+
 ### Unicode License v3
 
 Used by: [unicode-ident 1.0.26](https://crates.io/crates/unicode-ident/1.0.26)
@@ -4382,6 +4958,76 @@ pub(crate) static GB18030_2022_OVERRIDE_BYTES: [[u8; 2]; 18] = [
     [0xFE, 0x90],
     [0xFE, 0xA0],
 ];
+
+~~~
+
+Used by: [avif-serialize 0.8.9](https://crates.io/crates/avif-serialize/0.8.9)
+
+~~~text
+BSD 3-Clause License
+
+Copyright (c) 2020, Cloudflare, Inc.
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+~~~
+
+Used by: [ravif 0.13.0](https://crates.io/crates/ravif/0.13.0)
+
+~~~text
+BSD 3-Clause License
+
+Copyright (c) 2020, Kornel
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ~~~
 
@@ -4629,6 +5275,213 @@ Used by: [moxcms 0.8.1](https://crates.io/crates/moxcms/0.8.1), [pxfm 0.1.30](ht
       identification within third-party archives.
 
    Copyright 2024 Radzivon Bartoshyk
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+
+~~~
+
+Used by: [imgref 1.12.3](https://crates.io/crates/imgref/1.12.3)
+
+~~~text
+                                 Apache License
+                           Version 2.0, January 2004
+                        http://www.apache.org/licenses/
+
+   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
+
+   1. Definitions.
+
+      "License" shall mean the terms and conditions for use, reproduction,
+      and distribution as defined by Sections 1 through 9 of this document.
+
+      "Licensor" shall mean the copyright owner or entity authorized by
+      the copyright owner that is granting the License.
+
+      "Legal Entity" shall mean the union of the acting entity and all
+      other entities that control, are controlled by, or are under common
+      control with that entity. For the purposes of this definition,
+      "control" means (i) the power, direct or indirect, to cause the
+      direction or management of such entity, whether by contract or
+      otherwise, or (ii) ownership of fifty percent (50%) or more of the
+      outstanding shares, or (iii) beneficial ownership of such entity.
+
+      "You" (or "Your") shall mean an individual or Legal Entity
+      exercising permissions granted by this License.
+
+      "Source" form shall mean the preferred form for making modifications,
+      including but not limited to software source code, documentation
+      source, and configuration files.
+
+      "Object" form shall mean any form resulting from mechanical
+      transformation or translation of a Source form, including but
+      not limited to compiled object code, generated documentation,
+      and conversions to other media types.
+
+      "Work" shall mean the work of authorship, whether in Source or
+      Object form, made available under the License, as indicated by a
+      copyright notice that is included in or attached to the work
+      (an example is provided in the Appendix below).
+
+      "Derivative Works" shall mean any work, whether in Source or Object
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
+      represent, as a whole, an original work of authorship. For the purposes
+      of this License, Derivative Works shall not include works that remain
+      separable from, or merely link (or bind by name) to the interfaces of,
+      the Work and Derivative Works thereof.
+
+      "Contribution" shall mean any work of authorship, including
+      the original version of the Work and any modifications or additions
+      to that Work or Derivative Works thereof, that is intentionally
+      submitted to Licensor for inclusion in the Work by the copyright owner
+      or by an individual or Legal Entity authorized to submit on behalf of
+      the copyright owner. For the purposes of this definition, "submitted"
+      means any form of electronic, verbal, or written communication sent
+      to the Licensor or its representatives, including but not limited to
+      communication on electronic mailing lists, source code control systems,
+      and issue tracking systems that are managed by, or on behalf of, the
+      Licensor for the purpose of discussing and improving the Work, but
+      excluding communication that is conspicuously marked or otherwise
+      designated in writing by the copyright owner as "Not a Contribution."
+
+      "Contributor" shall mean Licensor and any individual or Legal Entity
+      on behalf of whom a Contribution has been received by Licensor and
+      subsequently incorporated within the Work.
+
+   2. Grant of Copyright License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      copyright license to reproduce, prepare Derivative Works of,
+      publicly display, publicly perform, sublicense, and distribute the
+      Work and such Derivative Works in Source or Object form.
+
+   3. Grant of Patent License. Subject to the terms and conditions of
+      this License, each Contributor hereby grants to You a perpetual,
+      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+      (except as stated in this section) patent license to make, have made,
+      use, offer to sell, sell, import, and otherwise transfer the Work,
+      where such license applies only to those patent claims licensable
+      by such Contributor that are necessarily infringed by their
+      Contribution(s) alone or by combination of their Contribution(s)
+      with the Work to which such Contribution(s) was submitted. If You
+      institute patent litigation against any entity (including a
+      cross-claim or counterclaim in a lawsuit) alleging that the Work
+      or a Contribution incorporated within the Work constitutes direct
+      or contributory patent infringement, then any patent licenses
+      granted to You under this License for that Work shall terminate
+      as of the date such litigation is filed.
+
+   4. Redistribution. You may reproduce and distribute copies of the
+      Work or Derivative Works thereof in any medium, with or without
+      modifications, and in Source or Object form, provided that You
+      meet the following conditions:
+
+      (a) You must give any other recipients of the Work or
+          Derivative Works a copy of this License; and
+
+      (b) You must cause any modified files to carry prominent notices
+          stating that You changed the files; and
+
+      (c) You must retain, in the Source form of any Derivative Works
+          that You distribute, all copyright, patent, trademark, and
+          attribution notices from the Source form of the Work,
+          excluding those notices that do not pertain to any part of
+          the Derivative Works; and
+
+      (d) If the Work includes a "NOTICE" text file as part of its
+          distribution, then any Derivative Works that You distribute must
+          include a readable copy of the attribution notices contained
+          within such NOTICE file, excluding those notices that do not
+          pertain to any part of the Derivative Works, in at least one
+          of the following places: within a NOTICE text file distributed
+          as part of the Derivative Works; within the Source form or
+          documentation, if provided along with the Derivative Works; or,
+          within a display generated by the Derivative Works, if and
+          wherever such third-party notices normally appear. The contents
+          of the NOTICE file are for informational purposes only and
+          do not modify the License. You may add Your own attribution
+          notices within Derivative Works that You distribute, alongside
+          or as an addendum to the NOTICE text from the Work, provided
+          that such additional attribution notices cannot be construed
+          as modifying the License.
+
+      You may add Your own copyright statement to Your modifications and
+      may provide additional or different license terms and conditions
+      for use, reproduction, or distribution of Your modifications, or
+      for any such Derivative Works as a whole, provided Your use,
+      reproduction, and distribution of the Work otherwise complies with
+      the conditions stated in this License.
+
+   5. Submission of Contributions. Unless You explicitly state otherwise,
+      any Contribution intentionally submitted for inclusion in the Work
+      by You to the Licensor shall be under the terms and conditions of
+      this License, without any additional terms or conditions.
+      Notwithstanding the above, nothing herein shall supersede or modify
+      the terms of any separate license agreement you may have executed
+      with Licensor regarding such Contributions.
+
+   6. Trademarks. This License does not grant permission to use the trade
+      names, trademarks, service marks, or product names of the Licensor,
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
+
+   7. Disclaimer of Warranty. Unless required by applicable law or
+      agreed to in writing, Licensor provides the Work (and each
+      Contributor provides its Contributions) on an "AS IS" BASIS,
+      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+      implied, including, without limitation, any warranties or conditions
+      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
+      PARTICULAR PURPOSE. You are solely responsible for determining the
+      appropriateness of using or redistributing the Work and assume any
+      risks associated with Your exercise of permissions under this License.
+
+   8. Limitation of Liability. In no event and under no legal theory,
+      whether in tort (including negligence), contract, or otherwise,
+      unless required by applicable law (such as deliberate and grossly
+      negligent acts) or agreed to in writing, shall any Contributor be
+      liable to You for damages, including any direct, indirect, special,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
+      work stoppage, computer failure or malfunction, or any and all
+      other commercial damages or losses), even if such Contributor
+      has been advised of the possibility of such damages.
+
+   9. Accepting Warranty or Additional Liability. While redistributing
+      the Work or Derivative Works thereof, You may choose to offer,
+      and charge a fee for, acceptance of support, warranty, indemnity,
+      or other liability obligations and/or rights consistent with this
+      License. However, in accepting such obligations, You may act only
+      on Your own behalf and on Your sole responsibility, not on behalf
+      of any other Contributor, and only if You agree to indemnify,
+      defend, and hold each Contributor harmless for any liability
+      incurred by, or claims asserted against, such Contributor by reason
+      of your accepting any such warranty or additional liability.
+
+   END OF TERMS AND CONDITIONS
+
+   APPENDIX: How to apply the Apache License to your work.
+
+      To apply the Apache License to your work, attach the following
+      boilerplate notice, with the fields enclosed by brackets "[]"
+      replaced with your own identifying information. (Don't include
+      the brackets!)  The text should be enclosed in the appropriate
+      comment syntax for the file format. We also recommend that a
+      file or class name and description of purpose be included on the
+      same "printed page" as the copyright notice for easier
+      identification within third-party archives.
+
+   Copyright [yyyy] [name of copyright owner]
 
    Licensed under the Apache License, Version 2.0 (the "License");
    you may not use this file except in compliance with the License.
@@ -6067,6 +6920,101 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
   This Source Code Form is "Incompatible With Secondary Licenses", as
   defined by the Mozilla Public License, v. 2.0.
+
+~~~
+
+### BSD 2-Clause "Simplified" License
+
+Used by: [v_frame 0.3.9](https://crates.io/crates/v_frame/0.3.9)
+
+~~~text
+BSD 2-Clause License
+
+Copyright (c) 2017-2022, the rav1e contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+~~~
+
+Used by: [rav1e 0.8.1](https://crates.io/crates/rav1e/0.8.1)
+
+~~~text
+BSD 2-Clause License
+
+Copyright (c) 2017-2023, the rav1e contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+~~~
+
+Used by: [av1-grain 0.2.5](https://crates.io/crates/av1-grain/0.2.5)
+
+~~~text
+BSD 2-Clause License
+
+Copyright (c) 2022-2022, the rav1e contributors
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ~~~
 
