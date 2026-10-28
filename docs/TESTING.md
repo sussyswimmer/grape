@@ -267,12 +267,16 @@ Image tools, M4 (D26; win and mac; any CI installer or DMG, nothing extra needed
 - [ ] win: an animated PNG on COMPRESS → "… is animated. Compress works on still PNGs for now."
 - [ ] win: Ctrl-drop three JPGs on COMPRESS → one panel, then three outputs.
 
-Image tools, slice 2, M4 (D28) (win and mac; any CI installer or DMG, nothing extra needed; use scratch copies of files, and check each original with `Get-FileHash`, or `shasum -a 256` on a Mac, before and after. Remove Metadata on TIFF runs; the Compress items come with Compress on TIFF, WebP and HEIC, and the HEIC items with Remove Metadata on HEIC)
+Image tools, slice 2, M4 (D28) (win and mac; any CI installer or DMG, nothing extra needed; use scratch copies of files, and check each original with `Get-FileHash`, or `shasum -a 256` on a Mac, before and after. Remove Metadata runs on TIFF and HEIC; the Compress items come with Compress on TIFF, WebP and HEIC)
 - [ ] A 10-page scanner TIFF (LZW) on REMOVE METADATA → `… No Metadata.tif` shows every page in Photos, Paint, Explorer's preview, Preview and Quick Look; Explorer → Properties → Details is empty but for the DPI, which is still there.
 - [ ] A 1-bit G4 scan on REMOVE METADATA → the scanner's model and date go; the pages and the DPI stay.
 - [ ] A Photoshop TIFF with layers and a clipping path on REMOVE METADATA → the path is still there in Photoshop or GIMP; the toast says embedded media went; it looks the same.
 - [ ] A GeoTIFF on REMOVE METADATA → QGIS shows no CRS.
 - [ ] A camera's DNG renamed `.tif` on REMOVE METADATA → "… is a camera raw (DNG) file, which Grape can't change yet." and nothing written; an ImageJ stack → "… keeps its layout in its description, so Remove Metadata would break it."
+- [ ] iPhone HEICs (12, 24 and 48 MP, one HDR, one Portrait) on REMOVE METADATA → `… No Metadata.HEIC`, the same size as the original. Explorer → Properties and Preview → Inspector show no GPS, camera or date; it's still upright; P3 color is intact; `exiftool` shows no EXIF or XMP. It opens in Windows Photos (with the HEIF extension), Preview, Photos and on an iPhone. Note whether the HDR look and Portrait depth editing survive.
+- [ ] A Canon or Sony 10-bit `.HIF` on REMOVE METADATA → `… No Metadata.HIF` opens in the camera maker's viewer or Lightroom with the same look and no camera data.
+- [ ] A Samsung motion-photo HEIC on REMOVE METADATA → the toast says embedded media went; the photo opens (as a still).
+- [ ] A HEIC image sequence (one with a `moov`, such as the HEIF conformance suite's `C026.heic`) on REMOVE METADATA → "… is an image sequence. Remove Metadata works on still HEIC photos for now." and nothing written.
 
 File actions, M5 (win; use scratch copies of files)
 - [ ] win: drag two scratch files, tap Alt and drop on COPY → a toast says "Copied 2 items". Ctrl+V in another folder → copies appear there, and the originals are still where they were.

@@ -581,7 +581,8 @@ impl Meta {
         self.items.iter().find(|item| item.id == id)
     }
 
-    /// Item `id`'s `iloc` entry.
+    /// Item `id`'s `iloc` entry (the tools look entries up by a map).
+    #[cfg(test)]
     pub(crate) fn location(&self, id: u32) -> Option<&Location> {
         self.locations.iter().find(|loc| loc.id == id)
     }

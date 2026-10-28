@@ -322,11 +322,6 @@ impl<'a> Fields<'a> {
             }
         }
     }
-
-    /// What's left.
-    pub(crate) fn rest(&self) -> &'a [u8] {
-        &self.bytes[self.at..self.end]
-    }
 }
 
 #[cfg(test)]
@@ -479,6 +474,6 @@ mod tests {
         ));
         let mut f = Fields::new(&bytes, 0..8);
         assert_eq!(f.full().unwrap(), (1, 0x020304));
-        assert_eq!(f.rest(), [5, b'a', 0, b'b']);
+        assert_eq!(f.take(4).unwrap(), [5, b'a', 0, b'b']);
     }
 }

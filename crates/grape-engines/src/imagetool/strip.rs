@@ -1,8 +1,9 @@
 //! Remove Metadata on images (D26, D28): the source streamed through its
 //! container's stripper into a temp file, then published with a note of
 //! what went. A TIFF is walked first and rewritten from the plan its walk
-//! made ([`tiff::strip`]), and the output is read again before it's
-//! published.
+//! made ([`tiff::strip`]); a HEIF file is read first and copied with its
+//! `meta` rebuilt in place ([`heic`]). Either output is read again before
+//! it's published.
 //!
 //! The container comes from the file's first bytes, not its name: a PNG
 //! named `.jpg` is stripped as a PNG (and keeps its name). Reads and
@@ -16,7 +17,7 @@ use std::path::Path;
 
 use grape_core::{Format, Job};
 
-use super::{gif, jpeg, png, tiff, webp, Kind};
+use super::{gif, heic, jpeg, png, tiff, webp, Kind};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -132,18 +133,19 @@ pub(crate) fn more_after(r: &mut dyn BufRead, padding: &[u8]) -> Result<bool, Er
 pub(crate) fn strips(from: Format) -> bool {
     matches!(
         from,
-        Format::Jpg | Format::Png | Format::Webp | Format::Gif | Format::Tiff
+        Format::Jpg | Format::Png | Format::Webp | Format::Gif | Format::Tiff | Format::Heic
     )
 }
 
 /// How a source is stripped: streamed through its container's stripper,
-/// or, for a TIFF, rewritten from the plan its walk made.
+/// or, for a TIFF or a HEIF file, written from the plan its reading made.
 enum Stripper {
     Jpeg,
     Png,
     Webp,
     Gif,
     Tiff(tiff::strip::Plan),
+    Heic(heic::Plan),
 }
 
 /// Runs Remove Metadata on the image `src` (named as `from`) into `dest`.
@@ -180,12 +182,12 @@ pub(crate) fn run(
         .map_err(|e| read_error(&names, src, &ctx.cancel, e))?;
     let Some(kind) = Kind::of(head) else {
         return Err(names.decode_failed(format!(
-            "{}: not a JPEG, PNG, WebP, GIF or TIFF",
+            "{}: not a JPEG, PNG, WebP, GIF, TIFF or HEIF",
             src.display()
         )));
     };
-    // A TIFF is walked first: one Grape won't strip is refused before
-    // anything is created.
+    // A TIFF or a HEIF file is read first: one Grape won't strip is
+    // refused before anything is created.
     let stripper = match kind {
         Kind::Jpeg => Stripper::Jpeg,
         Kind::Png => Stripper::Png,
@@ -193,6 +195,12 @@ pub(crate) fn run(
         Kind::Gif => Stripper::Gif,
         Kind::Tiff => Stripper::Tiff(
             tiff::strip::Plan::new(&mut reader, size)
+                .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
+        ),
+        // AVIF content, or another codec's, is stripped too: nothing is
+        // decoded.
+        Kind::Heif(_) => Stripper::Heic(
+            heic::Plan::new(&mut reader, size)
                 .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
         ),
     };
@@ -206,6 +214,7 @@ pub(crate) fn run(
         Stripper::Webp => webp::strip(&mut reader, &mut writer),
         Stripper::Gif => gif::strip(&mut reader, &mut writer),
         Stripper::Tiff(plan) => plan.write(&mut reader, &mut writer, &ctx.cancel),
+        Stripper::Heic(plan) => plan.write(&mut reader, &mut writer),
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
     let found = found.map_err(|e| failed(e, &names, src, temp.path(), &ctx.cancel))?;
@@ -217,9 +226,7 @@ pub(crate) fn run(
         .map_err(|e| names.write_failed(format!("sync {}: {e}", temp.path().display())))?;
     drop(out);
     drop(reader);
-    if let Stripper::Tiff(plan) = &stripper {
-        check(plan, temp.path(), &names, src, &ctx.cancel)?;
-    }
+    check(&stripper, temp.path(), &names, src, &ctx.cancel)?;
     if ctx.cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
@@ -244,11 +251,12 @@ fn failed(e: Error, names: &Names, src: &Path, temp: &Path, cancel: &CancelToken
     publish::or_cancelled(cancel, src, e)
 }
 
-/// Reads the TIFF Grape wrote at `path` again, against the `plan` it came
-/// from (D28): anything amiss is Grape's own failure, and nothing is
-/// published.
+/// Reads the TIFF or HEIF file Grape wrote at `path` again, against the
+/// plan it came from (D28), and a HEIF file's source `src` too: anything
+/// amiss is Grape's own failure, and nothing is published. The other
+/// containers are streamed, and have no plan.
 fn check(
-    plan: &tiff::strip::Plan,
+    stripper: &Stripper,
     path: &Path,
     names: &Names,
     src: &Path,
@@ -258,13 +266,28 @@ fn check(
         let e = names.encode_failed(format!("check {}: {why}", path.display()));
         publish::or_cancelled(cancel, src, e)
     };
-    let file = File::open(path).map_err(|e| wrong(format!("open: {e}")))?;
-    let len = file
-        .metadata()
-        .map_err(|e| wrong(format!("stat: {e}")))?
-        .len();
-    let mut reader = BufReader::with_capacity(64 * 1024, Cancellable::new(file, cancel));
-    plan.check(&mut reader, len).map_err(|e| match e {
+    let open = |at: &Path| -> Result<_, GrapeError> {
+        let file = File::open(at).map_err(|e| wrong(format!("open {}: {e}", at.display())))?;
+        let len = file
+            .metadata()
+            .map_err(|e| wrong(format!("stat {}: {e}", at.display())))?
+            .len();
+        let reader = BufReader::with_capacity(64 * 1024, Cancellable::new(file, cancel));
+        Ok((reader, len))
+    };
+    let checked = match stripper {
+        Stripper::Tiff(plan) => {
+            let (mut reader, len) = open(path)?;
+            plan.check(&mut reader, len)
+        }
+        Stripper::Heic(plan) => {
+            let (mut reader, len) = open(path)?;
+            let (mut source, _) = open(src)?;
+            plan.check(&mut source, &mut reader, len)
+        }
+        Stripper::Jpeg | Stripper::Png | Stripper::Webp | Stripper::Gif => Ok(()),
+    };
+    checked.map_err(|e| match e {
         Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => wrong(why),
         Error::Read(e) | Error::Write(e) => wrong(e.to_string()),
     })
