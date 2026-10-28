@@ -48,8 +48,8 @@ use objc2_core_graphics::{
     CGImageAlphaInfo, CGImageByteOrderInfo,
 };
 use objc2_image_io::{
-    kCGImageDestinationLossyCompressionQuality, kCGImagePropertyDepth, kCGImagePropertyOrientation,
-    kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
+    kCGImageDestinationLossyCompressionQuality, kCGImagePropertyDepth, kCGImagePropertyHasAlpha,
+    kCGImagePropertyOrientation, kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
     kCGImageSourceCreateThumbnailFromImageAlways, kCGImageSourceCreateThumbnailWithTransform,
     kCGImageSourceShouldAllowFloat, kCGImageSourceShouldCache,
     kCGImageSourceShouldCacheImmediately, kCGImageSourceThumbnailMaxPixelSize,
@@ -192,6 +192,10 @@ fn number(properties: &CFDictionary<CFString, CFType>, key: &CFString) -> Option
     properties.get(key)?.downcast_ref::<CFNumber>()?.as_i64()
 }
 
+fn boolean(properties: &CFDictionary<CFString, CFType>, key: &CFString) -> Option<bool> {
+    Some(properties.get(key)?.downcast_ref::<CFBoolean>()?.as_bool())
+}
+
 /// The color space Grape draws the image into, and the ICC profile that
 /// then describes the pixels (`None`: sRGB).
 struct Target {
@@ -265,7 +269,15 @@ enum Layout {
 }
 
 impl Layout {
-    fn of(image: &CGImage) -> Layout {
+    /// The source's own word first (`kCGImagePropertyHasAlpha`): the
+    /// full-size thumbnail ImageIO draws has an alpha channel even for an
+    /// opaque HEIC. Without it, the picture's alpha info decides.
+    fn of(has_alpha: Option<bool>, image: &CGImage) -> Layout {
+        match has_alpha {
+            Some(true) => return Layout::Alpha,
+            Some(false) => return Layout::Opaque,
+            None => {}
+        }
         match CGImage::alpha_info(Some(image)) {
             CGImageAlphaInfo::None
             | CGImageAlphaInfo::NoneSkipFirst
@@ -331,7 +343,9 @@ fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(),
         ));
     }
     if count == 0 {
-        return Err(fail(FailKind::NoImage, "no images"));
+        // ImageIO read the type from the ftyp but found no picture: a HEIC
+        // cut short, not one without an image.
+        return Err(fail(FailKind::Damaged, "ImageIO found no image in it"));
     }
     if primary >= count {
         return Err(fail(FailKind::NoImage, "no primary image"));
@@ -375,6 +389,8 @@ fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(),
     // Windows: nothing caps this process's memory.
     // SAFETY: the key is a constant CFString ImageIO exports.
     let depth = number(properties, unsafe { kCGImagePropertyDepth });
+    // SAFETY: the key is a constant CFString ImageIO exports.
+    let has_alpha = boolean(properties, unsafe { kCGImagePropertyHasAlpha });
     let needs = crate::mac_rules::heif_decode_bytes(width, height, depth);
     if needs > limits.max_decoder_memory {
         return Err(fail(
@@ -398,7 +414,7 @@ fn decode(source: &Path, limits: &Limits, out: &mut dyn PixelSink) -> Result<(),
             format!("ImageIO gave {w}x{h} for a {width}x{height} image"),
         ));
     }
-    draw_rows(image, w, h, limits, out)
+    draw_rows(image, w, h, has_alpha, limits, out)
 }
 
 /// The primary image, decoded at full size with its transform (irot, imir)
@@ -434,17 +450,19 @@ fn full_size_upright(
 }
 
 /// Draws `image` (`w` × `h`) into an 8-bit bitmap and hands it to `out`,
-/// one row at a time, with straight alpha. `out` hears of the image before
-/// the bitmap is made, and `image` is let go once it's drawn.
+/// one row at a time, with straight alpha (3 channels when the source says
+/// it has none, `has_alpha`). `out` hears of the image before the bitmap is
+/// made, and `image` is let go once it's drawn.
 fn draw_rows(
     image: CFRetained<CGImage>,
     w: usize,
     h: usize,
+    has_alpha: Option<bool>,
     limits: &Limits,
     out: &mut dyn PixelSink,
 ) -> Result<(), Failure> {
     let max_icc = usize::try_from(limits.max_icc_bytes).unwrap_or(usize::MAX);
-    let layout = Layout::of(&image);
+    let layout = Layout::of(has_alpha, &image);
     let target = Target::for_image(&image, max_icc)
         .ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
     // CoreGraphics takes a space and a layout or not, whatever the size: a

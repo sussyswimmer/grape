@@ -426,7 +426,8 @@ fn odd_sizes_round_trip() {
             return;
         };
         assert_eq!((back.width(), back.height()), (width, height));
-        assert_near(&back.to_rgb8().get_pixel(0, 0).0, &[0, 200, 0], 12, "odd");
+        let at = format!("{width}x{height}, {:?}", back.color());
+        assert_near(&back.to_rgb8().get_pixel(0, 0).0, &[0, 200, 0], 12, &at);
     }
 }
 
