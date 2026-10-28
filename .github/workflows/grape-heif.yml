@@ -155,7 +155,7 @@ jobs:
           $lines | ForEach-Object { Write-Output "  $_" }
           if ($lines[0] -cnotmatch ('^grape-heif version ' + [regex]::Escape($want['libheif']) + '-grape\.\d+ ')) { Bad "Banner line 1: $($lines[0])" }
           $tokens = @("$($lines[1])" -split ' ')
-          foreach ($t in "libheif=$($want['libheif'])", "libde265=$($want['libde265'])", "x265=$($want['x265'])", 'plugins=disabled', 'crt=static', 'protocol=1') {
+          foreach ($t in "libheif=$($want['libheif'])", "libde265=$($want['libde265'])", "x265=$($want['x265'])", 'plugins=disabled', 'crt=static', 'protocol=2') {
             if ($tokens -cnotcontains $t) { Bad "Banner line 2 lacks $t`: $($lines[1])" }
           }
 
@@ -175,9 +175,9 @@ jobs:
           $work = Join-Path $env:RUNNER_TEMP 'heif-probe'
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
-          $probe = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $probe = [ordered]@{ protocol = 2; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
           $answer = @($probe | & $exe --grape-heif-worker)
-          if ($LASTEXITCODE -ne 0 -or "$($answer[-1])" -notmatch '^\{"done":\{"caps":\{"decode":true,"encode":true,') { Bad "Probe with LIBHEIF_PLUGIN_PATH set: $($answer -join ' / ')" }
+          if ($LASTEXITCODE -ne 0 -or "$($answer[-1])" -notmatch '^\{"done":\{"caps":\{"heic":\{"decode":true,"encode":true\},"avif":\{') { Bad "Probe with LIBHEIF_PLUGIN_PATH set: $($answer -join ' / ')" }
           Remove-Item Env:LIBHEIF_PLUGIN_PATH
 
           # The DLLs it imports: Windows' own only (heic-spec J34; the first
@@ -226,7 +226,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
           $source = Join-Path $env:RUNNER_TEMP 'heif-fixtures\opaque.heic'
-          $request = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'decode'; source = $source }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $request = [ordered]@{ protocol = 2; workDir = $work; op = [ordered]@{ kind = 'decode'; source = $source }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
           $env:LIBHEIF_SECURITY_LIMITS = 'off'
           $answer = @($request | & $exe --grape-heif-worker)
           $code = $LASTEXITCODE

@@ -1,16 +1,31 @@
-//! Telling HEIC from other HEIF and from everything else by the `ftyp` box.
-//! Shared by the parent, `grape-heif.exe` and the Mac worker, so all three
-//! agree.
+//! Telling HEIC and AVIF from other HEIF and from everything else by the
+//! `ftyp` box. Shared by the parent, `grape-heif.exe` and the Mac worker, so
+//! all three agree.
+
+use crate::HeifFormat;
 
 /// What the first bytes of a file say it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sniff {
-    /// HEIF with HEVC (HEIC): Grape's helper can read it.
+    /// HEIF with HEVC (HEIC), or HEIF that names no codec at all.
     Heic,
-    /// HEIF with another codec (AVIF, AVC, JPEG, VVC, uncompressed).
+    /// HEIF with AV1 (AVIF).
+    Avif,
+    /// HEIF with another codec (AVC, JPEG, J2K, VVC, uncompressed).
     OtherHeif,
     /// Not HEIF at all (MP4 and MOV included).
     NotHeif,
+}
+
+impl Sniff {
+    /// The format a helper decodes it as: `Heic` and `Avif` only.
+    pub fn format(self) -> Option<HeifFormat> {
+        match self {
+            Sniff::Heic => Some(HeifFormat::Heic),
+            Sniff::Avif => Some(HeifFormat::Avif),
+            Sniff::OtherHeif | Sniff::NotHeif => None,
+        }
+    }
 }
 
 /// The HEVC brands.
@@ -18,16 +33,25 @@ const HEVC: [&[u8; 4]; 8] = [
     b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"hevm", b"hevs",
 ];
 
+/// The AV1 brands: AVIF's image and sequence brands, the intra-only one and
+/// MIAF's AV1 Baseline and Advanced profiles.
+const AV1: [&[u8; 4]; 5] = [b"avif", b"avis", b"avio", b"MA1B", b"MA1A"];
+
+/// The major brands that make a file AVIF whatever follows.
+const AV1_MAJOR: [&[u8; 4]; 2] = [b"avif", b"avis"];
+
 /// Structural brands: with one of these as the major brand, a compatible
-/// HEVC brand makes the file HEIC, and so does having no codec brand at all.
+/// codec brand decides (HEVC first, then AV1), and no codec brand at all
+/// makes the file HEIC, for the decoder to decide.
 const STRUCTURAL: [&[u8; 4]; 4] = [b"mif1", b"msf1", b"miaf", b"MiHE"];
 
 /// The brands of HEIF's other codecs.
-const OTHER_CODEC: [&[u8; 4]; 10] = [
-    b"avif", b"avis", b"avci", b"avcs", b"jpeg", b"jpgs", b"j2ki", b"j2is", b"vvic", b"vvis",
+const OTHER_CODEC: [&[u8; 4]; 8] = [
+    b"avci", b"avcs", b"jpeg", b"jpgs", b"j2ki", b"j2is", b"vvic", b"vvis",
 ];
 
-/// The other HEIF brands.
+/// The other HEIF brands: a file with one of these that isn't HEIC or AVIF
+/// by the rules above is [`Sniff::OtherHeif`].
 const OTHER_HEIF: [&[u8; 4]; 14] = [
     b"mif1", b"msf1", b"miaf", b"avif", b"avis", b"avci", b"avcs", b"jpeg", b"jpgs", b"j2ki",
     b"j2is", b"vvic", b"vvis", b"unif",
@@ -41,12 +65,19 @@ const OTHER_HEIF: [&[u8; 4]; 14] = [
 ///   u64 BE size at 8..16 and the brands start 8 bytes later; size 0 means
 ///   "to the end", read as `head.len()`. The box must be at least 16 bytes
 ///   (its header, the major brand and the minor version).
-/// - [`Sniff::Heic`]: the major brand is an HEVC brand, or it's `mif1`,
-///   `msf1`, `miaf` or `MiHE` and a compatible brand is an HEVC brand or
-///   none names a codec. libheif writes a grid that way when it can't find
-///   its first tile's brand, so the decoder decides what's inside.
-/// - [`Sniff::OtherHeif`]: otherwise, the major or a compatible brand is a
-///   HEIF brand.
+/// - The rules, in order (D41):
+///   1. An HEVC major brand: [`Sniff::Heic`].
+///   2. A major `avif` or `avis`: [`Sniff::Avif`].
+///   3. A structural major brand (`mif1`, `msf1`, `miaf`, `MiHE`) with a
+///      compatible HEVC brand: [`Sniff::Heic`], so HEVC wins a tie.
+///   4. A structural major brand with a compatible AV1 brand (`avif`,
+///      `avis`, `avio`, `MA1B`, `MA1A`) and no HEVC one: [`Sniff::Avif`].
+///   5. A structural major brand with no codec brand at all:
+///      [`Sniff::Heic`]. libheif writes a grid that way when it can't find
+///      its first tile's brand, so the decoder decides what's inside.
+///   6. Otherwise, the major or a compatible brand is a HEIF brand:
+///      [`Sniff::OtherHeif`]. So a non-structural major brand such as
+///      `isom` with a compatible `avif` (or `heic`) is never decoded.
 /// - [`Sniff::NotHeif`]: everything else.
 pub fn sniff(head: &[u8]) -> Sniff {
     let Some((major, compatible)) = brands(head) else {
@@ -55,10 +86,15 @@ pub fn sniff(head: &[u8]) -> Sniff {
     let is = |set: &[&[u8; 4]], brand: &[u8; 4]| set.contains(&brand);
     let any_compatible = |set: &[&[u8; 4]]| compatible.iter().any(|b| is(set, b));
     let structural = is(&STRUCTURAL, major);
-    if is(&HEVC, major)
-        || (structural && any_compatible(&HEVC))
-        || (structural && !any_compatible(&OTHER_CODEC))
-    {
+    if is(&HEVC, major) {
+        Sniff::Heic
+    } else if is(&AV1_MAJOR, major) {
+        Sniff::Avif
+    } else if structural && any_compatible(&HEVC) {
+        Sniff::Heic
+    } else if structural && any_compatible(&AV1) {
+        Sniff::Avif
+    } else if structural && !any_compatible(&OTHER_CODEC) {
         Sniff::Heic
     } else if is(&OTHER_HEIF, major) || any_compatible(&OTHER_HEIF) {
         Sniff::OtherHeif
@@ -157,11 +193,53 @@ mod tests {
     }
 
     #[test]
+    fn avif_is_told_apart() {
+        // An AVIF photo, and libavif's and libheif's usual brands.
+        assert_eq!(sniff(&file(b"avif", &[b"mif1", b"avif"])), Sniff::Avif);
+        assert_eq!(
+            sniff(&file(b"avif", &[b"avif", b"mif1", b"miaf", b"MA1B"])),
+            Sniff::Avif
+        );
+        assert_eq!(sniff(&file(b"avis", &[b"avis", b"msf1"])), Sniff::Avif);
+        assert_eq!(sniff(&file(b"avif", &[])), Sniff::Avif);
+        // A major avif decides, even with HEVC only as a compatible brand.
+        assert_eq!(sniff(&file(b"avif", &[b"heic"])), Sniff::Avif);
+        // Rule 4: a structural major brand with an AV1 brand and no HEVC one.
+        assert_eq!(sniff(&file(b"mif1", &[b"avif", b"miaf"])), Sniff::Avif);
+        for major in STRUCTURAL {
+            for av1 in AV1 {
+                assert_eq!(
+                    sniff(&file(major, &[b"mif1", av1])),
+                    Sniff::Avif,
+                    "{major:?} {av1:?}"
+                );
+            }
+        }
+        // An AV1 brand wins over another codec's under a structural one.
+        assert_eq!(sniff(&file(b"mif1", &[b"avci", b"avif"])), Sniff::Avif);
+        // Rule 3 first: HEVC wins a tie.
+        assert_eq!(sniff(&file(b"mif1", &[b"avif", b"heic"])), Sniff::Heic);
+        assert_eq!(sniff(&file(b"miaf", &[b"MA1A", b"hevc"])), Sniff::Heic);
+        // A non-structural major brand with a compatible avif: not decoded,
+        // as `isom` with a compatible `heic` isn't.
+        assert_eq!(sniff(&file(b"isom", &[b"avif"])), Sniff::OtherHeif);
+        assert_eq!(sniff(&file(b"isom", &[b"avis", b"mif1"])), Sniff::OtherHeif);
+        // The other AV1 brands as the major one aren't AVIF's own.
+        assert_eq!(sniff(&file(b"avio", &[b"mif1"])), Sniff::OtherHeif);
+        assert_eq!(sniff(&file(b"MA1B", &[])), Sniff::NotHeif);
+        assert_eq!(sniff(&file(b"isom", &[b"avio", b"MA1B"])), Sniff::NotHeif);
+    }
+
+    #[test]
+    fn the_formats_are_heic_and_avif_only() {
+        assert_eq!(Sniff::Heic.format(), Some(HeifFormat::Heic));
+        assert_eq!(Sniff::Avif.format(), Some(HeifFormat::Avif));
+        assert_eq!(Sniff::OtherHeif.format(), None);
+        assert_eq!(Sniff::NotHeif.format(), None);
+    }
+
+    #[test]
     fn other_heif_is_told_apart() {
-        assert_eq!(sniff(&file(b"avif", &[b"mif1", b"avif"])), Sniff::OtherHeif);
-        assert_eq!(sniff(&file(b"mif1", &[b"avif", b"miaf"])), Sniff::OtherHeif);
-        // HEVC only as a compatible brand under a non-structural major one.
-        assert_eq!(sniff(&file(b"avif", &[b"heic"])), Sniff::OtherHeif);
         for brand in OTHER_CODEC {
             assert_eq!(sniff(&file(brand, &[])), Sniff::OtherHeif, "{brand:?}");
             assert_eq!(
@@ -249,8 +327,12 @@ mod tests {
     #[test]
     fn compatible_brands_stop_at_the_box_end() {
         let mut bytes = ftyp(b"mif1", &[b"avif"]);
-        // A following box whose type happens to read as a brand.
+        // A following box whose type happens to read as a brand: inside the
+        // box, `heic` would win.
         bytes.extend_from_slice(b"heic");
+        assert_eq!(sniff(&bytes), Sniff::Avif);
+        let mut bytes = ftyp(b"mif1", &[b"avci"]);
+        bytes.extend_from_slice(b"avif");
         assert_eq!(sniff(&bytes), Sniff::OtherHeif);
     }
 
@@ -271,20 +353,24 @@ mod tests {
         // is there decides. A structural brand alone goes to the decoder.
         assert_eq!(sniff(&full[..12]), Sniff::Heic);
         assert_eq!(sniff(&full[..16]), Sniff::Heic);
-        assert_eq!(sniff(&full[..20]), Sniff::OtherHeif);
+        assert_eq!(sniff(&full[..20]), Sniff::Avif);
         // `heic` cut to `hei`.
-        assert_eq!(sniff(&full[..23]), Sniff::OtherHeif);
+        assert_eq!(sniff(&full[..23]), Sniff::Avif);
         assert_eq!(sniff(&full[..24]), Sniff::Heic);
         let heic = file(b"heic", &[]);
         assert_eq!(sniff(&heic[..12]), Sniff::Heic);
     }
 
     #[test]
-    fn the_fixtures_avif_brand_file_is_other_heif() {
-        // heic-spec §5.6's `avif-brand.heic`: 32 bytes, major `avif`,
-        // compatible `mif1 avif`, then zeros.
-        let mut bytes = ftyp(b"avif", &[b"mif1", b"avif"]);
+    fn the_fixtures_avci_brand_file_is_other_heif() {
+        // grape-heif-fixtures' `avci-brand.heic` (D41): 32 bytes, major
+        // `avci`, compatible `mif1 avci`, then zeros.
+        let mut bytes = ftyp(b"avci", &[b"mif1", b"avci"]);
         bytes.resize(32, 0);
         assert_eq!(sniff(&bytes), Sniff::OtherHeif);
+        // The `avif-brand.heic` it replaces is AVIF now.
+        let mut bytes = ftyp(b"avif", &[b"mif1", b"avif"]);
+        bytes.resize(32, 0);
+        assert_eq!(sniff(&bytes), Sniff::Avif);
     }
 }

@@ -3,12 +3,16 @@
 //! `serve` (in grape-heif-proto) reads the request, checks the paths and
 //! limits, sniffs the source and writes the pixel files. This module only
 //! turns a HEIC file into upright 8-bit rows, and pixels into HEIC bytes.
+//! Protocol 2 also names AVIF (D41), which this build has no codec for yet:
+//! its caps are false, a decode is `unsupported` and an encode `noEncoder`.
 
 use std::fs::File;
 use std::io::{self, BufReader};
 use std::path::Path;
 
-use grape_heif_proto::{Caps, Codec, FailKind, Failure, ImageInfo, Limits, PixelSink, Pixels};
+use grape_heif_proto::{
+    Caps, Codec, FailKind, Failure, FormatCaps, HeifFormat, ImageInfo, Limits, PixelSink, Pixels,
+};
 use libheif_rs::{
     color_profile_types, Channel, ColorProfile, ColorProfileRaw, ColorSpace, CompressionFormat,
     DecodingOptions, EncoderParameterValue, EncoderQuality, EncodingOptions, HeifContext,
@@ -82,8 +86,12 @@ impl Codec for LibheifCodec {
     fn caps(&self) -> Caps {
         let ok = self.ready().is_ok();
         Caps {
-            decode: ok,
-            encode: ok,
+            heic: FormatCaps {
+                decode: ok,
+                encode: ok,
+            },
+            // No AV1 codec in this build yet (D41).
+            avif: FormatCaps::default(),
             codec: self.components.codec_name(),
         }
     }
@@ -91,9 +99,13 @@ impl Codec for LibheifCodec {
     fn decode(
         &self,
         source: &Path,
+        format: HeifFormat,
         limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure> {
+        if format != HeifFormat::Heic {
+            return Err(no_av1(FailKind::Unsupported, "decoder"));
+        }
         let lib = self.ready()?;
         let file = File::open(source).map_err(|e| io_failure("opening the source", &e))?;
         let len = file
@@ -159,9 +171,13 @@ impl Codec for LibheifCodec {
     fn encode(
         &self,
         pixels: &Pixels,
+        format: HeifFormat,
         quality: Option<u8>,
         _limits: &Limits,
     ) -> Result<Vec<u8>, Failure> {
+        if format != HeifFormat::Heic {
+            return Err(no_av1(FailKind::NoEncoder, "encoder"));
+        }
         // serve has checked the size against the limits, and libheif's
         // security limits apply to reading, not to encoding.
         let lib = self.ready()?;
@@ -347,6 +363,11 @@ fn internal(detail: impl Into<String>) -> Failure {
     Failure::new(FailKind::Internal, detail)
 }
 
+/// This build has no AV1 decoder or encoder yet (D41).
+fn no_av1(kind: FailKind, what: &str) -> Failure {
+    Failure::new(kind, format!("this grape-heif has no AV1 {what}"))
+}
+
 fn io_failure(what: &str, e: &io::Error) -> Failure {
     Failure::new(FailKind::Read, format!("{what}: {:?}", e.kind()))
 }
@@ -484,13 +505,17 @@ mod tests {
 
     fn round_trip(pixels: &Pixels) -> Collect {
         let codec = LibheifCodec::new();
-        let bytes = codec.encode(pixels, None, &Limits::DEFAULT).unwrap();
+        let bytes = codec
+            .encode(pixels, HeifFormat::Heic, None, &Limits::DEFAULT)
+            .unwrap();
         assert_eq!(sniff(&bytes), Sniff::Heic);
         let dir = TempDir::new();
         let file = dir.0.join("round trip ảnh.heic");
         std::fs::write(&file, &bytes).unwrap();
         let mut sink = Collect::default();
-        codec.decode(&file, &Limits::DEFAULT, &mut sink).unwrap();
+        codec
+            .decode(&file, HeifFormat::Heic, &Limits::DEFAULT, &mut sink)
+            .unwrap();
         sink
     }
 
@@ -499,8 +524,36 @@ mod tests {
         let codec = LibheifCodec::new();
         assert_eq!(codec.problem, None);
         let caps = codec.caps();
-        assert!(caps.decode && caps.encode);
+        assert!(caps.heic.decode && caps.heic.encode);
+        assert_eq!(caps.avif, FormatCaps::default());
         assert_eq!(caps.codec, "libheif 1.23.7 (libde265 1.1.3, x265 4.3)");
+    }
+
+    #[test]
+    fn avif_isnt_read_or_written_yet() {
+        let codec = LibheifCodec::new();
+        let dir = TempDir::new();
+        let file = dir.0.join("x.avif");
+        std::fs::write(&file, b"\0\0\0\x18ftypavif\0\0\0\0mif1avif").unwrap();
+        let err = codec
+            .decode(
+                &file,
+                HeifFormat::Avif,
+                &Limits::DEFAULT,
+                &mut Collect::default(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err,
+            Failure::new(FailKind::Unsupported, "this grape-heif has no AV1 decoder")
+        );
+        let err = codec
+            .encode(&gradient(4, 4, 3), HeifFormat::Avif, None, &Limits::DEFAULT)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            Failure::new(FailKind::NoEncoder, "this grape-heif has no AV1 encoder")
+        );
     }
 
     #[test]
@@ -561,7 +614,12 @@ mod tests {
         let file = dir.0.join("x.heic");
         std::fs::write(&file, b"\0\0\0\x18ftypheic\0\0\0\0mif1heic garbage").unwrap();
         let err = LibheifCodec::new()
-            .decode(&file, &Limits::DEFAULT, &mut Collect::default())
+            .decode(
+                &file,
+                HeifFormat::Heic,
+                &Limits::DEFAULT,
+                &mut Collect::default(),
+            )
             .unwrap_err();
         assert!(
             matches!(

@@ -23,6 +23,9 @@
 //!   then writes one picture at ImageIO's lossy quality 0.8 by default. A
 //!   finish that fails is the same "this Mac can't write HEIC": that's how
 //!   ImageIO fails on hardware without an encoder that still lists the type.
+//! - **AVIF** (protocol 2's other format, D41) isn't read or written yet:
+//!   its caps are false, a decode is `unsupported` and an encode
+//!   `noEncoder`.
 //! - First thing, before ImageIO does anything else and while it has one
 //!   thread, the worker restricts ImageIO to the HEIF types with
 //!   `CGImageSourceSetAllowableTypes` on macOS 14.2 and later
@@ -37,7 +40,9 @@ use std::ffi::c_void;
 use std::path::Path;
 use std::sync::Once;
 
-use grape_heif_proto::{Caps, Codec, FailKind, Failure, ImageInfo, Limits, PixelSink, Pixels};
+use grape_heif_proto::{
+    Caps, Codec, FailKind, Failure, FormatCaps, HeifFormat, ImageInfo, Limits, PixelSink, Pixels,
+};
 use objc2::rc::autoreleasepool;
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFData, CFDictionary, CFMutableData, CFNumber, CFRetained, CFString,
@@ -89,8 +94,12 @@ impl ImageIo {
 impl Codec for ImageIo {
     fn caps(&self) -> Caps {
         autoreleasepool(|_| Caps {
-            decode: can_read_heic(),
-            encode: can_write_heic(),
+            heic: FormatCaps {
+                decode: can_read_heic(),
+                encode: can_write_heic(),
+            },
+            // Not yet (D41).
+            avif: FormatCaps::default(),
             codec: "ImageIO".to_owned(),
         })
     }
@@ -98,20 +107,33 @@ impl Codec for ImageIo {
     fn decode(
         &self,
         source: &Path,
+        format: HeifFormat,
         limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure> {
-        autoreleasepool(|_| decode(source, limits, out))
+        match format {
+            HeifFormat::Heic => autoreleasepool(|_| decode(source, limits, out)),
+            HeifFormat::Avif => Err(not_yet(FailKind::Unsupported, "decode")),
+        }
     }
 
     fn encode(
         &self,
         pixels: &Pixels,
+        format: HeifFormat,
         quality: Option<u8>,
         _limits: &Limits,
     ) -> Result<Vec<u8>, Failure> {
-        autoreleasepool(|_| encode(pixels, quality))
+        match format {
+            HeifFormat::Heic => autoreleasepool(|_| encode(pixels, quality)),
+            HeifFormat::Avif => Err(not_yet(FailKind::NoEncoder, "encode")),
+        }
     }
+}
+
+/// What this worker answers for AVIF until it reads and writes it (D41).
+fn not_yet(kind: FailKind, op: &str) -> Failure {
+    fail(kind, format!("this worker doesn't {op} AVIF yet"))
 }
 
 /// True when ImageIO can open `public.heic` on this Mac.
@@ -843,9 +865,41 @@ mod tests {
         // Every macOS since 10.13 reads HEIC; writing depends on the
         // hardware, so it's only reported.
         let caps = ImageIo.caps();
-        assert!(caps.decode);
+        assert!(caps.heic.decode);
         assert_eq!(caps.codec, "ImageIO");
-        println!("ImageIO encodes HEIC here: {}", caps.encode);
+        println!("ImageIO encodes HEIC here: {}", caps.heic.encode);
+        // Not yet (D41).
+        assert_eq!(caps.avif, FormatCaps::default());
+    }
+
+    #[test]
+    fn avif_isnt_read_or_written_yet() {
+        struct Nothing;
+        impl PixelSink for Nothing {
+            fn begin(&mut self, _: &ImageInfo, _: Option<&[u8]>) -> Result<(), Failure> {
+                panic!("nothing is decoded")
+            }
+            fn row(&mut self, _: &[u8]) -> Result<(), Failure> {
+                panic!("nothing is decoded")
+            }
+        }
+        // Not even opened: the path doesn't exist.
+        let missing = std::env::temp_dir().join("grape-no-such-file.avif");
+        let decoded = ImageIo.decode(&missing, HeifFormat::Avif, &Limits::DEFAULT, &mut Nothing);
+        let failure = decoded.expect_err("no AVIF decode yet");
+        assert_eq!(failure.kind, FailKind::Unsupported);
+        assert_eq!(failure.detail, "this worker doesn't decode AVIF yet");
+        let pixels = Pixels {
+            width: 1,
+            height: 1,
+            channels: 3,
+            data: vec![1, 2, 3],
+            icc: None,
+        };
+        let encoded = ImageIo.encode(&pixels, HeifFormat::Avif, None, &Limits::DEFAULT);
+        let failure = encoded.expect_err("no AVIF encode yet");
+        assert_eq!(failure.kind, FailKind::NoEncoder);
+        assert_eq!(failure.detail, "this worker doesn't encode AVIF yet");
     }
 
     #[test]

@@ -200,7 +200,7 @@ Grape converts HEIC images on Windows with `grape-heif.exe`, a small program of 
 | Grape's own code in it | MIT | Grape's `LICENSE` |
 | The Visual C++ runtime, linked statically | Visual Studio's redistribution terms, which need no notice | none needed |
 
-**The source.** Every build of the installer comes with grape-heif's complete source, `grape-heif-1.23.7-grape.1-source.tar.gz`, on the GitHub Release that ships the installer and in the CI run that built it. It holds Grape's code for the program, every Rust crate it uses, the three libraries' source archives, vcpkg's build recipes and how to build it again.
+**The source.** Every build of the installer comes with grape-heif's complete source, `grape-heif-1.23.7-grape.2-source.tar.gz`, on the GitHub Release that ships the installer and in the CI run that built it. It holds Grape's code for the program, every Rust crate it uses, the three libraries' source archives, vcpkg's build recipes and how to build it again.
 
 This section is written by hand: check it again when `tools/grape-heif/vcpkg.lock.json` changes a version.
 

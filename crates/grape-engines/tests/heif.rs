@@ -1,5 +1,5 @@
-//! HEIC end to end with Grape's real HEIC helper (feature `heif-it`,
-//! DECISIONS D33).
+//! HEIC end to end with Grape's real image helper (feature `heif-it`,
+//! DECISIONS D33), speaking protocol 2 (D41).
 //!
 //! - `GRAPE_TEST_HEIF` names the helper: `grape-heif.exe` from CI's
 //!   grape-heif job on Windows, grape-platform's `grape-heif-worker` on
@@ -73,7 +73,7 @@ fn serial() -> MutexGuard<'static, ()> {
 fn helper() -> PathBuf {
     let path = std::env::var_os("GRAPE_TEST_HEIF")
         .map(PathBuf::from)
-        .expect("set GRAPE_TEST_HEIF to the HEIC helper to run the heif-it tests");
+        .expect("set GRAPE_TEST_HEIF to the image helper to run the heif-it tests");
     assert!(
         path.is_file(),
         "GRAPE_TEST_HEIF is not a file: {}",
@@ -300,10 +300,10 @@ fn the_helper_answers_a_probe() {
         panic!("not a done line: {last}");
     };
     let caps = done.caps.unwrap();
-    eprintln!("HEIC helper: {caps:?}");
-    assert!(caps.decode);
+    eprintln!("image helper: {caps:?}");
+    assert!(caps.heic.decode);
     if cfg!(windows) {
-        assert!(caps.encode);
+        assert!(caps.heic.encode);
         assert!(caps.codec.starts_with("libheif 1.23.7"), "{}", caps.codec);
     }
     assert!(fs::read_dir(&work.path).unwrap().next().is_none());
@@ -553,12 +553,12 @@ fn a_damaged_heic_and_another_kind_of_heif_say_so() {
     refused(
         convert(
             &dir,
-            "avif-brand.heic",
-            &fixture("avif-brand.heic"),
+            "avci-brand.heic",
+            &fixture("avci-brand.heic"),
             Format::Jpg,
         ),
         ErrorKind::DecodeFailed,
-        "avif-brand.heic is a kind of HEIF image Grape can't read yet.",
+        "avci-brand.heic is a kind of HEIF image Grape can't read yet.",
     );
 }
 

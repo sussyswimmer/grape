@@ -1,17 +1,19 @@
 //! HEIC ⇄ JPG, PNG, WebP, TIFF and BMP (and HEIC's pixels for
-//! `pdf::create`) through Grape's HEIC helper, a separate process
+//! `pdf::create`) through Grape's image helper, a separate process
 //! (DECISIONS D33). Lane A's module, by agreement with
 //! lane B, who owns this crate.
 //!
 //! The helper is `grape-heif.exe` (libheif) on Windows and
 //! `Grape --grape-heif-worker` (ImageIO) on macOS. Both speak
-//! `grape-heif-proto`, so this side has no `cfg`: it starts
-//! `<SidecarPaths::heif> --grape-heif-worker` either way.
+//! `grape-heif-proto` (protocol 2, D41), so this side has no `cfg`: it
+//! starts `<SidecarPaths::heif> --grape-heif-worker` either way. Protocol 2
+//! also carries AVIF, which this module doesn't convert yet.
 //!
 //! - **HEIC → raster:** the source's `ftyp` is sniffed before anything
 //!   starts. A file that isn't HEIF goes to the raster engine
-//!   ([`image::convert`], FORMAT_MATRIX rule 3); HEIF with another codec is
-//!   refused. For HEIC, the helper decodes the primary image, upright and
+//!   ([`image::convert`], FORMAT_MATRIX rule 3); HEIF with another codec,
+//!   AV1 included for now, is refused. For HEIC, the helper decodes the
+//!   primary image, upright and
 //!   8-bit, into `pixels.rgba` in a private work folder under the OS temp
 //!   folder. Its `image` line comes before any pixel is written (libheif
 //!   sends it before decoding, ImageIO after its own decode, held to the
@@ -32,7 +34,9 @@
 //!   folder, contained by the app's hook (a Job Object on Windows) before
 //!   it gets its request. The job polls every 100 ms: a cancel or the
 //!   deadline ([`Limits`]) kills it. Its progress is passed on, never
-//!   backwards.
+//!   backwards. One that ends near its container's memory cap, or with
+//!   the heap bound's exit code ([`OVER_HEAP_EXIT`]), needed too much
+//!   memory.
 //! - **Messages** name the file in Grape's words (heic-spec §9). No detail
 //!   written here holds a path, a name or file contents; the helper's own
 //!   details never do either.
@@ -46,7 +50,7 @@ use std::time::{Duration, Instant};
 use ::image::{ColorType, DynamicImage, RgbImage, RgbaImage};
 use grape_core::{Format, Job};
 use grape_heif_proto::{
-    self as proto, FailKind, Failure, ImageInfo, Message, Op, PixelHeader, PixelLimits,
+    self as proto, FailKind, Failure, HeifFormat, ImageInfo, Message, Op, PixelHeader, PixelLimits,
     PixelWriter, Request, Sniff,
 };
 
@@ -54,11 +58,11 @@ use crate::cancel::Cancellable;
 use crate::helper::{self, Launch, Polled, Start, StartError, WorkDir};
 use crate::image;
 use crate::output::TempFile;
+use crate::pdf::heap::OVER_HEAP_EXIT;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome};
 
 const MIB: u64 = 1024 * 1024;
-const GIB: u64 = 1024 * MIB;
 
 /// The work folder's name starts with this (J4).
 pub(crate) const WORK_PREFIX: &str = "grape-heif-";
@@ -98,7 +102,8 @@ pub(crate) struct Limits {
     /// Added for each started megapixel of an image to encode.
     pub(crate) encode_per_megapixel: Duration,
     /// The helper's memory cap, where the app's container can set one
-    /// (the Job Object on Windows).
+    /// (the Job Object on Windows): [`proto::WORKER_HEAP_BYTES`], the
+    /// Mac worker's own heap bound too.
     pub(crate) helper_memory: u64,
     /// Where the work folder is made: the OS temp folder (tests use their
     /// own).
@@ -115,7 +120,7 @@ impl Default for Limits {
             timeout_base: Duration::from_secs(120),
             decode_per_megapixel: Duration::from_secs(1),
             encode_per_megapixel: Duration::from_secs(3),
-            helper_memory: 2 * GIB,
+            helper_memory: proto::WORKER_HEAP_BYTES,
             work_parent: std::env::temp_dir(),
         }
     }
@@ -149,7 +154,7 @@ pub(crate) fn convert(
     let Some(program) = ctx.sidecars.heif.as_deref() else {
         return Err(GrapeError::new(
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper is missing.",
+            "Grape's image helper is missing.",
             "SidecarPaths::heif is None",
         ));
     };
@@ -250,7 +255,7 @@ pub(crate) enum Decoded {
     NotHeif,
 }
 
-/// Grape's HEIC helper and the bounds a job holds it to, for an engine
+/// Grape's image helper and the bounds a job holds it to, for an engine
 /// that needs a HEIC's pixels rather than a raster file (`pdf::create`).
 pub(crate) struct Decoder {
     launch: Launch,
@@ -296,8 +301,8 @@ impl Decoder {
 }
 
 /// The decode half of HEIC → anything: `src`'s `ftyp` is sniffed (not HEIF
-/// at all → [`Decoded::NotHeif`]; HEIF with another codec is refused), its
-/// size checked, and the helper run. Its `image` line must fit the
+/// at all → [`Decoded::NotHeif`]; HEIF with another codec, AV1 included
+/// for now, is refused), its size checked, and the helper run. Its `image` line must fit the
 /// helper's limits and the working set of converting the pixels to `fit`
 /// ([`image::pixels_fit`]); the pixels are then read once, into the one
 /// buffer that check counted. The helper's progress `f` goes to `progress`
@@ -313,17 +318,20 @@ fn decode_pixels(
 ) -> Result<Decoded, GrapeError> {
     let cancel = run.cancel;
     let (head, len) = read_head(src).map_err(|e| names.read_failed(e))?;
-    match proto::sniff(&head) {
+    let format = match proto::sniff(&head) {
         Sniff::NotHeif => return Ok(Decoded::NotHeif),
         Sniff::OtherHeif => return Err(other_heif(names, "its ftyp names another codec")),
-        Sniff::Heic => {}
-    }
+        // Not converted yet (D41): refused as before protocol 2.
+        Sniff::Avif => return Err(other_heif(names, "its ftyp names AV1")),
+        Sniff::Heic => HeifFormat::Heic,
+    };
     let max_source = run.limits.helper.max_source_bytes;
     if len > max_source {
         return Err(names.too_large(format!(
-            "the file is {} MiB, over the {} MiB limit for a HEIC source",
+            "the file is {} MiB, over the {} MiB limit for a {} source",
             len / MIB,
-            max_source / MIB
+            max_source / MIB,
+            format.name()
         )));
     }
     let source = std::path::absolute(src).map_err(|e| names.read_failed(io_detail(&e)))?;
@@ -377,7 +385,7 @@ fn decode_pixels(
     let (done, info) = match ended {
         Ended::Done(done, Some(info)) => (done, info),
         Ended::Done(_, None) => return Err(helper_stopped("done without an image line")),
-        other => return Err(ended_error(other, names, Side::Decode, run.limits)),
+        other => return Err(ended_error(other, names, Side::Decode(format))),
     };
     if (done.width, done.height, done.channels, done.icc_bytes)
         != (info.width, info.height, info.channels, info.icc_bytes)
@@ -410,6 +418,7 @@ fn to_heic(
         return Err(cancelled());
     }
 
+    let format = HeifFormat::Heic;
     let (img, icc) = image::decode(src, from, Format::Heic, &names, cancel)
         .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     progress(0.3);
@@ -422,9 +431,15 @@ fn to_heic(
     {
         return Err(too_large_to_save(
             &names,
+            format,
             format!(
-                "{width}x{height} is over one HEVC picture ({} pixels, {} a side)",
-                helper_limits.max_encode_pixels, helper_limits.max_encode_side
+                "{width}x{height} is over one {} picture ({} pixels, {} a side)",
+                match format {
+                    HeifFormat::Heic => "HEVC",
+                    HeifFormat::Avif => "AV1",
+                },
+                helper_limits.max_encode_pixels,
+                helper_limits.max_encode_side
             ),
         ));
     }
@@ -471,7 +486,10 @@ fn to_heic(
         drive(
             run,
             &work,
-            Op::Encode { quality: None },
+            Op::Encode {
+                format,
+                quality: None,
+            },
             initial,
             &mut on_image,
             (0.4, 0.9),
@@ -480,10 +498,10 @@ fn to_heic(
     };
     let done = match ended {
         Ended::Done(done, _) => done,
-        other => return Err(ended_error(other, &names, Side::Encode, run.limits)),
+        other => return Err(ended_error(other, &names, Side::Encode(format))),
     };
-    let out = work.path().join(proto::names::OUTPUT);
-    check_output(&out, done.bytes)?;
+    let out = work.path().join(proto::names::output(format));
+    check_output(&out, done.bytes, format)?;
 
     publish::ensure_dir(job, ctx, dir, &names)?;
     // From here on, `temp` removes the temp file on every return path.
@@ -493,7 +511,11 @@ fn to_heic(
         if cancel.is_cancelled() {
             cancelled()
         } else {
-            names.write_failed(format!("writing the HEIC file: {}", io_detail(&e)))
+            names.write_failed(format!(
+                "writing the {} file: {}",
+                format.name(),
+                io_detail(&e)
+            ))
         }
     })?;
     drop(work);
@@ -626,22 +648,26 @@ fn read_decoded(
     Ok((img, pixels.icc))
 }
 
-/// `out.heic` must be the `bytes` the helper reported, and HEIC.
-fn check_output(out: &Path, bytes: u64) -> Result<(), GrapeError> {
+/// The helper's output (`out.heic` or `out.avif`) must be the `bytes` it
+/// reported, and sniff as `format`.
+fn check_output(out: &Path, bytes: u64, format: HeifFormat) -> Result<(), GrapeError> {
     let (head, len) = read_head(out).map_err(|e| helper_stopped(&format!("its output: {e}")))?;
     if bytes == 0 || len != bytes {
         return Err(helper_stopped(&format!(
             "its output is {len} bytes, and it said {bytes}"
         )));
     }
-    if proto::sniff(&head) != Sniff::Heic {
-        return Err(helper_stopped("its output isn't HEIC"));
+    if proto::sniff(&head).format() != Some(format) {
+        return Err(helper_stopped(&format!(
+            "its output isn't {}",
+            format.name()
+        )));
     }
     Ok(())
 }
 
-/// Copies `out.heic` into the temp `file` in the destination folder, then
-/// syncs it. Reading and writing fail once `cancel` is set.
+/// Copies the helper's output into the temp `file` in the destination
+/// folder, then syncs it. Reading and writing fail once `cancel` is set.
 fn copy_output(out: &Path, file: File, cancel: &CancelToken) -> io::Result<()> {
     let mut reader = Cancellable::new(File::open(out)?, cancel);
     let mut writer = BufWriter::with_capacity(WRITE_BUFFER, Cancellable::new(file, cancel));
@@ -682,8 +708,9 @@ enum Ended {
     /// Its `image` line was over a limit; it was killed. The detail.
     TooLarge(String),
     /// It ended without a result after committing nearly all the memory
-    /// its container allows.
-    OverMemory,
+    /// its container allows, or past its own heap bound
+    /// ([`OVER_HEAP_EXIT`]). The detail.
+    OverMemory(String),
     /// It ended without a consistent result (a crash, an abort, a lie).
     Crashed(String),
     /// It couldn't be started.
@@ -784,6 +811,13 @@ fn drive(
             }
         }
     };
+    // The Mac worker's heap bound (D41); grape-heif.exe never exits so.
+    if status.code() == Some(OVER_HEAP_EXIT) {
+        return Ended::OverMemory(format!(
+            "the HEIF helper went past its {} MiB heap bound",
+            run.limits.helper_memory / MIB
+        ));
+    }
     match (done, failure, status.success()) {
         (Some(done), None, true) => Ended::Done(done, image),
         (None, Some(failure), false) => Ended::Failed(failure),
@@ -794,7 +828,10 @@ fn drive(
                 u128::from(peak) * 100 >= u128::from(limit) * u128::from(OVER_MEMORY_PERCENT)
             });
             if over {
-                Ended::OverMemory
+                Ended::OverMemory(format!(
+                    "the HEIF helper ended near its {} MiB memory cap",
+                    limit / MIB
+                ))
             } else {
                 Ended::Crashed(format!(
                     "exit {:?} (success {success}) with done {} and error {}",
@@ -807,17 +844,18 @@ fn drive(
     }
 }
 
-/// Which way a job converts, for the messages.
+/// Which way a job converts, and the format the helper reads or writes,
+/// for the messages.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Side {
-    /// HEIC → raster: the helper decodes.
-    Decode,
-    /// Raster → HEIC: the helper encodes.
-    Encode,
+    /// HEIC → raster: the helper decodes the format.
+    Decode(HeifFormat),
+    /// Raster → HEIC: the helper encodes the format.
+    Encode(HeifFormat),
 }
 
 /// A run that didn't end with `done`, in Grape's words.
-fn ended_error(ended: Ended, names: &Names, side: Side, limits: &Limits) -> GrapeError {
+fn ended_error(ended: Ended, names: &Names, side: Side) -> GrapeError {
     let source = &names.source;
     match ended {
         Ended::Failed(failure) => report(failure, names, side),
@@ -825,16 +863,13 @@ fn ended_error(ended: Ended, names: &Names, side: Side, limits: &Limits) -> Grap
         Ended::TimedOut => GrapeError::new(
             ErrorKind::DecodeFailed,
             format!("{source} took too long, so Grape stopped."),
-            "the HEIC helper ran past its time",
+            "the HEIF helper ran past its time",
         ),
         Ended::TooLarge(detail) => names.too_large(detail),
-        Ended::OverMemory => GrapeError::new(
+        Ended::OverMemory(detail) => GrapeError::new(
             ErrorKind::DecodeFailed,
             format!("{source} needs too much memory, so Grape stopped."),
-            format!(
-                "the HEIC helper ended near its {} MiB memory cap",
-                limits.helper_memory / MIB
-            ),
+            detail,
         ),
         Ended::Crashed(detail) => helper_stopped(&detail),
         Ended::Spawn(kind) => couldnt_start(format!("starting it: {kind:?}")),
@@ -847,32 +882,37 @@ fn ended_error(ended: Ended, names: &Names, side: Side, limits: &Limits) -> Grap
 /// The helper's failure in Grape's words, naming the file.
 fn report(failure: Failure, names: &Names, side: Side) -> GrapeError {
     let source = &names.source;
-    let detail = format!("HEIC helper: {:?}: {}", failure.kind, failure.detail);
+    let detail = format!("HEIF helper: {:?}: {}", failure.kind, failure.detail);
     let decode_failed =
         |message: String| GrapeError::new(ErrorKind::DecodeFailed, message, detail.clone());
     match (failure.kind, side) {
         (FailKind::Protocol, _) => GrapeError::new(
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper doesn't match this version of Grape.",
+            "Grape's image helper doesn't match this version of Grape.",
             detail,
         ),
         (FailKind::Read, _) => names.read_failed(detail),
         (FailKind::Write, _) => temp_failed(detail),
-        (FailKind::NotHeif | FailKind::Damaged, Side::Decode) => names.decode_failed(detail),
-        (FailKind::Unsupported, Side::Decode) => decode_failed(format!(
-            "{source} is a kind of HEIF image Grape can't read yet."
+        (FailKind::NotHeif | FailKind::Damaged, Side::Decode(_)) => names.decode_failed(detail),
+        // HEIC's other profiles are "a kind of HEIF image", as other codecs.
+        (FailKind::Unsupported, Side::Decode(format)) => decode_failed(format!(
+            "{source} is a kind of {} image Grape can't read yet.",
+            match format {
+                HeifFormat::Heic => "HEIF",
+                HeifFormat::Avif => "AVIF",
+            }
         )),
-        (FailKind::NoImage, Side::Decode) => {
+        (FailKind::NoImage, Side::Decode(_)) => {
             decode_failed(format!("{source} has no image to convert."))
         }
-        (FailKind::TooLarge, Side::Decode) => names.too_large(detail),
-        (FailKind::TooLarge, Side::Encode) => too_large_to_save(names, detail),
-        (FailKind::NoEncoder, Side::Encode) => GrapeError::new(
+        (FailKind::TooLarge, Side::Decode(_)) => names.too_large(detail),
+        (FailKind::TooLarge, Side::Encode(format)) => too_large_to_save(names, format, detail),
+        (FailKind::NoEncoder, Side::Encode(format)) => GrapeError::new(
             ErrorKind::NotYetSupported,
-            "This Mac can't write HEIC files.",
+            format!("This Mac can't write {} files.", format.name()),
             detail,
         ),
-        (FailKind::Encode, Side::Encode) => names.encode_failed(detail),
+        (FailKind::Encode, Side::Encode(_)) => names.encode_failed(detail),
         // `internal`, and a kind that makes no sense for this side.
         _ => helper_stopped(&detail),
     }
@@ -886,15 +926,19 @@ fn other_heif(names: &Names, detail: &str) -> GrapeError {
             "{} is a kind of HEIF image Grape can't read yet.",
             names.source
         ),
-        format!("HEIC: {detail}"),
+        format!("HEIF: {detail}"),
     )
 }
 
-/// The image is larger than one HEVC picture Grape encodes.
-fn too_large_to_save(names: &Names, detail: String) -> GrapeError {
+/// The image is larger than the one picture Grape encodes in `format`.
+fn too_large_to_save(names: &Names, format: HeifFormat, detail: String) -> GrapeError {
     GrapeError::new(
         ErrorKind::EncodeFailed,
-        format!("{} is too large to save as HEIC.", names.source),
+        format!(
+            "{} is too large to save as {}.",
+            names.source,
+            format.name()
+        ),
         detail,
     )
 }
@@ -904,7 +948,7 @@ fn temp_failed(detail: String) -> GrapeError {
     GrapeError::new(
         ErrorKind::WriteFailed,
         "Grape couldn't write its temp files.",
-        format!("HEIC work folder: {detail}"),
+        format!("HEIF work folder: {detail}"),
     )
 }
 
@@ -912,8 +956,8 @@ fn temp_failed(detail: String) -> GrapeError {
 fn couldnt_start(detail: String) -> GrapeError {
     GrapeError::new(
         ErrorKind::NotYetSupported,
-        "Grape's HEIC helper couldn't start.",
-        format!("HEIC helper: {detail}"),
+        "Grape's image helper couldn't start.",
+        format!("HEIF helper: {detail}"),
     )
 }
 
@@ -921,8 +965,8 @@ fn couldnt_start(detail: String) -> GrapeError {
 fn helper_stopped(detail: &str) -> GrapeError {
     GrapeError::new(
         ErrorKind::DecodeFailed,
-        "Grape's HEIC helper stopped unexpectedly.",
-        format!("HEIC helper: {detail}"),
+        "Grape's image helper stopped unexpectedly.",
+        format!("HEIF helper: {detail}"),
     )
 }
 
@@ -945,7 +989,8 @@ pub(crate) mod tests {
     //! The engine with the test binary itself as a fake helper: it runs
     //! only [`fake_helper`] (`--exact … --ignored`) with [`FAKE`] set to a
     //! mode, and serves the request with `grape_heif_proto::serve` and
-    //! [`FakeCodec`], whose "HEIC" is an `ftyp` box followed by raw pixels.
+    //! [`FakeCodec`], whose "HEIC" (and "AVIF") is an `ftyp` box followed by
+    //! raw pixels.
     //! Every test checks that the source is unchanged, that nothing is left
     //! in the destination folder, and that no work folder is left.
 
@@ -963,7 +1008,7 @@ pub(crate) mod tests {
     use ::image::codecs::png::PngEncoder;
     use ::image::{ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader};
     use grape_core::{plan, JobOutput, Operation, Settings};
-    use grape_heif_proto::{Caps, Codec, PixelSink, Pixels};
+    use grape_heif_proto::{Caps, Codec, FormatCaps, PixelSink, Pixels};
 
     use super::*;
     use crate::helper::{Contain, Contained};
@@ -981,12 +1026,18 @@ pub(crate) mod tests {
     /// The file [`FakeContain`] writes into the work folder.
     const MARKER: &str = "contained";
 
+    const GIB: u64 = 1024 * MIB;
+
     /// An `ftyp` box: major brand `heic`, compatible `mif1 heic`.
     const FTYP: [u8; 24] = *b"\0\0\0\x18ftypheic\0\0\0\0mif1heic";
 
-    /// 32 bytes: an `ftyp` with major `avif`, compatible `mif1 avif`, then
-    /// zeros (heic-spec §5.6's `avif-brand.heic`).
-    const AVIF_BRAND: [u8; 32] = *b"\0\0\0\x18ftypavif\0\0\0\0mif1avif\0\0\0\0\0\0\0\0";
+    /// The same for AVIF: major brand `avif`, compatible `mif1 avif`.
+    const FTYP_AVIF: [u8; 24] = *b"\0\0\0\x18ftypavif\0\0\0\0mif1avif";
+
+    /// 32 bytes: an `ftyp` with major `avci`, compatible `mif1 avci`, then
+    /// zeros (grape-heif-fixtures' `avci-brand.heic`, D41): AVC, a HEIF
+    /// codec no helper reads.
+    const AVCI_BRAND: [u8; 32] = *b"\0\0\0\x18ftypavci\0\0\0\0mif1avci\0\0\0\0\0\0\0\0";
 
     /// A fake HEIC file: [`FTYP`], `FAKE`, the width and height (u32 LE),
     /// the channels, the ICC profile's length (u32 LE), the profile, the
@@ -998,8 +1049,23 @@ pub(crate) mod tests {
         rows: &[u8],
         icc: Option<&[u8]>,
     ) -> Vec<u8> {
+        fake_image(HeifFormat::Heic, width, height, channels, rows, icc)
+    }
+
+    /// [`fake_heic`], or the same after [`FTYP_AVIF`] for AVIF.
+    pub(crate) fn fake_image(
+        format: HeifFormat,
+        width: u32,
+        height: u32,
+        channels: u8,
+        rows: &[u8],
+        icc: Option<&[u8]>,
+    ) -> Vec<u8> {
         let icc = icc.unwrap_or_default();
-        let mut bytes = FTYP.to_vec();
+        let mut bytes = match format {
+            HeifFormat::Heic => FTYP.to_vec(),
+            HeifFormat::Avif => FTYP_AVIF.to_vec(),
+        };
         bytes.extend_from_slice(b"FAKE");
         bytes.extend_from_slice(&width.to_le_bytes());
         bytes.extend_from_slice(&height.to_le_bytes());
@@ -1021,7 +1087,10 @@ pub(crate) mod tests {
     }
 
     fn parse_fake(bytes: &[u8]) -> Option<FakeImage> {
-        let rest = bytes.strip_prefix(&FTYP)?.strip_prefix(b"FAKE")?;
+        let rest = bytes
+            .strip_prefix(&FTYP)
+            .or_else(|| bytes.strip_prefix(&FTYP_AVIF))?
+            .strip_prefix(b"FAKE")?;
         let u32_at = |at: usize| -> Option<u32> {
             Some(u32::from_le_bytes(rest.get(at..at + 4)?.try_into().ok()?))
         };
@@ -1084,9 +1153,13 @@ pub(crate) mod tests {
 
     impl Codec for FakeCodec {
         fn caps(&self) -> Caps {
-            Caps {
+            let both = FormatCaps {
                 decode: true,
                 encode: true,
+            };
+            Caps {
+                heic: both,
+                avif: both,
                 codec: "fake".to_string(),
             }
         }
@@ -1094,6 +1167,7 @@ pub(crate) mod tests {
         fn decode(
             &self,
             source: &Path,
+            _format: HeifFormat,
             _limits: &proto::Limits,
             out: &mut dyn PixelSink,
         ) -> Result<(), Failure> {
@@ -1121,6 +1195,7 @@ pub(crate) mod tests {
         fn encode(
             &self,
             pixels: &Pixels,
+            format: HeifFormat,
             _quality: Option<u8>,
             _limits: &proto::Limits,
         ) -> Result<Vec<u8>, Failure> {
@@ -1130,7 +1205,9 @@ pub(crate) mod tests {
                 "noencoder" => return Err(Failure::new(FailKind::NoEncoder, "fake")),
                 _ => {}
             }
-            Ok(fake_heic(
+            // The format asked for, so the tests can see which it was.
+            Ok(fake_image(
+                format,
                 pixels.width,
                 pixels.height,
                 pixels.channels,
@@ -1143,7 +1220,7 @@ pub(crate) mod tests {
     /// Not a test: the helper the tests start. The test binary runs only
     /// this "test" (`--exact … --ignored`) with [`FAKE`] set to a mode.
     #[test]
-    #[ignore = "a fake HEIC helper, run by the tests below"]
+    #[ignore = "a fake image helper, run by the tests below"]
     fn fake_helper() {
         let Ok(mode) = std::env::var(FAKE) else {
             return;
@@ -1161,8 +1238,13 @@ pub(crate) mod tests {
                 std::process::exit(3);
             }
             "protocol" => {
-                say(r#"{"error":{"kind":"protocol","detail":"fake: protocol 2"}}"#);
+                say(r#"{"error":{"kind":"protocol","detail":"fake: protocol 3"}}"#);
                 std::process::exit(1);
+            }
+            // The Mac worker past its heap bound (D41).
+            "over-heap" => {
+                say(r#"{"progress":0.1}"#);
+                std::process::exit(OVER_HEAP_EXIT);
             }
             // 512 MiB of RGBA: within the helper's pixel limit, but too
             // much for most conversions' working set.
@@ -1210,7 +1292,14 @@ pub(crate) mod tests {
         };
         match mode.as_str() {
             "bad-pixels" => append(proto::names::PIXELS),
-            "bad-output" => append(proto::names::OUTPUT),
+            "bad-output" => append(proto::names::OUTPUT_HEIC),
+            // The same length, but AVIF's ftyp.
+            "avif-output" => {
+                let path = here.join(proto::names::OUTPUT_HEIC);
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[..FTYP_AVIF.len()].copy_from_slice(&FTYP_AVIF);
+                fs::write(&path, bytes).unwrap();
+            }
             "wrong-size" => {
                 let header = PixelHeader {
                     width: 1,
@@ -1542,7 +1631,10 @@ pub(crate) mod tests {
             let outcome = ran.result.unwrap();
             assert_eq!(outcome.outputs, vec![case.dest()], "{from:?}");
             assert!(case.dest().to_string_lossy().ends_with("photo.heic"));
-            let out = parse_fake(&fs::read(case.dest()).unwrap()).unwrap();
+            let written = fs::read(case.dest()).unwrap();
+            // The fake writes the format it's asked for: HEIC.
+            assert!(written.starts_with(&FTYP), "{from:?}");
+            let out = parse_fake(&written).unwrap();
             assert_eq!((out.width, out.height, out.channels), (6, 4, 3), "{from:?}");
             let error = mean_error(&out.rows, &rows);
             assert!(
@@ -1653,7 +1745,7 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(err.kind, ErrorKind::NotYetSupported);
-        assert_eq!(err.user_message, "Grape's HEIC helper is missing.");
+        assert_eq!(err.user_message, "Grape's image helper is missing.");
         case.check();
     }
 
@@ -1790,13 +1882,74 @@ pub(crate) mod tests {
 
     #[test]
     fn other_heif_is_refused_before_anything_starts() {
-        let case = case("photo.heic", &AVIF_BRAND, Format::Jpg);
+        let case = case("photo.heic", &AVCI_BRAND, Format::Jpg);
         let ran = case.run(&nowhere());
-        case.refused(
+        let err = case.refused(
             ran,
             ErrorKind::DecodeFailed,
             "photo.heic is a kind of HEIF image Grape can't read yet.",
         );
+        assert_eq!(err.detail, "HEIF: its ftyp names another codec");
+    }
+
+    #[test]
+    fn avif_in_a_heic_name_is_refused_until_avif_converts() {
+        // Protocol 2 sniffs it as AVIF; until this engine converts AVIF
+        // (D41), it's refused as before, with nothing started.
+        for bytes in [
+            fake_image(HeifFormat::Avif, 1, 1, 3, &[1, 2, 3], None),
+            b"\0\0\0\x18ftypavif\0\0\0\0mif1avif\0\0\0\0\0\0\0\0".to_vec(),
+        ] {
+            let case = case("photo.heic", &bytes, Format::Png);
+            let ran = case.run(&nowhere());
+            let err = case.refused(
+                ran,
+                ErrorKind::DecodeFailed,
+                "photo.heic is a kind of HEIF image Grape can't read yet.",
+            );
+            assert_eq!(err.detail, "HEIF: its ftyp names AV1");
+        }
+    }
+
+    #[test]
+    fn a_helper_past_its_heap_bound_needs_too_much_memory() {
+        // The Mac worker's exit code past its heap bound, without a
+        // container (macOS has none), both ways.
+        let heic = fake_heic(1, 1, 3, &[0; 3], None);
+        let case_out = case("photo.heic", &heic, Format::Png);
+        let ran = case_out.run(&fake("over-heap"));
+        let err = case_out.refused(
+            ran,
+            ErrorKind::DecodeFailed,
+            "photo.heic needs too much memory, so Grape stopped.",
+        );
+        assert_eq!(
+            err.detail,
+            "the HEIF helper went past its 2048 MiB heap bound"
+        );
+
+        let source = png(1, 1, &[0; 3], ExtendedColorType::Rgb8, None);
+        let case_in = case("photo.png", &source, Format::Heic);
+        let ran = case_in.run(&fake("over-heap"));
+        case_in.refused(
+            ran,
+            ErrorKind::DecodeFailed,
+            "photo.png needs too much memory, so Grape stopped.",
+        );
+    }
+
+    #[test]
+    fn an_output_of_the_other_format_is_refused() {
+        // The helper's done line is right, but out.heic is AVIF.
+        let source = png(2, 2, &[5; 12], ExtendedColorType::Rgb8, None);
+        let case = case("photo.png", &source, Format::Heic);
+        let ran = case.run(&fake("avif-output"));
+        let err = case.refused(
+            ran,
+            ErrorKind::DecodeFailed,
+            "Grape's image helper stopped unexpectedly.",
+        );
+        assert_eq!(err.detail, "HEIF helper: its output isn't HEIC");
     }
 
     #[test]
@@ -1934,7 +2087,7 @@ pub(crate) mod tests {
     fn every_failure_has_its_message() {
         let stopped = (
             ErrorKind::DecodeFailed,
-            "Grape's HEIC helper stopped unexpectedly.",
+            "Grape's image helper stopped unexpectedly.",
         );
         let temp = (
             ErrorKind::WriteFailed,
@@ -1942,7 +2095,7 @@ pub(crate) mod tests {
         );
         let protocol = (
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper doesn't match this version of Grape.",
+            "Grape's image helper doesn't match this version of Grape.",
         );
         let unreadable = (
             ErrorKind::DecodeFailed,
@@ -2026,7 +2179,7 @@ pub(crate) mod tests {
 
     #[test]
     fn crashes_lies_and_bad_files_say_the_helper_stopped() {
-        let stopped = "Grape's HEIC helper stopped unexpectedly.";
+        let stopped = "Grape's image helper stopped unexpectedly.";
         let heic = fake_heic(3, 2, 3, &[5; 18], None);
         for mode in [
             "crash",
@@ -2067,7 +2220,7 @@ pub(crate) mod tests {
         case.refused(
             ran,
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper doesn't match this version of Grape.",
+            "Grape's image helper doesn't match this version of Grape.",
         );
     }
 
@@ -2116,7 +2269,7 @@ pub(crate) mod tests {
             let err = case.refused(
                 ran,
                 ErrorKind::DecodeFailed,
-                "Grape's HEIC helper stopped unexpectedly.",
+                "Grape's image helper stopped unexpectedly.",
             );
             assert!(err.detail.contains("control false"), "{err:?}");
             assert!(err.detail.contains("leaked []"), "{err:?}");
@@ -2193,7 +2346,7 @@ pub(crate) mod tests {
         case.refused(
             ran,
             ErrorKind::DecodeFailed,
-            "Grape's HEIC helper stopped unexpectedly.",
+            "Grape's image helper stopped unexpectedly.",
         );
     }
 
@@ -2213,7 +2366,7 @@ pub(crate) mod tests {
         let err = case.refused(
             ran,
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper couldn't start.",
+            "Grape's image helper couldn't start.",
         );
         assert!(err.detail.contains("fake: no container"), "{err:?}");
         assert_eq!(contain.calls.load(Ordering::SeqCst), 1);
@@ -2228,7 +2381,7 @@ pub(crate) mod tests {
         case.refused(
             ran,
             ErrorKind::NotYetSupported,
-            "Grape's HEIC helper couldn't start.",
+            "Grape's image helper couldn't start.",
         );
     }
 
@@ -2247,10 +2400,10 @@ pub(crate) mod tests {
             ),
             (
                 Some((2 * GIB * 9).div_ceil(10) - 1),
-                "Grape's HEIC helper stopped unexpectedly.",
+                "Grape's image helper stopped unexpectedly.",
             ),
-            (Some(GIB), "Grape's HEIC helper stopped unexpectedly."),
-            (None, "Grape's HEIC helper stopped unexpectedly."),
+            (Some(GIB), "Grape's image helper stopped unexpectedly."),
+            (None, "Grape's image helper stopped unexpectedly."),
         ] {
             let case = case("photo.heic", &heic, Format::Png);
             let mut launch = fake("crash");
@@ -2330,7 +2483,9 @@ pub(crate) mod tests {
         assert_eq!(helper.max_pixels * 4, 512 * MIB);
         let limits = Limits::default();
         assert_eq!(limits.helper, helper);
+        assert_eq!(limits.helper, proto::Limits::for_encode(HeifFormat::Heic));
         assert_eq!(limits.helper_memory, 2 * GIB);
+        assert_eq!(limits.helper_memory, proto::WORKER_HEAP_BYTES);
         assert_eq!(limits.work_parent, std::env::temp_dir());
         // At the caps: 120 s + 135 s to decode, 120 s + 3 × 36 s to encode.
         let decode = per_megapixel(limits.decode_per_megapixel, helper.max_pixels);

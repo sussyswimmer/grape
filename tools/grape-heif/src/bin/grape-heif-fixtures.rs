@@ -12,7 +12,7 @@
 //! | `odd.heic` | 3×5 solid (0,200,0) |
 //! | `icc.heic` | 64×64 gray 128 with the ICC profile from `--icc` (only with `--icc`) |
 //! | `truncated.heic` | the first 60% of `opaque.heic` |
-//! | `avif-brand.heic` | 32 bytes: an `ftyp` with major `avif`, compatible `mif1 avif`, then zeros |
+//! | `avci-brand.heic` | 32 bytes: an `ftyp` with major `avci`, compatible `mif1 avci`, then zeros: AVC, a HEIF codec no helper reads (D41; it replaces `avif-brand.heic`, which protocol 2 sniffs as AVIF) |
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -120,13 +120,13 @@ fn run(args: Vec<OsString>) -> Result<()> {
 
     write(&out, "truncated.heic", &opaque[..opaque.len() * 6 / 10])?;
 
-    let mut avif = Vec::with_capacity(32);
-    avif.extend_from_slice(&24u32.to_be_bytes());
-    avif.extend_from_slice(b"ftypavif");
-    avif.extend_from_slice(&0u32.to_be_bytes());
-    avif.extend_from_slice(b"mif1avif");
-    avif.resize(32, 0);
-    write(&out, "avif-brand.heic", &avif)?;
+    let mut avci = Vec::with_capacity(32);
+    avci.extend_from_slice(&24u32.to_be_bytes());
+    avci.extend_from_slice(b"ftypavci");
+    avci.extend_from_slice(&0u32.to_be_bytes());
+    avci.extend_from_slice(b"mif1avci");
+    avci.resize(32, 0);
+    write(&out, "avci-brand.heic", &avci)?;
     Ok(())
 }
 

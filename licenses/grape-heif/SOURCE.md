@@ -2,10 +2,10 @@
 
 Grape converts HEIC on Windows with `grape-heif.exe`, a small program of Grape's own (`tools/grape-heif`) that decodes with libheif and libde265 and encodes with libheif and x265. Grape runs it as `grape-heif.exe --grape-heif-worker` for one image at a time, in a Job Object, and talks to it over pipes; pixels go through a temp folder (`crates/grape-heif-proto`). It ships as a separate program next to `Grape.exe`. DECISIONS D33 has why and how. On macOS Grape uses ImageIO instead, so the Mac build has no grape-heif.
 
-- **Version:** `1.23.7-grape.1`: libheif's version, then Grape's build number, which goes up with every change to the build. Its banner (`grape-heif.exe -hide_banner -version`) reads:
+- **Version:** `1.23.7-grape.2`: libheif's version, then Grape's build number, which goes up with every change to the build. Its banner (`grape-heif.exe -hide_banner -version`) reads:
   ```
-  grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors
-  configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1
+  grape-heif version 1.23.7-grape.2 Copyright (c) 2026 the Grape contributors
+  configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=2
   license: GPL-3.0-or-later (libheif and libde265 LGPL-3.0-or-later, x265 GPL-2.0-or-later)
   ```
 - **License:** **GPL-3.0-or-later** as a whole (`LICENSE.txt`). It links libheif and libde265 (LGPL-3.0-or-later) and x265 (GPL-2.0-or-later) statically; GPL-2.0-or-later and LGPL-3.0-or-later combine under GPL-3.0. Grape's own source in it (`tools/grape-heif`, `crates/grape-heif-proto`) is MIT, like the rest of Grape. Because of the GPL, it only ever ships as this separate executable, never inside Grape's own binaries (golden rule 6, ENGINES.md licensing rule 2).
@@ -26,7 +26,7 @@ CI checks on every build that `libheif.txt` and `x265.txt` equal the copyright f
 
 ## The exact source
 
-Every build comes with its complete corresponding source, `grape-heif-1.23.7-grape.1-source.tar.gz`: CI's `grape-heif` job makes it in the same run as the installer (DECISIONS D33), and it's in that run's artifacts (`grape-heif-source`) and on the GitHub Release that ships the installer. It holds:
+Every build comes with its complete corresponding source, `grape-heif-1.23.7-grape.2-source.tar.gz`: CI's `grape-heif` job makes it in the same run as the installer (DECISIONS D33), and it's in that run's artifacts (`grape-heif-source`) and on the GitHub Release that ships the installer. It holds:
 
 - `grape-heif/`: Grape's source for the program (`tools/grape-heif`, `crates/grape-heif-proto`, `licenses/grape-heif`, `LICENSE`) at the commit that was built;
 - `vendor/`: every Rust crate in `tools/grape-heif/Cargo.lock` (`cargo vendor`);

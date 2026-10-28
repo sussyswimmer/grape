@@ -1,7 +1,7 @@
 //! Images → PDF and the Create PDF tool (DECISIONS D37), in Grape's own
 //! process: no PDF worker and no PDFium, because no PDF is parsed. The
 //! only untrusted input is the images, which the raster engine decodes
-//! with its own limits ([`image::decode`]) and Grape's HEIC helper decodes
+//! with its own limits ([`image::decode`]) and Grape's image helper decodes
 //! in its own process ([`heif::Decoder`]).
 //!
 //! - **One page per image,** in the job's input order: JPG, PNG, WebP,
@@ -68,7 +68,7 @@
 //! - **Cancel** is checked before each input, every [`flate::CANCEL_ROWS`]
 //!   rows, at every write into a stream's buffer and of the file.
 //!   **Progress** for input `i` of `n`: decoded at `(i + 0.5) / n` (the
-//!   HEIC helper's own fractions within `[i / n, (i + 0.5) / n]`), written
+//!   image helper's own fractions within `[i / n, (i + 0.5) / n]`), written
 //!   at `(i + 1) / n`, and 1.0 once the PDF is published.
 
 use std::fs::File;
@@ -305,7 +305,7 @@ fn read(
         let Some(helper) = heic else {
             return Err(GrapeError::new(
                 ErrorKind::NotYetSupported,
-                "Grape's HEIC helper is missing.",
+                "Grape's image helper is missing.",
                 "SidecarPaths::heif is None",
             ));
         };
@@ -1890,7 +1890,7 @@ mod tests {
         names
     }
 
-    /// Runs `job` with the fake HEIC helper in `mode`.
+    /// Runs `job` with the fake image helper in `mode`.
     fn run_with_helper(
         dir: &TestDir,
         job: &Job,
@@ -2072,7 +2072,7 @@ mod tests {
             (err.kind, err.user_message.as_str()),
             (
                 ErrorKind::NotYetSupported,
-                "Grape's HEIC helper is missing."
+                "Grape's image helper is missing."
             )
         );
         assert_eq!(listing(&dir.0), ["photo.heic", "work"]);

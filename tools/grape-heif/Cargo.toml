@@ -3,7 +3,7 @@ name = "grape-heif"
 description = "Grape's HEIC helper for Windows: libheif, libde265 and x265 behind the grape-heif-proto protocol (DECISIONS D33)"
 # libheif's version, then Grape's build number. The banner prints it, and the
 # codec refuses to run against any other libheif.
-version = "1.23.7-grape.1"
+version = "1.23.7-grape.2"
 edition = "2021"
 # Grape's own source in this folder is MIT. The built grape-heif.exe links
 # libheif and libde265 (LGPL-3.0-or-later) and x265 (GPL-2.0-or-later)

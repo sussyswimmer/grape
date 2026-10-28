@@ -2,8 +2,8 @@
 //! and CI (heic-spec §5.3):
 //!
 //! ```text
-//! grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors
-//! configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1
+//! grape-heif version 1.23.7-grape.2 Copyright (c) 2026 the Grape contributors
+//! configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=2
 //! license: GPL-3.0-or-later (libheif and libde265 LGPL-3.0-or-later, x265 GPL-2.0-or-later)
 //! ```
 //!
@@ -85,7 +85,7 @@ pub fn banner(c: &Components) -> String {
 }
 
 /// The libheif this build was made for: the first three parts of
-/// [`VERSION`] (`1.23.7-grape.1` → `[1, 23, 7]`).
+/// [`VERSION`] (`1.23.7-grape.2` → `[1, 23, 7]`).
 pub fn expected_libheif() -> Option<[u8; 3]> {
     Some([
         env!("CARGO_PKG_VERSION_MAJOR").parse().ok()?,
@@ -206,7 +206,7 @@ mod tests {
         };
         assert_eq!(
             lines[1],
-            format!("configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt={crt} protocol=1")
+            format!("configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt={crt} protocol=2")
         );
         assert!(lines[2].starts_with("license: GPL-3.0-or-later "));
         assert_eq!(c.codec_name(), "libheif 1.23.7 (libde265 1.1.3, x265 4.3)");

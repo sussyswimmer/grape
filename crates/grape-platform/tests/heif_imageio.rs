@@ -15,8 +15,8 @@
 use std::path::{Path, PathBuf};
 
 use grape_heif_proto::{
-    serve, Codec, FailKind, Failure, ImageInfo, Limits, Message, Op, PixelSink, Pixels, Request,
-    PROTOCOL,
+    serve, Codec, FailKind, Failure, HeifFormat, ImageInfo, Limits, Message, Op, PixelSink, Pixels,
+    Request, PROTOCOL,
 };
 use grape_platform::macos::heif::ImageIo;
 
@@ -73,7 +73,7 @@ impl Collect {
 
 fn decode(path: &Path) -> Result<Collect, Failure> {
     let mut sink = Collect::default();
-    ImageIo.decode(path, &Limits::DEFAULT, &mut sink)?;
+    ImageIo.decode(path, HeifFormat::Heic, &Limits::DEFAULT, &mut sink)?;
     let (_, height, _) = sink.size();
     assert_eq!(sink.rows.len(), height as usize, "every row");
     Ok(sink)
@@ -92,7 +92,7 @@ fn near(got: &[u8], want: &[u8], tolerance: u8, at: &str) {
 #[test]
 fn this_mac_decodes_heic() {
     let caps = ImageIo.caps();
-    assert!(caps.decode);
+    assert!(caps.heic.decode);
     assert_eq!(caps.codec, "ImageIO");
 }
 
@@ -218,11 +218,11 @@ fn work_dir(name: &str) -> PathBuf {
 }
 
 #[test]
-fn the_avif_brand_is_refused_before_imageio_sees_it() {
-    let dir = work_dir("avif");
+fn the_avci_brand_is_refused_before_imageio_sees_it() {
+    let dir = work_dir("avci");
     let (messages, done) = served(
         Op::Decode {
-            source: fixture("avif-brand.heic"),
+            source: fixture("avci-brand.heic"),
         },
         &dir,
     );
@@ -278,8 +278,8 @@ fn a_served_probe_says_it_decodes() {
     match messages.last() {
         Some(Message::Done(done)) => {
             let caps = done.caps.as_ref().expect("caps");
-            assert!(caps.decode);
-            println!("ImageIO encodes HEIC here: {}", caps.encode);
+            assert!(caps.heic.decode);
+            println!("ImageIO encodes HEIC here: {}", caps.heic.encode);
         }
         other => panic!("{other:?}"),
     }
@@ -313,14 +313,14 @@ fn encode_round_trips_or_says_this_mac_cant() {
     let dir = work_dir("encode");
     for channels in [3, 4] {
         let pixels = gradient(64, 48, channels);
-        let heic = match ImageIo.encode(&pixels, None, &Limits::DEFAULT) {
+        let heic = match ImageIo.encode(&pixels, HeifFormat::Heic, None, &Limits::DEFAULT) {
             Ok(heic) => heic,
             Err(failure) if failure.kind == FailKind::NoEncoder => {
                 println!("this Mac can't write HEIC: {}", failure.detail);
                 // Not listed: the list check said so. Listed (GitHub's VMs
                 // and Macs without the hardware): no destination, or no
                 // finish.
-                let listed = ImageIo.caps().encode;
+                let listed = ImageIo.caps().heic.encode;
                 let why = failure.detail.as_str();
                 let expected = if listed {
                     why == "ImageIO made no HEIC destination"

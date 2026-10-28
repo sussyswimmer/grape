@@ -688,7 +688,7 @@ jobs:
             exit 1
           fi
           limits='{"maxSourceBytes":536870912,"maxPixels":134217728,"maxEncodePixels":35651584,"maxEncodeSide":16888,"maxIccBytes":16707345,"maxDecoderMemory":1073741824}'
-          request='{"protocol":1,"workDir":"'"$RUNNER_TEMP"'","op":{"kind":"probe"},"limits":'"$limits"'}'
+          request='{"protocol":2,"workDir":"'"$RUNNER_TEMP"'","op":{"kind":"probe"},"limits":'"$limits"'}'
           probe() {
             set +e
             out=$(printf '%s' "$request" | "$@" --grape-heif-worker)
@@ -696,8 +696,8 @@ jobs:
             set -e
             echo "$* --grape-heif-worker: $out (exit $code)"
             case "$out" in
-              *'"done":{"caps":{"decode":true,'*) [ "$code" -eq 0 ] || { echo "::error::The HEIC worker answered but exited $code."; exit 1; } ;;
-              *) echo "::error::The HEIC worker didn't answer the probe with decode true."; exit 1 ;;
+              *'"done":{"caps":{"heic":{"decode":true,'*) [ "$code" -eq 0 ] || { echo "::error::The HEIC worker answered but exited $code."; exit 1; } ;;
+              *) echo "::error::The HEIC worker didn't answer the probe with HEIC decode true."; exit 1 ;;
             esac
           }
           probe "$bin"
