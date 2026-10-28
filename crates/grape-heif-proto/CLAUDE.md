@@ -24,6 +24,6 @@ src/
 
 ## Tests you must keep green
 - The exact JSON strings of heic-spec §3.2 and §3.3, both ways, and every unknown field or message refused (`{"kind":"probe","x":1}` included).
-- The sniff table: every HEVC brand, structural brands, `mif1` alone (OtherHeif), MP4 and MOV, size 0 and 1, truncated boxes.
+- The sniff table: every HEVC brand, structural brands, a structural brand with no codec brand (`mif1` alone: Heic, for the helper to decide, D33's 2026-10-26 note), another codec's brand (OtherHeif), MP4 and MOV, size 0 and 1, truncated boxes.
 - The pixel file: round trips, lengths ±1, overflow, channels 2 and 5, the limits.
 - `serve` with the fake: path, quality, limit and protocol checks, a panic, bad rows, the sink's failure winning, no file ever replaced.

@@ -458,9 +458,10 @@ fn full_size_upright(
 }
 
 /// Draws `image` (`w` × `h`) into an 8-bit bitmap and hands it to `out`,
-/// one row at a time, with straight alpha (3 channels when the source says
-/// it has none, `has_alpha`). `out` hears of the image before the bitmap is
-/// made, and `image` is let go once it's drawn.
+/// one row at a time, with straight alpha. `out` hears of the image once
+/// it's drawn, `image` having been let go: 3 channels when the source says
+/// it has none (`has_alpha`) or every pixel drawn is opaque, since the
+/// full-size thumbnail ImageIO makes has alpha even for an opaque HEIC.
 fn draw_rows(
     image: CFRetained<CGImage>,
     w: usize,
@@ -470,17 +471,17 @@ fn draw_rows(
     out: &mut dyn PixelSink,
 ) -> Result<(), Failure> {
     let max_icc = usize::try_from(limits.max_icc_bytes).unwrap_or(usize::MAX);
-    let layout = Layout::of(has_alpha, &image);
+    let drawn = Layout::of(has_alpha, &image);
     let target = Target::for_image(&image, max_icc)
         .ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
     // CoreGraphics takes a space and a layout or not, whatever the size: a
     // one-pixel try settles the target before `begin` names its profile.
-    let target = if bitmap_takes(&target, layout) {
+    let target = if bitmap_takes(&target, drawn) {
         target
     } else {
         // Once more in sRGB, without a profile.
         let srgb = Target::srgb().ok_or_else(|| fail(FailKind::Internal, "no sRGB color space"))?;
-        if !bitmap_takes(&srgb, layout) {
+        if !bitmap_takes(&srgb, drawn) {
             return Err(fail(FailKind::Internal, "no bitmap context"));
         }
         srgb
@@ -494,15 +495,6 @@ fn draw_rows(
         .icc
         .as_ref()
         .map_or(0, |icc| u32::try_from(icc.len()).unwrap_or(0));
-    out.begin(
-        &ImageInfo {
-            width,
-            height,
-            channels: layout.channels(),
-            icc_bytes,
-        },
-        target.icc.as_deref(),
-    )?;
 
     let stride = w
         .checked_mul(4)
@@ -515,7 +507,7 @@ fn draw_rows(
         .try_reserve_exact(len)
         .map_err(|_| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
     buffer.resize(len, 0);
-    let context = bitmap(&mut buffer, w, h, stride, &target, layout)
+    let context = bitmap(&mut buffer, w, h, stride, &target, drawn)
         .ok_or_else(|| fail(FailKind::Internal, "no bitmap context"))?;
 
     let rect = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64));
@@ -524,6 +516,28 @@ fn draw_rows(
     drop(context);
     // ImageIO's picture isn't needed once it's drawn.
     drop(image);
+
+    let layout = match drawn {
+        Layout::Alpha
+            if buffer
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == u8::MAX) =>
+        {
+            Layout::Opaque
+        }
+        drawn => drawn,
+    };
+    out.begin(
+        &ImageInfo {
+            width,
+            height,
+            channels: layout.channels(),
+            icc_bytes,
+        },
+        target.icc.as_deref(),
+    )?;
 
     // Row 0 of the bitmap is the image's top row.
     let mut row = Vec::with_capacity(w * usize::from(layout.channels()));

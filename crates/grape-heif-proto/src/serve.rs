@@ -61,9 +61,9 @@ pub trait Codec {
     /// Decodes the primary image of `source` (a file that sniffed as
     /// [`Sniff::Heic`]), upright, 8-bit, straight alpha, under `limits`:
     /// [`PixelSink::begin`] once, before any row is written and as early as
-    /// the codec knows the upright size (libheif: before decoding; ImageIO:
-    /// after its own decode, which first has to fit
-    /// [`Limits::max_decoder_memory`]), then every row in order.
+    /// the codec knows the upright size and channels (libheif: before
+    /// decoding; ImageIO: after its own decode and its draw, which first
+    /// have to fit [`Limits::max_decoder_memory`]), then every row in order.
     fn decode(
         &self,
         source: &Path,
