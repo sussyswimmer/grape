@@ -89,10 +89,13 @@ fn peak(job: &Job) -> usize {
     PEAK.load(Ordering::Relaxed) - before
 }
 
+/// Which byte strip `i` of `n` is.
+type At = fn(u32, u32) -> u32;
+
 /// A classic TIFF of one gray page, 1 × `n`, one 1-byte row a strip: `n`
-/// strips, their offsets and counts LONG arrays; the strips in the file
-/// last first if `reversed`.
-fn strips(n: u32, reversed: bool) -> Vec<u8> {
+/// strips, their offsets and counts LONG arrays, then `n` bytes, of which
+/// strip `i` is byte `at(i, n)`.
+fn strips(n: u32, at: At) -> Vec<u8> {
     let entries: [(u16, u16, u32, u32); 7] = [
         (256, 4, 1, 1),
         (257, 4, 1, n),
@@ -118,33 +121,42 @@ fn strips(n: u32, reversed: bool) -> Vec<u8> {
         file.extend(value.to_le_bytes());
     }
     file.extend([0; 4]);
-    let at = |i: u32| if reversed { data + n - 1 - i } else { data + i };
-    file.extend((0..n).flat_map(|i| at(i).to_le_bytes()));
+    file.extend((0..n).flat_map(|i| (data + at(i, n)).to_le_bytes()));
     file.extend((0..n).flat_map(|_| 1u32.to_le_bytes()));
     file.extend((0..n).map(|i| (i % 251) as u8));
     file
 }
 
 #[test]
-fn remove_metadata_on_a_tiff_of_a_million_strips_holds_little_past_two_models() {
+fn remove_metadata_on_a_tiff_of_a_million_strips_holds_two_models_and_a_half_at_most() {
     let _turn = turn();
     let n = 1 << 20;
     let dir = TestDir::new("tiff-heap");
-    // Strips in the file's order, and last first, which the overlap check
-    // sorts (as references).
-    for (name, reversed) in [("scan.tif", false), ("reversed.tif", true)] {
+    // The model holds 16 bytes a strip. The self-check holds the plan's
+    // and the output's, and little else; when the output's strips are out
+    // of the file's order, the overlap check's sorted references to them
+    // too (half a model), and when strips repeat, the plan's list of
+    // those (half a model at most).
+    let cases: [(&str, At, f64); 5] = [
+        ("scan.tif", |i, _| i, 2.25),
+        // Last first: the source's strips are sorted, the output's aren't.
+        ("reversed.tif", |i, n| n - 1 - i, 2.25),
+        // Every strip one byte, written once.
+        ("one.tif", |_, _| 0, 2.25),
+        // Each byte two strips in a row: half a million repeats.
+        ("pairs.tif", |i, _| i / 2, 2.75),
+        // Two bytes in turn: the output's strips are out of order too.
+        ("turns.tif", |i, _| i % 2, 2.75),
+    ];
+    for (name, at, most) in cases {
         let (_, job) = plan_one(
             &dir,
             name,
-            &strips(n, reversed),
+            &strips(n, at),
             Operation::tool(ToolKey::RemoveMetadata),
         );
-        let peak = peak(&job);
-        // The model holds 16 bytes a strip. The self-check holds the
-        // plan's and the output's, and little else.
-        let model = 16 * n as usize;
-        let models = peak as f64 / model as f64;
-        assert!(peak < 2 * model + model / 2, "{name}: {models:.2} models");
+        let models = peak(&job) as f64 / (16 * n) as f64;
+        assert!(models < most, "{name}: {models:.2} models");
     }
 }
 

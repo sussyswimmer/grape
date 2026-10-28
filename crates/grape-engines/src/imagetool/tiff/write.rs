@@ -154,12 +154,14 @@ struct Node<'d> {
 /// Writes `pages`, the main chain, into `w` (a new, empty file) as a TIFF
 /// of `layout`'s byte order and kind, copying values and blocks from the
 /// source `r` ([module docs](self)). `shared` holds the source's blocks
-/// that are listed more than once.
+/// that are listed more than once, sorted ([`Tiff::shared`]).
+///
+/// [`Tiff::shared`]: super::read::Tiff::shared
 pub(crate) fn write(
     r: &mut dyn In,
     w: &mut dyn Out,
     layout: Layout,
-    shared: &HashSet<Block>,
+    shared: &[Block],
     pages: &[Dir],
     cancel: &CancelToken,
 ) -> Result<(), Error> {
@@ -184,7 +186,9 @@ pub(crate) fn write(
     out.put(&o.bytes(0, word))?;
 
     let mut buf = vec![0; COPY];
-    let mut placed: HashMap<Block, u64> = HashMap::new();
+    // Where each shared block went; 0 until it's written, since no block
+    // is written at 0.
+    let mut placed = vec![0; shared.len()];
     // The bytes taken from the source: each block and value once.
     let mut taken: u64 = 0;
     for node in &mut nodes {
@@ -196,20 +200,28 @@ pub(crate) fn write(
             if cancel.is_cancelled() {
                 return Err(Error::Write(io::Error::other("cancelled")));
             }
-            let at = if block.len == 0 {
-                0
-            } else if let Some(&at) = placed.get(&block) {
-                at
-            } else {
-                out.align()?;
-                let at = out.at;
-                copy(r, &mut out, block.offset, block.len, &mut buf)?;
-                fits(layout, out.at)?;
-                taken = sum(taken, block.len)?;
-                if shared.contains(&block) {
-                    placed.insert(block, at);
+            if block.len == 0 {
+                offsets.push(0);
+                continue;
+            }
+            // Where it went, if it's a shared block written already.
+            let place = shared
+                .binary_search(&block)
+                .ok()
+                .and_then(|n| placed.get_mut(n));
+            let at = match place {
+                Some(&mut at) if at > 0 => at,
+                place => {
+                    out.align()?;
+                    let at = out.at;
+                    copy(r, &mut out, block.offset, block.len, &mut buf)?;
+                    fits(layout, out.at)?;
+                    taken = sum(taken, block.len)?;
+                    if let Some(place) = place {
+                        *place = at;
+                    }
+                    at
                 }
-                at
             };
             offsets.push(at);
         }
@@ -536,7 +548,7 @@ mod tests {
             &mut r,
             &mut out,
             tiff.layout,
-            &tiff.shared,
+            &tiff.shared(),
             &pages,
             &CancelToken::new(),
         )
@@ -655,7 +667,7 @@ mod tests {
             // and what nothing pointed at is gone.
             let blocks = &b.pages[0].blocks;
             assert_eq!(blocks[0], blocks[1]);
-            assert_eq!(b.shared, [blocks[0]].into());
+            assert_eq!(b.shared(), [blocks[0]]);
             assert_eq!(blocks[2], Block { offset: 0, len: 0 });
             assert!(!out.windows(8).any(|w| w == b"orphaned"));
             assert!(out.len() < file.len());
@@ -808,7 +820,7 @@ mod tests {
                 &mut Cursor::new(&file),
                 &mut out,
                 tiff.layout,
-                &tiff.shared,
+                &tiff.shared(),
                 &pages,
                 &CancelToken::new(),
             );
@@ -838,7 +850,7 @@ mod tests {
                 &mut Cursor::new(&file),
                 &mut Cursor::new(Vec::new()),
                 tiff.layout,
-                &tiff.shared,
+                &tiff.shared(),
                 &[dir],
                 &CancelToken::new(),
             );
@@ -890,7 +902,7 @@ mod tests {
             &mut Cursor::new(&file),
             &mut out,
             tiff.layout,
-            &tiff.shared,
+            &tiff.shared(),
             &[dir],
             &CancelToken::new(),
         )
@@ -914,7 +926,7 @@ mod tests {
             &mut Cursor::new(&file),
             &mut out,
             tiff.layout,
-            &tiff.shared,
+            &tiff.shared(),
             &pages,
             &cancel,
         );

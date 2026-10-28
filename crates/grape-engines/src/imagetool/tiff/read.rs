@@ -252,8 +252,6 @@ pub(crate) struct Tiff {
     pub(crate) layout: Layout,
     /// The pages, in order.
     pub(crate) pages: Vec<Ifd>,
-    /// The blocks that appear more than once, so a writer writes them once.
-    pub(crate) shared: HashSet<Block>,
 }
 
 impl Tiff {
@@ -309,12 +307,8 @@ impl Tiff {
         if pages.is_empty() {
             return Err(Error::Broken("no IFD in the file".into()));
         }
-        let mut tiff = Tiff {
-            layout,
-            pages,
-            shared: HashSet::new(),
-        };
-        tiff.shared = tiff.check_overlaps()?;
+        let tiff = Tiff { layout, pages };
+        tiff.check_overlaps()?;
         Ok(tiff)
     }
 
@@ -333,12 +327,49 @@ impl Tiff {
         all
     }
 
+    /// The blocks listed more than once, sorted, so that a writer writes
+    /// them once: worked out when asked, so that a model read only to be
+    /// checked never holds them.
+    pub(crate) fn shared(&self) -> Vec<Block> {
+        let mut shared: Vec<Block> = Vec::new();
+        let mut last = None;
+        for block in self.in_order() {
+            if last == Some(block) && shared.last() != Some(block) {
+                shared.push(*block);
+            }
+            last = Some(block);
+        }
+        shared.shrink_to_fit();
+        shared
+    }
+
+    /// Every block with bytes, in the file's order, one that's listed more
+    /// than once that many times in a row: where they're listed when
+    /// that's their order already, as writers lay them out (Grape's output
+    /// among them); otherwise through a sorted list of references to them,
+    /// never a copy.
+    fn in_order(&self) -> Box<dyn Iterator<Item = &Block> + '_> {
+        let listed = || {
+            self.ifds()
+                .into_iter()
+                .flat_map(|ifd| &ifd.blocks)
+                .filter(|b| b.len > 0)
+        };
+        if listed()
+            .zip(listed().skip(1))
+            .all(|(a, b)| a == b || apart(a, b))
+        {
+            return Box::new(listed());
+        }
+        let mut sorted: Vec<&Block> = Vec::with_capacity(listed().count());
+        sorted.extend(listed());
+        sorted.sort_unstable();
+        Box::new(sorted.into_iter())
+    }
+
     /// Fails when two blocks overlap without being the same bytes, or a
-    /// block or an IFD overlaps an IFD; otherwise gives the blocks that
-    /// appear more than once. Blocks already in the file's order, as
-    /// writers lay them out, are checked where they are; others through a
-    /// sorted list of references to them, never a copy.
-    fn check_overlaps(&self) -> Result<HashSet<Block>, Error> {
+    /// block or an IFD overlaps an IFD.
+    fn check_overlaps(&self) -> Result<(), Error> {
         let layout = self.layout;
         let all = self.ifds();
         let mut ifds: Vec<(u64, u64)> = Vec::new();
@@ -357,39 +388,31 @@ impl Tiff {
         // An Exif, GPS or Interop IFD that IFDs share is listed for each.
         ifds.sort_unstable();
         ifds.dedup();
-        let broken = || Err(Error::Broken("blocks or IFDs overlap".into()));
-        if !ifds.windows(2).all(|w| w[1].0 >= w[0].1) {
-            return broken();
+        if ifds.windows(2).all(|w| w[1].0 >= w[0].1) && clear_of(self.in_order(), &ifds) {
+            Ok(())
+        } else {
+            Err(Error::Broken("blocks or IFDs overlap".into()))
         }
-        let blocks = || all.iter().flat_map(|ifd| &ifd.blocks).filter(|b| b.len > 0);
-        let apart = |a: &Block, b: &Block| b.offset >= a.offset + a.len;
-        if blocks().zip(blocks().skip(1)).all(|(a, b)| apart(a, b)) {
-            return if clear_of(blocks(), &ifds) {
-                Ok(HashSet::new())
-            } else {
-                broken()
-            };
-        }
-        let mut sorted: Vec<&Block> = blocks().collect();
-        sorted.sort_unstable();
-        let shared = sorted
-            .windows(2)
-            .filter(|w| w[0] == w[1])
-            .map(|w| *w[0])
-            .collect();
-        sorted.dedup();
-        if !sorted.windows(2).all(|w| apart(w[0], w[1])) || !clear_of(sorted.into_iter(), &ifds) {
-            return broken();
-        }
-        Ok(shared)
     }
 }
 
-/// Whether no block of `blocks` (in the file's order, apart) reaches into
-/// an IFD of `ifds` (in order, apart).
+/// Whether block `b` starts where block `a` ends, or after.
+fn apart(a: &Block, b: &Block) -> bool {
+    b.offset >= a.offset + a.len
+}
+
+/// Whether the blocks `blocks` (in the file's order, a repeat in a row)
+/// are apart from each other but for repeats, and none reaches into an
+/// IFD of `ifds` (in order, apart).
 fn clear_of<'a>(blocks: impl Iterator<Item = &'a Block>, ifds: &[(u64, u64)]) -> bool {
     let mut ifds = ifds.iter().peekable();
+    let mut last: Option<&Block> = None;
     for block in blocks {
+        match last {
+            Some(last) if last == block => continue,
+            Some(last) if !apart(last, block) => return false,
+            _ => last = Some(block),
+        }
         // An IFD that ends before this block can't meet a later one.
         while ifds.next_if(|ifd| ifd.1 <= block.offset).is_some() {}
         if ifds
@@ -905,7 +928,7 @@ mod tests {
             assert_eq!(blocks(second), [vec![1; 256], vec![2; 256]]);
             // The pages, the SubIFD chain of two, and the one under it.
             assert_eq!(tiff.ifds().len(), 5);
-            assert!(tiff.shared.is_empty());
+            assert!(tiff.shared().is_empty());
             // Out-of-line values are read where they are.
             let date = exif.entries[0].clone();
             let mut r = Cursor::new(&file[..]);
@@ -1157,10 +1180,21 @@ mod tests {
         let tiff = read(&file).unwrap();
         let blocks = &tiff.pages[0].blocks;
         assert_eq!(blocks[0], blocks[1]);
-        assert_eq!(tiff.shared, [blocks[0]].into());
+        assert_eq!(tiff.shared(), [blocks[0]]);
         assert_eq!(blocks[2], Block { offset: 0, len: 0 });
         assert!(blocks[3].offset < blocks[0].offset);
         assert_eq!(bytes_of(&file, &blocks[3]), b"cd");
+        // A block twice in a row, in the file's order: listed as it is.
+        let page = gray(2, 3, 1, vec![B::data(b"ab"), B::Same(0), B::data(b"cd")]);
+        let file = Builder::new(b'I', false, vec![page]).build();
+        let tiff = read(&file).unwrap();
+        assert_eq!(tiff.shared(), [tiff.pages[0].blocks[0]]);
+        // And one that runs into the next after it.
+        let mut over = gray(2, 4, 1, vec![B::data(b"ab"), B::Same(0), B::data(b"cd")]);
+        over.blocks.push(B::data(b"ef"));
+        over.counts = Some(vec![3, 3, 2, 2]);
+        let file = Builder::new(b'I', false, vec![over]).build();
+        assert!(matches!(read(&file), Err(Error::Broken(_))));
         // A strip that runs one byte into the next.
         let page = gray(2, 2, 1, vec![B::data(b"ab"), B::data(b"cd")]);
         let mut page_over = page.clone();

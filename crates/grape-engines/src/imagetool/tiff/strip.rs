@@ -95,7 +95,8 @@ fn field(tag: u16) -> Option<MetaField> {
 #[derive(Debug)]
 pub(crate) struct Plan {
     layout: Layout,
-    shared: HashSet<Block>,
+    /// The source's blocks listed more than once, sorted.
+    shared: Vec<Block>,
     pages: Vec<Dir>,
     found: Found,
 }
@@ -120,11 +121,8 @@ impl Plan {
                 return Err(Error::Refused(IN_DATA.into()));
             }
         }
-        let Tiff {
-            layout,
-            pages,
-            shared,
-        } = tiff;
+        let shared = tiff.shared();
+        let Tiff { layout, pages } = tiff;
         let mut walk = Walk {
             r,
             order,
