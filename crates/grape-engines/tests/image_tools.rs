@@ -255,3 +255,82 @@ fn remove_metadata_strips_a_png_even_one_named_jpg() {
         fs::remove_file(dir.join(name)).unwrap();
     }
 }
+
+/// A RIFF chunk, padded to even.
+fn riff_chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut out = fourcc.to_vec();
+    out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_le_bytes());
+    out.extend_from_slice(data);
+    if data.len() % 2 == 1 {
+        out.push(0);
+    }
+    out
+}
+
+fn riff(chunks: &[Vec<u8>]) -> Vec<u8> {
+    let body = chunks.concat();
+    let mut out = b"RIFF".to_vec();
+    out.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_le_bytes());
+    out.extend_from_slice(b"WEBP");
+    out.extend(body);
+    out
+}
+
+#[test]
+fn remove_metadata_strips_a_webp_and_fixes_its_header() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-webp");
+    let mut lossless = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    // The encoder's VP8L chunk, put in an extended file with EXIF and XMP.
+    let vp8l = lossless[12..].to_vec();
+    let vp8x = |flags: u8| riff_chunk(b"VP8X", &[flags, 0, 0, 0, 63, 0, 0, 47, 0, 0]);
+    let exif = exif(6);
+    let src = riff(&[
+        vp8x(0x0C),
+        vp8l.clone(),
+        riff_chunk(b"EXIF", &exif[4..]),
+        riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    let outcome = strip(&dir, "pic.webp", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(pixels(&out), pixels(&lossless));
+    assert_eq!(orientation(&out), Orientation::Rotate90);
+    assert!(!out.windows(6).any(|w| w == b"secret"));
+    assert_eq!(
+        u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
+        out.len() - 8
+    );
+    // VP8X keeps only its EXIF flag, for the orientation written back.
+    assert_eq!(out[20], 0x08);
+}
+
+#[test]
+fn remove_metadata_strips_a_gif_and_keeps_its_frames() {
+    let dir = TestDir::new("strip-gif");
+    // Two 1×1 frames, looping, with a 2-color palette (the image crate
+    // here has no GIF encoder).
+    let mut plain = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff".to_vec();
+    plain.extend_from_slice(b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00");
+    for _ in 0..2 {
+        plain.extend_from_slice(&[0x21, 0xF9, 4, 4, 10, 0, 0, 0]);
+        plain.extend_from_slice(&[0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0]);
+    }
+    let mut src = plain.clone();
+    plain.push(0x3B);
+    src.extend_from_slice(&[0x21, 0xFE, 6]);
+    src.extend_from_slice(b"secret");
+    src.extend_from_slice(&[0, 0x3B]);
+    let outcome = strip(&dir, "anim.gif", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![MetaField::Comment])]
+    );
+    assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), plain);
+}

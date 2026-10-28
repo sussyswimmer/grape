@@ -9,12 +9,12 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
 use std::path::Path;
 
 use grape_core::{Format, Job};
 
-use super::{jpeg, png};
+use super::{gif, jpeg, png, webp};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -37,6 +37,11 @@ pub(crate) enum Error {
     Write(io::Error),
 }
 
+/// Where a stripper writes: WebP's goes back to fix its header.
+pub(crate) trait Out: Write + Seek {}
+
+impl<T: Write + Seek> Out for T {}
+
 /// Reads exactly `buf.len()` bytes; the end of the file is [`Error::Broken`].
 pub(crate) fn read_exact(r: &mut dyn BufRead, buf: &mut [u8]) -> Result<(), Error> {
     r.read_exact(buf).map_err(|e| match e.kind() {
@@ -57,6 +62,8 @@ pub(crate) fn read_u8(r: &mut dyn BufRead) -> Result<u8, Error> {
 enum Container {
     Jpeg,
     Png,
+    Webp,
+    Gif,
 }
 
 impl Container {
@@ -66,6 +73,10 @@ impl Container {
             Some(Container::Jpeg)
         } else if png::sniff(head) {
             Some(Container::Png)
+        } else if webp::sniff(head) {
+            Some(Container::Webp)
+        } else if gif::sniff(head) {
+            Some(Container::Gif)
         } else {
             None
         }
@@ -75,7 +86,7 @@ impl Container {
 /// The formats Remove Metadata runs on through this engine, by name; the
 /// content decides the container.
 pub(crate) fn strips(from: Format) -> bool {
-    matches!(from, Format::Jpg | Format::Png)
+    matches!(from, Format::Jpg | Format::Png | Format::Webp | Format::Gif)
 }
 
 /// Runs Remove Metadata on the image `src` (named as `from`) into `dest`.
@@ -111,7 +122,7 @@ pub(crate) fn run(
         .fill_buf()
         .map_err(|e| read_error(&names, src, &ctx.cancel, e))?;
     let Some(container) = Container::sniff(head) else {
-        return Err(names.decode_failed(format!("{}: not a JPEG or PNG", src.display())));
+        return Err(names.decode_failed(format!("{}: not a JPEG, PNG, WebP or GIF", src.display())));
     };
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
@@ -120,6 +131,8 @@ pub(crate) fn run(
     let found = match container {
         Container::Jpeg => jpeg::strip(&mut reader, &mut writer),
         Container::Png => png::strip(&mut reader, &mut writer),
+        Container::Webp => webp::strip(&mut reader, &mut writer),
+        Container::Gif => gif::strip(&mut reader, &mut writer),
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
     let found = found.map_err(|e| {

@@ -206,9 +206,11 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
 }
 
 /// Grape's own image tools (D26), which need no sidecar.
-const IMAGE_TOOLS: [(ToolKey, Format); 2] = [
+const IMAGE_TOOLS: [(ToolKey, Format); 4] = [
     (ToolKey::RemoveMetadata, Format::Jpg),
     (ToolKey::RemoveMetadata, Format::Png),
+    (ToolKey::RemoveMetadata, Format::Webp),
+    (ToolKey::RemoveMetadata, Format::Gif),
 ];
 
 /// The tools that run with `ffmpeg` and `ffprobe` (D26).
