@@ -994,10 +994,10 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - Animated files are refused.
 - **Compress, HEIC:**
   - The helper decodes upright 8-bit pixels; Grape scales (≤2048 / ≤4096 / full ≤35.65 MP); the helper encodes at libheif q40/50/60 or ImageIO 0.60/0.70/0.80 (provisional).
-  - Grape grafts back the source's Exif (Orientation 1, dimensions patched, a sideways IFD1 unlinked), its XMP (Orientation 1) and other metadata items.
+  - Grape grafts back the source's Exif (Orientation 1, dimensions patched, a sideways IFD1 unlinked), its XMP (Orientation 1) and other metadata items. Every run checks D33's three `out.heic` invariants first (one file-level `meta`; every `iloc` item at construction method 0 or 1; the helper's own metadata items found and replaced); when one doesn't hold, the job is `EncodeFailed` ("Grape couldn't write a HEIC file.") and nothing is published.
   - Gain maps, depth, mattes, thumbnails, motion-photo video and C2PA are dropped, as D26's JPEG drops them.
   - Refused: 10-bit, wide `nclx` the helper hands back without a profile, a second picture, non-square pixels, sequences, and High over one HEVC picture ("Try Balanced").
-  - A Mac without a HEVC encoder is told before anything is decoded.
+  - A Mac whose ImageIO doesn't list HEIC is told before anything is decoded; one that lists it but can't encode is told after the decode.
 - **API:** `imagetool::runs_tool(tool, from, heif)`. No new `MetaField` or `Note`.
 - **New dependencies:**
   - libwebp-sys =0.14.4: crate MIT, published 2026-04-29; vendors libwebp 1.6.0, BSD-3-Clause with Google's patent grant; `default-features = false, features = ["std"]`; +1 lock package.
@@ -1005,7 +1005,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - weezl 0.1.12 becomes direct (MIT OR Apache-2.0, already locked).
   - tiff 0.11.3 as a dev-dependency (MIT, already locked).
   - `deny.toml` and `about.toml` clarify libwebp-sys as MIT AND BSD-3-Clause; `about.hbs` prints `PATENTS`. A build must never set `TARGET_CPU`.
-- **Lane A:** `heif::Encoder` (with `max_picture`, `check_encode` and `encode`), `Decoder::decode_within`, `other_heif` made `pub(crate)`, a fake helper that writes real HEIF and echoes the quality, four fixtures, the app tests that used TIFF as "coming", and CI's heif-it cases. The protocol stays at v1.
+- **Lane A:** `heif::Encoder` (with `max_picture`, `check_encode` and `encode`), `Decoder::decode_within`, `other_heif` made `pub(crate)`, a fake helper that writes real HEIF and echoes the quality, four fixtures, the app tests that used TIFF as "coming", and CI's heif-it cases. The protocol stays at 2 (D41).
 - **Not chosen:**
   - webp 0.3.1 (libwebp 1.3.1, before CVE-2023-4863's fix);
   - webpx (4 more crates);
