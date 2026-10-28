@@ -273,6 +273,229 @@ jobs:
           [ "$(head -c 12 "$work/out.avif" | tail -c 4)" = avif ] || { echo "::error::out.avif isn't an AVIF."; exit 1; }
           ls -l "$work/out.avif"
           rm -rf "$work"
+      # The launch smoke test, this step and the next. The SVG and PDF
+      # workers are Grape itself (D39, D29): one small job each, on each
+      # slice the runner can run, the PDF job loading Contents/Frameworks'
+      # libpdfium.dylib. The image helper's probe and the sidecars' version
+      # lines are checked above. Each run gets a minute (perl's alarm, as
+      # macOS has no timeout command), and the sources must be unchanged
+      # after. Nothing here goes online.
+      - name: Run the SVG and PDF workers in Grape.app
+        timeout-minutes: 5
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          bin="$PWD/$app/Contents/MacOS/$name"
+          pdfium="$PWD/$app/Contents/Frameworks/libpdfium.dylib"
+          work=$(mktemp -d "$RUNNER_TEMP/grape-smoke.XXXXXX")
+          # A 40 x 30 SVG, drawn at twice its size (it's under 256 px) and
+          # opaque, so pixels.rgba holds 80 x 60 x 3 bytes after its 24-byte
+          # header (grape-heif-proto's pixels.rs). A PDF with one 1-inch
+          # page, rendered to PNG at 300 DPI: 300 x 300.
+          python3 -I - "$work" <<'PY'
+          import os, sys
+          work = sys.argv[1]
+          with open(os.path.join(work, "tiny.svg"), "w") as f:
+              f.write('<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="#5b2a86"/><circle cx="20" cy="15" r="9" fill="#f2c14e"/></svg>')
+          content = b"0.36 0.16 0.53 rg 0 0 72 72 re f"
+          objects = [
+              b"<< /Type /Catalog /Pages 2 0 R >>",
+              b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+              b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << >> /Contents 4 0 R >>",
+              b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+          ]
+          pdf = bytearray(b"%PDF-1.7\n")
+          offsets = []
+          for i, obj in enumerate(objects, 1):
+              offsets.append(len(pdf))
+              pdf += b"%d 0 obj\n%s\nendobj\n" % (i, obj)
+          xref = len(pdf)
+          pdf += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+          pdf += b"".join(b"%010d 00000 n \n" % o for o in offsets)
+          pdf += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+          with open(os.path.join(work, "tiny.pdf"), "wb") as f:
+              f.write(pdf)
+          PY
+          sums=$(cd "$work" && shasum -a 256 tiny.svg tiny.pdf)
+          # The app's own limits: svg::protocol::Limits::DEFAULT and
+          # pdf::run's bounds.
+          svg_limits='{"maxSourceBytes":67108864,"maxTextBytes":67108864,"maxNodes":2000000,"maxSide":16384,"maxPixels":67108864,"maxNestedSvgs":64,"maxDataBytes":134217728,"maxEmbeddedSide":16384,"maxEmbeddedPixels":67108864,"maxHeapBytes":2147483648}'
+          pdf_bounds='{"dpi":300.0,"maxPages":2000,"maxSplitPages":100000,"maxPagePixels":100000000,"maxSide":65535,"maxOutputBytes":8589934592,"maxTextBytes":268435456,"maxDecompressed":536870912,"maxHeapBytes":4294967296}'
+          bad=0
+          error() { echo "::error::$*"; bad=1; }
+          # worker <slice> <flag> <request> [arch -x86_64]: runs Grape as that
+          # worker for at most 60 s; sets out and code.
+          worker() {
+            local slice=$1 flag=$2 request=$3
+            shift 3
+            set +e
+            out=$(printf '%s' "$request" | perl -e 'alarm shift; exec @ARGV or die "exec: $!\n"' 60 "$@" "$bin" "$flag")
+            code=$?
+            set -e
+            echo "$slice $name $flag (exit $code):"
+            [ -z "$out" ] || printf '%s\n' "$out" | sed 's/^/  /'
+            [ "$code" -ne 142 ] || error "$slice: $name $flag didn't finish in 60 s, so it was killed."
+          }
+          # check <slice> [arch -x86_64]
+          check() {
+            local slice=$1
+            shift
+            mkdir -p "$work/$slice/svg" "$work/$slice/pdf"
+            worker "$slice" --grape-svg-worker '{"protocol":1,"source":"'"$work/tiny.svg"'","workDir":"'"$work/$slice/svg"'","mode":"raster","limits":'"$svg_limits"'}' "$@"
+            if [ "$code" -ne 0 ] || [ "${out##*$'\n'}" != '{"done":{"width":80,"height":60,"channels":3,"leftOut":0,"scaled":false}}' ]; then
+              error "$slice: $name --grape-svg-worker exited $code and didn't draw the 40 x 30 SVG at 80 x 60."
+            fi
+            worker "$slice" --grape-pdf-worker '{"pdfium":"'"$pdfium"'","outDir":"'"$work/$slice/pdf"'","op":{"kind":"render","source":"'"$work/tiny.pdf"'","format":"png"},"bounds":'"$pdf_bounds"'}' "$@"
+            case "$code ${out##*$'\n'}" in
+              '0 {"done":{"pages":1,'*) ;;
+              *) error "$slice: $name --grape-pdf-worker exited $code and didn't render the one-page PDF (an error of kind library means libpdfium.dylib didn't load)." ;;
+            esac
+            # What each wrote: the pixel file's header, size and first pixel,
+            # and the PNG's signature and size.
+            python3 -I - "$work/$slice/svg/pixels.rgba" "$work/$slice/pdf/page-1.png" "$slice" <<'PY' || bad=1
+          import os, struct, sys
+          pixels, png, slice = sys.argv[1:4]
+          ok = True
+          if os.path.isfile(pixels):
+              b = open(pixels, "rb").read()
+              header = b[:8], struct.unpack("<IIII", b[8:24])
+              print(f"{slice} pixels.rgba: {len(b)} bytes, {header[1]}, first pixel #{b[24:27].hex()}")
+              if header != (b"GRAPEPX\x01", (80, 60, 3, 0)) or len(b) != 24 + 80 * 60 * 3 or b[24:27] != bytes.fromhex("5b2a86"):
+                  print(f"::error::{slice}: pixels.rgba isn't 80 x 60 RGB starting with the SVG's #5b2a86.")
+                  ok = False
+          if os.path.isfile(png):
+              b = open(png, "rb").read(24)
+              size = struct.unpack(">II", b[16:24])
+              print(f"{slice} page-1.png: {os.path.getsize(png)} bytes, {size[0]} x {size[1]}")
+              if b[1:4] != b"PNG" or size != (300, 300):
+                  print(f"::error::{slice}: page-1.png isn't a 300 x 300 PNG.")
+                  ok = False
+          sys.exit(0 if ok else 1)
+          PY
+          }
+          check native
+          # Rosetta, when this runner has it: the Intel slice and PDFium's
+          # Intel half too.
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then
+            check x86_64 arch -x86_64
+          else
+            echo "No Rosetta on this runner: the x86_64 slice's workers aren't run."
+          fi
+          [ "$(cd "$work" && shasum -a 256 tiny.svg tiny.pdf)" = "$sums" ] || error "A worker changed its source."
+          rm -rf "$work"
+          [ "$bad" -eq 0 ] || exit 1
+      # Grape.app started the way Finder starts it, through LaunchServices
+      # (open -n), not its executable from this shell, so it runs as a
+      # user's would: from its Info.plist, with none of this step's
+      # environment. Setup's lines must reach the log and Grape must still
+      # run 10 s later; then a second open -n must hand over to it and exit
+      # (single-instance), leaving one process, and the first logs that.
+      # Then it's killed and its whole log printed. No permission is needed:
+      # the drag monitor polls (D18). Launched from here, not /Volumes or a
+      # translocated copy, a first launch turns launch at login on
+      # (settings::first_launch_rule), and the LaunchAgent it writes is
+      # removed after, so the runner is left clean.
+      - name: Start Grape.app, then a second one
+        timeout-minutes: 5
+        run: |
+          app=target/universal-apple-darwin/release/bundle/macos/Grape.app
+          name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+          bin="$PWD/$app/Contents/MacOS/$name"
+          read -r id product < <(python3 -I -c 'import json, sys; c = json.load(open(sys.argv[1])); print(c["identifier"], c["productName"])' apps/desktop/src-tauri/tauri.conf.json)
+          # tauri-plugin-log's file: <productName>.log in ~/Library/Logs/<identifier>.
+          log="$HOME/Library/Logs/$id/$product.log"
+          # Nothing stored yet means a first launch: launch at login goes on
+          # and the welcome card opens Settings (settings.rs).
+          first=yes
+          [ ! -e "$HOME/Library/Application Support/$id/settings.json" ] || first=no
+          # auto-launch's LaunchAgent, named after productName.
+          agent="$HOME/Library/LaunchAgents/$product.plist"
+          agent_before=no
+          [ ! -e "$agent" ] || agent_before=yes
+          start=0
+          [ ! -f "$log" ] || start=$(stat -f %z "$log")
+          bad=0
+          error() { echo "::error::$*"; bad=1; }
+          # This launch's part of the log.
+          new_log() { if [ -f "$log" ]; then tail -c "+$((start + 1))" "$log"; fi; }
+          has() { local text; text=$(new_log); grep -Eq -- "$1" <<< "$text"; }
+          pids() { pgrep -f "$bin" || true; }
+          crash_reports() {
+            sleep 5
+            for f in ~/Library/Logs/DiagnosticReports/"$name"*.ips; do
+              [ -f "$f" ] || continue
+              echo "::group::$(basename "$f")"
+              head -c 100000 "$f"
+              echo
+              echo "::endgroup::"
+            done
+          }
+          die() { echo "::error::$*"; crash_reports; exit 1; }
+          cleanup() {
+            local status=$?
+            for p in $(pids); do kill "$p" 2> /dev/null || true; done
+            for _ in $(seq 10); do [ -n "$(pids)" ] || break; sleep 0.5; done
+            for p in $(pids); do kill -9 "$p" 2> /dev/null || true; done
+            if [ "$agent_before" = no ] && [ -f "$agent" ]; then
+              echo "Removing the LaunchAgent the first launch wrote, $agent:"
+              plutil -p "$agent" || true
+              rm -f "$agent"
+            fi
+            echo "Grape's log, $log:"
+            if [ -f "$log" ]; then cat "$log"; else echo "(none)"; fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+
+          out=$(open -n "$app" 2>&1) || die "open -n couldn't start Grape.app: $out (it needs a signed-in desktop session)."
+          # Setup's last line (lib.rs). A tray icon that can't be made ends
+          # setup before it, with a panic.
+          running='\]\[grape_app\]\[INFO\] Grape [^ ]+ is running$'
+          pid=
+          for _ in $(seq 90); do
+            [ -n "$pid" ] || pid=$(pids | head -n 1)
+            if has "$running"; then break; fi
+            if [ -n "$pid" ] && ! kill -0 "$pid" 2> /dev/null; then die "Grape exited before setup finished."; fi
+            sleep 0.5
+          done
+          if ! has "$running"; then
+            [ -f "$log" ] || die "No log at $log after 45 s: Grape never got as far as starting its logger."
+            die "The log never said 'Grape <version> is running' in 45 s: setup didn't finish."
+          fi
+          [ -n "$pid" ] || pid=$(pids | head -n 1)
+          [ -n "$pid" ] || die "Grape's log says it's running, but no process runs $bin."
+          sleep 10
+          kill -0 "$pid" 2> /dev/null || die "Grape (pid $pid) is gone 10 s after finishing setup."
+          echo "Grape runs as pid $pid. First launch: $first."
+
+          has '\]\[grape_app::sidecars\]\[INFO\] sidecars: found ffmpeg, ffprobe, bsdtar, pdfium$' || error "The log lacks the sidecars line naming all four."
+          has '\]\[grape_app::wheel\]\[INFO\] drag monitor running$' || error "The log lacks 'drag monitor running'."
+          has '\]\[grape_app::float\]\[INFO\] float: shelf window built$' || error "The log lacks the float shelf built at launch (D43)."
+          if [ "$first" = yes ]; then
+            has '\]\[grape_app::settings\]\[INFO\] settings: first launch; launch at login is on$' || error "The log lacks the first launch's launch at login."
+            has "\]\[grape_app::settings\]\[INFO\] settings: the welcome card isn't dismissed yet; opening Settings$" || error "The log lacks the welcome card opening Settings."
+            if [ ! -f "$agent" ]; then
+              error "The first launch wrote no LaunchAgent at $agent."
+            elif ! grep -q -- '<string>--at-login</string>' "$agent"; then
+              error "$agent doesn't start Grape with --at-login."
+            fi
+          fi
+          while IFS= read -r line; do
+            [ -z "$line" ] || error "Grape logged an error: $line"
+          done <<< "$(new_log | grep -F '][ERROR] ' || true)"
+
+          open -n "$app" || error "The second open -n failed."
+          handover='\]\[grape_app\]\[INFO\] second launch: opening Settings in the running instance$'
+          for _ in $(seq 20); do
+            if has "$handover" && [ "$(pids | wc -l | tr -d ' ')" -eq 1 ]; then break; fi
+            sleep 0.5
+          done
+          has "$handover" || error "The first Grape never logged the second launch."
+          count=$(pids | wc -l | tr -d ' ')
+          [ "$count" -eq 1 ] || error "$count Grape processes 10 s after the second launch, not 1: the second didn't hand over and exit."
+          kill -0 "$pid" 2> /dev/null || die "The first Grape exited after the second launch."
+          [ "$bad" -eq 0 ] || exit 1
+          echo "Grape ran through its first launch, and a second one handed over to it."
       - if: ${{ !inputs.release }}
         uses: actions/upload-artifact@v7
         with:
