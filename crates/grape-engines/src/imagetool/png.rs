@@ -14,7 +14,7 @@
 use std::io::{BufRead, Read, Write};
 
 use super::exif;
-use super::strip::{read_exact, Error, Found};
+use super::strip::{more_after, read_exact, Error, Found};
 use crate::MetaField;
 
 /// A PNG's signature.
@@ -27,8 +27,13 @@ const MAX_CHUNKS: usize = 1 << 20;
 const MAX_HELD: usize = 64 << 20;
 
 /// The most bytes of a dropped chunk read to classify it, decompressed
-/// text included: an EXIF bigger than this is reported as Other.
+/// text included: of a bigger EXIF, only this much is walked (its first
+/// IFD is at the start), and the rest is reported as Other.
 const MAX_READ: usize = 1 << 20;
+
+/// How much compressed text is inflated at a time to see whether it's
+/// blank.
+const INFLATE_STEP: usize = 4096;
 
 pub(super) fn sniff(head: &[u8]) -> bool {
     head.starts_with(SIGNATURE)
@@ -136,11 +141,11 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
                     note_exif(&mut found, &mut first_exif, held.as_mut(), &blob);
                 }
             }
-            b"eXIf" if whole => {
-                note_exif(&mut found, &mut first_exif, held.as_mut(), &data);
-            }
             b"eXIf" => {
-                found.fields.insert(MetaField::Other);
+                if !whole {
+                    found.fields.insert(MetaField::Other);
+                }
+                note_exif(&mut found, &mut first_exif, held.as_mut(), &data);
             }
             b"tIME" => {
                 found.fields.insert(MetaField::ModDate);
@@ -152,8 +157,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
         }
     }
     // Anything but padding after IEND.
-    let rest = r.fill_buf().map_err(Error::Read)?;
-    if rest.iter().any(|&b| b != 0) {
+    if more_after(r, &[0])? {
         found.fields.insert(MetaField::Other);
     }
     Ok(found)
@@ -187,37 +191,71 @@ fn text(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<
     };
     let keyword = &data[..nul];
     let rest = &data[nul + 1..];
+    // The text, and whether it's compressed.
     let body = match kind {
-        b"tEXt" => Some(rest.to_vec()),
-        b"zTXt" => rest.get(1..).and_then(|z| inflate(z, whole)),
-        _ => itxt(rest, whole),
+        b"tEXt" => Some((false, rest)),
+        b"zTXt" => rest.get(1..).map(|z| (true, z)),
+        _ => itxt(rest),
     };
     let field = text_field(keyword);
-    let raw_exif = matches!(keyword, b"Raw profile type exif" | b"Raw profile type APP1");
-    match body {
-        // Unreadable: reported by its keyword.
-        None => (Some(if raw_exif { MetaField::Other } else { field }), None),
-        Some(body) if raw_exif => match unhex_profile(&body) {
+    if matches!(keyword, b"Raw profile type exif" | b"Raw profile type APP1") {
+        let body = body.and_then(|(compressed, text)| {
+            if compressed {
+                inflate(text, whole)
+            } else {
+                Some(text.to_vec())
+            }
+        });
+        return match body.as_deref().and_then(unhex_profile) {
             Some(blob) => (None, Some(blob)),
             None => (Some(MetaField::Other), None),
-        },
-        Some(body) if body.iter().all(|&b| b == 0 || b.is_ascii_whitespace()) => (None, None),
-        Some(_) => (Some(field), None),
+        };
+    }
+    let blank = body.and_then(|(compressed, text)| {
+        if compressed {
+            inflates_blank(text, whole)
+        } else {
+            Some(blank(text))
+        }
+    });
+    match blank {
+        // Blank, or unreadable: reported by its keyword.
+        Some(true) => (None, None),
+        Some(false) | None => (Some(field), None),
     }
 }
 
-/// The text of an iTXt chunk after its keyword.
-fn itxt(rest: &[u8], whole: bool) -> Option<Vec<u8>> {
+/// The text of an iTXt chunk after its keyword, and whether it's
+/// compressed.
+fn itxt(rest: &[u8]) -> Option<(bool, &[u8])> {
     let (&compressed, rest) = rest.split_first()?;
     let rest = rest.get(1..)?;
     let language = rest.iter().position(|&b| b == 0)?;
     let rest = &rest[language + 1..];
     let translated = rest.iter().position(|&b| b == 0)?;
-    let text = &rest[translated + 1..];
-    if compressed == 1 {
-        inflate(text, whole)
-    } else {
-        Some(text.to_vec())
+    Some((compressed == 1, &rest[translated + 1..]))
+}
+
+/// Whether text is only NULs and white space.
+fn blank(text: &[u8]) -> bool {
+    text.iter().all(|&b| b == 0 || b.is_ascii_whitespace())
+}
+
+/// Whether zlib `data` inflates to blank text ([`blank`]), inflating only
+/// as far as the first other byte and at most [`MAX_READ`]; `None` if it's
+/// broken (or cut short before any text, unless `whole`).
+fn inflates_blank(data: &[u8], whole: bool) -> Option<bool> {
+    let mut reader = flate2::read::ZlibDecoder::new(data).take(MAX_READ as u64);
+    let mut buf = [0; INFLATE_STEP];
+    let mut read_any = false;
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => return Some(true),
+            Ok(n) if !blank(&buf[..n]) => return Some(false),
+            Ok(_) => read_any = true,
+            Err(_) if !whole && read_any => return Some(true),
+            Err(_) => return None,
+        }
     }
 }
 
@@ -467,6 +505,91 @@ mod tests {
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_big_exif_is_walked_as_far_as_it_was_read() {
+        use MetaField::*;
+        // Orientation 6 and a GPS IFD up front, then over 1 MiB of a maker
+        // note: the orientation still comes back, the location is said.
+        let big = vec![7; MAX_READ];
+        let t = tiff(
+            b'M',
+            &[
+                &[
+                    (0x0112, V::Short(6)),
+                    (0x8825, V::Ifd(1)),
+                    (0x927C, V::Bytes(7, &big)),
+                ],
+                &[(0x0002, V::Bytes(5, &[0, 0, 0, 48, 0, 0, 0, 1]))],
+            ],
+            None,
+        );
+        assert!(t.len() > MAX_READ);
+        let src = png(&[ihdr(), chunk(b"eXIf", &t), idat(), chunk(b"IEND", &[])]);
+        let (out, fields) = run(&src).unwrap();
+        assert!(
+            fields.contains(&Location) && fields.contains(&Other),
+            "{fields:?}"
+        );
+        let minimal = exif::minimal(Some(6), false).unwrap();
+        assert_eq!(
+            out,
+            png(&[
+                ihdr(),
+                chunk(b"eXIf", &minimal),
+                idat(),
+                chunk(b"IEND", &[])
+            ])
+        );
+    }
+
+    #[test]
+    fn compressed_text_is_inflated_only_until_it_isnt_blank() {
+        let ztxt = |text: &[u8]| {
+            let mut data = b"Comment\0\0".to_vec();
+            data.extend(zlib(text));
+            data
+        };
+        assert_eq!(text(b"zTXt", &ztxt(b"  \0 "), true), (None, None));
+        assert_eq!(
+            text(b"zTXt", &ztxt(b"  hi"), true),
+            (Some(MetaField::Comment), None)
+        );
+        // Text past the first step is still found.
+        let mut late = vec![b' '; 3 * INFLATE_STEP];
+        late.push(b'x');
+        assert_eq!(
+            text(b"zTXt", &ztxt(&late), true),
+            (Some(MetaField::Comment), None)
+        );
+        // Broken zlib: said by its keyword.
+        assert_eq!(
+            text(b"zTXt", b"Comment\0\0not zlib", true),
+            (Some(MetaField::Comment), None)
+        );
+        let mut itxt = b"Title\0\x01\0en\0\0".to_vec();
+        itxt.extend(zlib(b"\n\n"));
+        assert_eq!(text(b"iTXt", &itxt, true), (None, None));
+    }
+
+    #[test]
+    fn data_after_iend_is_found_past_the_read_buffer() {
+        let src = png(&[ihdr(), idat(), chunk(b"IEND", &[])]);
+        let mut after = vec![0; 70_000];
+        after.extend_from_slice(b"video");
+        let input = [src.clone(), after].concat();
+        let mut out = Vec::new();
+        let found = strip(
+            &mut std::io::BufReader::with_capacity(8, Cursor::new(input)),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(found.fields, [MetaField::Other].into());
+        assert_eq!(out, src);
+        // Only zeros: padding.
+        let (_, fields) = run(&[src, vec![0; 70_000]].concat()).unwrap();
+        assert!(fields.is_empty());
     }
 
     #[test]

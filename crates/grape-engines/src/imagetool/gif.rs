@@ -14,7 +14,7 @@
 
 use std::io::{BufRead, Write};
 
-use super::strip::{read_exact, read_u8, Error, Found};
+use super::strip::{more_after, read_exact, read_u8, Error, Found};
 use crate::MetaField;
 
 /// The most blocks (images and extensions) in a file.
@@ -72,6 +72,11 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
                     }
                     0xFF => {
                         let first = read_sub_block(r)?;
+                        if first.is_empty() {
+                            // `21 FF 00`: an empty extension, already ended.
+                            found.fields.insert(MetaField::Other);
+                            continue;
+                        }
                         let id = first.get(..11).unwrap_or_default();
                         let keep_loop = matches!(id, b"NETSCAPE2.0" | b"ANIMEXTS1.0");
                         if (keep_loop && !looped) || id == b"ICCRGBG1012" {
@@ -111,8 +116,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
             other => return Err(Error::Broken(format!("an unknown block {other:#04X}"))),
         }
     }
-    let rest = r.fill_buf().map_err(Error::Read)?;
-    if rest.iter().any(|&b| b != 0) {
+    if more_after(r, &[0])? {
         found.fields.insert(MetaField::Other);
     }
     Ok(found)
@@ -247,6 +251,32 @@ mod tests {
         let (out, fields) = run(&[src, b"tail".to_vec()].concat()).unwrap();
         assert_eq!(fields, [Comment, Xmp, Iptc, Other].into());
         assert_eq!(out, gif(&[looping], &[]));
+    }
+
+    #[test]
+    fn an_empty_application_extension_ends_where_it_starts() {
+        // `21 FF 00`, then a comment whose text looks like a plain-text
+        // extension, then the image: the comment goes whole, the image
+        // stays.
+        let tricky = ext(0xFE, &[b"\x21\x01\x05SECRET\x00"]);
+        let src = gif(&[vec![0x21, 0xFF, 0x00], tricky], &[]);
+        let (out, fields) = run(&src).unwrap();
+        assert_eq!(fields, [MetaField::Comment, MetaField::Other].into());
+        assert_eq!(out, gif(&[], &[]));
+    }
+
+    #[test]
+    fn data_after_the_trailer_is_found_past_the_read_buffer() {
+        let mut input = gif(&[], &[]);
+        input.extend(vec![0; 70_000]);
+        input.extend_from_slice(b"zip");
+        let mut out = Vec::new();
+        let found = strip(
+            &mut std::io::BufReader::with_capacity(8, Cursor::new(input)),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(found.fields, [MetaField::Other].into());
     }
 
     #[test]

@@ -57,6 +57,23 @@ pub(crate) fn read_u8(r: &mut dyn BufRead) -> Result<u8, Error> {
     Ok(b[0])
 }
 
+/// Whether anything but `padding` bytes follows the container's end:
+/// reads on, as far as the end of the file, up to the first byte that
+/// isn't padding.
+pub(crate) fn more_after(r: &mut dyn BufRead, padding: &[u8]) -> Result<bool, Error> {
+    loop {
+        let buf = r.fill_buf().map_err(Error::Read)?;
+        if buf.is_empty() {
+            return Ok(false);
+        }
+        if buf.iter().any(|b| !padding.contains(b)) {
+            return Ok(true);
+        }
+        let n = buf.len();
+        r.consume(n);
+    }
+}
+
 /// The image containers Remove Metadata strips.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Container {

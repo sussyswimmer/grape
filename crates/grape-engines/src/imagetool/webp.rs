@@ -1,9 +1,11 @@
 //! Remove Metadata on WebP (D26): the image chunks are copied as they
 //! are, padding included; the rest are dropped and said what they were.
 //!
-//! - **Kept:** `VP8 `, `VP8L`, `VP8X`, `ALPH`, `ANIM`, `ANMF` and `ICCP`.
+//! - **Kept:** `VP8 `, `VP8L`, `VP8X`, `ALPH`, `ANIM` and `ICCP`, and each
+//!   `ANMF` frame with its header and its `ALPH`, `VP8 ` or `VP8L`.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
-//!   `XMP `, unknown chunks, and anything after the RIFF's end.
+//!   `XMP `, unknown chunks (inside a frame too), and anything after the
+//!   RIFF's end.
 //! - **Patched afterwards:** the RIFF size, and VP8X's flags: XMP off, and
 //!   EXIF on only when the minimal EXIF ([`exif::minimal`]) went back where
 //!   the old one was. Without a VP8X (a simple WebP) there's no flag to
@@ -12,15 +14,19 @@
 use std::io::{BufRead, SeekFrom};
 
 use super::exif;
-use super::strip::{read_exact, Error, Found, Out};
+use super::strip::{more_after, read_exact, Error, Found, Out};
 use crate::MetaField;
 
 /// The most chunks in a file (an animation has one per frame).
 const MAX_CHUNKS: usize = 1 << 20;
 
-/// The most bytes of an EXIF chunk read; a bigger one is reported as
+/// The most bytes of an EXIF chunk read: of a bigger one, only this much
+/// is walked (its first IFD is at the start), and the rest is reported as
 /// Other.
 const MAX_EXIF: usize = 1 << 20;
+
+/// An ANMF frame's header: its position, size, duration and flags.
+const FRAME_HEADER: u64 = 16;
 
 /// VP8X's flag for an XMP chunk.
 const XMP_FLAG: u8 = 0x04;
@@ -91,32 +97,28 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
                 write(w, &data, &mut written)?;
                 copy(r, w, body - 10, &mut written)?;
             }
-            b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ANMF" | b"ICCP" => {
-                image |= matches!(&fourcc, b"VP8 " | b"VP8L" | b"ANMF");
+            b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
+                image |= matches!(&fourcc, b"VP8 " | b"VP8L");
                 write(w, &head, &mut written)?;
                 copy(r, w, body, &mut written)?;
             }
+            b"ANMF" => {
+                image = true;
+                frame(r, w, size, &mut found, &mut written)?;
+                skip(r, body - size)?;
+            }
             b"EXIF" => {
-                let take = usize_of(size)?.min(MAX_EXIF);
-                let mut data = vec![0; take];
-                read_exact(r, &mut data)?;
-                skip(r, body - take as u64)?;
-                if take as u64 == size {
-                    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(&data);
-                    let walked = exif::walk(tiff);
-                    found.fields.extend(walked.fields.iter().copied());
-                    if !seen_exif && flags_at.is_some() {
-                        let needs = exif::minimal(
-                            walked.orientation,
-                            walked.dcf_adobe_rgb() && flags & 0x20 == 0,
-                        );
-                        if let Some(tiff) = needs {
-                            write_chunk(w, b"EXIF", &tiff, &mut written)?;
-                            wrote_exif = true;
-                        }
+                let walked = read_exif(r, size, &mut found)?;
+                skip(r, body - size)?;
+                if !seen_exif && flags_at.is_some() {
+                    let needs = exif::minimal(
+                        walked.orientation,
+                        walked.dcf_adobe_rgb() && flags & 0x20 == 0,
+                    );
+                    if let Some(tiff) = needs {
+                        write_chunk(w, b"EXIF", &tiff, &mut written)?;
+                        wrote_exif = true;
                     }
-                } else {
-                    found.fields.insert(MetaField::Other);
                 }
                 seen_exif = true;
             }
@@ -133,8 +135,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
     if !image {
         return Err(Error::Broken("no image data".into()));
     }
-    let rest = r.fill_buf().map_err(Error::Read)?;
-    if rest.iter().any(|&b| b != 0) {
+    if more_after(r, &[0])? {
         found.fields.insert(MetaField::Other);
     }
     // The RIFF's size, and VP8X's flags.
@@ -149,6 +150,89 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
     }
     w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
     Ok(found)
+}
+
+/// Reads an EXIF chunk's `size` bytes, walking at most [`MAX_EXIF`] of
+/// them (after an optional `Exif\0\0`), and says what it held.
+fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::Exif, Error> {
+    let take = usize_of(size)?.min(MAX_EXIF);
+    let mut data = vec![0; take];
+    read_exact(r, &mut data)?;
+    skip(r, size - take as u64)?;
+    if (take as u64) < size {
+        found.fields.insert(MetaField::Other);
+    }
+    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(&data);
+    let walked = exif::walk(tiff);
+    found.fields.extend(walked.fields.iter().copied());
+    Ok(walked)
+}
+
+/// Copies an ANMF frame of `size` bytes: its header and its image
+/// chunks, the rest dropped and said. Its size is written again after.
+fn frame(
+    r: &mut dyn BufRead,
+    w: &mut dyn Out,
+    size: u64,
+    found: &mut Found,
+    written: &mut u64,
+) -> Result<(), Error> {
+    if size < FRAME_HEADER {
+        return Err(Error::Broken("a short ANMF".into()));
+    }
+    write(w, b"ANMF\0\0\0\0", written)?;
+    let size_at = *written - 4;
+    let mut header = [0; FRAME_HEADER as usize];
+    read_exact(r, &mut header)?;
+    write(w, &header, written)?;
+    let mut left = size - FRAME_HEADER;
+    while left > 0 {
+        let mut head = [0; 8];
+        if left < 8 {
+            return Err(Error::Broken("a chunk cut short in an ANMF".into()));
+        }
+        read_exact(r, &mut head)?;
+        let fourcc = [head[0], head[1], head[2], head[3]];
+        let inner = u64::from(u32::from_le_bytes([head[4], head[5], head[6], head[7]]));
+        let padded = inner + (inner & 1);
+        // The frame's last chunk's pad byte may be missing.
+        let body = if left >= 8 + padded {
+            padded
+        } else if left == 8 + inner {
+            inner
+        } else {
+            return Err(Error::Broken(format!(
+                "a chunk of {inner} bytes past its ANMF's end"
+            )));
+        };
+        left -= 8 + body;
+        match &fourcc {
+            b"ALPH" | b"VP8 " | b"VP8L" => {
+                write(w, &head, written)?;
+                copy(r, w, body, written)?;
+            }
+            b"EXIF" => {
+                read_exif(r, inner, found)?;
+                skip(r, body - inner)?;
+            }
+            b"XMP " => {
+                skip(r, body)?;
+                found.fields.insert(MetaField::Xmp);
+            }
+            _ => {
+                skip(r, body)?;
+                found.fields.insert(MetaField::Other);
+            }
+        }
+    }
+    let kept = u32::try_from(*written - size_at - 4)
+        .map_err(|_| Error::Broken("a frame too big".into()))?;
+    seek_write(w, size_at, &kept.to_le_bytes())?;
+    w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
+    if kept % 2 == 1 {
+        write(w, &[0], written)?;
+    }
+    Ok(())
 }
 
 fn usize_of(n: u64) -> Result<usize, Error> {
@@ -231,6 +315,11 @@ mod tests {
         chunk(b"VP8X", &[flags, 0, 0, 0, 1, 0, 0, 1, 0, 0])
     }
 
+    /// An ANMF frame: a 16-byte header, then `chunks`.
+    fn anmf(chunks: &[Vec<u8>]) -> Vec<u8> {
+        chunk(b"ANMF", &[[3; 16].as_slice(), &chunks.concat()].concat())
+    }
+
     fn webp(chunks: &[Vec<u8>]) -> Vec<u8> {
         let body: Vec<u8> = chunks.concat();
         let mut out = b"RIFF".to_vec();
@@ -259,7 +348,8 @@ mod tests {
                 vp8x(0x22),
                 chunk(b"ICCP", b"prof"),
                 chunk(b"ANIM", &[0; 6]),
-                chunk(b"ANMF", b"f1"),
+                anmf(&[chunk(b"ALPH", b"a"), chunk(b"VP8 ", b"f1")]),
+                anmf(&[chunk(b"VP8L", b"f2")]),
             ]),
         ] {
             let (out, fields) = run(&src).unwrap();
@@ -299,6 +389,79 @@ mod tests {
         let src = webp(&[vp8x(0x08), chunk(b"VP8 ", b"frame"), chunk(b"EXIF", &t)]);
         let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x00), chunk(b"VP8 ", b"frame")]));
+    }
+
+    #[test]
+    fn chunks_inside_a_frame_go_too() {
+        use MetaField::*;
+        let src = webp(&[
+            vp8x(0x02),
+            chunk(b"ANIM", &[0; 6]),
+            anmf(&[
+                chunk(b"VP8L", b"frame one"),
+                chunk(b"XMP ", b"<x:xmpmeta>Zoe</x:xmpmeta>"),
+                chunk(b"ABCD", b"GPS"),
+            ]),
+            anmf(&[chunk(b"ALPH", b"al"), chunk(b"VP8 ", b"two")]),
+        ]);
+        let (out, fields) = run(&src).unwrap();
+        assert_eq!(fields, [Xmp, Other].into());
+        assert_eq!(
+            out,
+            webp(&[
+                vp8x(0x02),
+                chunk(b"ANIM", &[0; 6]),
+                anmf(&[chunk(b"VP8L", b"frame one")]),
+                anmf(&[chunk(b"ALPH", b"al"), chunk(b"VP8 ", b"two")]),
+            ])
+        );
+        // A frame too short for its header, or with a chunk past its end.
+        for bad in [
+            webp(&[vp8x(0x02), chunk(b"ANMF", &[0; 15])]),
+            webp(&[
+                vp8x(0x02),
+                chunk(b"ANMF", &[[0; 16].as_slice(), b"VP8 \x09\0\0\0ab"].concat()),
+            ]),
+        ] {
+            assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_big_exif_is_walked_as_far_as_it_was_read() {
+        let big = vec![7; MAX_EXIF];
+        let t = tiff(
+            b'I',
+            &[&[(0x0112, V::Short(3)), (0x927C, V::Bytes(7, &big))]],
+            None,
+        );
+        let src = webp(&[vp8x(0x08), chunk(b"VP8 ", b"frame"), chunk(b"EXIF", &t)]);
+        let (out, fields) = run(&src).unwrap();
+        // The maker note is the camera's; the cut is Other.
+        assert_eq!(fields, [MetaField::Camera, MetaField::Other].into());
+        let minimal = exif::minimal(Some(3), false).unwrap();
+        assert_eq!(
+            out,
+            webp(&[
+                vp8x(0x08),
+                chunk(b"VP8 ", b"frame"),
+                chunk(b"EXIF", &minimal)
+            ])
+        );
+    }
+
+    #[test]
+    fn data_after_the_riff_is_found_past_the_read_buffer() {
+        let mut input = webp(&[chunk(b"VP8 ", b"frame")]);
+        input.extend(vec![0; 70_000]);
+        input.extend_from_slice(b"more");
+        let mut out = Cursor::new(Vec::new());
+        let found = strip(
+            &mut std::io::BufReader::with_capacity(8, Cursor::new(input)),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(found.fields, [MetaField::Other].into());
     }
 
     #[test]

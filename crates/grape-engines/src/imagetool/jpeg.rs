@@ -1,6 +1,7 @@
 //! Remove Metadata on JPEG (D26): every segment the decoder needs is
-//! copied as it is, the scans' entropy-coded data byte for byte; the rest
-//! is dropped, and said what it was.
+//! copied as it is, the scans' entropy-coded data byte for byte (fill
+//! bytes before the marker that ends a scan aside); the rest is dropped,
+//! and said what it was.
 //!
 //! - **Kept:** SOI; APP0 JFIF, without its thumbnail (16 bytes); APP2
 //!   `ICC_PROFILE`; APP14 Adobe; the tables and frame (DQT, DHT, DAC,
@@ -18,7 +19,7 @@
 use std::io::{self, BufRead, Write};
 
 use super::exif;
-use super::strip::{read_exact, read_u8, Error, Found};
+use super::strip::{more_after, read_exact, read_u8, Error, Found};
 use crate::MetaField;
 
 /// The most segments before the first scan.
@@ -111,9 +112,11 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
     }
     write(w, &sos)?;
 
-    // The scans, and what comes between them, up to EOI.
+    // The scans, and what comes between them, up to EOI. Only a scan is
+    // followed by entropy-coded data: after any other segment, stray bytes
+    // before the next marker are skipped, as in the header.
+    let mut marker = copy_entropy(r, w, &mut markers)?;
     loop {
-        let marker = copy_entropy(r, w, &mut markers)?;
         match marker {
             0xD9 => {
                 write(w, &[0xFF, 0xD9])?;
@@ -123,7 +126,10 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
             0xDA => {
                 let segment = read_segment(r, marker)?;
                 write(w, &segment)?;
+                marker = copy_entropy(r, w, &mut markers)?;
+                continue;
             }
+            0x01 | 0xD0..=0xD7 => write(w, &[0xFF, marker])?,
             _ => {
                 let segment = read_segment(r, marker)?;
                 match fate(marker, &segment[4..]) {
@@ -141,10 +147,10 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
                 }
             }
         }
+        marker = next_marker(r, &mut markers)?;
     }
     // Anything but padding after EOI: a second image, a gain map, video.
-    let rest = r.fill_buf().map_err(Error::Read)?;
-    if rest.iter().any(|&b| b != 0x00 && b != 0xFF) {
+    if more_after(r, &[0x00, 0xFF])? {
         found.fields.insert(MetaField::Embedded);
     }
     Ok(found)
@@ -157,6 +163,11 @@ pub(super) struct Header {
     pub(super) components: u8,
     pub(super) width: u16,
     pub(super) height: u16,
+    /// Whether the color components are sampled unequally (4:2:0, 4:2:2).
+    pub(super) subsampled: bool,
+    /// The JFIF APP0's pixel density: its unit (0 none, 1 per inch, 2 per
+    /// centimeter), then x and y.
+    pub(super) density: Option<(u8, u16, u16)>,
     /// The first luminance (table 0) quantization table, in zigzag order.
     pub(super) luma: Option<[u16; 64]>,
     /// The first EXIF's TIFF bytes.
@@ -202,6 +213,9 @@ pub(super) fn header(r: &mut dyn BufRead) -> Result<Header, Error> {
         }
         let payload = &segment[4..];
         match marker {
+            0xDA if found.components == 0 => {
+                return Err(Error::Broken("a scan before any frame header".into()))
+            }
             0xDA => break,
             0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
                 if payload.len() < 6 {
@@ -210,6 +224,23 @@ pub(super) fn header(r: &mut dyn BufRead) -> Result<Header, Error> {
                 found.height = u16::from_be_bytes([payload[1], payload[2]]);
                 found.width = u16::from_be_bytes([payload[3], payload[4]]);
                 found.components = payload[5];
+                // Each component: its id, H << 4 | V, its table.
+                let sampling: Vec<u8> = payload[6..]
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .map(|c| c[1])
+                    .collect();
+                found.subsampled = sampling.windows(2).any(|w| w[0] != w[1]);
+            }
+            0xE0 if payload.starts_with(b"JFIF\0") && payload.len() >= 12 => {
+                if found.density.is_none() {
+                    found.density = Some((
+                        payload[7],
+                        u16::from_be_bytes([payload[8], payload[9]]),
+                        u16::from_be_bytes([payload[10], payload[11]]),
+                    ));
+                }
             }
             0xDB => {
                 if found.luma.is_none() {
@@ -242,8 +273,7 @@ pub(super) fn header(r: &mut dyn BufRead) -> Result<Header, Error> {
             }
         }
     }
-    let rest = r.fill_buf().map_err(Error::Read)?;
-    found.extras |= rest.iter().any(|&b| b != 0x00 && b != 0xFF);
+    found.extras |= more_after(r, &[0x00, 0xFF])?;
     Ok(found)
 }
 
@@ -456,11 +486,18 @@ fn copy_entropy(r: &mut dyn BufRead, w: &mut dyn Write, markers: &mut usize) -> 
         r.consume(at + 1);
         let mut next = read_u8(r)?;
         // Fill bytes before a marker.
+        let mut fill = 0;
         while next == 0xFF {
+            fill += 1;
             next = read_u8(r)?;
         }
         match next {
-            0x00 | 0xD0..=0xD7 => write(w, &[0xFF, next])?,
+            0x00 | 0xD0..=0xD7 => {
+                for _ in 0..fill {
+                    write(w, &[0xFF])?;
+                }
+                write(w, &[0xFF, next])?;
+            }
             marker => {
                 *markers += 1;
                 if *markers > MAX_MARKERS {
@@ -715,6 +752,87 @@ pub(super) mod tests {
             .map(|_| seg(0xDB, &[0; 3]))
             .collect();
         assert!(matches!(run(&jpeg(&many, &[], &[])), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn stray_bytes_after_a_segment_between_scans_are_dropped() {
+        let mut between = seg(0xC4, &[1; 20]);
+        between.extend_from_slice(b"Author: Jane Doe");
+        between.extend(seg(0xFE, b"note"));
+        between.extend_from_slice(b"51.5N");
+        between.extend(seg(0xDA, &[1, 1, 0, 1, 63, 0]));
+        between.extend_from_slice(&[0x9A]);
+        let (out, found) = run(&jpeg(&[], &between, &[])).unwrap();
+        assert_eq!(found.fields, fields(&[MetaField::Comment]));
+        let mut kept = seg(0xC4, &[1; 20]);
+        kept.extend(seg(0xDA, &[1, 1, 0, 1, 63, 0]));
+        kept.extend_from_slice(&[0x9A]);
+        assert_eq!(out, jpeg(&[], &kept, &[]));
+    }
+
+    #[test]
+    fn fill_bytes_inside_a_scan_stay() {
+        // Fill bytes before a restart marker and before a stuffed zero are
+        // part of the scan; those before EOI end it.
+        let tail = [
+            0xFF, 0xFF, 0xFF, 0xD1, 0x22, 0xFF, 0xFF, 0x00, 0x33, 0xFF, 0xFF,
+        ];
+        let src = jpeg(&[], &tail, &[]);
+        let (out, _) = run(&src).unwrap();
+        assert_eq!(out, jpeg(&[], &tail[..tail.len() - 2], &[]));
+    }
+
+    #[test]
+    fn data_after_eoi_is_found_past_the_read_buffer() {
+        let mut after = vec![0; 70_000];
+        after.extend_from_slice(b"\0\0\0\x1Cftypmp42");
+        let input = jpeg(&[], &[], &after);
+        for capacity in [8, 70_003] {
+            let mut out = Vec::new();
+            let found = strip(
+                &mut std::io::BufReader::with_capacity(capacity, Cursor::new(&input)),
+                &mut out,
+            )
+            .unwrap();
+            assert_eq!(found.fields, fields(&[MetaField::Embedded]), "{capacity}");
+            let header = header(&mut std::io::BufReader::with_capacity(
+                capacity,
+                Cursor::new(&input),
+            ))
+            .unwrap();
+            assert!(header.extras, "{capacity}");
+        }
+    }
+
+    #[test]
+    fn the_header_reads_the_frame_density_and_sampling() {
+        let mut j = vec![0xFF, 0xD8];
+        j.extend(seg(0xE0, b"JFIF\0\x01\x02\x01\x01\x2C\x01\x2C\0\0"));
+        j.extend(seg(0xDB, &[0; 65]));
+        j.extend(seg(
+            0xC0,
+            &[8, 0, 16, 0, 32, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1],
+        ));
+        j.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+        j.extend_from_slice(&[0x12, 0xFF, 0xD9]);
+        let h = header(&mut Cursor::new(&j)).unwrap();
+        assert_eq!((h.width, h.height, h.components), (32, 16, 3));
+        assert!(h.subsampled);
+        assert_eq!(h.density, Some((1, 300, 300)));
+        // 4:4:4 and gray aren't subsampled.
+        let (tables, scan) = frame();
+        let plain = [vec![0xFF, 0xD8], tables, scan, vec![0xFF, 0xD9]].concat();
+        let h = header(&mut Cursor::new(&plain)).unwrap();
+        assert!(!h.subsampled && h.density.is_none());
+        // A scan with no frame header before it is refused.
+        let mut no_frame = vec![0xFF, 0xD8];
+        no_frame.extend(seg(0xDB, &[0; 65]));
+        no_frame.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+        no_frame.extend_from_slice(&[0x12, 0xFF, 0xD9]);
+        assert!(matches!(
+            header(&mut Cursor::new(&no_frame)),
+            Err(Error::Broken(_))
+        ));
     }
 
     #[test]

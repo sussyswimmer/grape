@@ -6,31 +6,44 @@
 //! Exact reductions, in order ([`reduce`]):
 //! 1. 16 → 8 bits a sample, when every sample is v · 257;
 //! 2. no alpha, when every pixel is opaque;
-//! 3. gray, when every pixel has R = G = B;
+//! 3. gray, when every pixel has R = G = B; at 1, 2 or 4 bits when every
+//!    level is one of that depth's (0 and 255; multiples of 85; of 17);
 //! 4. a palette of up to 256 colors (with `tRNS` for the transparent ones),
-//!    at the fewest bits an index that holds it.
+//!    at the fewest bits an index that holds it, for color or gray with
+//!    alpha.
 //!
-//! Gray and the palette are skipped when the source has an ICC profile,
-//! cICP, mDCV or cLLI, whose meaning depends on the color type.
+//! Gray (from color) and the palette are skipped when the source has an
+//! ICC profile, cICP, mDCV or cLLI, whose meaning depends on the color
+//! type.
 //!
-//! Carried: the ICC profile, sRGB, gAMA, cHRM, cICP, mDCV, cLLI, `eXIf`,
-//! the text chunks, pHYs and tIME. Dropped: sBIT, bKGD, hIST, sPLT, the old
-//! PLTE and tRNS (made again), `iDOT` and unknown chunks. An animated PNG
-//! is refused.
+//! Carried: the ICC profile (rather than sRGB when a source has both, as
+//! PNG 3 ranks them), sRGB, gAMA, cHRM, cICP, mDCV, cLLI, `eXIf`, the text
+//! chunks (those after the image data stay after it), pHYs and tIME.
+//! Dropped: sBIT, bKGD, hIST, sPLT, the old PLTE and tRNS (made again),
+//! `iDOT` and unknown chunks. An animated PNG is refused.
+//!
+//! The pixels are read a row at a time, never copied whole, and the cancel
+//! token is checked every [`CANCEL_CHECK_ROWS`] rows while they are read
+//! and while the PNG is written.
 
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::Path;
 
 use grape_core::{Format, Job};
-use image::DynamicImage;
+use image::{ColorType as ImageColor, DynamicImage, GenericImageView};
 use png::{BitDepth, ColorType, Compression, Filter};
 
 use super::strip::{read_exact, Error};
 use crate::cancel::Cancellable;
+use crate::image::{CANCEL_CHECK_ROWS, PNG_METADATA_LIMIT};
 use crate::output::TempFile;
 use crate::publish::{self, Names};
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
+use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
+
+/// A raw chunk: its type and data.
+type Raw = ([u8; 4], Vec<u8>);
 
 /// What the chunk walk found ([`walk`]).
 #[derive(Debug, Default)]
@@ -39,13 +52,16 @@ struct Chunks {
     animated: bool,
     /// The color chunks that tie the color type: iCCP, cICP, mDCV, cLLI.
     color_bound: bool,
-    /// Chunks the `png` crate doesn't write: cICP, mDCV, cLLI, tIME, as
-    /// (type, data).
-    raw: Vec<([u8; 4], Vec<u8>)>,
+    /// Chunks the `png` crate doesn't write: cICP, mDCV, cLLI, tIME.
+    raw: Vec<Raw>,
+    /// Text and `eXIf` after the image data, which the `png` crate's
+    /// header read stops before.
+    after: Vec<Raw>,
+    /// The bytes in `after`.
+    after_bytes: u64,
 }
 
-/// Walks the PNG's chunks, reading only the small ones Compress carries
-/// itself.
+/// Walks the PNG's chunks, reading only the ones Compress carries itself.
 fn walk(r: &mut dyn BufRead) -> Result<Chunks, Error> {
     let mut found = Chunks::default();
     let mut signature = [0; 8];
@@ -61,11 +77,22 @@ fn walk(r: &mut dyn BufRead) -> Result<Chunks, Error> {
         let kind = [header[4], header[5], header[6], header[7]];
         let len = usize::try_from(len).map_err(|_| Error::Broken("a huge chunk".into()))?;
         let small = matches!(&kind, b"cICP" | b"mDCV" | b"cLLI" | b"tIME") && len <= 64;
-        if small {
+        let late = image_data && matches!(&kind, b"tEXt" | b"zTXt" | b"iTXt" | b"eXIf");
+        if small || late {
+            if late {
+                found.after_bytes = found.after_bytes.saturating_add(len as u64);
+                if found.after_bytes > PNG_METADATA_LIMIT {
+                    return Err(Error::Broken("too much text after the image data".into()));
+                }
+            }
             let mut data = vec![0; len];
             read_exact(r, &mut data)?;
             skip(r, 4)?;
-            found.raw.push((kind, data));
+            if late {
+                found.after.push((kind, data));
+            } else {
+                found.raw.push((kind, data));
+            }
         } else {
             skip(r, len.saturating_add(4))?;
         }
@@ -104,35 +131,142 @@ pub(super) struct Packed {
     pub(super) trns: Option<Vec<u8>>,
 }
 
-/// The smallest exact form of `img` ([module docs](self)); gray and a
-/// palette only if `free_color` (no color chunk ties the color type).
-pub(super) fn reduce(img: &DynamicImage, free_color: bool) -> Packed {
+/// How a [`scan`] ended.
+enum Scan {
+    Done,
+    /// The row callback stopped it.
+    Stopped,
+    Cancelled,
+}
+
+/// Calls `f` with each row of `img` as RGBA, 16 bits a sample, until it
+/// returns false; checks `cancel` every [`CANCEL_CHECK_ROWS`] rows.
+fn scan(img: &DynamicImage, cancel: &CancelToken, mut f: impl FnMut(&[[u16; 4]]) -> bool) -> Scan {
+    let width = img.width() as usize;
+    let mut row = Vec::with_capacity(width);
+    for y in 0..img.height() as usize {
+        if y % CANCEL_CHECK_ROWS == 0 && cancel.is_cancelled() {
+            return Scan::Cancelled;
+        }
+        row.clear();
+        fill_row(img, y, width, &mut row);
+        if !f(&row) {
+            return Scan::Stopped;
+        }
+    }
+    Scan::Done
+}
+
+/// Row `y` of `img` (`width` pixels) as RGBA, 16 bits a sample.
+fn fill_row(img: &DynamicImage, y: usize, width: usize, row: &mut Vec<[u16; 4]>) {
+    const OPAQUE: u16 = u16::MAX;
+    let wide = |v: u8| u16::from(v) * 257;
+    let line = |n: usize| y * width * n..(y + 1) * width * n;
+    match img {
+        DynamicImage::ImageLuma8(b) => row.extend(b.as_raw()[line(1)].iter().map(|&v| {
+            let v = wide(v);
+            [v, v, v, OPAQUE]
+        })),
+        DynamicImage::ImageLumaA8(b) => {
+            row.extend(b.as_raw()[line(2)].as_chunks::<2>().0.iter().map(|p| {
+                let v = wide(p[0]);
+                [v, v, v, wide(p[1])]
+            }));
+        }
+        DynamicImage::ImageRgb8(b) => row.extend(
+            b.as_raw()[line(3)]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| [wide(p[0]), wide(p[1]), wide(p[2]), OPAQUE]),
+        ),
+        DynamicImage::ImageRgba8(b) => row.extend(
+            b.as_raw()[line(4)]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| [wide(p[0]), wide(p[1]), wide(p[2]), wide(p[3])]),
+        ),
+        DynamicImage::ImageLuma16(b) => {
+            row.extend(b.as_raw()[line(1)].iter().map(|&v| [v, v, v, OPAQUE]));
+        }
+        DynamicImage::ImageLumaA16(b) => row.extend(
+            b.as_raw()[line(2)]
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|p| [p[0], p[0], p[0], p[1]]),
+        ),
+        DynamicImage::ImageRgb16(b) => row.extend(
+            b.as_raw()[line(3)]
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| [p[0], p[1], p[2], OPAQUE]),
+        ),
+        DynamicImage::ImageRgba16(b) => row.extend(
+            b.as_raw()[line(4)]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| [p[0], p[1], p[2], p[3]]),
+        ),
+        // Floating point, which a PNG never decodes to.
+        other => row.extend((0..width).map(|x| {
+            let p = other.get_pixel(x as u32, y as u32).0;
+            [wide(p[0]), wide(p[1]), wide(p[2]), wide(p[3])]
+        })),
+    }
+}
+
+/// The smallest exact form of `img` ([module docs](self)); gray from color
+/// and a palette only if `free_color` (no color chunk ties the color
+/// type). `None` if cancelled.
+pub(super) fn reduce(img: &DynamicImage, free_color: bool, cancel: &CancelToken) -> Option<Packed> {
     let (width, height) = (img.width() as usize, img.height() as usize);
-    // Every pixel as RGBA, 16 bits a sample.
-    let rgba: Vec<[u16; 4]> = img.to_rgba16().pixels().map(|p| p.0).collect();
     let gray_source = matches!(
         img.color(),
-        image::ColorType::L8
-            | image::ColorType::L16
-            | image::ColorType::La8
-            | image::ColorType::La16
-    );
-    let wide_source = matches!(
-        img.color(),
-        image::ColorType::L16
-            | image::ColorType::La16
-            | image::ColorType::Rgb16
-            | image::ColorType::Rgba16
+        ImageColor::L8 | ImageColor::L16 | ImageColor::La8 | ImageColor::La16
     );
     let alpha_source = img.color().has_alpha();
-    let eight = !wide_source || rgba.iter().all(|p| p.iter().all(|&v| v % 257 == 0));
-    let opaque = !alpha_source || rgba.iter().all(|p| p[3] == u16::MAX);
-    let gray = gray_source || (free_color && rgba.iter().all(|p| p[0] == p[1] && p[1] == p[2]));
+    // One pass for what the pixels allow.
+    let mut eight = true;
+    let mut opaque = true;
+    let mut all_gray = true;
+    // Whether every gray level fits 1, 2 or 4 bits.
+    let mut fits = [true; 3];
+    let pass = scan(img, cancel, |row| {
+        for p in row {
+            eight &= p.iter().all(|&v| v % 257 == 0);
+            opaque &= !alpha_source || p[3] == u16::MAX;
+            all_gray &= p[0] == p[1] && p[1] == p[2];
+            for (fit, step) in fits.iter_mut().zip(LOW_STEPS) {
+                *fit &= (p[0] / 257) % step == 0;
+            }
+        }
+        true
+    });
+    if let Scan::Cancelled = pass {
+        return None;
+    }
+    let gray = gray_source || (free_color && all_gray);
     let has_alpha = !opaque;
 
-    if free_color && eight {
-        if let Some(packed) = palette(&rgba, width, height, gray, has_alpha) {
-            return packed;
+    if gray && !has_alpha && eight {
+        if let Some(bits) = [1, 2, 4]
+            .into_iter()
+            .zip(fits)
+            .find_map(|(b, f)| f.then_some(b))
+        {
+            return low_gray(img, bits, cancel);
+        }
+    }
+    // Gray without alpha stays gray: a palette is no smaller.
+    if free_color && eight && !(gray && !has_alpha) {
+        match palette(img, width, height, has_alpha, cancel) {
+            Indexed::Packed(packed) => return Some(packed),
+            Indexed::Cancelled => return None,
+            Indexed::TooMany => {}
         }
     }
     let channels: &[usize] = match (gray, has_alpha) {
@@ -147,17 +281,23 @@ pub(super) fn reduce(img: &DynamicImage, free_color: bool) -> Packed {
         (false, false) => ColorType::Rgb,
         (false, true) => ColorType::Rgba,
     };
-    let mut data = Vec::with_capacity(rgba.len() * channels.len() * if eight { 1 } else { 2 });
-    for p in &rgba {
-        for &c in channels {
-            if eight {
-                data.push((p[c] / 257) as u8);
-            } else {
-                data.extend_from_slice(&p[c].to_be_bytes());
+    let mut data = Vec::with_capacity(width * height * channels.len() * if eight { 1 } else { 2 });
+    let pass = scan(img, cancel, |row| {
+        for p in row {
+            for &c in channels {
+                if eight {
+                    data.push((p[c] / 257) as u8);
+                } else {
+                    data.extend_from_slice(&p[c].to_be_bytes());
+                }
             }
         }
+        true
+    });
+    if let Scan::Cancelled = pass {
+        return None;
     }
-    Packed {
+    Some(Packed {
         color,
         depth: if eight {
             BitDepth::Eight
@@ -167,37 +307,85 @@ pub(super) fn reduce(img: &DynamicImage, free_color: bool) -> Packed {
         data,
         palette: None,
         trns: None,
-    }
+    })
 }
 
-/// An indexed form of 8-bit `rgba` if it has at most 256 colors, or a
-/// gray one at fewer bits if every gray level fits them (gray without
-/// alpha only); the transparent colors first, so `tRNS` is short.
+/// The step between an 8-bit gray's levels at 1, 2 and 4 bits.
+const LOW_STEPS: [u16; 3] = [255, 85, 17];
+
+/// `img`, gray with every level a multiple of its step, at `bits` (1, 2
+/// or 4) a pixel. `None` if cancelled.
+fn low_gray(img: &DynamicImage, bits: usize, cancel: &CancelToken) -> Option<Packed> {
+    let (width, height) = (img.width() as usize, img.height() as usize);
+    let (step, depth) = match bits {
+        1 => (255, BitDepth::One),
+        2 => (85, BitDepth::Two),
+        _ => (17, BitDepth::Four),
+    };
+    let row_bytes = (width * bits).div_ceil(8);
+    let mut data = Vec::with_capacity(row_bytes * height);
+    let pass = scan(img, cancel, |row| {
+        let start = data.len();
+        data.resize(start + row_bytes, 0);
+        for (x, p) in row.iter().enumerate() {
+            let level = (p[0] / 257 / step) as u8;
+            let bit = x * bits;
+            data[start + bit / 8] |= level << (8 - bits - bit % 8);
+        }
+        true
+    });
+    if let Scan::Cancelled = pass {
+        return None;
+    }
+    Some(Packed {
+        color: ColorType::Grayscale,
+        depth,
+        data,
+        palette: None,
+        trns: None,
+    })
+}
+
+/// What [`palette`] made.
+enum Indexed {
+    Packed(Packed),
+    /// More than 256 colors.
+    TooMany,
+    Cancelled,
+}
+
+/// An indexed form of 8-bit `img` if it has at most 256 colors; the
+/// transparent colors first, so `tRNS` is short.
 fn palette(
-    rgba: &[[u16; 4]],
+    img: &DynamicImage,
     width: usize,
     height: usize,
-    gray: bool,
     has_alpha: bool,
-) -> Option<Packed> {
+    cancel: &CancelToken,
+) -> Indexed {
+    let key = |p: &[u16; 4]| {
+        let alpha = if has_alpha { p[3] } else { u16::MAX };
+        [p[0], p[1], p[2], alpha].map(|v| (v / 257) as u8)
+    };
     let mut colors: Vec<[u8; 4]> = Vec::new();
-    let mut index = std::collections::HashMap::new();
-    for p in rgba {
-        let c = [p[0] / 257, p[1] / 257, p[2] / 257, p[3] / 257].map(|v| v as u8);
-        if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(c) {
-            if colors.len() == 256 {
-                return None;
+    let mut index = HashMap::new();
+    let pass = scan(img, cancel, |row| {
+        for p in row {
+            let c = key(p);
+            if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(c) {
+                if colors.len() == 256 {
+                    return false;
+                }
+                slot.insert(0u8);
+                colors.push(c);
             }
-            slot.insert(0u8);
-            colors.push(c);
         }
-    }
-    // A gray picture of up to 16 levels can be gray at 1, 2 or 4 bits
-    // only if its levels are the evenly spaced ones; the palette is
-    // simpler and as small, so gray stays 8-bit gray and the palette is
-    // used only for color, or gray with alpha.
-    if gray && !has_alpha {
-        return None;
+        true
+    });
+    match pass {
+        Scan::Done => {}
+        Scan::Stopped => return Indexed::TooMany,
+        Scan::Cancelled => return Indexed::Cancelled,
     }
     colors.sort_by_key(|c| c[3] == u8::MAX);
     for (i, c) in colors.iter().enumerate() {
@@ -211,26 +399,38 @@ fn palette(
     };
     let bits = depth as usize;
     let row_bytes = (width * bits).div_ceil(8);
-    let mut data = vec![0u8; row_bytes * height];
-    for (n, p) in rgba.iter().enumerate() {
-        let c = [p[0] / 257, p[1] / 257, p[2] / 257, p[3] / 257].map(|v| v as u8);
-        let i = index[&c];
-        let (y, x) = (n / width, n % width);
-        let bit = x * bits;
-        let byte = y * row_bytes + bit / 8;
-        let shift = 8 - bits - bit % 8;
-        data[byte] |= i << shift;
+    let mut data = Vec::with_capacity(row_bytes * height);
+    let pass = scan(img, cancel, |row| {
+        let start = data.len();
+        data.resize(start + row_bytes, 0);
+        for (x, p) in row.iter().enumerate() {
+            let i = index[&key(p)];
+            let bit = x * bits;
+            data[start + bit / 8] |= i << (8 - bits - bit % 8);
+        }
+        true
+    });
+    if let Scan::Cancelled = pass {
+        return Indexed::Cancelled;
     }
     let palette: Vec<u8> = colors.iter().flat_map(|c| [c[0], c[1], c[2]]).collect();
     let transparent = colors.iter().take_while(|c| c[3] != u8::MAX).count();
     let trns = (transparent > 0).then(|| colors[..transparent].iter().map(|c| c[3]).collect());
-    Some(Packed {
+    Indexed::Packed(Packed {
         color: ColorType::Indexed,
         depth,
         data,
         palette: Some(palette),
         trns,
     })
+}
+
+/// What Compress holds at its peak for a decoded image of `decoded` bytes,
+/// besides the decoder: the image and its packed form (never bigger), then
+/// the packed form and the PNG written from it, and the text after the
+/// image data throughout.
+fn peak(decoded: u64, after: u64) -> u64 {
+    decoded.saturating_mul(2).saturating_add(after)
 }
 
 /// Runs Compress on the PNG `src` (named as `from`) into `dest`.
@@ -277,7 +477,7 @@ pub(crate) fn run(
     }
     // The metadata, as the `png` crate reads it.
     let limits = png::Limits {
-        bytes: crate::image::PNG_METADATA_LIMIT as usize,
+        bytes: PNG_METADATA_LIMIT as usize,
     };
     let reader =
         png::Decoder::new_with_limits(BufReader::new(Cancellable::new(open()?, cancel)), limits)
@@ -288,15 +488,25 @@ pub(crate) fn run(
     drop(reader);
     progress(0.1);
 
-    let (img, _icc) = crate::image::decode_stored(src, from, Format::Png, &names, cancel)?;
+    let after = chunks.after_bytes;
+    let tool_peak = |width: u32, height: u32, color: ImageColor| {
+        let decoded = u64::from(width)
+            .saturating_mul(u64::from(height))
+            .saturating_mul(u64::from(color.bytes_per_pixel()));
+        peak(decoded, after)
+    };
+    let (img, _icc) =
+        crate::image::decode_stored(src, from, Format::Png, &names, cancel, &tool_peak)?;
     progress(0.5);
-    let packed = reduce(&img, !chunks.color_bound);
+    let packed = reduce(&img, !chunks.color_bound, cancel).ok_or_else(|| crate::cancelled(src))?;
     drop(img);
+    progress(0.6);
+    let encoded = encode(&packed, &info, &chunks.raw, &chunks.after, cancel)
+        .map_err(|e| names.encode_failed(format!("encode {}: {e}", src.display())))
+        .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let encoded = encode(&packed, &info, &chunks.raw)
-        .map_err(|e| names.encode_failed(format!("encode {}: {e}", src.display())))?;
     progress(0.9);
     let after = encoded.len() as u64;
     if after.saturating_mul(20) > before.saturating_mul(19) {
@@ -320,12 +530,15 @@ pub(crate) fn run(
     Ok(outcome)
 }
 
-/// Writes `packed` as a PNG with `source`'s metadata, and the `raw` chunks
-/// the `png` crate doesn't write itself.
+/// Writes `packed` as a PNG with `source`'s metadata, the `raw` chunks the
+/// `png` crate doesn't write itself before the image data, and the `after`
+/// ones after it; stops at a cancel between rows.
 fn encode(
     packed: &Packed,
     source: &png::Info<'static>,
-    raw: &[([u8; 4], Vec<u8>)],
+    raw: &[Raw],
+    after: &[Raw],
+    cancel: &CancelToken,
 ) -> Result<Vec<u8>, png::EncodingError> {
     let mut info = png::Info::with_size(source.width, source.height);
     info.color_type = packed.color;
@@ -333,14 +546,24 @@ fn encode(
     info.palette = packed.palette.clone().map(Into::into);
     info.trns = packed.trns.clone().map(Into::into);
     info.pixel_dims = source.pixel_dims;
-    info.srgb = source.srgb;
-    info.source_gamma = source.source_gamma;
-    info.source_chromaticities = source.source_chromaticities;
+    // The decoder sets only the chunk fields; the encoder reads the source
+    // ones.
+    info.source_gamma = source.gama_chunk.or(source.source_gamma);
+    info.source_chromaticities = source.chrm_chunk.or(source.source_chromaticities);
     info.icc_profile = source.icc_profile.clone();
+    // The encoder writes sRGB or iCCP, not both; PNG 3 ranks the profile
+    // first.
+    info.srgb = if source.icc_profile.is_some() {
+        None
+    } else {
+        source.srgb
+    };
     info.exif_metadata = source.exif_metadata.clone();
     info.uncompressed_latin1_text = source.uncompressed_latin1_text.clone();
     info.compressed_latin1_text = source.compressed_latin1_text.clone();
     info.utf8_text = source.utf8_text.clone();
+    let rows = (source.height as usize).max(1);
+    let step = (packed.data.len() / rows).max(1) * CANCEL_CHECK_ROWS;
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::with_info(&mut out, info)?;
@@ -350,7 +573,17 @@ fn encode(
         for (kind, data) in raw {
             writer.write_chunk(png::chunk::ChunkType(*kind), data)?;
         }
-        writer.write_image_data(&packed.data)?;
+        let mut stream = writer.stream_writer()?;
+        for part in packed.data.chunks(step) {
+            if cancel.is_cancelled() {
+                return Err(io::Error::other("cancelled").into());
+            }
+            stream.write_all(part)?;
+        }
+        stream.finish()?;
+        for (kind, data) in after {
+            writer.write_chunk(png::chunk::ChunkType(*kind), data)?;
+        }
         writer.finish()?;
     }
     Ok(out)
@@ -366,13 +599,41 @@ mod tests {
 
     use super::*;
 
+    fn encoded(packed: &Packed, info: &png::Info<'static>, after: &[Raw]) -> Vec<u8> {
+        encode(packed, info, &[], after, &CancelToken::default()).unwrap()
+    }
+
     fn decoded(packed: &Packed, w: u32, h: u32) -> image::RgbaImage {
         let mut info = png::Info::with_size(w, h);
         info.color_type = packed.color;
         info.bit_depth = packed.depth;
-        let raw: Vec<([u8; 4], Vec<u8>)> = Vec::new();
-        let png = encode(packed, &info, &raw).unwrap();
+        let png = encoded(packed, &info, &[]);
         image::load_from_memory(&png).unwrap().to_rgba8()
+    }
+
+    fn reduced(img: &DynamicImage, free_color: bool) -> Packed {
+        reduce(img, free_color, &CancelToken::default()).unwrap()
+    }
+
+    /// The chunk types of a PNG, in order.
+    fn kinds(png: &[u8]) -> Vec<String> {
+        let mut at = 8;
+        let mut out = Vec::new();
+        while at + 8 <= png.len() {
+            let len = u32::from_be_bytes(png[at..at + 4].try_into().unwrap()) as usize;
+            out.push(String::from_utf8_lossy(&png[at + 4..at + 8]).into_owned());
+            at += 12 + len;
+        }
+        out
+    }
+
+    /// The `png` crate's view of a PNG's metadata.
+    fn info_of(png: &[u8]) -> png::Info<'static> {
+        png::Decoder::new(Cursor::new(png.to_vec()))
+            .read_info()
+            .unwrap()
+            .info()
+            .clone()
     }
 
     #[test]
@@ -382,14 +643,14 @@ mod tests {
             let v = u16::try_from(x * 40 + y).unwrap() * 257;
             Rgba([v, v, v, u16::MAX])
         }));
-        let packed = reduce(&img, true);
+        let packed = reduced(&img, true);
         assert_eq!(
             (packed.color, packed.depth),
             (ColorType::Grayscale, BitDepth::Eight)
         );
         assert_eq!(decoded(&packed, 5, 3), img.to_rgba8());
         // With an ICC profile, the color type stays.
-        let packed = reduce(&img, false);
+        let packed = reduced(&img, false);
         assert_eq!(
             (packed.color, packed.depth),
             (ColorType::Rgb, BitDepth::Eight)
@@ -398,7 +659,7 @@ mod tests {
         let deep = DynamicImage::ImageRgb16(ImageBuffer::from_fn(4, 4, |x, _| {
             Rgb([u16::try_from(x).unwrap() * 1000 + 1, 0, 0])
         }));
-        let packed = reduce(&deep, true);
+        let packed = reduced(&deep, true);
         assert_eq!(packed.depth, BitDepth::Sixteen);
         // Three colors with one transparent: a 2-bit palette, tRNS first.
         let few = DynamicImage::ImageRgba8(RgbaImage::from_fn(7, 3, |x, _| match x % 3 {
@@ -406,7 +667,7 @@ mod tests {
             1 => Rgba([0, 255, 0, 128]),
             _ => Rgba([0, 0, 255, 255]),
         }));
-        let packed = reduce(&few, true);
+        let packed = reduced(&few, true);
         assert_eq!(
             (packed.color, packed.depth),
             (ColorType::Indexed, BitDepth::Two)
@@ -421,18 +682,111 @@ mod tests {
                 0,
             ])
         }));
-        assert_eq!(reduce(&many, true).color, ColorType::Rgb);
+        assert_eq!(reduced(&many, true).color, ColorType::Rgb);
         // Gray stays gray (not a palette).
         let gray = DynamicImage::ImageLuma8(GrayImage::from_fn(9, 2, |x, _| {
-            Luma([u8::try_from(x * 20).unwrap()])
+            Luma([u8::try_from(x * 20 + 1).unwrap()])
         }));
-        let packed = reduce(&gray, true);
-        assert_eq!(packed.color, ColorType::Grayscale);
+        let packed = reduced(&gray, true);
+        assert_eq!(
+            (packed.color, packed.depth),
+            (ColorType::Grayscale, BitDepth::Eight)
+        );
         assert_eq!(decoded(&packed, 9, 2), gray.to_rgba8());
     }
 
     #[test]
-    fn the_walk_finds_animation_and_color_chunks() {
+    fn gray_with_few_even_levels_goes_down_to_their_bits() {
+        for (levels, depth) in [
+            (&[0u8, 255][..], BitDepth::One),
+            (&[0, 85, 170, 255], BitDepth::Two),
+            (&[0, 17, 34, 238, 255], BitDepth::Four),
+            (&[0, 16, 255], BitDepth::Eight),
+        ] {
+            let gray = DynamicImage::ImageLuma8(GrayImage::from_fn(11, 3, |x, y| {
+                Luma([levels[(x + y) as usize % levels.len()]])
+            }));
+            let packed = reduced(&gray, false);
+            assert_eq!(
+                (packed.color, packed.depth),
+                (ColorType::Grayscale, depth),
+                "{levels:?}"
+            );
+            assert_eq!(decoded(&packed, 11, 3), gray.to_rgba8(), "{levels:?}");
+        }
+        // A black-and-white RGB page, with no color chunk: 1-bit gray.
+        let page = DynamicImage::ImageRgb8(RgbImage::from_fn(13, 2, |x, _| {
+            if x % 3 == 0 {
+                Rgb([0, 0, 0])
+            } else {
+                Rgb([255, 255, 255])
+            }
+        }));
+        let packed = reduced(&page, true);
+        assert_eq!(packed.depth, BitDepth::One);
+        assert_eq!(decoded(&packed, 13, 2), page.to_rgba8());
+    }
+
+    #[test]
+    fn a_cancel_stops_the_reduction_and_the_encode() {
+        let cancel = CancelToken::default();
+        cancel.cancel();
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(9, 200, |x, y| {
+            Rgb([u8::try_from(x).unwrap(), u8::try_from(y).unwrap(), 0])
+        }));
+        assert!(reduce(&img, true, &cancel).is_none());
+        let packed = reduced(&img, true);
+        let mut info = png::Info::with_size(9, 200);
+        info.color_type = packed.color;
+        info.bit_depth = packed.depth;
+        assert!(encode(&packed, &info, &[], &[], &cancel).is_err());
+    }
+
+    #[test]
+    fn the_color_chunks_and_late_text_come_along() {
+        let img = DynamicImage::ImageRgb8(RgbImage::from_fn(4, 4, |x, y| {
+            Rgb([
+                u8::try_from(x * 60).unwrap(),
+                u8::try_from(y * 60).unwrap(),
+                9,
+            ])
+        }));
+        let packed = reduced(&img, true);
+        // gAMA and cHRM, without sRGB.
+        let mut source = png::Info::with_size(4, 4);
+        source.color_type = ColorType::Rgb;
+        source.source_gamma = Some(png::ScaledFloat::from_scaled(100_000));
+        source.source_chromaticities = Some(png::SourceChromaticities::new(
+            (0.3127, 0.329),
+            (0.64, 0.33),
+            (0.3, 0.6),
+            (0.15, 0.06),
+        ));
+        let late: Vec<Raw> = vec![(*b"tEXt", b"Comment\0late note".to_vec())];
+        let src = encoded(&packed, &source, &late);
+        let out = encoded(&packed, &info_of(&src), &late);
+        let back = info_of(&out);
+        assert_eq!(
+            back.gama_chunk,
+            Some(png::ScaledFloat::from_scaled(100_000))
+        );
+        assert!(back.chrm_chunk.is_some());
+        let order = kinds(&out);
+        let idat = order.iter().position(|k| k == "IDAT").unwrap();
+        let text = order.iter().position(|k| k == "tEXt").unwrap();
+        assert!(text > idat, "{order:?}");
+        // sRGB with an ICC profile too: the profile is kept.
+        let mut both = png::Info::with_size(4, 4);
+        both.color_type = ColorType::Rgb;
+        both.srgb = Some(png::SrgbRenderingIntent::Perceptual);
+        both.icc_profile = Some(b"a profile".to_vec().into());
+        let out = encoded(&packed, &both, &[]);
+        let back = info_of(&out);
+        assert!(back.icc_profile.is_some() && back.srgb.is_none());
+    }
+
+    #[test]
+    fn the_walk_finds_animation_color_chunks_and_late_text() {
         let png = |chunks: &[(&[u8; 4], &[u8])]| {
             let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
             for (kind, data) in chunks {
@@ -456,13 +810,27 @@ mod tests {
             (b"IHDR", ihdr),
             (b"cICP", &[9, 16, 0, 1]),
             (b"tIME", &[7, 232, 5, 1, 0, 0, 0]),
+            (b"tEXt", b"Title\0early"),
             (b"IDAT", &[1]),
             (b"acTL", &[0; 8]),
+            (b"tEXt", b"Comment\0late"),
+            (b"eXIf", b"MM\0*"),
             (b"IEND", &[]),
         ]);
         let found = walk(&mut Cursor::new(hdr)).unwrap();
         assert!(!found.animated && found.color_bound);
         assert_eq!(found.raw.len(), 2);
+        let after: Vec<&[u8; 4]> = found.after.iter().map(|(k, _)| k).collect();
+        assert_eq!(after, [b"tEXt", b"eXIf"]);
+        assert_eq!(found.after_bytes, 16);
         assert!(walk(&mut Cursor::new(b"\x89PNG\r\n\x1a\n\0\0".to_vec())).is_err());
+    }
+
+    #[test]
+    fn the_peak_is_the_image_and_its_packed_form() {
+        // A 170 MP RGB image near the decode limit fits only just.
+        assert_eq!(peak(500, 7), 1007);
+        assert!(peak(512 << 20, 0) <= crate::image::WORKING_SET_LIMIT);
+        assert!(peak(513 << 20, 0) > crate::image::WORKING_SET_LIMIT);
     }
 }

@@ -132,7 +132,7 @@ const MAX_JPEG_HEADER_WORK: u64 = 1 << 27;
 
 /// How many rows Grape's own pixel loops process between cancel checks
 /// (at most a few milliseconds of work).
-const CANCEL_CHECK_ROWS: usize = 64;
+pub(crate) const CANCEL_CHECK_ROWS: usize = 64;
 
 /// True for a conversion between two different [`RASTER`] formats.
 pub(crate) fn supports(from: Format, to: Format) -> bool {
@@ -236,19 +236,26 @@ pub(crate) fn decode(
     names: &Names,
     cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(src, from, to, names, cancel, true)
+    decode_as(src, from, to, names, cancel, true, &|_, _, _| 0)
 }
 
+/// What a tool holds at its peak for a `width`×`height` image of a
+/// color type, in bytes.
+pub(crate) type ToolPeak<'a> = &'a dyn Fn(u32, u32, ColorType) -> u64;
+
 /// [`decode`], but the pixels as stored, the EXIF orientation not applied:
-/// for Compress, which carries the EXIF as it is (D26).
+/// for Compress, which carries the EXIF as it is (D26). What Compress
+/// itself holds afterwards, `tool_peak`, is held to the same limit before
+/// any pixel is decoded.
 pub(crate) fn decode_stored(
     src: &Path,
     from: Format,
     to: Format,
     names: &Names,
     cancel: &CancelToken,
+    tool_peak: ToolPeak,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(src, from, to, names, cancel, false)
+    decode_as(src, from, to, names, cancel, false, tool_peak)
 }
 
 /// [`decode`], applying the EXIF orientation if `upright`.
@@ -259,6 +266,7 @@ fn decode_as(
     names: &Names,
     cancel: &CancelToken,
     upright: bool,
+    tool_peak: ToolPeak,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
@@ -350,7 +358,8 @@ fn decode_as(
                 .flatten()
                 .filter(|icc| icc_size_fits(icc.len()));
             let profile = icc.as_ref().map_or(0, |icc| icc.len() as u64);
-            let peak = working_set(width, height, color, keeps, orientation, to, profile);
+            let peak = working_set(width, height, color, keeps, orientation, to, profile)
+                .max(tool_peak(width, height, color).saturating_add(profile));
             if peak > WORKING_SET_LIMIT {
                 return Err(DecodeFailure::TooLarge(format!(
                     "{width}x{height} {color:?} to {} needs about {} MiB, over the {} MiB limit",
