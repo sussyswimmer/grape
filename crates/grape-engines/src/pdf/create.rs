@@ -61,7 +61,10 @@
 //! - **Errors:** a file that can't be read stops the whole PDF; the message
 //!   names that file the way the raster and HEIC engines do. A write
 //!   failure names the destination folder. No detail written here holds a
-//!   path, a name or file contents.
+//!   path, a name or file contents; but details passed through from
+//!   [`image::decode`] and [`publish`] name the source's path or the
+//!   destination folder, as [`GrapeError::detail`] says, so a log replaces
+//!   a job's paths before writing one (the app's `failure_log`).
 //! - **Cancel** is checked before each input, every [`flate::CANCEL_ROWS`]
 //!   rows, at every write into a stream's buffer and of the file.
 //!   **Progress** for input `i` of `n`: decoded at `(i + 0.5) / n` (the
