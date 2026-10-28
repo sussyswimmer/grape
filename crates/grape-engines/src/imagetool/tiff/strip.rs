@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::super::exif;
-use super::super::strip::{read_exact, Error, Found, In, Out};
+use super::super::strip::{read_at, read_exact, Error, Found, In, Out};
 use super::irb;
 use super::read::{read_value, seek, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value};
 use super::write::{self, Data, Dir, Field, Image};
@@ -308,14 +308,14 @@ fn dcf(order: Order) -> Dir {
 }
 
 /// The first `max` bytes of `entry`'s value, and whether that's all of it;
-/// `None` when it can't be read.
+/// `None` when it can't be read. Only they are read ([`read_at`]), however
+/// far from what was read before.
 fn head(r: &mut dyn In, entry: &Entry, max: u64) -> Result<Option<(Vec<u8>, bool)>, Error> {
     match entry.value {
         Value::Inline { bytes, len } => Ok(Some((bytes[..usize::from(len)].to_vec(), true))),
         Value::At { offset, len } => {
             let mut bytes = vec![0; len.min(max) as usize];
-            seek(r, offset)?;
-            read_exact(r, &mut bytes)?;
+            read_at(r, offset, &mut bytes)?;
             Ok(Some((bytes, len <= max)))
         }
         Value::Unread => Ok(None),
@@ -1591,6 +1591,49 @@ mod tests {
         let (found, read) = tallied(&blanks(260, &[305], 64 * 1024, 2));
         assert_eq!(found, [Software].into());
         assert!(read < JUDGE_BUDGET + (1 << 20), "{read} bytes read");
+    }
+
+    #[test]
+    fn values_judged_out_of_order_read_only_their_own_bytes() {
+        // 16 pages of 4,088 Software tags, each 5 bytes of one run of NULs,
+        // each a byte before the last: refilling a 64 KiB buffer for each
+        // would read 4 GiB.
+        let (pages, per) = (16u32, 4_088u32);
+        let ifd = 2 + 12 * (7 + per) + 4;
+        let strips = 8 + pages * ifd;
+        let run = strips + pages;
+        let mut file = b"II*\0\x08\0\0\0".to_vec();
+        for n in 0..pages {
+            let mut entries = vec![
+                (256, 4, 1, 1),
+                (257, 4, 1, 1),
+                (258, 3, 1, 8),
+                (262, 3, 1, 1),
+                (273, 4, 1, strips + n),
+                (278, 4, 1, 1),
+                (279, 4, 1, 1),
+            ];
+            let last = run + pages * per - 1;
+            entries.extend((0..per).map(|i| (305, 2, 5, last - (n * per + i))));
+            file.extend((entries.len() as u16).to_le_bytes());
+            for (tag, kind, count, value) in entries {
+                file.extend(u16::to_le_bytes(tag));
+                file.extend(u16::to_le_bytes(kind));
+                file.extend(u32::to_le_bytes(count));
+                file.extend(u32::to_le_bytes(value));
+            }
+            let next = if n + 1 < pages { 8 + (n + 1) * ifd } else { 0 };
+            file.extend(next.to_le_bytes());
+        }
+        file.extend(vec![b'x'; pages as usize]);
+        file.extend(vec![0; (pages * per + 4) as usize]);
+        let (found, read) = tallied(&file);
+        assert!(found.is_empty(), "{found:?}");
+        assert!(
+            read < 2 * file.len() as u64,
+            "{read} bytes read of {}",
+            file.len()
+        );
     }
 
     #[test]

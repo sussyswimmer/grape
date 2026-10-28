@@ -11,7 +11,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Read, Seek, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use grape_core::{Format, Job};
@@ -51,13 +51,53 @@ pub(crate) trait Out: Write + Seek {}
 impl<T: Write + Seek> Out for T {}
 
 /// What a stripper that seeks reads from: TIFF's walks its IFDs.
-pub(crate) trait In: BufRead + Seek {}
+pub(crate) trait In: BufRead + Seek {
+    /// Reads exactly `buf.len()` bytes at `at`, and stays after them.
+    fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(at))?;
+        self.read_exact(buf)
+    }
+}
 
-impl<T: BufRead + Seek> In for T {}
+/// From what's buffered when it holds the bytes, or else straight from
+/// the file: refilled, the buffer would read 64 KiB for each short value
+/// or block read out of the file's order, and only what's asked for is.
+impl<R: Read + Seek> In for BufReader<R> {
+    fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        let here = self.stream_position()?;
+        match i64::try_from(i128::from(at) - i128::from(here)) {
+            // What's buffered stays when `at` is in it.
+            Ok(by) => self.seek_relative(by)?,
+            Err(_) => {
+                self.seek(SeekFrom::Start(at))?;
+            }
+        }
+        if self.buffer().len() >= buf.len() {
+            return self.read_exact(buf);
+        }
+        if !self.buffer().is_empty() {
+            // Dropped, so that the file is at `at`.
+            self.seek(SeekFrom::Start(at))?;
+        }
+        self.get_mut().read_exact(buf)
+    }
+}
+
+impl<T: AsRef<[u8]>> In for Cursor<T> {}
 
 /// Reads exactly `buf.len()` bytes; the end of the file is [`Error::Broken`].
 pub(crate) fn read_exact(r: &mut dyn BufRead, buf: &mut [u8]) -> Result<(), Error> {
     r.read_exact(buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => Error::Broken("the file ends early".into()),
+        _ => Error::Read(e),
+    })
+}
+
+/// Reads exactly `buf.len()` bytes at `at` ([`In::read_exact_at`]): a
+/// short read out of the file's order reads only what it asks for. The
+/// end of the file is [`Error::Broken`].
+pub(crate) fn read_at(r: &mut dyn In, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+    r.read_exact_at(at, buf).map_err(|e| match e.kind() {
         io::ErrorKind::UnexpectedEof => Error::Broken("the file ends early".into()),
         _ => Error::Read(e),
     })
@@ -269,5 +309,70 @@ impl<R: Read> Read for Counting<'_, R> {
 impl<R: Seek> Seek for Counting<'_, R> {
     fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
         self.inner.seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// A file that counts the bytes read from it.
+    struct Tally {
+        file: Cursor<Vec<u8>>,
+        read: u64,
+    }
+
+    impl Read for Tally {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.file.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Seek for Tally {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.file.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_read_the_buffer_cant_serve_reads_only_what_it_asks_for() {
+        let bytes: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        let file = Tally {
+            file: Cursor::new(bytes.clone()),
+            read: 0,
+        };
+        let mut r = BufReader::with_capacity(64, file);
+        // Reads `len` bytes at `at`: they're the file's, and gives the
+        // bytes read from it so far.
+        let take = |r: &mut BufReader<Tally>, at: u64, len: usize| {
+            let mut buf = vec![0; len];
+            read_at(r, at, &mut buf).unwrap();
+            assert_eq!(buf, bytes[at as usize..][..len]);
+            r.get_ref().read
+        };
+        // Far apart, last first: each reads only itself.
+        assert_eq!(take(&mut r, 900, 10), 10);
+        assert_eq!(take(&mut r, 800, 10), 20);
+        // On from there, a read fills the buffer: 810 to 874.
+        let mut next = [0; 4];
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[810..814]);
+        assert_eq!(r.get_ref().read, 84);
+        // Within it, behind and ahead: nothing more is read.
+        assert_eq!(take(&mut r, 811, 5), 84);
+        assert_eq!(take(&mut r, 870, 4), 84);
+        // Partly in it: only what's asked for.
+        assert_eq!(take(&mut r, 872, 10), 94);
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[882..886]);
+        // Past the end of the file.
+        assert!(matches!(
+            read_at(&mut r, 995, &mut [0; 10]),
+            Err(Error::Broken(_))
+        ));
     }
 }

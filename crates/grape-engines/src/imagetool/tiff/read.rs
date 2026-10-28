@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::exif;
-use super::super::strip::{read_exact, Error, In};
+use super::super::strip::{read_at, read_exact, Error, In};
 
 /// The most image IFDs (pages and SubIFDs) in a file.
 pub(crate) const MAX_IFDS: usize = 65_536;
@@ -480,8 +480,8 @@ fn refusal(ifd: &Ifd, order: Order) -> Option<&'static str> {
     }
 }
 
-/// Reads `len` bytes of `entry`'s value, or `None` when it can't be read
-/// or is longer than `max`.
+/// Reads `len` bytes of `entry`'s value, and only them ([`read_at`]), or
+/// `None` when it can't be read or is longer than `max`.
 pub(crate) fn read_value(
     r: &mut dyn In,
     entry: &Entry,
@@ -491,8 +491,7 @@ pub(crate) fn read_value(
         Value::Inline { bytes, len } => Ok(Some(bytes[..usize::from(len)].to_vec())),
         Value::At { offset, len } if len <= max => {
             let mut value = vec![0; usize_of(len)?];
-            seek(r, offset)?;
-            read_exact(r, &mut value)?;
+            read_at(r, offset, &mut value)?;
             Ok(Some(value))
         }
         Value::At { .. } | Value::Unread => Ok(None),
