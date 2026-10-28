@@ -1,5 +1,5 @@
-//! Grape's overlay, toast and tool panel windows on macOS
-//! (`docs/PLATFORM_MACOS.md` → "Overlay window").
+//! Grape's overlay, toast, tool panel and float shelf windows on macOS
+//! (`docs/PLATFORM_MACOS.md` → "Overlay window" and "Float shelf").
 //!
 //! Each function takes the raw pointer that Tauri's
 //! `WebviewWindow::ns_window()` returns. That pointer is autoreleased: it's
@@ -25,6 +25,15 @@
 //! sits at level 99, under the toast and an open wheel. Never `NSApp.hide`
 //! and never tao's `set_focus`.
 //!
+//! The float shelf (D43) can become key too, but only a click makes it so:
+//! [`show_shelf`] sets its frame and orders it front with
+//! `orderFrontRegardless`, never key and never activating Grape, and
+//! records the app in front; [`hide_shelf`] orders it out and, if a click
+//! had made it key, hands activation back as [`hide_panel`] does. It sits
+//! at the floating level (3), under every other Grape window and above
+//! normal windows. [`window_frame`] reads its frame in points: Tauri's
+//! `outer_position` and `outer_size` give backing pixels on the Mac.
+//!
 //! tao resets the level that [`harden_window`] sets in `set_always_on_top`
 //! and `set_always_on_bottom` (queued on the main queue: floating, below
 //! normal or normal level) and in `set_fullscreen` (level 0 before it
@@ -42,18 +51,19 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSFloatingWindowLevel, NSMainMenuWindowLevel, NSModalPanelWindowLevel,
     NSNormalWindowLevel, NSPopUpMenuWindowLevel, NSRunningApplication, NSScreenSaverWindowLevel,
-    NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowLevel,
+    NSStatusWindowLevel, NSWindow, NSWindowCollectionBehavior, NSWindowLevel, NSWindowStyleMask,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::actions::{activate, frontmost_other_app, hand_back};
 use super::{display, NO_CODE};
-use crate::mac_rules::to_cocoa;
+use crate::mac_rules::{to_cocoa, to_grape, CocoaRect};
 use crate::{PlatformError, Rect};
 
 /// Which of Grape's always-in-front windows is being hardened. They differ
-/// only in level, so the overlay always covers the toast, and both cover
-/// the tool panel.
+/// in level, so the overlay always covers the toast, both cover the tool
+/// panel, and all three cover the float shelf. The shelf also gets the
+/// `Closable` style bit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WindowRole {
     /// The full-display wheel overlay: `NSPopUpMenuWindowLevel` (101).
@@ -66,6 +76,12 @@ pub enum WindowRole {
     /// and the toast always cover it, and the next drag always reaches the
     /// wheel.
     Panel,
+    /// The float shelf (D43): `NSFloatingWindowLevel` (3), above normal
+    /// windows but under the Dock, the menu bar, other apps' menus and every
+    /// other Grape window, so the next drag's wheel covers it and takes the
+    /// drop. It's long-lived and always inside the screen's visible frame,
+    /// so it never needs to cover the Dock or the menu bar.
+    Shelf,
 }
 
 impl WindowRole {
@@ -75,15 +91,16 @@ impl WindowRole {
             Self::Overlay => NSPopUpMenuWindowLevel,
             Self::Toast => NSPopUpMenuWindowLevel - 1,
             Self::Panel => NSPopUpMenuWindowLevel - 2,
+            Self::Shelf => NSFloatingWindowLevel,
         }
     }
 }
 
-/// What [`show_panel`] saw.
+/// What [`show_panel`] or [`show_shelf`] saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PanelShown {
     /// The app that was in front (never Grape), to hand activation back to
-    /// when the panel closes.
+    /// when the panel or the shelf closes.
     pub front_pid: Option<i32>,
 }
 
@@ -94,6 +111,14 @@ pub struct PanelShown {
 /// IgnoresCycle` for both. It stays visible when Grape isn't the active
 /// app. The level stays below 500: any higher and it would cover the image
 /// the user is dragging.
+///
+/// For [`WindowRole::Shelf`] it also sets the `Closable` style bit, which
+/// tao leaves off a window without decorations: with it, the default
+/// menu's Close Window (Cmd+W) is a close request instead of a beep. No
+/// `Titled` bit, so no title bar or close button appears. The first
+/// responder is put back after the style change. Never tao's or Tauri's
+/// `set_closable`, which makes tao's own view first responder instead of
+/// the webview.
 ///
 /// Call it once on the main thread, before the window is first shown.
 /// Calling it again is harmless.
@@ -114,6 +139,13 @@ pub unsafe fn harden_window(ns_window: *mut c_void, role: WindowRole) -> Result<
         window.setLevel(role.level());
         window.setCollectionBehavior(behavior);
         window.setHidesOnDeactivate(false);
+        if role == WindowRole::Shelf {
+            let responder = window.firstResponder();
+            window.setStyleMask(window.styleMask() | NSWindowStyleMask::Closable);
+            if let Some(responder) = responder {
+                window.makeFirstResponder(Some(&responder));
+            }
+        }
     }))
     .map_err(|_| PlatformError::Os {
         context: "setting the window's level and collection behavior",
@@ -194,7 +226,97 @@ pub unsafe fn hide_panel(
 ) -> Result<bool, PlatformError> {
     // SAFETY: the caller's contract is the one `retain_window` needs.
     let (window, mtm) = unsafe { retain_window(ns_window) }?;
-    let handed = autoreleasepool(|_| {
+    Ok(order_out_and_hand_back(&window, mtm, back_to_pid))
+}
+
+/// Shows the float shelf at `frame` (Grape's top-left points) without
+/// taking focus: it records the app in front (not Grape), sets the frame
+/// and orders the window front with `orderFrontRegardless`. Never key,
+/// never activating Grape: the Mac's `SWP_NOACTIVATE`. Used for every
+/// show, resize and snap. Also refreshes the screen cache, as
+/// [`frame_and_show`] does.
+///
+/// # Safety
+/// As [`harden_window`].
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] off the main thread.
+/// - [`PlatformError::Os`] for a null pointer, or when there are no screens.
+pub unsafe fn show_shelf(ns_window: *mut c_void, frame: Rect) -> Result<PanelShown, PlatformError> {
+    // SAFETY: the caller's contract is the one `retain_window` needs.
+    let (window, mtm) = unsafe { retain_window(ns_window) }?;
+    let rect = cocoa_frame(mtm, frame)?;
+    let front_pid = autoreleasepool(|_| {
+        let front_pid = frontmost_other_app(mtm).map(|app| app.processIdentifier());
+        window.setFrame_display(rect, false);
+        // Never makeKeyWindow, makeKeyAndOrderFront or activate.
+        window.orderFrontRegardless();
+        front_pid
+    });
+    Ok(PanelShown { front_pid })
+}
+
+/// Hides the float shelf (`orderOut`). If a click had made it the key
+/// window and Grape is still the active app, it hands activation back to
+/// the app with `back_to_pid` when that one is still running, as
+/// [`hide_panel`] does: an active Mac app with no window keeps the
+/// keyboard, so the user's next keystrokes would go nowhere. Returns
+/// whether it handed back. Never `NSApp.hide`.
+///
+/// # Safety
+/// As [`harden_window`].
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] off the main thread.
+/// - [`PlatformError::Os`] for a null pointer.
+pub unsafe fn hide_shelf(
+    ns_window: *mut c_void,
+    back_to_pid: Option<i32>,
+) -> Result<bool, PlatformError> {
+    // SAFETY: the caller's contract is the one `retain_window` needs.
+    let (window, mtm) = unsafe { retain_window(ns_window) }?;
+    Ok(order_out_and_hand_back(&window, mtm, back_to_pid))
+}
+
+/// The window's frame now, in Grape's top-left points. Read it here, never
+/// with Tauri's `outer_position` / `outer_size`, which give backing pixels
+/// (points × the screen's scale) on the Mac. Also refreshes the screen
+/// cache.
+///
+/// # Safety
+/// As [`harden_window`].
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] off the main thread.
+/// - [`PlatformError::Os`] for a null pointer, or when there are no screens.
+pub unsafe fn window_frame(ns_window: *mut c_void) -> Result<Rect, PlatformError> {
+    // SAFETY: the caller's contract is the one `retain_window` needs.
+    let (window, mtm) = unsafe { retain_window(ns_window) }?;
+    let primary_height = display::refresh(mtm).ok_or(PlatformError::Os {
+        context: "NSScreen.screens",
+        code: NO_CODE,
+    })?;
+    let frame = window.frame();
+    Ok(to_grape(
+        CocoaRect {
+            x: frame.origin.x,
+            y: frame.origin.y,
+            width: frame.size.width,
+            height: frame.size.height,
+        },
+        primary_height,
+    ))
+}
+
+/// [`hide_panel`]'s and [`hide_shelf`]'s work: `orderOut`, then, if the
+/// window was key and Grape is still active, activation back to the app
+/// with `back_to_pid` when it still runs. Returns whether it handed back.
+fn order_out_and_hand_back(
+    window: &NSWindow,
+    mtm: MainThreadMarker,
+    back_to_pid: Option<i32>,
+) -> bool {
+    autoreleasepool(|_| {
         let was_key = window.isKeyWindow();
         window.orderOut(None);
         let active = NSApplication::sharedApplication(mtm).isActive();
@@ -208,8 +330,7 @@ pub unsafe fn hide_panel(
             }
             None => false,
         }
-    });
-    Ok(handed)
+    })
 }
 
 /// The window's level, collection behavior, whether it's the key window
@@ -396,6 +517,18 @@ mod tests {
     }
 
     #[test]
+    fn the_shelf_floats_under_every_other_grape_window() {
+        assert_eq!(WindowRole::Shelf.level(), 3);
+        assert_eq!(WindowRole::Shelf.level(), NSFloatingWindowLevel);
+        assert!(WindowRole::Shelf.level() > NSNormalWindowLevel);
+        assert!(WindowRole::Shelf.level() < WindowRole::Panel.level());
+        assert!(WindowRole::Panel.level() < WindowRole::Toast.level());
+        assert!(WindowRole::Toast.level() < WindowRole::Overlay.level());
+        assert!(WindowRole::Shelf.level() < 500);
+        assert_eq!(level_name(WindowRole::Shelf.level()), "floating");
+    }
+
+    #[test]
     fn levels_and_behaviors_read_well_in_a_log() {
         assert_eq!(level_name(101), "pop-up menu");
         assert_eq!(level_name(100), "toast, under pop-up menu");
@@ -412,7 +545,12 @@ mod tests {
 
     #[test]
     fn a_null_window_is_refused() {
-        for role in [WindowRole::Overlay, WindowRole::Toast, WindowRole::Panel] {
+        for role in [
+            WindowRole::Overlay,
+            WindowRole::Toast,
+            WindowRole::Panel,
+            WindowRole::Shelf,
+        ] {
             // SAFETY: null is allowed by the contract and never dereferenced.
             let hardened = unsafe { harden_window(std::ptr::null_mut(), role) };
             assert!(matches!(hardened, Err(PlatformError::Os { .. })));
@@ -426,6 +564,15 @@ mod tests {
         // SAFETY: as above.
         let hidden = unsafe { hide_panel(std::ptr::null_mut(), Some(1)) };
         assert!(matches!(hidden, Err(PlatformError::Os { .. })));
+        // SAFETY: as above.
+        let shelf = unsafe { show_shelf(std::ptr::null_mut(), Rect::default()) };
+        assert!(matches!(shelf, Err(PlatformError::Os { .. })));
+        // SAFETY: as above.
+        let shelf_hidden = unsafe { hide_shelf(std::ptr::null_mut(), Some(1)) };
+        assert!(matches!(shelf_hidden, Err(PlatformError::Os { .. })));
+        // SAFETY: as above.
+        let frame = unsafe { window_frame(std::ptr::null_mut()) };
+        assert!(matches!(frame, Err(PlatformError::Os { .. })));
         // SAFETY: as above.
         let described = unsafe { describe_window(std::ptr::null_mut()) };
         assert!(
