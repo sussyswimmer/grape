@@ -83,10 +83,13 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
                 }
                 write(w, &head, &mut written)?;
                 flags_at = Some(written);
-                let mut data = vec![0; usize_of(body)?];
+                // The format's 10 bytes; anything a longer chunk claims is
+                // copied as it comes, never held.
+                let mut data = [0; 10];
                 read_exact(r, &mut data)?;
                 flags = data[0];
                 write(w, &data, &mut written)?;
+                copy(r, w, body - 10, &mut written)?;
             }
             b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ANMF" | b"ICCP" => {
                 image |= matches!(&fourcc, b"VP8 " | b"VP8L" | b"ANMF");
@@ -317,5 +320,20 @@ mod tests {
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn a_vp8x_is_never_held_whole() {
+        // 30 bytes whose VP8X claims almost 4 GiB: refused as cut short,
+        // having read only the format's 10 bytes into memory.
+        let mut huge = b"RIFF\xff\xff\xff\xffWEBPVP8X\xf0\xff\xff\xff".to_vec();
+        huge.extend_from_slice(&[0; 10]);
+        assert!(matches!(run(&huge), Err(Error::Broken(_))));
+        // A longer VP8X than the format's is copied whole.
+        let long = webp(&[
+            chunk(b"VP8X", &[0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 7, 7]),
+            chunk(b"VP8 ", b"frame"),
+        ]);
+        assert_eq!(run(&long).unwrap().0, long);
     }
 }
