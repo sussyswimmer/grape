@@ -614,7 +614,7 @@ pub(crate) fn push(args: &mut Vec<OsString>, list: &[&str]) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::media) mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::path::PathBuf;
@@ -1796,7 +1796,7 @@ mod tests {
     /// The width and height a `scale='W':'H'` filter of Grape's gives an
     /// `iw`×`ih` frame, evaluated like FFmpeg's `scale`: the expressions
     /// in doubles, then truncated to whole pixels.
-    fn scaled(filter: &str, iw: u32, ih: u32) -> (u32, u32) {
+    pub(in crate::media) fn scaled(filter: &str, iw: u32, ih: u32) -> (u32, u32) {
         let sides = filter
             .strip_prefix("scale='")
             .unwrap()

@@ -667,6 +667,154 @@ pub(super) fn squeeze(
     }
 }
 
+/// A video's x264 CRF and the short side it is brought down to, at a
+/// preset.
+fn x264(preset: CompressPreset) -> (&'static str, u32) {
+    match preset {
+        CompressPreset::Small => ("28", 720),
+        CompressPreset::Balanced => ("23", 1080),
+        CompressPreset::High => ("20", 2160),
+    }
+}
+
+/// A `scale` filter's size that brings the short side down to `short`,
+/// never up, keeping the shape, both sides even and at least 2 px. The
+/// long side is worked out as `iw*short/min(iw,ih)`, so a short side
+/// that is cut comes out exactly `short`. FFmpeg turns a rotated source
+/// upright before the filters, so `iw` and `ih` are the shown size.
+pub(super) fn fit(short: u32) -> String {
+    format!(
+        r"scale='max(2\,trunc(min(iw\,iw*{short}/min(iw\,ih))/2)*2)':'max(2\,trunc(min(ih\,ih*{short}/min(iw\,ih))/2)*2)'"
+    )
+}
+
+/// The `fps` filter's rate for Small: an average over 31 fps divided by
+/// the least whole number that brings it to 30 or less (60 → 30, 50 → 25,
+/// 120 → 30, 59.94 → 29.97); `None` for 31 fps or less, or unknown.
+pub(super) fn fps_cap(avg: Option<(u32, u32)>) -> Option<String> {
+    let (num, den) = avg.filter(|&(num, den)| den > 0 && num > 0)?;
+    let (num, den) = (u64::from(num), u64::from(den));
+    if num <= 31 * den {
+        return None;
+    }
+    let by = num.div_ceil(30 * den);
+    Some(format!("{num}/{}", den * by))
+}
+
+/// Whether a video's transfer is PQ (`smpte2084`, HDR10), which Compress
+/// can't keep: x264 writes 8 bits, and PQ in 8 bits bands.
+pub(super) fn is_pq(video: &StreamInfo) -> bool {
+    video.color_transfer == "smpte2084"
+}
+
+/// The first video stream that isn't cover art: the one Compress encodes.
+pub(super) fn picture(probe: &Probe) -> Option<&StreamInfo> {
+    probe
+        .streams
+        .iter()
+        .find(|s| s.kind == StreamKind::Video && !s.attached_pic)
+}
+
+/// The streams Compress on a video keeps, in the source's order: the
+/// first video that isn't cover art (encoded), every audio track, cover
+/// art, and what [`mute`] keeps besides (`mov_text` in MP4 and MOV;
+/// subtitles and attachments in MKV). Further videos and data tracks are
+/// dropped.
+pub(super) fn shrunk(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamInfo> {
+    let first = picture(probe).map(|s| s.index);
+    probe.streams.iter().filter(move |s| match s.kind {
+        StreamKind::Video => s.attached_pic || Some(s.index) == first,
+        StreamKind::Audio => true,
+        _ => muted(to, probe).any(|kept| kept.index == s.index),
+    })
+}
+
+/// Compress's argv for a video ([`shrink`]), and whether it copies an
+/// audio track, which the muxer may still refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Shrink {
+    pub(super) args: Vec<OsString>,
+    pub(super) copies: bool,
+}
+
+/// Compress on MP4, MOV and MKV (D26): the streams [`shrunk`] keeps,
+/// copied but for
+///
+/// - the picture ([`picture`]): x264 at CRF 28, 23 or 20 (`medium`,
+///   `high`, `yuv420p`), its short side at most 720, 1080 or 2160
+///   ([`fit`], Lanczos), and at Small at most 30 fps ([`fps_cap`]). HLG
+///   stays tagged as HLG;
+/// - each audio track: AAC at 48k, 64k or 96k a channel ([`aac_rate`]),
+///   at most 48 kHz, unless it is AAC already within 1.1 × that bitrate
+///   and `copy_audio`, when it is copied.
+///
+/// Tags, chapters and dates stay ([`keep`]).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn shrink(
+    src: &Path,
+    to: Format,
+    probe: &Probe,
+    tags: &Tags,
+    preset: CompressPreset,
+    copy_audio: bool,
+    out: &Path,
+) -> Shrink {
+    let mut args = prefix_at(src, &[], "error");
+    let kept: Vec<&StreamInfo> = shrunk(to, probe).collect();
+    for stream in &kept {
+        map(&mut args, stream.index);
+    }
+    push(&mut args, &["-c", "copy"]);
+    let picture = picture(probe).map(|s| s.index);
+    let mut copies = false;
+    for (o, stream) in kept.iter().enumerate() {
+        let o = o.to_string();
+        let spec = |option: &str| format!("-{option}:{o}");
+        if Some(stream.index) == picture && !stream.attached_pic {
+            let (crf, short) = x264(preset);
+            let mut chain = Vec::new();
+            if preset == CompressPreset::Small {
+                chain.extend(fps_cap(stream.avg_fps).map(|rate| format!("fps={rate}")));
+            }
+            chain.push(format!("{}:flags=lanczos", fit(short)));
+            push(
+                &mut args,
+                &[
+                    &spec("c"),
+                    "libx264",
+                    &spec("crf"),
+                    crf,
+                    &spec("preset"),
+                    "medium",
+                    &spec("profile"),
+                    "high",
+                    &spec("pix_fmt"),
+                    "yuv420p",
+                    &spec("filter"),
+                    &chain.join(","),
+                ],
+            );
+        } else if stream.kind == StreamKind::Audio {
+            let target = aac_rate(aac_per_channel(preset), stream.channels);
+            if copy_audio && stream.codec == "aac" && within(stream.bit_rate, target) {
+                copies = true;
+                continue;
+            }
+            let bits = format!("{}k", target / 1000);
+            push(&mut args, &[&spec("c"), "aac", &spec("b"), &bits]);
+            let capped = at_most_48k(stream.sample_rate);
+            if capped != stream.sample_rate {
+                push(&mut args, &[&spec("ar"), &capped.to_string()]);
+            }
+        }
+    }
+    keep(&mut args, to, tags);
+    Shrink {
+        args: finish(args, muxer_of(to), out),
+        copies,
+    }
+}
+
 /// A measuring or check pass of Normalize Volume: the source's first
 /// audio track through `filter` (which ends with `ebur128`), logged at
 /// `info` so the summary is printed, into the `null` muxer. It opens no
@@ -929,6 +1077,19 @@ pub(super) mod tests {
                     blank_replaygain: false,
                 };
                 all.push(reencode(&src(), to, &probe, &dated(true), &encode, &out()));
+            }
+        }
+        for preset in [
+            CompressPreset::Small,
+            CompressPreset::Balanced,
+            CompressPreset::High,
+        ] {
+            for copy_audio in [true, false] {
+                for (to, probe) in [(Format::Mp4, movie()), (Format::Mkv, mkv())] {
+                    let tags = dated(true);
+                    let shrink = shrink(&src(), to, &probe, &tags, preset, copy_audio, &out());
+                    all.push(shrink.args);
+                }
             }
         }
         all.push(measure(&src(), &song("mp3", "mp3"), "ebur128=peak=true"));
@@ -1286,7 +1447,7 @@ pub(super) mod tests {
             ..encode
         };
         let args = reencode(&src(), Format::Wav, &wav, &Tags::default(), &encode, &out());
-        assert!(crate::media::tests::has(&args, ["-af", DITHER]), "{args:?}");
+        assert!(has(&args, ["-af", DITHER]), "{args:?}");
         assert!(text.ends_with(&[
             "-rf64".to_owned(),
             "auto".to_owned(),
@@ -1647,6 +1808,205 @@ pub(super) mod tests {
         ] {
             assert_eq!(at_most_48k(rate), capped, "{rate}");
         }
+    }
+
+    #[test]
+    fn compress_fits_the_short_side_without_scaling_up() {
+        use crate::media::args::tests::scaled;
+        // (short side, width, height, out)
+        for (short, iw, ih, want) in [
+            (720, 1920, 1080, (1280, 720)),
+            (720, 1080, 1920, (720, 1280)),
+            (1080, 3840, 2160, (1920, 1080)),
+            (2160, 3840, 2160, (3840, 2160)),
+            (1080, 1280, 720, (1280, 720)),
+            (720, 4000, 3000, (960, 720)),
+            (720, 1918, 1080, (1278, 720)),
+            (1080, 1279, 719, (1278, 718)),
+            (720, 720, 720, (720, 720)),
+            (720, 1, 1, (2, 2)),
+            (720, 4096, 2, (4096, 2)),
+            (720, 9000, 1000, (6480, 720)),
+        ] {
+            assert_eq!(scaled(&fit(short), iw, ih), want, "{iw}x{ih} to {short}");
+        }
+    }
+
+    #[test]
+    fn small_caps_the_rate_at_30_by_a_whole_divisor() {
+        for (avg, want) in [
+            (Some((60, 1)), Some("60/2")),
+            (Some((60_000, 1001)), Some("60000/2002")),
+            (Some((50, 1)), Some("50/2")),
+            (Some((120, 1)), Some("120/4")),
+            (Some((240, 1)), Some("240/8")),
+            (Some((32, 1)), Some("32/2")),
+            (Some((31, 1)), None),
+            (Some((30, 1)), None),
+            (Some((30_000, 1001)), None),
+            (Some((0, 0)), None),
+            (Some((60, 0)), None),
+            (None, None),
+        ] {
+            assert_eq!(fps_cap(avg).as_deref(), want, "{avg:?}");
+        }
+    }
+
+    #[test]
+    fn compress_keeps_the_first_picture_audio_cover_and_subtitles() {
+        let indexes =
+            |to, probe: &Probe| -> Vec<u32> { shrunk(to, probe).map(|s| s.index).collect() };
+        // MP4: the second video and data go; mov_text, not DVD subtitles.
+        let mut two = movie();
+        two.streams.push(stream(7, StreamKind::Video, "hevc"));
+        assert_eq!(indexes(Format::Mp4, &two), [0, 1, 2, 3, 6]);
+        assert_eq!(indexes(Format::Mkv, &mkv()), [0, 1, 2, 3, 4]);
+        // Cover art first doesn't count as the picture.
+        let covered = probe_of(
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            vec![cover(0), stream(1, StreamKind::Video, "h264")],
+        );
+        assert_eq!(picture(&covered).map(|s| s.index), Some(1));
+        let song = probe_of(
+            "mov,mp4,m4a,3gp,3g2,mj2",
+            vec![stream(0, StreamKind::Audio, "aac"), cover(1)],
+        );
+        assert_eq!(picture(&song), None);
+        assert_eq!(indexes(Format::Mp4, &song), [0, 1]);
+        let mut pq = stream(0, StreamKind::Video, "hevc");
+        assert!(!is_pq(&pq));
+        pq.color_transfer = "arib-std-b67".to_owned();
+        assert!(!is_pq(&pq));
+        pq.color_transfer = "smpte2084".to_owned();
+        assert!(is_pq(&pq));
+    }
+
+    #[test]
+    fn compress_encodes_the_picture_and_copies_small_aac() {
+        let mut probe = movie();
+        probe.streams[0].avg_fps = Some((60, 1));
+        // Track 1 is AAC at 120k stereo: within 1.1 × Balanced's 128k.
+        probe.streams[1].bit_rate = Some(120_000);
+        // Track 2 is AAC at 200k: re-encoded.
+        probe.streams[2].bit_rate = Some(200_000);
+        let shrink = shrink(
+            &src(),
+            Format::Mp4,
+            &probe,
+            &Tags::default(),
+            CompressPreset::Balanced,
+            true,
+            &out(),
+        );
+        assert!(shrink.copies);
+        let scale = format!("{}:flags=lanczos", fit(1080));
+        let middle = [
+            "-map",
+            "0:0",
+            "-map",
+            "0:1",
+            "-map",
+            "0:2",
+            "-map",
+            "0:3",
+            "-map",
+            "0:6",
+            "-c",
+            "copy",
+            "-c:0",
+            "libx264",
+            "-crf:0",
+            "23",
+            "-preset:0",
+            "medium",
+            "-profile:0",
+            "high",
+            "-pix_fmt:0",
+            "yuv420p",
+            "-filter:0",
+            &scale,
+            "-c:2",
+            "aac",
+            "-b:2",
+            "128k",
+            "-movflags",
+            "+faststart",
+        ];
+        assert_eq!(shrink.args, expect(&[], &middle, "mp4"));
+
+        // Without the copy (the retry), and at Small: both tracks at 96k,
+        // and 60 fps at 30.
+        let shrink = super::shrink(
+            &src(),
+            Format::Mp4,
+            &probe,
+            &Tags::default(),
+            CompressPreset::Small,
+            false,
+            &out(),
+        );
+        assert!(!shrink.copies);
+        let chain = format!("fps=60/2,{}:flags=lanczos", fit(720));
+        assert!(
+            has(&shrink.args, ["-filter:0", &chain]),
+            "{:?}",
+            shrink.args
+        );
+        assert!(has(&shrink.args, ["-crf:0", "28"]));
+        assert!(has(&shrink.args, ["-b:1", "96k"]));
+        assert!(has(&shrink.args, ["-b:2", "96k"]));
+
+        // High: 2160, CRF 20, no rate cap; 5.1 PCM at 96 kHz becomes AAC
+        // at 512k (96k a channel, capped) and 48 kHz.
+        let mut pcm = stream(1, StreamKind::Audio, "pcm_s24le");
+        pcm.channels = 6;
+        pcm.sample_rate = 96_000;
+        let mut video = stream(0, StreamKind::Video, "prores");
+        video.avg_fps = Some((60, 1));
+        let probe = probe_of("mov,mp4,m4a,3gp,3g2,mj2", vec![video, pcm]);
+        let shrink = super::shrink(
+            &src(),
+            Format::Mov,
+            &probe,
+            &dated(true),
+            CompressPreset::High,
+            true,
+            &out(),
+        );
+        assert!(!shrink.copies);
+        let scale = format!("{}:flags=lanczos", fit(2160));
+        assert!(has(&shrink.args, ["-filter:0", &scale]));
+        assert!(has(&shrink.args, ["-crf:0", "20"]));
+        assert!(has(&shrink.args, ["-b:1", "512k"]));
+        assert!(has(&shrink.args, ["-ar:1", "48000"]));
+        assert!(has(
+            &shrink.args,
+            ["-movflags", "+faststart+use_metadata_tags"]
+        ));
+
+        // An audio-only MKV: no x264 at all, cover art copied.
+        let probe = probe_of(
+            "matroska,webm",
+            vec![stream(0, StreamKind::Audio, "flac"), cover(1)],
+        );
+        let shrink = super::shrink(
+            &src(),
+            Format::Mkv,
+            &probe,
+            &Tags::default(),
+            CompressPreset::Balanced,
+            true,
+            &out(),
+        );
+        let middle = [
+            "-map", "0:0", "-map", "0:1", "-c", "copy", "-c:0", "aac", "-b:0", "128k",
+        ];
+        assert_eq!(shrink.args, expect(&[], &middle, "matroska"));
+    }
+
+    /// Whether `args` has `pair` one after the other.
+    fn has(args: &[OsString], pair: [&str; 2]) -> bool {
+        crate::media::tests::has(args, pair)
     }
 
     #[test]

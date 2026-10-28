@@ -200,8 +200,11 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
     assert!(!runnable_tools(&no_bsdtar).contains(&(ToolKey::ExtractArchive, Format::Rar)));
 }
 
-/// The tools that run with `ffmpeg` and `ffprobe` (D26), so far.
-const MEDIA_TOOLS: [(ToolKey, Format); 22] = [
+/// The tools that run with `ffmpeg` and `ffprobe` (D26).
+const MEDIA_TOOLS: [(ToolKey, Format); 25] = [
+    (ToolKey::Compress, Format::Mp4),
+    (ToolKey::Compress, Format::Mov),
+    (ToolKey::Compress, Format::Mkv),
     (ToolKey::Compress, Format::Mp3),
     (ToolKey::Compress, Format::M4a),
     (ToolKey::Compress, Format::Wav),
@@ -331,7 +334,7 @@ fn audio_and_video_run_only_with_both_ffmpeg_sidecars() {
     ));
     assert!(!supports_with(
         &Operation::tool(ToolKey::Compress),
-        &[Some(Format::Mp4)],
+        &[Some(Format::Webm)],
         &both
     ));
 }

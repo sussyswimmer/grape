@@ -1,6 +1,6 @@
 //! The tools that run through FFmpeg (D26), one file in and one out:
-//! Remove Audio, Remove Metadata, Audio Channels, Normalize Volume, and
-//! Compress on audio so far.
+//! Remove Audio, Remove Metadata, Audio Channels, Normalize Volume and
+//! Compress.
 //!
 //! [`run`] goes through the steps a conversion does ([`super::convert`]),
 //! and every refusal, and every [`ErrorKind::NoChange`], comes before
@@ -22,7 +22,8 @@
 //! 6. The publish ([`super::Begun::publish_checked`]), and the note.
 //!
 //! Tools keep every track but what they remove: streams are mapped by
-//! index. Nothing is retried: a copy tool that re-encoded would lose the
+//! index. Only Compress on a video retries, once, when the muxer refuses
+//! an audio track it copied: a copy tool that re-encoded would lose the
 //! quality it promises to keep.
 
 mod argv;
@@ -30,7 +31,7 @@ mod argv;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use grape_core::{Channels, Format, Job, ToolKey, ToolParams};
+use grape_core::{Channels, CompressPreset, Format, Job, ToolKey, ToolParams};
 
 use super::args::{Missing, Pass};
 use super::loudness::{self, Correction, Plan};
@@ -39,7 +40,7 @@ use super::run::{self, RunError, SlotGuard};
 use super::tags::{self, Tags};
 use super::{
     absolute, begin, ffmpeg_failed, no_stream, probe_failed, probe_output, run_passes,
-    source_is_a_file, Bar, Begun, PASSES_SHARE, PROBE_TIMEOUT,
+    source_is_a_file, worth_a_retry, Bar, Begun, COPY_SHARE, PASSES_SHARE, PROBE_TIMEOUT,
 };
 use crate::output::TempFile;
 use crate::publish;
@@ -51,9 +52,8 @@ pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
     use Format::{Flac, M4a, Mkv, Mov, Mp3, Mp4, Wav};
     match tool {
         ToolKey::RemoveMetadata => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
-        ToolKey::Compress | ToolKey::AudioChannels | ToolKey::NormalizeAudio => {
-            matches!(from, Mp3 | M4a | Wav | Flac)
-        }
+        ToolKey::Compress => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
+        ToolKey::AudioChannels | ToolKey::NormalizeAudio => matches!(from, Mp3 | M4a | Wav | Flac),
         ToolKey::MuteVideo => matches!(from, Mp4 | Mov | Mkv),
         _ => false,
     }
@@ -95,7 +95,10 @@ pub(crate) fn run(
         ToolKey::RemoveMetadata => tool.strip(&mut bar),
         ToolKey::AudioChannels => tool.channels(&mut bar),
         ToolKey::NormalizeAudio => tool.normalize(&mut bar),
-        ToolKey::Compress => tool.compress_audio(&mut bar),
+        ToolKey::Compress => match to {
+            Format::Mp4 | Format::Mov | Format::Mkv => tool.compress_video(&mut bar),
+            _ => tool.compress_audio(&mut bar),
+        },
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
@@ -437,6 +440,85 @@ impl Tool<'_> {
         self.publish_smaller(written, before, squeeze.lossy, squeeze.try_small, bar)
     }
 
+    /// Compress on a video ([`argv::shrink`]): the picture through x264,
+    /// smaller and at most 30 fps at Small; each audio track AAC unless it
+    /// is small AAC already, when it's copied; everything else kept. A
+    /// copied track the muxer refuses gets one retry, re-encoding every
+    /// audio track. Then the size rule, at 90 %.
+    fn compress_video(&self, bar: &mut Bar) -> Result<JobOutcome, GrapeError> {
+        let Begun {
+            ffmpeg,
+            names,
+            info,
+            src,
+            src_abs,
+            ..
+        } = self.begun;
+        let kept: Vec<&StreamInfo> = argv::shrunk(self.to, info).collect();
+        if !kept
+            .iter()
+            .any(|s| !s.attached_pic && matches!(s.kind, StreamKind::Video | StreamKind::Audio))
+        {
+            return Err(nothing_in_it(names, src));
+        }
+        if argv::picture(info).is_some_and(argv::is_pq) {
+            return Err(GrapeError::new(
+                ErrorKind::NotYetSupported,
+                format!(
+                    "{} is HDR10 video, which Compress can't keep yet.",
+                    names.source
+                ),
+                format!("PQ (smpte2084) video in {}", src.display()),
+            ));
+        }
+        let preset = self.params.compress;
+        let before = self.source_size()?;
+        let (temp, out) = self.temp()?;
+        let slot = self.slot()?;
+        let shrink = |copy_audio| {
+            let shrink = argv::shrink(src_abs, self.to, info, self.tags, preset, copy_audio, &out);
+            let pass = Pass {
+                args: shrink.args,
+                weight: 1.0,
+            };
+            (pass, shrink.copies)
+        };
+        let (first, copies) = shrink(true);
+        let share = if copies { COPY_SHARE } else { PASSES_SHARE };
+        let warnings = match run_passes(ffmpeg, &[first], info.duration, self.ctx, bar, share) {
+            Ok(warnings) => warnings,
+            Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
+            Err(e) => {
+                let refused = matches!(e, RunError::Exit { .. });
+                let failure =
+                    publish::or_cancelled(&self.ctx.cancel, src, ffmpeg_failed(names, e, src));
+                if !(refused && copies && worth_a_retry(&failure)) {
+                    return Err(failure);
+                }
+                // An AAC track can fit by its codec and still not mux.
+                let (again, _) = shrink(false);
+                self.run(&[again], bar, PASSES_SHARE)?
+            }
+        };
+        let probe = self.probe(&out, &warnings)?;
+        let planned = kinds(kept.iter().copied());
+        let wrote = kinds(probe.streams.iter());
+        if wrote != planned {
+            return Err(self.wrote_wrong(
+                &out,
+                format!("streams by kind {wrote:?}, {planned:?} planned"),
+            ));
+        }
+        let written = Written {
+            temp,
+            out,
+            probe,
+            _slot: slot,
+        };
+        let try_small = preset != CompressPreset::Small;
+        self.publish_smaller(written, before, true, try_small, bar)
+    }
+
     /// The refusal of an audio file Compress can't make FLAC of.
     fn refused(&self, audio: &StreamInfo, refusal: argv::Refusal) -> GrapeError {
         let (names, src) = (&self.begun.names, self.begun.src);
@@ -762,7 +844,7 @@ mod tests {
             assert_eq!(to, want, "{tool:?} on {from:?}: {planned}");
             assert!(crate::media::args::muxer(to).is_some());
         }
-        assert_eq!(count, 22);
+        assert_eq!(count, 25);
     }
 
     /// A tool job on `name` (the bytes "source") in a fresh folder, with
@@ -1669,6 +1751,144 @@ mod tests {
         script([Fake::Prints(flat("flac", false, "")), no_tags()]);
         let err = case.run().0.unwrap_err();
         assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        case.assert_clean();
+    }
+
+    /// `ffprobe`'s view of an H.264 and AAC `format_name` file whose AAC
+    /// is at `bit_rate`, and whose video has `transfer`.
+    fn movie(format_name: &str, bit_rate: Option<u64>, transfer: &str) -> Fake {
+        let mut text = flat(format_name, true, "aac");
+        if let Some(bit_rate) = bit_rate {
+            text.push_str(&format!("streams.stream.1.bit_rate=\"{bit_rate}\"\n"));
+        }
+        text.push_str(&format!("streams.stream.0.color_transfer=\"{transfer}\"\n"));
+        Fake::Prints(text)
+    }
+
+    #[test]
+    fn compress_encodes_a_video_and_says_how_much_it_saved() {
+        let case = compress_case("clip.mp4", CompressPreset::Balanced);
+        let mp4 = || movie("mov,mp4,m4a,3gp,3g2,mj2", Some(400_000), "bt709");
+        script([mp4(), no_tags(), writes(500), mp4()]);
+        let (result, seen) = case.run();
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("clip Compressed.mp4")]);
+        assert_eq!(
+            outcome.notes,
+            [Note::Compressed {
+                before: 1000,
+                after: 500
+            }]
+        );
+        let args = ran_args(2);
+        assert!(has(&args, ["-c:0", "libx264"]) && has(&args, ["-crf:0", "23"]));
+        assert!(has(&args, ["-c:1", "aac"]) && has(&args, ["-b:1", "128k"]));
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // Over 90 %: nothing saved. At Small, nothing smaller to suggest.
+        for (preset, message) in [
+            (
+                CompressPreset::High,
+                "clip.mkv is already compact. Try Small.",
+            ),
+            (
+                CompressPreset::Small,
+                "clip.mkv is already as small as Grape makes it.",
+            ),
+        ] {
+            let case = compress_case("clip.mkv", preset);
+            let mkv = || movie("matroska,webm", None, "");
+            script([mkv(), no_tags(), writes(901), mkv()]);
+            let err = case.run().0.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+            assert_eq!(err.user_message, message);
+            assert!(!case.dest().exists());
+            assert_eq!(slots_held(), 0);
+            case.assert_clean();
+        }
+
+        // An output that lost its audio isn't published.
+        let case = compress_case("clip.mov", CompressPreset::Balanced);
+        script([
+            movie("mov,mp4,m4a,3gp,3g2,mj2", None, ""),
+            no_tags(),
+            writes(100),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "")),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    #[test]
+    fn compress_retries_once_when_the_muxer_refuses_a_copied_track() {
+        let refused = "[out#0/mp4 @ 0x1] Could not write header: Invalid argument";
+        let case = compress_case("clip.mp4", CompressPreset::Balanced);
+        // AAC at 120k stereo: copied first.
+        let mp4 = || movie("mov,mp4,m4a,3gp,3g2,mj2", Some(120_000), "");
+        script([
+            mp4(),
+            no_tags(),
+            Fake::Child("error", refused.to_owned()),
+            writes(400),
+            mp4(),
+        ]);
+        let (result, seen) = case.run();
+        result.unwrap();
+        let (first, again) = (ran_args(2), ran_args(3));
+        assert!(!first.iter().any(|a| a == "-c:1"), "{first:?}");
+        assert!(has(&again, ["-c:1", "aac"]), "{again:?}");
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // Nothing copied: nothing to retry.
+        let case = compress_case("clip.mp4", CompressPreset::Balanced);
+        script([
+            movie("mov,mp4,m4a,3gp,3g2,mj2", Some(400_000), ""),
+            no_tags(),
+            Fake::Child("error", refused.to_owned()),
+            writes(400),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert_eq!(ran().len(), 3);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    #[test]
+    fn compress_refuses_hdr10_and_an_empty_file_before_anything_runs() {
+        let case = compress_case("clip.mov", CompressPreset::Balanced);
+        script([
+            movie("mov,mp4,m4a,3gp,3g2,mj2", None, "smpte2084"),
+            no_tags(),
+        ]);
+        let (result, seen) = case.run();
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "clip.mov is HDR10 video, which Compress can't keep yet."
+        );
+        assert_eq!(ran().len(), 2);
+        assert!(seen.is_empty());
+        case.assert_clean();
+
+        // HLG is encoded.
+        let case = compress_case("clip.mov", CompressPreset::Balanced);
+        let hlg = || movie("mov,mp4,m4a,3gp,3g2,mj2", None, "arib-std-b67");
+        script([hlg(), no_tags(), writes(100), hlg()]);
+        case.run().0.unwrap();
+        case.assert_clean();
+
+        let case = compress_case("empty.mkv", CompressPreset::Balanced);
+        script([Fake::Prints(flat("matroska,webm", false, "")), no_tags()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "empty.mkv has no sound or video in it.");
+        assert_eq!(ran().len(), 2);
         case.assert_clean();
     }
 

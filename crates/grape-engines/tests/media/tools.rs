@@ -1586,3 +1586,200 @@ fn compress_saves_nothing_when_it_cant_save_enough() {
         "noise.flac is already as small as Grape makes it."
     );
 }
+
+/// A 1 s 1920×1080 60 fps H.264 `name` of format `muxer`, made big
+/// (`-crf 5`), with stereo AAC at 256k, two chapters, a title, a creation
+/// time, and the video options `video` (color tags, say).
+fn camera(dir: &TestDir, name: &str, muxer: &str, video: &[&str]) -> PathBuf {
+    let chapters = chapter_source(dir);
+    let path = dir.join(name);
+    let mut args = vec![
+        "-f",
+        "lavfi",
+        "-i",
+        "testsrc=size=1920x1080:rate=60:duration=1",
+    ];
+    args.extend(SINE);
+    args.extend(["-i", s(&chapters), "-map", "0:v", "-map", "1:a"]);
+    args.extend(["-map_chapters", "2", "-c:v", "libx264", "-crf", "5"]);
+    args.extend(["-preset", "ultrafast", "-pix_fmt", "yuv420p"]);
+    args.extend(video);
+    args.extend(["-c:a", "aac", "-ac", "2", "-b:a", "256k"]);
+    args.extend(["-metadata", "title=Trip"]);
+    args.extend(["-metadata", "creation_time=2024-05-01T10:20:30.000000Z"]);
+    args.extend(["-f", muxer, s(&path)]);
+    ffmpeg(&args);
+    path
+}
+
+/// What `ffprobe` says of `path`'s video and first audio track, and its
+/// tags.
+fn picture_of(path: &Path) -> HashMap<String, String> {
+    flat(
+        path,
+        "stream=codec_type,codec_name,width,height,avg_frame_rate,color_transfer,\
+         color_primaries,bit_rate,sample_rate:stream_side_data=rotation:format_tags",
+    )
+}
+
+#[test]
+fn compress_shrinks_video_by_preset_and_keeps_chapters_and_dates() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-compress-video");
+    let mut failures = Vec::new();
+    for muxer in ["mp4", "mov", "matroska"] {
+        let ext = if muxer == "matroska" { "mkv" } else { muxer };
+        let src = camera(&dir, &format!("camera.{ext}"), muxer, &[]);
+        // (preset, width, height, fps)
+        for (preset, w, h, fps) in [
+            (Small, "1280", "720", "30/1"),
+            (Balanced, "1920", "1080", "60/1"),
+            (High, "1920", "1080", "60/1"),
+        ] {
+            let what = format!("{ext} {preset:?}");
+            let out = match run_tool(&dir, &src, ToolKey::Compress, to_preset(preset)) {
+                Ok(out) => out,
+                Err(e) => {
+                    failures.push(format!("{what}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let path = &out.outputs[0];
+            let note = Note::Compressed {
+                before: size(&src),
+                after: size(path),
+            };
+            assert_eq!(out.notes, [note], "{what}");
+            assert!(size(path) * 10 <= size(&src) * 9, "{what}");
+            let got = picture_of(path);
+            let want = [
+                ("streams.stream.0.codec_name", "h264"),
+                ("streams.stream.0.width", w),
+                ("streams.stream.0.height", h),
+                ("streams.stream.0.avg_frame_rate", fps),
+                ("streams.stream.1.codec_name", "aac"),
+                ("format.tags.title", "Trip"),
+            ];
+            for (key, value) in want {
+                if got.get(key).map(String::as_str) != Some(value) {
+                    failures.push(format!("{what}: {key} {:?}", got.get(key)));
+                }
+            }
+            let dated = got
+                .iter()
+                .any(|(k, v)| k.ends_with("creation_time") && v.starts_with("2024-05-01T10:20:30"));
+            if !dated {
+                failures.push(format!("{what}: no creation_time: {got:?}"));
+            }
+            if chapters(path) != 2 {
+                failures.push(format!("{what}: {} chapters", chapters(path)));
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn compress_turns_rotated_video_upright_and_keeps_hlg() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("tools-compress-upright");
+    let plain = camera(&dir, "plain.mp4", "mp4", &[]);
+    let rotated = dir.join("rotated.mp4");
+    ffmpeg(&[
+        "-display_rotation:v:0",
+        "90",
+        "-i",
+        s(&plain),
+        "-c",
+        "copy",
+        "-f",
+        "mp4",
+        s(&rotated),
+    ]);
+    let out = run_tool(&dir, &rotated, ToolKey::Compress, to_preset(Small)).unwrap();
+    let got = picture_of(&out.outputs[0]);
+    assert_eq!(got["streams.stream.0.width"], "720");
+    assert_eq!(got["streams.stream.0.height"], "1280");
+    assert!(!got.keys().any(|k| k.contains("rotation")), "{got:?}");
+
+    // HLG stays tagged as HLG; PQ is refused before anything is written.
+    // The tags go into the H.264 itself: FFmpeg 9.0's CLI gives x264 the
+    // frames' (none from lavfi) over `-color_trc`.
+    let tagged = |transfer: u8| {
+        format!(
+            "h264_metadata=colour_primaries=9:transfer_characteristics={transfer}:\
+             matrix_coefficients=9"
+        )
+    };
+    let hlg_tags = tagged(18);
+    let hlg = camera(&dir, "hlg.mov", "mov", &["-bsf:v", &hlg_tags]);
+    let out = run_tool(&dir, &hlg, ToolKey::Compress, to_preset(Small)).unwrap();
+    let got = picture_of(&out.outputs[0]);
+    assert_eq!(got["streams.stream.0.color_transfer"], "arib-std-b67");
+    assert_eq!(got["streams.stream.0.color_primaries"], "bt2020");
+    let pq = dir.join("pq.mov");
+    let mut args = TESTSRC.to_vec();
+    let pq_tags = tagged(16);
+    args.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-bsf:v", &pq_tags]);
+    args.extend(["-f", "mov", s(&pq)]);
+    ffmpeg(&args);
+    let err = run_tool(&dir, &pq, ToolKey::Compress, to_preset(Small)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "pq.mov is HDR10 video, which Compress can't keep yet."
+    );
+}
+
+#[test]
+fn compress_keeps_every_track_of_a_movie_and_an_iphones_keys() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("tools-compress-tracks");
+    let mkv = movie_mkv(&dir, "movie.mkv");
+    let out = run_tool(&dir, &mkv, ToolKey::Compress, to_preset(Small)).unwrap();
+    let path = &out.outputs[0];
+    assert_eq!(
+        kinds(path),
+        ["video", "audio", "audio", "subtitle", "attachment"]
+    );
+    let got = tags(path);
+    assert_eq!(got["streams.stream.1.tags.language"], "eng");
+    assert_eq!(got["streams.stream.2.tags.language"], "fra");
+
+    let mov = iphone_mov(&dir);
+    let out = run_tool(&dir, &mov, ToolKey::Compress, to_preset(Small)).unwrap();
+    let got = tags(&out.outputs[0]);
+    let values: Vec<&str> = got.values().map(String::as_str).collect();
+    // The timecode track is written again from the `timecode` tag.
+    for kept in [
+        "Apple",
+        "iPhone 15 Pro",
+        "+48.8577+002.2950+035.000/",
+        "01:00:00:00",
+    ] {
+        assert!(values.contains(&kept), "lost {kept}: {got:?}");
+    }
+    assert_eq!(kinds(&out.outputs[0]), ["video", "audio", "data"]);
+}
+
+#[test]
+fn compress_saves_nothing_from_a_video_it_cant_shrink() {
+    use grape_core::CompressPreset::{High, Small};
+    let dir = TestDir::new("tools-compress-video-none");
+    // Already at CRF 40: CRF 20 makes it bigger.
+    let tiny = dir.join("tiny.mp4");
+    let mut args = TESTSRC.to_vec();
+    args.extend(["-c:v", "libx264", "-crf", "40", "-pix_fmt", "yuv420p"]);
+    args.extend(["-f", "mp4", s(&tiny)]);
+    ffmpeg(&args);
+    let err = run_tool(&dir, &tiny, ToolKey::Compress, to_preset(High)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(err.user_message, "tiny.mp4 is already compact. Try Small.");
+    let err = run_tool(&dir, &tiny, ToolKey::Compress, to_preset(Small)).unwrap_err();
+    assert_eq!(
+        err.user_message,
+        "tiny.mp4 is already as small as Grape makes it."
+    );
+}
