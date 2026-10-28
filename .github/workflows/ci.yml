@@ -114,15 +114,23 @@ jobs:
           GRAPE_TEST_PDFIUM: ${{ github.workspace }}/apps/desktop/src-tauri/binaries/libpdfium-universal-apple-darwin.dylib
         run: cargo test -p grape-engines --features pdf-it --locked --no-fail-fast
 
-  # Grape's own bsdtar for RAR (DECISIONS D27), built in this run.
-  bsdtar:
-    name: bsdtar
+  # Grape's own bsdtar for RAR (DECISIONS D27), built in this run, one call
+  # per OS so that each bundle waits only for its own.
+  bsdtar-windows:
+    name: bsdtar (Windows)
     uses: ./.github/workflows/bsdtar.yml
+    with:
+      targets: windows
+  bsdtar-macos:
+    name: bsdtar (macOS)
+    uses: ./.github/workflows/bsdtar.yml
+    with:
+      targets: macos
 
   # The RAR engine against the bsdtar just built (feature rar-it).
   rar-it:
     name: RAR tests (${{ matrix.name }})
-    needs: bsdtar
+    needs: [bsdtar-windows, bsdtar-macos]
     strategy:
       fail-fast: false
       matrix:
@@ -265,10 +273,21 @@ jobs:
 
   # Grape's own FFmpeg (DECISIONS D24), built in this run: the Windows exes
   # cross-built on Linux, the two Mac halves on their own runners joined with
-  # lipo, and the GPL source bundle, the same from every target.
-  ffmpeg:
-    name: ffmpeg
+  # lipo, and the GPL source bundle, the same from every target. Two calls, so
+  # that the Windows installer never waits for a Mac job: the Mac one starts
+  # after the Windows one, which uploads the run's one source bundle.
+  ffmpeg-windows:
+    name: ffmpeg (Windows)
     uses: ./.github/workflows/ffmpeg.yml
+    with:
+      targets: windows
+  ffmpeg-macos:
+    name: ffmpeg (macOS)
+    needs: ffmpeg-windows
+    uses: ./.github/workflows/ffmpeg.yml
+    with:
+      targets: macos
+      windows-sources: ${{ needs.ffmpeg-windows.outputs.windows-sources }}
 
   # The FFmpeg engine (D22) against the ffmpeg and ffprobe just built, the
   # ones the bundles carry (feature engines-it: every audio and video pair,
@@ -277,7 +296,7 @@ jobs:
   # merge job ran the x86_64 one.
   engines-it:
     name: FFmpeg tests (${{ matrix.name }})
-    needs: ffmpeg
+    needs: [ffmpeg-windows, ffmpeg-macos]
     strategy:
       fail-fast: false
       matrix:
@@ -328,7 +347,7 @@ jobs:
   # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
   build-windows:
     name: Build (Windows installer)
-    needs: [ffmpeg, bsdtar, grape-heif]
+    needs: [ffmpeg-windows, bsdtar-windows, grape-heif]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -376,7 +395,7 @@ jobs:
       - name: Put the sidecars in binaries
         shell: pwsh
         env:
-          FFMPEG_SUMS: ${{ needs.ffmpeg.outputs.windows-sums }}
+          FFMPEG_SUMS: ${{ needs.ffmpeg-windows.outputs.windows-sums }}
           GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
         run: |
           function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
@@ -495,7 +514,7 @@ jobs:
   # docs/PLATFORM_MACOS.md → "Running a CI build".
   build-macos:
     name: Build (macOS DMG)
-    needs: [ffmpeg, bsdtar]
+    needs: [ffmpeg-macos, bsdtar-macos]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -541,7 +560,7 @@ jobs:
       - name: Put the sidecars in binaries
         shell: bash
         env:
-          FFMPEG_SUMS: ${{ needs.ffmpeg.outputs.macos-sums }}
+          FFMPEG_SUMS: ${{ needs.ffmpeg-macos.outputs.macos-sums }}
         run: |
           fail() { echo "::error::$*"; exit 1; }
           sums=$(shasum -a 256 < "$RUNNER_TEMP/ffmpeg/SHA256SUMS" | cut -d ' ' -f 1)

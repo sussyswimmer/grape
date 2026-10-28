@@ -23,6 +23,13 @@ name: ffmpeg
 #   ffmpeg-logs-<target>            build.sh's logs, notices-found.json among
 #                                   them (scripts/ffmpeg/README.md, "License
 #                                   notices"), from every run that built
+#
+# targets: "all" (the default, and a manual run) builds everything here. ci.yml
+# calls it twice instead, so that its Windows installer never waits for a Mac
+# job: "windows" (windows-x86_64 and windows-check), then "macos" (the halves,
+# sources and merge) once that call has passed, with its windows-sources
+# output. A Mac call needs that run's ffmpeg-source, which only windows-x86_64
+# uploads, so the DMG still waits for the Windows build.
 on:
   workflow_call:
     inputs:
@@ -34,6 +41,14 @@ on:
         description: What to check out (release.yml passes its tag); empty for the caller's own ref.
         type: string
         default: ""
+      targets:
+        description: all, windows or macos (see above).
+        type: string
+        default: all
+      windows-sources:
+        description: For targets macos, the windows call's windows-sources output.
+        type: string
+        default: ""
     outputs:
       sources-sha256:
         description: grape-ffmpeg-sources.tar's SHA-256 (the ffmpeg-source artifact).
@@ -41,6 +56,9 @@ on:
       windows-sums:
         description: The SHA-256 of the ffmpeg-x86_64-pc-windows-msvc artifact's SHA256SUMS.
         value: ${{ jobs.windows-x86_64.outputs.sums }}
+      windows-sources:
+        description: The uploaded source bundle's SHA-256, content hash and date, for a macos call's windows-sources.
+        value: ${{ jobs.windows-x86_64.outputs.sources-sha256 }} ${{ jobs.windows-x86_64.outputs.sources-content }} ${{ jobs.windows-x86_64.outputs.sources-epoch }}
       macos-sums:
         description: The SHA-256 of the ffmpeg-apple-darwin artifact's SHA256SUMS.
         value: ${{ jobs.merge.outputs.sums }}
@@ -64,6 +82,7 @@ jobs:
   # toolchain (mingw-w64 11.0.1, GCC 13.2.0), whose runtimes the exe links.
   windows-x86_64:
     name: FFmpeg (windows-x86_64, built on Linux)
+    if: inputs.targets != 'macos'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     defaults:
@@ -351,10 +370,12 @@ jobs:
 
   # Natively on Apple silicon: build.sh doesn't cross-compile between Mac
   # architectures. After windows-x86_64, which uploads the one source bundle:
-  # the halves are GPL programs too, so no run holds them without it.
+  # the halves are GPL programs too, so no run holds them without it. In a
+  # macos call windows-x86_64 ran in the caller's windows call instead.
   macos-arm64:
     name: FFmpeg (macos-arm64)
     needs: windows-x86_64
+    if: ${{ !cancelled() && (inputs.targets == 'macos' || inputs.targets != 'windows' && needs.windows-x86_64.result == 'success') }}
     runs-on: macos-latest
     timeout-minutes: 90
     defaults:
@@ -495,7 +516,7 @@ jobs:
           name: ffmpeg-half-macos-arm64
           path: ${{ runner.temp }}/ffmpeg-half
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # Natively on Intel: uname -m must say x86_64, so Rosetta on Apple silicon
   # isn't enough. macos-15-intel is GitHub's Intel image; when it's retired,
@@ -503,6 +524,7 @@ jobs:
   macos-x86_64:
     name: FFmpeg (macos-x86_64)
     needs: windows-x86_64
+    if: ${{ !cancelled() && (inputs.targets == 'macos' || inputs.targets != 'windows' && needs.windows-x86_64.result == 'success') }}
     runs-on: macos-15-intel
     timeout-minutes: 90
     defaults:
@@ -638,7 +660,7 @@ jobs:
           name: ffmpeg-half-macos-x86_64
           path: ${{ runner.temp }}/ffmpeg-half
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
 
   # The two halves joined with lipo into <name>-universal-apple-darwin, which
   # is signed ad hoc (lipo breaks the halves' signatures, D25). The per-arch
@@ -650,6 +672,7 @@ jobs:
   merge:
     name: FFmpeg (macOS universal)
     needs: [macos-arm64, macos-x86_64, sources]
+    if: ${{ !cancelled() && needs.sources.result == 'success' }}
     runs-on: macos-latest
     timeout-minutes: 20
     defaults:
@@ -793,10 +816,13 @@ jobs:
   # and the one uploaded (from windows-x86_64) is checked here. Bundles of one
   # commit must match byte for byte; a bundle restored from the cache was
   # written by another commit's run, whose date it carries, so then only the
-  # contents are compared.
+  # contents are compared. In a macos call the Windows job's hashes come from
+  # the caller (windows-sources). Both halves passed means windows-x86_64 did
+  # too, in an all call.
   sources:
     name: FFmpeg's source bundle (the same from every target)
     needs: [windows-x86_64, macos-arm64, macos-x86_64]
+    if: ${{ !cancelled() && needs.macos-arm64.result == 'success' && needs.macos-x86_64.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -812,7 +838,7 @@ jobs:
       - id: compare
         name: Compare the three bundles, and the uploaded one
         env:
-          WINDOWS: ${{ needs.windows-x86_64.outputs.sources-sha256 }} ${{ needs.windows-x86_64.outputs.sources-content }} ${{ needs.windows-x86_64.outputs.sources-epoch }}
+          WINDOWS: ${{ inputs.targets == 'macos' && inputs.windows-sources || format('{0} {1} {2}', needs.windows-x86_64.outputs.sources-sha256, needs.windows-x86_64.outputs.sources-content, needs.windows-x86_64.outputs.sources-epoch) }}
           ARM64: ${{ needs.macos-arm64.outputs.sources-sha256 }} ${{ needs.macos-arm64.outputs.sources-content }} ${{ needs.macos-arm64.outputs.sources-epoch }}
           X86_64: ${{ needs.macos-x86_64.outputs.sources-sha256 }} ${{ needs.macos-x86_64.outputs.sources-content }} ${{ needs.macos-x86_64.outputs.sources-epoch }}
         run: |

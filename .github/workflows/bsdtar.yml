@@ -4,6 +4,10 @@ name: bsdtar
 # built per OS, checked, smoke-tested in Grape's exact environment and uploaded as
 # artifacts for the jobs of the run that called this. No GitHub Release of the
 # builds until M7; release.yml builds it clean from its tag for the installer.
+#
+# targets: "all" (the default, and a manual run) builds both. ci.yml calls it
+# once per OS ("windows", "macos"), so that a Mac failure never holds back the
+# Windows installer, and the other way round.
 on:
   workflow_call:
     inputs:
@@ -15,6 +19,10 @@ on:
         description: What to check out (release.yml passes its tag); empty for the caller's own ref.
         type: string
         default: ""
+      targets:
+        description: all, windows or macos (see above).
+        type: string
+        default: all
   workflow_dispatch:
     inputs:
       cache:
@@ -32,6 +40,7 @@ permissions:
 jobs:
   windows:
     name: bsdtar (Windows x64)
+    if: inputs.targets != 'macos'
     runs-on: windows-latest
     steps:
       # Builds third-party code, so it keeps no git credentials.
@@ -76,6 +85,7 @@ jobs:
 
   macos:
     name: bsdtar (macOS universal)
+    if: inputs.targets != 'windows'
     runs-on: macos-latest
     steps:
       # Builds third-party code, so it keeps no git credentials.
