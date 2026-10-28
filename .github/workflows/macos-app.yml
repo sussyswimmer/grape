@@ -482,9 +482,6 @@ jobs:
               error "$agent doesn't start Grape with --at-login."
             fi
           fi
-          while IFS= read -r line; do
-            [ -z "$line" ] || error "Grape logged an error: $line"
-          done <<< "$(new_log | grep -F '][ERROR] ' || true)"
 
           open -n "$app" || error "The second open -n failed."
           handover='\]\[grape_app\]\[INFO\] second launch: opening Settings in the running instance$'
@@ -495,7 +492,13 @@ jobs:
           has "$handover" || error "The first Grape never logged the second launch."
           count=$(pids | wc -l | tr -d ' ')
           [ "$count" -eq 1 ] || error "$count Grape processes 10 s after the second launch, not 1: the second didn't hand over and exit."
+          # Settings opens on a task after the handover line, so it gets a
+          # moment before the log is read for errors.
+          sleep 3
           kill -0 "$pid" 2> /dev/null || die "The first Grape exited after the second launch."
+          while IFS= read -r line; do
+            [ -z "$line" ] || error "Grape logged an error: $line"
+          done <<< "$(new_log | grep -F '][ERROR] ' || true)"
           [ "$bad" -eq 0 ] || exit 1
           echo "Grape ran through its first launch, and a second one handed over to it."
       - if: ${{ !inputs.release }}

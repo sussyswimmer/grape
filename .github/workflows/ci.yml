@@ -838,9 +838,6 @@ jobs:
               if ($desktop) { Bad 'The drag monitor (the low-level mouse hook) didn''t start.' }
               else { Write-Output "::warning::The drag monitor didn't start, and this runner has no desktop; Grape kept running, as wheel.rs promises." }
             }
-            foreach ($line in @($text -split '\r?\n' | Where-Object { $_ -cmatch '\]\[ERROR\] ' })) {
-              if (-not $desktop -and $line -cmatch 'drag monitor') { Write-Output "::warning::$line" } else { Bad "Grape logged an error: $line" }
-            }
             # auto-launch writes a Run value named after productName: in HKLM
             # when it may (here, where jobs run as an administrator with UAC
             # off), else in HKCU, as for a user.
@@ -863,7 +860,13 @@ jobs:
               Write-Output 'The second Grape.exe exited with code 0.'
             }
             if (-not (Wait-Log '\]\[grape_app\]\[INFO\] second launch: opening Settings in the running instance$' 10)) { Bad 'The first Grape never logged the second launch.' }
+            # Settings opens on a task after that line, so it gets a moment
+            # before the log is read for errors.
+            Start-Sleep -Seconds 3
             if ($grape.HasExited) { Fail "The first Grape exited with code $($grape.ExitCode) after the second launch." }
+            foreach ($line in @((Read-Log) -split '\r?\n' | Where-Object { $_ -cmatch '\]\[ERROR\] ' })) {
+              if (-not $desktop -and $line -cmatch 'drag monitor') { Write-Output "::warning::$line" } else { Bad "Grape logged an error: $line" }
+            }
             if ($script:bad -eq 0) { Write-Output 'Grape ran through its first launch, and a second one handed over to it.' }
           } finally {
             if (-not $grape.HasExited) {
