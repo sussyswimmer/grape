@@ -310,10 +310,13 @@ jobs:
   # ones the bundles carry (feature engines-it: every audio and video pair,
   # the hostile inputs, cancel, the names, and that the build has everything
   # Grape uses). On the Mac the universal files run their arm64 half; the
-  # merge job ran the x86_64 one.
+  # merge job ran the x86_64 one. The Windows leg needs only the Windows
+  # FFmpeg: when the Mac one didn't build, the Mac leg fails at once and says
+  # so, and the Windows leg still runs.
   engines-it:
     name: FFmpeg tests (${{ matrix.name }})
     needs: [ffmpeg-windows, ffmpeg-macos]
+    if: ${{ !cancelled() && needs.ffmpeg-windows.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -328,6 +331,11 @@ jobs:
             suffix: universal-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
+      - name: The Mac FFmpeg was built
+        if: matrix.name == 'macOS' && needs.ffmpeg-macos.result != 'success'
+        run: |
+          echo "::error::The macOS FFmpeg didn't build in this run (ffmpeg (macOS): ${{ needs.ffmpeg-macos.result }}), so there's nothing to test."
+          exit 1
       # The tests run programs built in this run, so the job keeps no git
       # credentials.
       - uses: actions/checkout@v7
