@@ -347,6 +347,8 @@ fn extension_lookup_ignores_case_and_leading_dot() {
 #[test]
 fn unknown_extension_is_none() {
     assert_eq!(Format::from_extension("exe"), None);
+    // An HEIF image sequence, not a photo (D33).
+    assert_eq!(Format::from_extension("heics"), None);
     assert_eq!(Format::from_extension(""), None);
     assert_eq!(Format::from_extension("."), None);
     assert_eq!(Format::from_extension("jpg "), None);

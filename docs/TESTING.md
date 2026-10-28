@@ -159,7 +159,7 @@ HEIC, D33 (use scratch copies of files; nothing here has run on the PC or a Mac 
 - [ ] win: quit during a big HEIC (tray → Quit while the toast says "Making …"; that's how a running conversion is cancelled) → `grape-heif.exe` is gone from Task Manager within 2 s, and nothing is left in the folder or in `%TEMP%\grape-heif-*`.
 - [ ] win: during a big HEIC → PNG, end `Grape.exe` in Task Manager (End task) → `grape-heif.exe` is gone at once, and a `%TEMP%\grape-heif-…` folder may be left. Start Grape again → within a few seconds that folder is gone, and the log says `contain: removed 1 work folder(s) an earlier run left`. The HEIC is unchanged (`Get-FileHash`).
 - [ ] win: a PNG renamed to `.heic` converts to JPG; an AVIF renamed to `.heic` says "… is a kind of HEIF image Grape can't read yet."
-- [ ] win and mac: a camera `.HIF` (Canon, Sony or Fujifilm, 10-bit 4:2:2) → JPG, once grape-core takes `.hif` and `.heif` as HEIC (lane B).
+- [ ] win and mac: a camera `.HIF` (Canon, Sony or Fujifilm, 10-bit 4:2:2) → JPG, and the same file renamed to `.heif`.
 - [ ] win and mac: an iPhone HEIC of a red or green subject → BMP and → PNG, side by side in Photos or Preview. Known gap (D33, not handled yet): BMP can't carry the Display P3 profile, so the BMP looks duller than the PNG. Note how much.
 - [ ] mac (DMG): a portrait iPhone HEIC → JPG is upright and matches the PC's output of the same file. Activity Monitor shows a second `Grape` process only during the job. `shasum -a 256` of the HEIC is the same before and after.
 - [ ] mac (DMG): a Display P3 HEIC → PNG keeps Display P3 (Preview → Tools → Show Inspector). `shasum -a 256` of the HEIC is the same before and after.
