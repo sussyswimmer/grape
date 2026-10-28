@@ -35,6 +35,15 @@ const MAX_READ: usize = 1 << 20;
 /// blank.
 const INFLATE_STEP: usize = 4096;
 
+/// How much of one compressed text is inflated to see whether it's blank:
+/// text still blank this far in is reported by its keyword.
+const BLANK_CHECK: u64 = 64 << 10;
+
+/// The most text inflated in one file: past it, text is reported by its
+/// keyword, uninflated, so the work between two reads (and cancel checks)
+/// stays small.
+const INFLATE_BUDGET: u64 = 16 << 20;
+
 pub(super) fn sniff(head: &[u8]) -> bool {
     head.starts_with(SIGNATURE)
 }
@@ -70,6 +79,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
     let mut held: Option<Vec<Part>> = Some(Vec::new());
     let mut held_bytes = 0;
     let mut first_exif: Option<exif::Exif> = None;
+    let mut budget = INFLATE_BUDGET;
     let mut color_chunk = false;
     let mut chunks = 0;
     loop {
@@ -135,7 +145,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
         let whole = take == len;
         match &kind {
             b"tEXt" | b"zTXt" | b"iTXt" => {
-                let (field, exif_blob) = text(&kind, &data, whole);
+                let (field, exif_blob) = text(&kind, &data, whole, &mut budget);
                 found.fields.extend(field);
                 if let Some(blob) = exif_blob {
                     note_exif(&mut found, &mut first_exif, held.as_mut(), &blob);
@@ -184,8 +194,14 @@ fn note_exif(
 
 /// What a text chunk of `kind` holding `data` (all of it if `whole`)
 /// says: its field, if its text isn't empty, and an EXIF blob for
-/// ImageMagick's "Raw profile type exif" (or "APP1").
-fn text(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<Vec<u8>>) {
+/// ImageMagick's "Raw profile type exif" (or "APP1"). Inflates no more
+/// than is left of `budget`, and takes what it inflates from it.
+fn text(
+    kind: &[u8; 4],
+    data: &[u8],
+    whole: bool,
+    budget: &mut u64,
+) -> (Option<MetaField>, Option<Vec<u8>>) {
     let Some(nul) = data.iter().take(80).position(|&b| b == 0) else {
         return (Some(MetaField::Other), None);
     };
@@ -201,7 +217,7 @@ fn text(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<
     if matches!(keyword, b"Raw profile type exif" | b"Raw profile type APP1") {
         let body = body.and_then(|(compressed, text)| {
             if compressed {
-                inflate(text, whole)
+                inflate(text, whole, budget)
             } else {
                 Some(text.to_vec())
             }
@@ -213,9 +229,10 @@ fn text(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<
     }
     let blank = body.and_then(|(compressed, text)| {
         if compressed {
-            inflates_blank(text, whole)
+            inflates_blank(text, whole, budget)
         } else {
-            Some(blank(text))
+            // Text past what was read may not be blank.
+            Some(whole && blank(text))
         }
     });
     match blank {
@@ -241,30 +258,42 @@ fn blank(text: &[u8]) -> bool {
     text.iter().all(|&b| b == 0 || b.is_ascii_whitespace())
 }
 
-/// Whether zlib `data` inflates to blank text ([`blank`]), inflating only
-/// as far as the first other byte and at most [`MAX_READ`]; `None` if it's
-/// broken (or cut short before any text, unless `whole`).
-fn inflates_blank(data: &[u8], whole: bool) -> Option<bool> {
-    let mut reader = flate2::read::ZlibDecoder::new(data).take(MAX_READ as u64);
+/// Whether zlib `data` (all of it if `whole`) inflates to blank text
+/// ([`blank`]), inflating only as far as the first other byte, and at
+/// most [`BLANK_CHECK`] or what's left of `budget`: text still blank there
+/// isn't, nor is text cut short. `None` if it's broken.
+fn inflates_blank(data: &[u8], whole: bool, budget: &mut u64) -> Option<bool> {
+    let limit = BLANK_CHECK.min(*budget);
+    let mut reader = flate2::read::ZlibDecoder::new(data).take(limit);
     let mut buf = [0; INFLATE_STEP];
-    let mut read_any = false;
-    loop {
+    let mut read = 0;
+    let found = loop {
         match reader.read(&mut buf) {
-            Ok(0) => return Some(true),
-            Ok(n) if !blank(&buf[..n]) => return Some(false),
-            Ok(_) => read_any = true,
-            Err(_) if !whole && read_any => return Some(true),
-            Err(_) => return None,
+            Ok(0) => break Some(whole && read < limit),
+            Ok(n) => {
+                read += n as u64;
+                if !blank(&buf[..n]) {
+                    break Some(false);
+                }
+            }
+            Err(_) if !whole && read > 0 => break Some(false),
+            Err(_) => break None,
         }
-    }
+    };
+    *budget -= read;
+    found
 }
 
-/// Inflates zlib data to at most [`MAX_READ`] bytes; `None` if it's
-/// broken (or cut short, unless `whole`).
-fn inflate(data: &[u8], whole: bool) -> Option<Vec<u8>> {
+/// Inflates zlib data to at most [`MAX_READ`] bytes, or what's left of
+/// `budget`; `None` if it's broken (or cut short, unless `whole`).
+fn inflate(data: &[u8], whole: bool, budget: &mut u64) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     let reader = flate2::read::ZlibDecoder::new(data);
-    match reader.take(MAX_READ as u64).read_to_end(&mut out) {
+    let result = reader
+        .take((MAX_READ as u64).min(*budget))
+        .read_to_end(&mut out);
+    *budget -= out.len() as u64;
+    match result {
         Ok(_) => Some(out),
         Err(_) if !whole && !out.is_empty() => Some(out),
         Err(_) => None,
@@ -544,6 +573,11 @@ mod tests {
         );
     }
 
+    /// [`text`] with a whole budget.
+    fn text_of(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<Vec<u8>>) {
+        text(kind, data, whole, &mut INFLATE_BUDGET.clone())
+    }
+
     #[test]
     fn compressed_text_is_inflated_only_until_it_isnt_blank() {
         let ztxt = |text: &[u8]| {
@@ -551,26 +585,55 @@ mod tests {
             data.extend(zlib(text));
             data
         };
-        assert_eq!(text(b"zTXt", &ztxt(b"  \0 "), true), (None, None));
+        assert_eq!(text_of(b"zTXt", &ztxt(b"  \0 "), true), (None, None));
         assert_eq!(
-            text(b"zTXt", &ztxt(b"  hi"), true),
+            text_of(b"zTXt", &ztxt(b"  hi"), true),
             (Some(MetaField::Comment), None)
         );
         // Text past the first step is still found.
         let mut late = vec![b' '; 3 * INFLATE_STEP];
         late.push(b'x');
         assert_eq!(
-            text(b"zTXt", &ztxt(&late), true),
+            text_of(b"zTXt", &ztxt(&late), true),
             (Some(MetaField::Comment), None)
         );
         // Broken zlib: said by its keyword.
         assert_eq!(
-            text(b"zTXt", b"Comment\0\0not zlib", true),
+            text_of(b"zTXt", b"Comment\0\0not zlib", true),
             (Some(MetaField::Comment), None)
         );
         let mut itxt = b"Title\0\x01\0en\0\0".to_vec();
         itxt.extend(zlib(b"\n\n"));
-        assert_eq!(text(b"iTXt", &itxt, true), (None, None));
+        assert_eq!(text_of(b"iTXt", &itxt, true), (None, None));
+    }
+
+    #[test]
+    fn text_blank_as_far_as_it_was_looked_at_is_still_reported() {
+        let ztxt = |text: &[u8]| {
+            let mut data = b"Author\0\0".to_vec();
+            data.extend(zlib(text));
+            data
+        };
+        // Blank past the check, then a name.
+        let mut late = vec![b' '; BLANK_CHECK as usize];
+        late.extend_from_slice(b"Jane Doe");
+        let author = (Some(MetaField::Author), None);
+        assert_eq!(text_of(b"zTXt", &ztxt(&late), true), author);
+        // Blank as far as it was read, the rest not read.
+        let mut long = b"Author\0".to_vec();
+        long.extend(vec![b' '; MAX_READ]);
+        assert_eq!(text_of(b"tEXt", &long, false), author);
+        assert_eq!(text_of(b"tEXt", &long, true), (None, None));
+        // Each look takes from the file's budget; with none left, the
+        // keyword is all that's said.
+        let mut budget = INFLATE_STEP as u64;
+        assert_eq!(
+            text(b"zTXt", &ztxt(b"   "), true, &mut budget),
+            (None, None)
+        );
+        assert_eq!(budget, INFLATE_STEP as u64 - 3);
+        budget = 0;
+        assert_eq!(text(b"zTXt", &ztxt(b"   "), true, &mut budget), author);
     }
 
     #[test]
@@ -607,6 +670,6 @@ mod tests {
             assert_eq!(text_field(keyword), field);
         }
         // No NUL within 80 bytes: not a keyword.
-        assert_eq!(text(b"tEXt", &[b'a'; 100], true), (Some(Other), None));
+        assert_eq!(text_of(b"tEXt", &[b'a'; 100], true), (Some(Other), None));
     }
 }
