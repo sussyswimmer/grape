@@ -848,8 +848,9 @@ impl SettingsState {
         };
         state.first_launch_at_login(app, &facts);
         // Once launch at login is on, macOS mustn't also relaunch Grape at
-        // login (it's off by default only for apps that never asked).
-        if launch_state(app) == Some(true) {
+        // login (macOS relaunches every app by default). Only a Mac asks
+        // the plugin here: elsewhere nothing would use the answer.
+        if cfg!(target_os = "macos") && launch_state(app) == Some(true) {
             relaunch_on_login(app, true);
         }
         state
