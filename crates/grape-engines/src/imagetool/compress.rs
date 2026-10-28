@@ -104,12 +104,14 @@ fn fit(w: u64, h: u64, cap: u64) -> (u64, u64) {
 ///   of 16 bytes a pixel, the source's width by the result's height) and
 ///   the result;
 /// - the picture encoded, an RGB copy unless it's gray or RGB, and up to 2
-///   bytes a pixel of JPEG (quality 85 at 4:4:4 on noise is about 1.6).
+///   bytes a pixel of JPEG (quality 85 at 4:4:4 on noise is about 1.6), or
+///   1 for gray (about 0.7).
 fn peak(width: u32, height: u32, bpp: u64, preset: CompressPreset) -> u64 {
     let (w, h) = (u64::from(width), u64::from(height));
     let size = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp);
     let copy = if bpp == 1 || bpp == 3 { 0 } else { 3 };
-    let encode = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp + copy + 2);
+    let jpeg = if bpp == 1 { 1 } else { 2 };
+    let encode = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp + copy + jpeg);
     let long = w.max(h);
     let Some(cap) = plan(preset).1.map(u64::from).filter(|&cap| long > cap) else {
         return encode(w, h);
@@ -497,8 +499,11 @@ mod tests {
         assert_eq!(shrink_factor(12_000, 4096), 2);
         assert_eq!(shrink_factor(8192, 4096), 1);
         assert_eq!(shrink_factor(8193, 4096), 2);
-        // No scale: the picture, and up to 2 bytes a pixel of JPEG.
+        // No scale: the picture, and up to 2 bytes a pixel of JPEG, or 1
+        // for gray, so a gray picture up to the decode limit fits at High.
         assert_eq!(peak(100, 10, 3, High), 5000);
+        assert_eq!(peak(100, 10, 1, High), 2000);
+        assert!(peak(19_000, 19_000, 1, High) <= limit);
         // A 4:1 picture just over the cap: 16 bytes a pixel of 4097 by
         // its new height, besides the picture and its result.
         let (nw, nh) = fit(4097, 1024, 4096);
