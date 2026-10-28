@@ -1160,8 +1160,9 @@ fn fake_bsdtar() {
         "slow" => {
             // Echoes the whole input 1 KiB at a time, 50 ms apart: never
             // stalled, however slow the machine. The time cap only stops a
-            // fake that's left running, so it's far above the ~1.2 s a
-            // 24 KiB input takes (a slow CI Mac once needed more than 1.5 s).
+            // fake that's left running, so it's far above the ~3.2 s a
+            // 64 KiB input takes (a slow CI Mac once needed more than 1.5 s
+            // for 24 KiB).
             let start = Instant::now();
             let mut stdin = io::stdin().lock();
             let mut buf = [0u8; 1024];
@@ -1538,11 +1539,18 @@ fn a_stalled_bsdtar_is_killed() {
 
 #[test]
 fn a_slow_but_steady_bsdtar_is_not_a_stall() {
-    let source = super::super::tests::noise(24 * 1024, 5);
-    let ran = run_fake(&fake_stalling("slow"), &source, false);
+    // The stall time also covers starting the fake, which a busy Windows
+    // runner once took more than 300 ms to do, so this one is 1.5 s. The
+    // fake still runs for twice that, never quiet for long.
+    let launch = Launch {
+        stall: Duration::from_millis(1500),
+        ..fake("slow")
+    };
+    let source = super::super::tests::noise(64 * 1024, 5);
+    let ran = run_fake(&launch, &source, false);
     ran.result.as_ref().unwrap();
     assert!(ran.out == source);
-    assert!(ran.took >= Duration::from_millis(900), "{:?}", ran.took);
+    assert!(ran.took >= Duration::from_secs(3), "{:?}", ran.took);
     ran.assert_clean();
 }
 
