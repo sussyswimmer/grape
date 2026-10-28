@@ -21,8 +21,8 @@
 use std::collections::HashSet;
 
 use grape_core::{
-    output_name, Channels, CompressPreset, Operation, SelectionItem, ToolKey, ToolParams,
-    WheelEntry, GEOMETRY,
+    output_name, wheel_content, Channels, CompressPreset, Features, Operation, SelectionItem,
+    ToolKey, ToolParams, WheelEntry, WheelMode, GEOMETRY,
 };
 use grape_engines::SidecarPaths;
 use grape_platform::{DisplayBounds, Rect};
@@ -30,13 +30,6 @@ use grape_platform::{DisplayBounds, Rect};
 use crate::events::{PanelChoice, PanelItem, PanelOpen, PanelRun, PanelSpec};
 use crate::float::display_name;
 use crate::jobs::{self, NotRunnable};
-
-/// The quietest Normalize target, in LUFS.
-pub const MIN_LUFS: i8 = -24;
-/// The loudest Normalize target, in LUFS.
-pub const MAX_LUFS: i8 = -10;
-/// The Normalize slider's step, in LUFS.
-pub const STEP_LUFS: u8 = 1;
 
 // The window's layout, in logical pixels (points on macOS). The page lays
 // out to fill the window, with the same numbers.
@@ -48,8 +41,11 @@ const INSET: f64 = 6.0;
 const HEADER: f64 = 52.0;
 /// Hint, Cancel and Run.
 const FOOTER: f64 = 60.0;
-/// Compress's and Audio Channels' segmented control and note.
+/// Audio Channels' segmented control and note.
 const CHOICE_BODY: f64 = 100.0;
+/// Compress's segmented control and its note, which takes up to two lines
+/// (Small's is wider than one in some fonts).
+const COMPRESS_BODY: f64 = 118.0;
 /// Normalize's slider, its scale and note.
 const LOUDNESS_BODY: f64 = 110.0;
 /// Merge's label, "Saves as" and the move buttons, without the rows.
@@ -60,26 +56,6 @@ const ROW: f64 = 36.0;
 const ROWS_SHOWN: usize = 6;
 /// Space between the wheel's glass and the panel, as the toast's.
 const SPACING: f64 = 16.0;
-
-/// The four v1 panel tools. grape-core marks Remove Metadata `panel = Y`,
-/// but it runs at once in v1 (`docs/TOOLS_AND_ACTIONS.md`).
-pub fn has_panel(tool: ToolKey) -> bool {
-    matches!(
-        tool,
-        ToolKey::Compress | ToolKey::AudioChannels | ToolKey::NormalizeAudio | ToolKey::MergePdf
-    )
-}
-
-/// True for a whole LUFS value in [`MIN_LUFS`]..=[`MAX_LUFS`] on the
-/// [`STEP_LUFS`] grid.
-pub fn lufs_ok(value: i64) -> bool {
-    let (min, max, step) = (
-        i64::from(MIN_LUFS),
-        i64::from(MAX_LUFS),
-        i64::from(STEP_LUFS),
-    );
-    (min..=max).contains(&value) && (value - min) % step == 0
-}
 
 /// What the panels start from: the last Compress preset and Normalize
 /// target that ran (`tools.compress`, `tools.normalize_lufs`).
@@ -117,18 +93,25 @@ pub enum Route {
     Direct,
 }
 
-/// A v1 panel tool whose default-params operation passes `check` opens its
-/// panel; everything else goes the direct way, where `jobs::submit` runs
-/// it or shows why it can't. So a tool this build can't run never opens a
-/// panel.
+/// A v1 panel tool ([`ToolKey::has_v1_panel`]) opens its panel when it's
+/// offered for these items under `features` (the wheel's rule, which
+/// `grape_core::plan` checks again: Audio Channels on one file only, Merge
+/// PDFs on two or more, nothing a format's tools leave out) and its
+/// default-params operation passes `check`. Everything else goes the
+/// direct way, where `jobs::submit` runs it or shows why it can't. So a
+/// panel never opens for a run that would fail, whether this build can't
+/// run the tool or the plan wouldn't offer it.
 pub fn route(
     entry: WheelEntry,
     items: &[SelectionItem],
+    features: Features,
     check: impl Fn(&Operation, &[SelectionItem]) -> Result<(), NotRunnable>,
 ) -> Route {
     match entry {
         WheelEntry::Tool(tool)
-            if has_panel(tool) && check(&Operation::tool(tool), items).is_ok() =>
+            if tool.has_v1_panel()
+                && offered(tool, items, features)
+                && check(&Operation::tool(tool), items).is_ok() =>
         {
             Route::Panel(tool)
         }
@@ -136,17 +119,25 @@ pub fn route(
     }
 }
 
+/// Whether the Tools wheel for `items` under `features` has `tool`: the
+/// formats' tools for this many items (`grape_core::tools`, so only the
+/// multi-OK ones for several), shared by every format in the drop.
+pub fn offered(tool: ToolKey, items: &[SelectionItem], features: Features) -> bool {
+    wheel_content(items, WheelMode::Tools, features).contains(WheelEntry::Tool(tool))
+}
+
 /// The check `GRAPE_PREVIEW_PANELS=1` routes with: the four panel tools
-/// pass, so their panels open even when this build can't run them, and
-/// everything else gets [`jobs::check_runnable`]. A preview panel's Run
-/// still meets the real check in `jobs::submit_op`, so nothing is written.
+/// pass, so their panels open where they're offered even when this build
+/// can't run them, and everything else gets [`jobs::check_runnable`]. A
+/// preview panel's Run still meets the real check in `jobs::submit_op`, so
+/// nothing is written.
 pub fn preview_check(
     op: &Operation,
     items: &[SelectionItem],
     sidecars: &SidecarPaths,
 ) -> Result<(), NotRunnable> {
     match op {
-        Operation::Tool { tool, .. } if has_panel(*tool) => Ok(()),
+        Operation::Tool { tool, .. } if tool.has_v1_panel() => Ok(()),
         _ => jobs::check_runnable(op, items, sidecars),
     }
 }
@@ -248,7 +239,7 @@ impl PanelModel {
     /// Opens a panel for `request`, replacing any open one. Returns the
     /// payload and the seq it replaced, or `None`, leaving the model as it
     /// was, when the request can't have a panel: a tool without one
-    /// ([`has_panel`]), no items, or Merge with fewer than two.
+    /// ([`ToolKey::has_v1_panel`]), no items, or Merge with fewer than two.
     pub fn open(
         &mut self,
         request: PanelRequest,
@@ -430,16 +421,16 @@ fn spec_for(tool: ToolKey, memory: ToolMemory, names: &[String]) -> Option<Panel
             channels: Channels::Mono,
         }),
         ToolKey::NormalizeAudio => {
-            let target = if lufs_ok(i64::from(memory.normalize_lufs)) {
+            let target = if ToolParams::lufs_ok(memory.normalize_lufs) {
                 memory.normalize_lufs
             } else {
                 ToolMemory::DEFAULT.normalize_lufs
             };
             Some(PanelSpec::NormalizeAudio {
                 target_lufs: target,
-                min_lufs: MIN_LUFS,
-                max_lufs: MAX_LUFS,
-                step_lufs: STEP_LUFS,
+                min_lufs: ToolParams::LUFS_MIN,
+                max_lufs: ToolParams::LUFS_MAX,
+                step_lufs: ToolParams::LUFS_STEP,
             })
         }
         ToolKey::MergePdf if names.len() >= 2 => {
@@ -494,7 +485,7 @@ fn chosen(
             None
         }
         (ToolKey::NormalizeAudio, PanelChoice::NormalizeAudio { target_lufs }) => {
-            if !lufs_ok(i64::from(target_lufs)) {
+            if !ToolParams::lufs_ok(target_lufs) {
                 return Err(Rejected::OutOfRange);
             }
             params.target_lufs = target_lufs;
@@ -510,7 +501,8 @@ fn chosen(
 /// 352 wide, and the inset, header, body and footer tall.
 pub fn size(spec: &PanelSpec, count: usize) -> (f64, f64) {
     let body = match spec {
-        PanelSpec::Compress { .. } | PanelSpec::AudioChannels { .. } => CHOICE_BODY,
+        PanelSpec::Compress { .. } => COMPRESS_BODY,
+        PanelSpec::AudioChannels { .. } => CHOICE_BODY,
         PanelSpec::NormalizeAudio { .. } => LOUDNESS_BODY,
         PanelSpec::MergePdf { .. } => MERGE_BODY + count.min(ROWS_SHOWN) as f64 * ROW,
     };
@@ -700,44 +692,127 @@ mod tests {
         }
     }
 
+    /// The features Grape plans with (`settings::planning_features`).
+    const V1: Features = Features::V1_ONLY;
+
+    /// For each of the four, a drop the wheel offers it for: the fixtures'.
+    fn offered_drop(tool: ToolKey) -> Vec<SelectionItem> {
+        match tool {
+            ToolKey::Compress => files(&["/pics/photo.jpg", "/pics/beach.png"]),
+            ToolKey::AudioChannels => files(&["/rec/interview.wav"]),
+            ToolKey::NormalizeAudio => files(&["/pod/episode 12.mp3", "/pod/intro.m4a"]),
+            _ => files(&["/docs/report.pdf", "/docs/cover.pdf"]),
+        }
+    }
+
+    fn not_runnable(_: &Operation, _: &[SelectionItem]) -> Result<(), NotRunnable> {
+        Err(NotRunnable {
+            title: "Not in this build yet".to_owned(),
+            detail: None,
+        })
+    }
+
     #[test]
     fn exactly_the_four_v1_tools_have_a_panel() {
         let with: Vec<ToolKey> = ToolKey::ALL
             .into_iter()
-            .filter(|&tool| has_panel(tool))
+            .filter(|tool| tool.has_v1_panel())
             .collect();
         assert_eq!(with, ALL_FOUR);
         // grape-core says it opens one; v1 runs it at once.
         assert!(ToolKey::RemoveMetadata.opens_panel());
-        assert!(!has_panel(ToolKey::RemoveMetadata));
-        for tool in [
-            ToolKey::MuteVideo,
-            ToolKey::SplitPdf,
-            ToolKey::CreatePdf,
-            ToolKey::ExtractArchive,
-        ] {
-            assert!(!has_panel(tool), "{tool:?}");
+        assert!(!ToolKey::RemoveMetadata.has_v1_panel());
+        // No other tool gets a panel, even when asked for one.
+        let mut model = PanelModel::default();
+        for tool in ToolKey::ALL {
+            let opened = model
+                .open(
+                    request(tool, &["/a/one.pdf", "/a/two.pdf"]),
+                    ToolMemory::DEFAULT,
+                )
+                .is_some();
+            assert_eq!(opened, tool.has_v1_panel(), "{tool:?}");
         }
     }
 
     #[test]
     fn a_runnable_panel_tool_routes_to_its_panel_and_the_rest_go_direct() {
         let anything = |_: &Operation, _: &[SelectionItem]| Ok(());
-        let items = files(&["/a/one.pdf", "/a/two.pdf"]);
         for tool in ALL_FOUR {
+            let items = offered_drop(tool);
             assert_eq!(
-                route(WheelEntry::Tool(tool), &items, anything),
+                route(WheelEntry::Tool(tool), &items, V1, anything),
                 Route::Panel(tool)
             );
+            // One this build can't run goes the direct way, to its toast.
+            assert_eq!(
+                route(WheelEntry::Tool(tool), &items, V1, not_runnable),
+                Route::Direct
+            );
         }
+        let items = files(&["/a/one.mp4", "/a/two.mp4"]);
         for entry in [
             WheelEntry::Tool(ToolKey::RemoveMetadata),
             WheelEntry::Tool(ToolKey::MuteVideo),
-            WheelEntry::Tool(ToolKey::CreatePdf),
-            WheelEntry::Convert(Format::Png),
+            WheelEntry::Convert(Format::Mov),
         ] {
-            assert_eq!(route(entry, &items, anything), Route::Direct, "{entry:?}");
+            assert_eq!(
+                route(entry, &items, V1, anything),
+                Route::Direct,
+                "{entry:?}"
+            );
         }
+    }
+
+    #[test]
+    fn a_panel_opens_only_where_the_wheel_offers_its_tool() {
+        let anything = |_: &Operation, _: &[SelectionItem]| Ok(());
+        let preview = |op: &Operation, items: &[SelectionItem]| {
+            preview_check(op, items, &SidecarPaths::default())
+        };
+        let not_offered = [
+            // Audio Channels isn't multi-OK: one file at a time.
+            (ToolKey::AudioChannels, files(&["/a/one.wav", "/a/two.wav"])),
+            // Merge PDFs takes two or more.
+            (ToolKey::MergePdf, files(&["/a/only.pdf"])),
+            // Compress on a PDF is v2, so not beside a JPG either.
+            (ToolKey::Compress, files(&["/a/doc.pdf"])),
+            (ToolKey::Compress, files(&["/a/photo.jpg", "/a/doc.pdf"])),
+            // Normalize is for audio, and every file must take it.
+            (ToolKey::NormalizeAudio, files(&["/a/clip.mp4"])),
+            (
+                ToolKey::NormalizeAudio,
+                files(&["/a/song.mp3", "/a/clip.mp4"]),
+            ),
+            // A folder, a file of no known format, or nothing.
+            (ToolKey::Compress, vec![SelectionItem::folder("/a/pics")]),
+            (ToolKey::Compress, files(&["/a/notes.xyz"])),
+            (ToolKey::Compress, Vec::new()),
+        ];
+        for (tool, items) in &not_offered {
+            let entry = WheelEntry::Tool(*tool);
+            assert!(!offered(*tool, items, V1), "{tool:?}");
+            assert_eq!(route(entry, items, V1, anything), Route::Direct, "{tool:?}");
+            assert_eq!(route(entry, items, V1, preview), Route::Direct, "{tool:?}");
+        }
+        // The same drops where the wheel does offer the tool.
+        for (tool, items) in [
+            (ToolKey::AudioChannels, files(&["/a/one.wav"])),
+            (ToolKey::MergePdf, files(&["/a/one.pdf", "/a/two.pdf"])),
+            (ToolKey::Compress, files(&["/a/photo.jpg", "/a/beach.png"])),
+            (
+                ToolKey::NormalizeAudio,
+                files(&["/a/song.mp3", "/a/b.flac"]),
+            ),
+        ] {
+            assert!(offered(tool, &items, V1), "{tool:?}");
+        }
+        // Compress on a PDF is offered once v2 is.
+        assert!(offered(
+            ToolKey::Compress,
+            &files(&["/a/doc.pdf"]),
+            Features::FULL
+        ));
     }
 
     /// What Grape finds in a full install: FFmpeg and ffprobe, PDFium, the
@@ -753,71 +828,130 @@ mod tests {
         }
     }
 
-    /// Even with FFmpeg there, the media tools' panels stay shut until lane
-    /// B's FFmpeg tools (D26) run them: update this test then.
+    /// The four open their panels in a normal build wherever lane B's
+    /// tools (D26) and the PDF engine run them, and nowhere else.
     #[test]
-    fn this_build_opens_only_the_merge_panel() {
+    fn this_build_opens_the_four_panels_where_they_run() {
         let real =
             |op: &Operation, items: &[SelectionItem]| jobs::check_runnable(op, items, &installed());
-        let pdfs = files(&["/a/one.pdf", "/a/two.pdf"]);
+        let bare = |op: &Operation, items: &[SelectionItem]| {
+            jobs::check_runnable(op, items, &SidecarPaths::default())
+        };
+        // Compress on JPG and PNG needs no helper.
+        let images = files(&["/a/photo.jpg", "/a/beach.png"]);
         assert_eq!(
-            route(WheelEntry::Tool(ToolKey::MergePdf), &pdfs, real),
-            Route::Panel(ToolKey::MergePdf)
+            route(WheelEntry::Tool(ToolKey::Compress), &images, V1, bare),
+            Route::Panel(ToolKey::Compress)
         );
-        let media = files(&["/a/one.mp3", "/a/two.mp3"]);
-        for tool in [
-            ToolKey::Compress,
-            ToolKey::NormalizeAudio,
-            ToolKey::AudioChannels,
+        // The media ones need FFmpeg; Merge PDFs needs PDFium.
+        for (tool, items) in [
+            (ToolKey::Compress, files(&["/a/one.mp3", "/a/two.flac"])),
+            (ToolKey::Compress, files(&["/a/song.m4a", "/a/take.wav"])),
+            (
+                ToolKey::Compress,
+                files(&["/a/clip.mp4", "/a/clip.mov", "/a/clip.mkv"]),
+            ),
+            (
+                ToolKey::NormalizeAudio,
+                files(&["/a/1.mp3", "/a/2.m4a", "/a/3.wav", "/a/4.flac"]),
+            ),
+            (ToolKey::AudioChannels, files(&["/a/interview.wav"])),
+            (ToolKey::AudioChannels, files(&["/a/song.m4a"])),
+            (ToolKey::MergePdf, files(&["/a/one.pdf", "/a/two.pdf"])),
         ] {
             assert_eq!(
-                route(WheelEntry::Tool(tool), &media, real),
+                route(WheelEntry::Tool(tool), &items, V1, real),
+                Route::Panel(tool),
+                "{tool:?}"
+            );
+            // Without them the drop goes the direct way, to its toast.
+            assert_eq!(
+                route(WheelEntry::Tool(tool), &items, V1, bare),
                 Route::Direct,
                 "{tool:?}"
             );
         }
-        // Without PDFium the drop goes the direct way, to its toast.
-        let missing = |op: &Operation, items: &[SelectionItem]| {
-            jobs::check_runnable(op, items, &SidecarPaths::default())
-        };
-        assert_eq!(
-            route(WheelEntry::Tool(ToolKey::MergePdf), &pdfs, missing),
-            Route::Direct
-        );
+        // Formats still coming (D26's later slices): no panel.
+        for items in [
+            files(&["/a/scan.tiff"]),
+            files(&["/a/photo.webp", "/a/other.webp"]),
+            files(&["/a/IMG_0001.heic"]),
+            files(&["/a/photo.jpg", "/a/scan.tiff"]),
+        ] {
+            assert_eq!(
+                route(WheelEntry::Tool(ToolKey::Compress), &items, V1, real),
+                Route::Direct
+            );
+        }
     }
 
     #[test]
-    fn the_preview_opens_the_four_panels_and_nothing_else() {
-        let items = files(&["/a/one.png", "/a/two.png"]);
+    fn the_preview_opens_the_four_panels_where_offered_and_nothing_else() {
         let preview = |op: &Operation, items: &[SelectionItem]| {
             preview_check(op, items, &SidecarPaths::default())
         };
+        // Where this build can't run them yet: Compress on TIFF.
+        let tiffs = files(&["/a/one.tiff", "/a/two.tiff"]);
+        assert_eq!(
+            route(WheelEntry::Tool(ToolKey::Compress), &tiffs, V1, preview),
+            Route::Panel(ToolKey::Compress)
+        );
+        // Or where a helper is missing.
         for tool in ALL_FOUR {
             assert_eq!(
-                route(WheelEntry::Tool(tool), &items, preview),
+                route(WheelEntry::Tool(tool), &offered_drop(tool), V1, preview),
                 Route::Panel(tool)
             );
         }
+        // Never where the wheel wouldn't offer them, nor for the others.
         for entry in [
+            WheelEntry::Tool(ToolKey::NormalizeAudio),
+            WheelEntry::Tool(ToolKey::AudioChannels),
+            WheelEntry::Tool(ToolKey::MergePdf),
             WheelEntry::Tool(ToolKey::RemoveMetadata),
             WheelEntry::Tool(ToolKey::MuteVideo),
             WheelEntry::Tool(ToolKey::SplitPdf),
             WheelEntry::Convert(Format::Jpg),
         ] {
-            assert_eq!(route(entry, &items, preview), Route::Direct);
+            assert_eq!(
+                route(entry, &tiffs, V1, preview),
+                Route::Direct,
+                "{entry:?}"
+            );
         }
         // The real check still answers for everything but the four.
+        let items = files(&["/a/one.png", "/a/two.png"]);
         let to_jpg = Operation::convert(Format::Jpg);
         assert_eq!(preview(&to_jpg, &items), Ok(()));
         assert!(preview(&Operation::tool(ToolKey::MuteVideo), &items).is_err());
     }
 
     #[test]
-    fn lufs_are_whole_values_from_minus_24_to_minus_10() {
-        assert!(lufs_ok(-24) && lufs_ok(-16) && lufs_ok(-14) && lufs_ok(-10));
-        for bad in [-25, -9, 0, i64::MIN, i64::MAX] {
-            assert!(!lufs_ok(bad), "{bad}");
-        }
+    fn the_normalize_range_is_grape_cores() {
+        assert_eq!(
+            (
+                ToolParams::LUFS_MIN,
+                ToolParams::LUFS_MAX,
+                ToolParams::LUFS_STEP
+            ),
+            (-24, -10, 1)
+        );
+        let mut model = PanelModel::default();
+        let (view, _) = model
+            .open(
+                request(ToolKey::NormalizeAudio, &["/a/b.mp3"]),
+                ToolMemory::DEFAULT,
+            )
+            .unwrap();
+        assert_eq!(
+            view.panel,
+            PanelSpec::NormalizeAudio {
+                target_lufs: -16,
+                min_lufs: ToolParams::LUFS_MIN,
+                max_lufs: ToolParams::LUFS_MAX,
+                step_lufs: ToolParams::LUFS_STEP,
+            }
+        );
         assert_eq!(
             ToolMemory::DEFAULT,
             ToolMemory {
@@ -825,6 +959,7 @@ mod tests {
                 normalize_lufs: -16
             }
         );
+        assert!(ToolParams::lufs_ok(ToolMemory::DEFAULT.normalize_lufs));
     }
 
     #[test]
@@ -1272,7 +1407,7 @@ mod tests {
         let merge = PanelSpec::MergePdf {
             merged_names: vec![],
         };
-        assert_eq!(size(&compress, 2), (352.0, 224.0));
+        assert_eq!(size(&compress, 2), (352.0, 242.0));
         assert_eq!(size(&channels, 1), (352.0, 224.0));
         assert_eq!(size(&normalize, 2), (352.0, 234.0));
         assert_eq!(size(&merge, 2), (352.0, 286.0));

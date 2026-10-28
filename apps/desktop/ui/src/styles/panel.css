@@ -215,6 +215,17 @@ body {
   text-overflow: ellipsis;
 }
 
+/*
+ * Compress's notes take up to two lines: Small's says what it scales down,
+ * wider than one line in some fonts. Rust's window has room for two.
+ */
+#panel-root[data-tool="compress"] .panel-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
 /* Compress and Audio Channels: a segmented control of native radios. */
 .panel-segments {
   flex: none;
