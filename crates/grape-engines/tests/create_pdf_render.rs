@@ -338,23 +338,45 @@ fn a_picture_longer_than_an_image_may_be_draws_whole() {
 
 #[test]
 fn a_page_over_200_inches_is_scaled_down_whole() {
+    // 20,000 × 10, red with its last 100 columns blue: on the 14,400 ×
+    // 7.2 pt page the whole image is drawn, so its last 72 pt are blue. An
+    // image drawn at its pixel size would be cut off red at the page's edge.
     let dir = TestDir::new("create-render-wide");
-    let wide = RgbImage::from_fn(20_000, 10, |x, _| Rgb([(x % 256) as u8, 0, 0]));
-    let (_, job) = plan_one(
+    let wide = RgbImage::from_fn(20_000, 10, |x, _| {
+        if x >= 19_900 {
+            Rgb([0, 0, 255])
+        } else {
+            Rgb([255, 0, 0])
+        }
+    });
+    let (src, job) = plan_one(
         &dir,
         "wide.png",
         &png(&DynamicImage::ImageRgb8(wide)),
         Operation::convert(Format::Pdf),
     );
+    let before = SourceState::of(&src);
     run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
     let bytes = fs::read(planned_file(&job)).unwrap();
-    let pdfium = pdfium();
-    let document = pdfium.load_pdf_from_byte_slice(&bytes, None).unwrap();
-    let page = document.pages().get(0).unwrap();
-    assert_eq!(page.width().value, 14_400.0);
-    assert!(
-        (page.height().value - 7.2).abs() < 1e-3,
-        "{}",
-        page.height().value
+    let doc = lopdf::Document::load_mem(&bytes).unwrap();
+    let content = doc.get_page_content(doc.get_pages()[&1]);
+    assert_eq!(
+        String::from_utf8(content).unwrap().trim_end(),
+        "q 14400 0 0 7.2 0 0 cm /Im0 Do Q"
     );
+    let pages = draw(&planned_file(&job));
+    let page = &pages[0];
+    assert_eq!(page.width_pt, 14_400.0);
+    assert!((page.height_pt - 7.2).abs() < 1e-3, "{}", page.height_pt);
+    let y = page.pixels.height() / 2;
+    for x in [0, 7_000, 14_320] {
+        let [r, _, b] = page.pixels.get_pixel(x, y).0;
+        assert!(r > 200 && b < 50, "column {x} isn't red: {r} {b}");
+    }
+    for x in [14_340, 14_399] {
+        let [r, _, b] = page.pixels.get_pixel(x, y).0;
+        assert!(r < 50 && b > 200, "column {x} isn't blue: {r} {b}");
+    }
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
 }

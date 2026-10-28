@@ -1698,6 +1698,39 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_over_200_inches_is_drawn_onto_its_scaled_page() {
+        // 14,401 × 1 lossless: the page is 14,400 × 1 pt, and so is the
+        // image's matrix, not its pixel size.
+        let line = DynamicImage::ImageRgb8(gradient(14_401, 1));
+        let pdf = pdf_of(vec![lossless(line)]);
+        let (_, page) = pages(&pdf);
+        assert_eq!(page[0].media_box, [0.0, 0.0, 14_400.0, 1.0]);
+        assert_eq!(page[0].content, "q 14400 0 0 1 0 0 cm /Im0 Do Q");
+        assert_eq!(int(&page[0].image, b"Width"), 14_401);
+
+        // A JPEG stored 14,401 × 8 with EXIF orientation 6, passed through:
+        // upright 8 × 14,401, on a page of 7.9994 × 14,400 pt.
+        let mut bytes = jpeg_bytes(&DynamicImage::ImageRgb8(gradient(14_401, 8)));
+        let mut exif =
+            b"Exif\0\0MM\0\x2a\0\0\0\x08\0\x01\x01\x12\0\x03\0\0\0\x01\0\x06\0\0\0\0\0\0".to_vec();
+        let len = u16::try_from(exif.len() + 2).unwrap().to_be_bytes();
+        let mut app1 = vec![0xFF, 0xE1, len[0], len[1]];
+        app1.append(&mut exif);
+        bytes.splice(2..2, app1);
+        let pdf = pdf_of(vec![passed(bytes)]);
+        let (_, page) = pages(&pdf);
+        assert_eq!(page[0].media_box, [0.0, 0.0, 7.9994, 14_400.0]);
+        assert_eq!(page[0].content, "q 0 -14400 7.9994 0 0 14400 cm /Im0 Do Q");
+        assert_eq!(
+            (
+                int(&page[0].image, b"Width"),
+                int(&page[0].image, b"Height")
+            ),
+            (14_401, 8)
+        );
+    }
+
+    #[test]
     fn page_memory_counts_the_pixels_one_stream_and_the_profile() {
         let side = 256u32;
         let pixels = u64::from(side * side);
