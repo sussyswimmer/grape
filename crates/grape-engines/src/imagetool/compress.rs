@@ -175,10 +175,13 @@ fn shrink(img: DynamicImage, k: u32, cancel: &CancelToken) -> Option<DynamicImag
             GrayImage::from_raw(nw, nh, average(&b, w, h, 1, k, cancel)?)
                 .map(DynamicImage::ImageLuma8)
         }
+        DynamicImage::ImageRgb8(b) => RgbImage::from_raw(nw, nh, average(&b, w, h, 3, k, cancel)?)
+            .map(DynamicImage::ImageRgb8),
         DynamicImage::ImageRgba8(b) => {
             RgbaImage::from_raw(nw, nh, average(&b, w, h, 4, k, cancel)?)
                 .map(DynamicImage::ImageRgba8)
         }
+        // Not what a JPEG decodes to: an RGB copy first.
         other => {
             let rgb = other.to_rgb8();
             drop(other);
@@ -494,6 +497,24 @@ mod tests {
         assert_eq!(average(&rgb, 2, 1, 3, 2, &cancel).unwrap(), [20, 30, 40]);
         cancel.cancel();
         assert!(average(&src, 5, 3, 1, 2, &cancel).is_none());
+    }
+
+    #[test]
+    fn shrinking_keeps_gray_rgb_and_rgba_as_they_are() {
+        let cancel = CancelToken::default();
+        let rgb = RgbImage::from_raw(2, 1, vec![10, 20, 30, 30, 40, 50]).unwrap();
+        let out = shrink(DynamicImage::ImageRgb8(rgb.clone()), 2, &cancel).unwrap();
+        assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
+        let gray = GrayImage::from_raw(2, 1, vec![10, 30]).unwrap();
+        let out = shrink(DynamicImage::ImageLuma8(gray), 2, &cancel).unwrap();
+        assert_eq!(out.as_luma8().unwrap().as_raw(), &[20]);
+        let rgba = RgbaImage::from_raw(2, 1, vec![10, 20, 30, 40, 30, 40, 50, 60]).unwrap();
+        let out = shrink(DynamicImage::ImageRgba8(rgba), 2, &cancel).unwrap();
+        assert_eq!(out.as_rgba8().unwrap().as_raw(), &[20, 30, 40, 50]);
+        // Anything else is averaged as RGB.
+        let wide = DynamicImage::ImageRgb8(rgb).to_rgb16();
+        let out = shrink(DynamicImage::ImageRgb16(wide), 2, &cancel).unwrap();
+        assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
     }
 
     #[test]
