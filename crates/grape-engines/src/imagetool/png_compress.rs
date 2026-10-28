@@ -61,6 +61,9 @@ struct Chunks {
     after: Vec<Raw>,
     /// The bytes in `after`.
     after_bytes: u64,
+    /// The bytes of the text chunks before the image data, which the
+    /// `png` crate's header read holds.
+    text_bytes: u64,
 }
 
 /// Walks the PNG's chunks, reading only the ones Compress carries itself.
@@ -97,6 +100,9 @@ fn walk(r: &mut dyn BufRead) -> Result<Chunks, Error> {
             }
         } else {
             skip(r, len.saturating_add(4))?;
+        }
+        if !image_data && matches!(&kind, b"tEXt" | b"zTXt" | b"iTXt") {
+            found.text_bytes = found.text_bytes.saturating_add(len as u64);
         }
         match &kind {
             b"acTL" if !image_data => found.animated = true,
@@ -463,9 +469,9 @@ fn palette(
 /// in rows of `row` bytes, besides the decoder: the image and its packed
 /// form (never bigger) with a [`SPAN`] of pixels, then the packed form and
 /// the PNG written from it with the encoder's three rows and its deflater
-/// (the bigger of the two extras), and the text after the image data
-/// throughout.
-fn peak(decoded: u64, row: u64, after: u64) -> u64 {
+/// (the bigger of the two extras), and `metadata` bytes throughout, twice:
+/// as read, and in the PNG.
+fn peak(decoded: u64, row: u64, metadata: u64) -> u64 {
     let encoder = row
         .saturating_add(1)
         .saturating_mul(3)
@@ -473,7 +479,7 @@ fn peak(decoded: u64, row: u64, after: u64) -> u64 {
     decoded
         .saturating_mul(2)
         .saturating_add(encoder)
-        .saturating_add(after)
+        .saturating_add(metadata.saturating_mul(2))
 }
 
 /// Runs Compress on the PNG `src` (named as `from`) into `dest`.
@@ -531,10 +537,17 @@ pub(crate) fn run(
     drop(reader);
     progress(0.1);
 
-    let after = chunks.after_bytes;
+    // Text read as Latin-1 can take twice its bytes as a string.
+    let size = |data: Option<&[u8]>| data.map_or(0, |d| d.len() as u64);
+    let metadata = chunks
+        .text_bytes
+        .saturating_mul(2)
+        .saturating_add(chunks.after_bytes)
+        .saturating_add(size(info.icc_profile.as_deref()))
+        .saturating_add(size(info.exif_metadata.as_deref()));
     let tool_peak = |width: u32, height: u32, color: ImageColor| {
         let row = u64::from(width).saturating_mul(u64::from(color.bytes_per_pixel()));
-        peak(row.saturating_mul(u64::from(height)), row, after)
+        peak(row.saturating_mul(u64::from(height)), row, metadata)
     };
     let (img, _icc) =
         crate::image::decode_stored(src, from, Format::Png, &names, cancel, &tool_peak)
@@ -543,7 +556,7 @@ pub(crate) fn run(
     let packed = reduce(&img, !chunks.color_bound, cancel).ok_or_else(|| crate::cancelled(src))?;
     drop(img);
     progress(0.6);
-    let encoded = encode(&packed, &info, &chunks.raw, &chunks.after, cancel)
+    let encoded = encode(&packed, info, &chunks.raw, &chunks.after, cancel)
         .map_err(|e| names.encode_failed(format!("encode {}: {e}", src.display())))
         .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     if cancel.is_cancelled() {
@@ -572,12 +585,12 @@ pub(crate) fn run(
     Ok(outcome)
 }
 
-/// Writes `packed` as a PNG with `source`'s metadata, the `raw` chunks the
-/// `png` crate doesn't write itself before the image data, and the `after`
-/// ones after it; stops at a cancel between rows.
+/// Writes `packed` as a PNG with `source`'s metadata (moved, not copied),
+/// the `raw` chunks the `png` crate doesn't write itself before the image
+/// data, and the `after` ones after it; stops at a cancel.
 fn encode(
     packed: &Packed,
-    source: &png::Info<'static>,
+    source: png::Info<'static>,
     raw: &[Raw],
     after: &[Raw],
     cancel: &CancelToken,
@@ -592,7 +605,6 @@ fn encode(
     // ones.
     info.source_gamma = source.gama_chunk.or(source.source_gamma);
     info.source_chromaticities = source.chrm_chunk.or(source.source_chromaticities);
-    info.icc_profile = source.icc_profile.clone();
     // The encoder writes sRGB or iCCP, not both; PNG 3 ranks the profile
     // first.
     info.srgb = if source.icc_profile.is_some() {
@@ -600,10 +612,11 @@ fn encode(
     } else {
         source.srgb
     };
-    info.exif_metadata = source.exif_metadata.clone();
-    info.uncompressed_latin1_text = source.uncompressed_latin1_text.clone();
-    info.compressed_latin1_text = source.compressed_latin1_text.clone();
-    info.utf8_text = source.utf8_text.clone();
+    info.icc_profile = source.icc_profile;
+    info.exif_metadata = source.exif_metadata;
+    info.uncompressed_latin1_text = source.uncompressed_latin1_text;
+    info.compressed_latin1_text = source.compressed_latin1_text;
+    info.utf8_text = source.utf8_text;
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::with_info(&mut out, info)?;
@@ -640,7 +653,7 @@ mod tests {
     use super::*;
 
     fn encoded(packed: &Packed, info: &png::Info<'static>, after: &[Raw]) -> Vec<u8> {
-        encode(packed, info, &[], after, &CancelToken::default()).unwrap()
+        encode(packed, info.clone(), &[], after, &CancelToken::default()).unwrap()
     }
 
     fn decoded(packed: &Packed, w: u32, h: u32) -> image::RgbaImage {
@@ -779,7 +792,7 @@ mod tests {
         let mut info = png::Info::with_size(9, 200);
         info.color_type = packed.color;
         info.bit_depth = packed.depth;
-        assert!(encode(&packed, &info, &[], &[], &cancel).is_err());
+        assert!(encode(&packed, info, &[], &[], &cancel).is_err());
     }
 
     #[test]
@@ -863,12 +876,14 @@ mod tests {
         let after: Vec<&[u8; 4]> = found.after.iter().map(|(k, _)| k).collect();
         assert_eq!(after, [b"tEXt", b"eXIf"]);
         assert_eq!(found.after_bytes, 16);
+        // "Title\0early": the text before the image data.
+        assert_eq!(found.text_bytes, 11);
         assert!(walk(&mut Cursor::new(b"\x89PNG\r\n\x1a\n\0\0".to_vec())).is_err());
     }
 
     #[test]
     fn the_peak_is_the_image_its_packed_form_and_the_encoders_rows() {
-        assert_eq!(peak(500, 7, 3), 1000 + 3 * 8 + DEFLATER + 3);
+        assert_eq!(peak(500, 7, 3), 1000 + 3 * 8 + DEFLATER + 2 * 3);
         // One row of 134 M gray pixels is held three more times while
         // it's written, so 128 MiB decoded counts as about 641 MiB.
         let row = 134_000_000;
