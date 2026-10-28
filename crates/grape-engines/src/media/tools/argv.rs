@@ -266,13 +266,14 @@ pub(super) fn stripped<'a>(
 /// art: each image attachment a copy turned into a video track, which comes
 /// back without the cover-art mark, a still image ([`STILL_CODECS`]) of one
 /// frame. How that shows: an MP4 or MOV counts the frames
-/// ([`StreamInfo::frames`]); an MKV doesn't, but the track keeps the
-/// attachment's MIME type ([`Tags::image_tracks`]). A track of more than one
-/// frame is always video, and so is a camera's MJPEG track, which has no
-/// MIME type. Only beside a video that isn't one, so a cover that is the
-/// only video stays.
+/// ([`StreamInfo::frames`]), so there a track of more than one frame is
+/// always video; an MKV counts none, but the track keeps the attachment's
+/// MIME type ([`Tags::image_tracks`]), which a camera's MJPEG track hasn't.
+/// Only beside a video that isn't one, so a cover that is the only video
+/// stays. An M4A keeps no video at all, so there each such track is the
+/// cover art it drops.
 pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> {
-    if !matches!(to, Format::Mp4 | Format::Mov | Format::Mkv) {
+    if !matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::M4a) {
         return Vec::new();
     }
     let one_frame = |s: &StreamInfo| match s.frames {
@@ -284,7 +285,7 @@ pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> 
         .iter()
         .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
         .partition(|s| is_still(s) && one_frame(s));
-    if videos.is_empty() {
+    if videos.is_empty() && to != Format::M4a {
         return Vec::new();
     }
     covers.iter().map(|s| s.index).collect()
@@ -573,18 +574,24 @@ fn not_speakers(audio: &StreamInfo) -> bool {
     audio.codec == "opus" && !audio.has_layout
 }
 
-/// The `pan` that labels `audio`, 3 to 8 channels that aren't speakers
-/// ([`not_speakers`]), with the [`NO_LFE`] layout of its count, each
-/// channel kept in its own: FFmpeg's guess has an LFE for 3, 6, 7 and 8
-/// (2.1, 5.1, 6.1, 7.1), which AAC codes band-limited, wiping that
-/// channel. `pan` maps the channels by number, whatever FFmpeg guessed.
-/// `None` for any other track.
+/// The `pan` that labels `audio`, 1 to 8 channels that aren't speakers
+/// ([`not_speakers`]), with the [`NO_LFE`] layout of its count (mono and
+/// stereo for 1 and 2), each channel kept in its own: FFmpeg's guess has an
+/// LFE for 3, 6, 7 and 8 (2.1, 5.1, 6.1, 7.1), which AAC codes
+/// band-limited, wiping that channel, and the Opus decoder hands even 1 or
+/// 2 such channels over with no layout, which AAC refuses. `pan` maps the
+/// channels by number, whatever FFmpeg guessed. `None` for any other
+/// track.
 fn label(audio: &StreamInfo) -> Option<String> {
     if !not_speakers(audio) {
         return None;
     }
     let channels = usize::try_from(audio.channels).ok()?;
-    let layout = NO_LFE.get(channels.checked_sub(3)?)?;
+    let layout = match channels {
+        1 => "mono",
+        2 => "stereo",
+        _ => NO_LFE.get(channels.checked_sub(3)?)?,
+    };
     let mut pan = format!("pan={layout}");
     for c in 0..channels {
         pan.push_str(&format!("|c{c}=c{c}"));
@@ -846,7 +853,7 @@ fn is_still(stream: &StreamInfo) -> bool {
 
 /// Codecs of still images, which a video track rarely is but cover art
 /// copied into one is.
-const STILL_CODECS: [&str; 5] = ["png", "mjpeg", "bmp", "webp", "gif"];
+const STILL_CODECS: [&str; 6] = ["png", "mjpeg", "bmp", "webp", "gif", "tiff"];
 
 /// The streams Compress on a video keeps, in the source's order: the
 /// first video that isn't cover art (encoded), every audio track, and what
@@ -1488,10 +1495,20 @@ pub(super) mod tests {
                 );
             }
         }
-        // An M4A leaves out every video by its own rule.
+        // An M4A leaves out every video by its own rule, and says which of
+        // them was a cover, even with no other video.
         let m4a = probe_of("mov,mp4,m4a,3gp,3g2,mj2", typed(Some(1)).streams);
         assert_eq!(indexes(Format::M4a, &m4a, &none), [1]);
-        assert!(copied_covers(Format::M4a, &m4a, &none).is_empty());
+        assert_eq!(copied_covers(Format::M4a, &m4a, &none), [2]);
+        let mut cover_only = m4a.clone();
+        cover_only.streams.remove(0);
+        assert_eq!(copied_covers(Format::M4a, &cover_only, &none), [2]);
+        // A copied TIFF cover in an MKV, which FFmpeg's demuxer counts as
+        // cover art when it's attached.
+        assert_eq!(
+            copied_covers(Format::Mkv, &mkv(["h264", "tiff"]), &copied),
+            [2]
+        );
     }
 
     #[test]
@@ -2400,7 +2417,12 @@ pub(super) mod tests {
             assert_eq!(label(&unlabeled("pcm_s16le", channels)), None);
             assert_eq!(label(&unlabeled("flac", channels)), None);
         }
-        for channels in [0, 1, 2, 9] {
+        // Fewer than 3 get the plain layout: the Opus decoder hands them
+        // over with none, which AAC refuses.
+        assert_eq!(label(&unlabeled("opus", 1)), Some(pan("mono", 1)));
+        assert_eq!(label(&unlabeled("opus", 2)), Some(pan("stereo", 2)));
+        assert_eq!(label(&unlabeled("pcm_s16le", 2)), None);
+        for channels in [0, 9] {
             assert_eq!(label(&unlabeled("opus", channels)), None);
         }
         let surround = at(audio("opus", 16), 48_000, 6);

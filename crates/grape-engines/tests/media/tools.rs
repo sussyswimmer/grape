@@ -2186,6 +2186,29 @@ fn compress_keeps_each_channel_of_opus_that_isnt_speakers() {
     assert_eq!(audio_layout(&mkv), "unknown");
     let out = run_tool(&dir, &mkv, ToolKey::Compress, to_preset(Small)).unwrap();
     assert_eq!(audio_layout(&out.outputs[0]), "5.1");
+    fs::remove_file(&out.outputs[0]).unwrap();
+
+    // 6 and 2 channels of such Opus side by side: the Opus decoder hands
+    // even the 2 over with no layout, which AAC refuses unless it's
+    // labelled stereo.
+    let two = dir.join("take2.wav");
+    write_tones(&two, 48_000, &TRACK_TONES[..2], 0.25, None, Sample::I16);
+    let pair = dir.join("pair.mkv");
+    let mut args = TESTSRC.to_vec();
+    args.extend(["-guess_layout_max", "0", "-i", s(&wav)]);
+    args.extend(["-guess_layout_max", "0", "-i", s(&two)]);
+    args.extend(["-map", "0:v", "-map", "1:a", "-map", "2:a"]);
+    args.extend(["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "libopus"]);
+    args.extend(["-mapping_family", "255", "-b:a", "256k", "-vbr", "off"]);
+    args.extend(["-f", "matroska", s(&pair)]);
+    ffmpeg(&args);
+    match run_tool(&dir, &pair, ToolKey::Compress, to_preset(Small)) {
+        Ok(out) => {
+            let got = flat(&out.outputs[0], "stream=channel_layout");
+            assert_eq!(got["streams.stream.2.channel_layout"], "stereo");
+        }
+        Err(e) => failures.push(format!("6 and 2 of Opus: {e} ({})", e.detail)),
+    }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
