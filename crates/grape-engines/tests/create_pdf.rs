@@ -299,6 +299,47 @@ fn a_jpeg_of_thousands_of_segments_is_re_encoded() {
 }
 
 #[test]
+fn a_motion_jpeg_frame_is_re_encoded_with_its_tables() {
+    // A webcam frame: an AVI1 APP0 and no DHT, relying on the standard
+    // Huffman tables (the encoder's own), which Grape's decoder supplies
+    // for it. In the PDF it must carry its tables.
+    let dir = TestDir::new("create-mjpeg");
+    let plain = encode(&gradient(24, 16), ImageFormat::Jpeg);
+    let mut mjpeg = plain[..2].to_vec();
+    mjpeg.extend_from_slice(&[0xFF, 0xE0, 0, 14]);
+    mjpeg.extend_from_slice(b"AVI1\0\0\0\0\0\0\0\0");
+    let mut at = 2;
+    while plain[at + 1] != 0xDA {
+        let end = at + 2 + usize::from(u16::from_be_bytes([plain[at + 2], plain[at + 3]]));
+        if plain[at + 1] != 0xC4 {
+            mjpeg.extend_from_slice(&plain[at..end]);
+        }
+        at = end;
+    }
+    mjpeg.extend_from_slice(&plain[at..]);
+    assert!(!contains(&mjpeg, &[0xFF, 0xC4]));
+    assert_eq!(
+        image::load_from_memory(&mjpeg).unwrap().to_rgb8(),
+        image::load_from_memory(&plain).unwrap().to_rgb8()
+    );
+    let (src, job) = plan_one(&dir, "frame.jpg", &mjpeg, Operation::convert(Format::Pdf));
+    let before = SourceState::of(&src);
+
+    run(&job).0.unwrap();
+
+    let (_, pages) = read_pdf(&planned_file(&job));
+    assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
+    let data = &pages[0].data;
+    assert!(contains(data, &[0xFF, 0xC4]));
+    assert!(!contains(data, b"AVI1"));
+    // Its own tables: it decodes without the Motion-JPEG defaults.
+    let decoded = image::load_from_memory(data).unwrap();
+    assert_eq!(decoded.width(), 24);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
 fn transparency_becomes_a_soft_mask_and_opaque_alpha_does_not() {
     let dir = TestDir::new("create-alpha");
     let clear = RgbaImage::from_fn(10, 6, |x, _| {

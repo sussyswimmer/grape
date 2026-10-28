@@ -28,6 +28,14 @@
 //! before the first SOS, or a malformed structure (a length past the end,
 //! no SOS, no EOI) doesn't pass: the decoder accepted the file, so the
 //! caller re-encodes its pixels instead.
+//!
+//! Nor does a JPEG whose Huffman tables aren't all in the file: a
+//! Motion-JPEG frame (an `AVI1` APP0, from a webcam or an IP camera),
+//! which may leave out its DHT segments and rely on the standard tables.
+//! Grape's decoder supplies them for such a frame; PDF readers don't all
+//! (pdf.js draws nothing), and a DCT stream without its tables isn't a
+//! JPEG interchange stream. So an `AVI1` APP0, or no DHT before the first
+//! SOS, takes the re-encode path.
 
 use std::ops::Range;
 
@@ -106,6 +114,7 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
     keep.push(0..2);
     let mut at = 2;
     let mut segments = 0;
+    let mut tables = false;
     let mut frame: Option<Frame> = None;
     let mut jfif = false;
     let mut adobe: Option<u8> = None;
@@ -123,6 +132,9 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
         let payload = &bytes[marker_at + 4..end];
         let whole = marker_at..end;
         match code {
+            // A Motion-JPEG frame: Grape's decoder may have supplied the
+            // standard Huffman tables it leaves out.
+            APP0 if payload.starts_with(b"AVI1") => return None,
             APP0 => {
                 if let Some(thumbnail) = jfif_thumbnail(payload) {
                     jfif = true;
@@ -159,7 +171,11 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
                 frame = Some(read_frame(payload)?);
                 push(&mut keep, whole);
             }
-            DQT | DHT | DRI => push(&mut keep, whole),
+            DHT => {
+                tables = true;
+                push(&mut keep, whole);
+            }
+            DQT | DRI => push(&mut keep, whole),
             // Lossless, hierarchical and arithmetic frames, DAC, DNL, the
             // reserved JPGn and anything else.
             _ => return None,
@@ -167,6 +183,9 @@ pub(crate) fn passthrough(bytes: &[u8]) -> Option<Passthrough> {
         at = end;
     };
     let frame = frame?;
+    if !tables {
+        return None;
+    }
     let eoi_end = scans_end(bytes, sos_at)?;
     push(&mut keep, sos_at..eoi_end);
     let rgb = match frame.ids.as_slice() {
@@ -367,8 +386,21 @@ pub(crate) mod tests {
         segment(APP1, &payload)
     }
 
-    /// A JPEG of these segments, then [`scans`], then `trailer`.
+    /// A Huffman table segment (one DC table, all its counts zero).
+    fn table() -> Vec<u8> {
+        segment(DHT, &[0; 17])
+    }
+
+    /// A JPEG of these segments, then [`table`], then [`scans`], then
+    /// `trailer`.
     fn jpeg(segments: &[Vec<u8>], trailer: &[u8]) -> Vec<u8> {
+        let mut segments = segments.to_vec();
+        segments.push(table());
+        bare(&segments, trailer)
+    }
+
+    /// A JPEG of only these segments, then [`scans`], then `trailer`.
+    fn bare(segments: &[Vec<u8>], trailer: &[u8]) -> Vec<u8> {
         let mut bytes = vec![0xFF, SOI];
         for segment in segments {
             bytes.extend_from_slice(segment);
@@ -408,7 +440,7 @@ pub(crate) mod tests {
         let bytes = jpeg(&segments, b"trailing data after EOI");
         let pass = passthrough(&bytes).unwrap();
         let mut expected = vec![0xFF, SOI];
-        for segment in [jfif((0, 0)), icc, dqt, sof, dht, dri] {
+        for segment in [jfif((0, 0)), icc, dqt, sof, dht, dri, table()] {
             expected.extend(segment);
         }
         expected.extend(scans());
@@ -539,16 +571,31 @@ pub(crate) mod tests {
         // range.
         let mut segments = vec![sof.clone()];
         segments.extend(std::iter::repeat_n(empty_dht.clone(), MAX_SEGMENTS - 1));
-        let bytes = jpeg(&segments, b"");
+        let bytes = bare(&segments, b"");
         let pass = passthrough(&bytes).unwrap();
         assert_eq!(pass.keep, vec![0..bytes.len()]);
         // One more: re-encoded.
         segments.push(empty_dht);
-        assert!(passthrough(&jpeg(&segments, b"")).is_none());
+        assert!(passthrough(&bare(&segments, b"")).is_none());
         // Dropped segments count too.
         let mut segments = vec![sof];
         segments.extend(std::iter::repeat_n(segment(COM, b"c"), MAX_SEGMENTS));
         assert!(passthrough(&jpeg(&segments, b"")).is_none());
+    }
+
+    #[test]
+    fn a_jpeg_without_all_its_tables_takes_the_re_encode_path() {
+        let sof = frame(0xC0, 8, &[1, 2, 3]);
+        assert!(passthrough(&jpeg(std::slice::from_ref(&sof), b"")).is_some());
+        // No DHT before the first scan; one only between scans (in
+        // `scans`) doesn't count.
+        assert!(passthrough(&bare(std::slice::from_ref(&sof), b"")).is_none());
+        assert!(passthrough(&bare(&[segment(DQT, &[0; 65]), sof.clone()], b"")).is_none());
+        // A Motion-JPEG frame, even with its tables: the decoder may have
+        // filled in the ones it leaves out.
+        let avi1 = segment(APP0, b"AVI1\0\0\0\0\0\0\0\0");
+        assert!(passthrough(&bare(&[avi1.clone(), sof.clone()], b"")).is_none());
+        assert!(passthrough(&jpeg(&[avi1, sof], b"")).is_none());
     }
 
     #[test]
@@ -602,6 +649,7 @@ pub(crate) mod tests {
         // A comment or APPn between scans.
         let mut between = vec![0xFF, SOI];
         between.extend(sof);
+        between.extend(table());
         between.extend(segment(SOS, &[1, 1, 0, 0, 63, 0]));
         between.extend_from_slice(&[0x11, 0x22]);
         between.extend(segment(COM, b"late"));
