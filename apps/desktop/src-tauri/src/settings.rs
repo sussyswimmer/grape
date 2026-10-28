@@ -1230,8 +1230,10 @@ enum FirstLaunch {
 /// On Windows, with `true` stored and the `Run` value gone (an uninstall
 /// deletes it and keeps `settings.json`), the same release build, store
 /// and readable file register Grape again, so a reinstall keeps the
-/// user's "on". A value that's there, on or off in Task Manager, is never
-/// touched.
+/// user's "on". A value removed any other way (regedit, Autoruns) looks
+/// the same and is registered again too: Settings and Task Manager are how
+/// to turn it off. A value that's there, on or off in Task Manager, is
+/// never touched.
 fn first_launch_rule(facts: &LaunchFacts<'_>) -> FirstLaunch {
     let again =
         facts.stored_on && facts.run_value_missing && matches!(facts.platform, Platform::Windows);
