@@ -26,7 +26,7 @@ use grape_core::{plan, Format, Job, JobOutput, Operation, Settings, ToolKey};
 use lopdf::{Document, Object};
 
 use super::protocol::{ImageInfo, Mode};
-use super::run::{caps, check_image, is_raster, Limits, Renderer};
+use super::run::{caps, check_image, is_raster, per_megapixel, Limits, Renderer};
 use super::*;
 use crate::heif::tests::{fake as fake_helper, nowhere as no_helper};
 use crate::helper::{Contain, Contained};
@@ -430,6 +430,20 @@ fn the_caps_follow_the_target() {
     assert_eq!(limits.timeout_base, Duration::from_secs(60));
     assert_eq!(limits.per_megapixel, Duration::from_secs(1));
     assert_eq!(limits.worker_memory, 2560 << 20);
+    // A started megapixel is 2^20 pixels: the 64 MP canvas gives 124 s in
+    // all, and the QA item's 2000 × 2000 `blur.svg` 64 s.
+    let deadline = |pixels: u64| limits.timeout_base + per_megapixel(limits.per_megapixel, pixels);
+    assert_eq!(deadline(67_108_864), Duration::from_secs(124));
+    assert_eq!(deadline(67_108_863), Duration::from_secs(124));
+    assert_eq!(deadline(2000 * 2000), Duration::from_secs(64));
+    assert_eq!(deadline(1 << 20), Duration::from_secs(61));
+    assert_eq!(deadline((1 << 20) + 1), Duration::from_secs(62));
+    assert_eq!(deadline(1), Duration::from_secs(61));
+    assert_eq!(deadline(0), Duration::from_secs(60));
+    assert_eq!(
+        per_megapixel(Duration::from_secs(1), u64::MAX),
+        Duration::from_secs(u64::from(u32::MAX))
+    );
 }
 
 #[test]

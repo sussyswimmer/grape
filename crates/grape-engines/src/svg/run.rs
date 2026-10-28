@@ -13,7 +13,7 @@
 //!   request. The job polls every 100 ms: a cancel or the deadline kills
 //!   it. The deadline is [`Limits::timeout_base`] from the start, extended
 //!   once the `image` line arrives by [`Limits::per_megapixel`] for each
-//!   started megapixel of the canvas.
+//!   started megapixel ([`MEGAPIXEL`]) of the canvas.
 //! - **The `image` line** must be within the caps the request sent, and
 //!   converting that many RGBA pixels to the target must fit the working
 //!   set ([`image::pixels_fit`]); otherwise the worker is killed before it
@@ -65,6 +65,10 @@ const SNIFF_BYTES: u64 = 16;
 const MAX_SIDE: u32 = 16_384;
 const MAX_PIXELS: u64 = 64 * MIB;
 
+/// A megapixel for the deadline: 2^20 pixels, as [`MAX_PIXELS`] is 64 of
+/// them, so the largest canvas adds 64 s to the 60 (D39's 124 s).
+const MEGAPIXEL: u64 = MIB;
+
 /// WebP's format limit, a side.
 const WEBP_MAX_SIDE: u32 = 16_383;
 
@@ -76,8 +80,8 @@ pub(crate) struct Limits {
     pub(crate) worker: protocol::Limits,
     /// The time every job gets.
     pub(crate) timeout_base: Duration,
-    /// Added for each started megapixel of the canvas, once the worker
-    /// reports it.
+    /// Added for each started megapixel ([`MEGAPIXEL`]) of the canvas,
+    /// once the worker reports it.
     pub(crate) per_megapixel: Duration,
     /// The worker's memory cap, where the app's container can set one (the
     /// Job Object on Windows): it covers the stacks and anything outside
@@ -332,9 +336,9 @@ fn make_work_dir(limits: &Limits) -> Result<WorkDir, GrapeError> {
         .map_err(|e| temp_failed(format!("making the work folder: {}", io_detail(&e))))
 }
 
-/// `per` for each started megapixel of `pixels`.
-fn per_megapixel(per: Duration, pixels: u64) -> Duration {
-    let megapixels = pixels.div_ceil(1_000_000);
+/// `per` for each started megapixel ([`MEGAPIXEL`]) of `pixels`.
+pub(super) fn per_megapixel(per: Duration, pixels: u64) -> Duration {
+    let megapixels = pixels.div_ceil(MEGAPIXEL);
     per.saturating_mul(u32::try_from(megapixels).unwrap_or(u32::MAX))
 }
 
