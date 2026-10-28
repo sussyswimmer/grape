@@ -166,7 +166,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Direct dependencies:** `image` and `zune-jpeg` 0.5.15, which `image` already brings in; the engine uses it to read a JPEG's headers before decoding.
 - **New `Cargo.lock` entries**, all permissive and all published before the 14-day cutoff (D9): image 0.25.10, zune-jpeg 0.5.15, zune-core 0.5.3 (MIT/Apache-2.0/Zlib); image-webp 0.2.4, half 2.7.1, weezl 0.1.12 (MIT OR Apache-2.0); tiff 0.11.3, fax 0.2.7, crunchy 0.2.4 (MIT); moxcms 0.8.1, pxfm 0.1.30 (BSD-3-Clause OR Apache-2.0); byteorder-lite 0.1.0 (Unlicense OR MIT); quick-error 2.0.1 (MIT/Apache-2.0). No GPL, LGPL or MPL in the engines tree.
 - **Tested:** every engine test hashes the source before and after and checks that no temp or probe file is left. CI's Windows runner exercises the NTFS hard-link path.
-- **Revisit if:** lossy WebP is wanted (libwebp), or HEIC/AVIF/SVG/PDF land (ravif, resvg, pdfium).
+- **Revisit if:** lossy WebP is wanted (libwebp), or HEIC/AVIF/SVG/PDF land (ravif, resvg, pdfium). *libwebp comes in for Compress only (D28); conversions still write lossless WebP.*
 
 ## D17: `hit_test` follows the drawn wheel (2026-10-23, proposed, confirm)
 - **Decision:** `grape_core::hit_test` selects exactly what the overlay draws (`INTERACTION_SPEC.md` §4):
@@ -431,7 +431,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - Remove Metadata on JPG, PNG, WebP and GIF (Grape's own container strip, no sidecar) and on MP3, M4A, WAV, FLAC, MP4, MOV and MKV (FFmpeg stream copy);
   - Normalize Volume and Audio Channels on MP3, M4A, WAV and FLAC;
   - Remove Audio on MP4, MOV and MKV.
-  WebP, TIFF and HEIC Compress, and TIFF and HEIC Remove Metadata, stay "coming". The numbers are in ENGINES.md → Tools. Lane B builds the slice in small commits; until a pair's commit lands, `run_job` refuses it and the app says "… is coming" (D35).
+  WebP, TIFF and HEIC Compress, and TIFF and HEIC Remove Metadata, stay "coming". *Amended by D28 (2026-10-28): those five pairs are D28's.* The numbers are in ENGINES.md → Tools. Lane B builds the slice in small commits; until a pair's commit lands, `run_job` refuses it and the app says "… is coming" (D35).
 - **Rules:**
   - Only Remove Metadata removes metadata. The other tools keep tags, `creation_time` (FFmpeg drops it on every remux, `ffmpeg_mux_init.c:3034`), iPhone QuickTime keys, cover art, chapters, ICC and EXIF/XMP/IPTC.
   - Tools keep every track except what they remove. They map streams by index, unlike conversions ("only what the user sees", D22).
@@ -872,6 +872,80 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Tested:** `cargo test` on Linux (the mask has no Move, Delete, Generic or Private bit; the outcome mapping, the own-window rule, the own-drag rule, the icon types, the frames, the names of unexpected operations and the list of apps last activated, in `mac_rules`; the shelf model, `drag_items` and the outcome words), clippy for Linux, Windows and the Mac. CI's `macos-latest` runs the rest, which hasn't run there yet: the shelf's level order, null windows refused, `drag_out`'s early returns (nothing to drag, the button up, a null window), the `NSDragOperation` bits matching `mac_rules`', and the activation observer (refused off the main thread; through its real selector it notes another app and never Grape). No test builds a window or starts a drag. Nothing has run on a Mac.
 - **Needs a Mac** (`TESTING.md` → "Float on the Mac, D43"): first, the Dock's Trash; then whether AppKit takes the synthesized event, the drops into Finder with and without keys, the own-window check, no wheel during a shelf drag, a fast flick, Esc, the first click on an inactive shelf and activation (Stage Manager), which app gets activation back after the header's ×, launch-time activation, the level over full-screen Spaces, Cmd+W and Cmd+H, the page after a drag, and the snap on two displays.
 - **Revisit if:** a drop on the Trash ever removes a file (stop shipping Float on the Mac first); AppKit refuses the synthesized event; the shelf is hidden over a full-screen app or by Stage Manager (level 98); WebKit is left pressed after a drag (post a synthetic mouse-up after `endedAt`); Command alone refusing the drop confuses people (ignore modifier keys: always a copy, no alias); `iconForFileType` stops working (`iconForContentType`, a new crate); the `Closable` bit shows chrome or breaks the keys (drop it: Cmd+W then beeps); Cmd+H hides the wheel (a Grape menu without Hide); the idle webview's memory matters (build lazily and hand activation back).
+
+## D28: Lane B's image tools, slice 2: WebP, TIFF and HEIC Compress; TIFF and HEIC Remove Metadata (2026-10-28, proposed, confirm)
+- **Decision:** `run_job` runs D26's five "coming" image pairs:
+  - Compress on WebP and TIFF, and Remove Metadata on TIFF and HEIC, with no sidecar;
+  - Compress on HEIC with Grape's HEIC helper (D33).
+
+  That makes 43 tool pairs with every sidecar instead of 38. D26's rules hold: only Remove Metadata removes metadata; ≤90 % lossy and ≤95 % exact, or `NoChange`; the content decides which code runs; outputs keep the source's literal extension. Amends D26 (its coming pairs) and D16 (libwebp, for Compress only). The numbers are in ENGINES.md → Tools. Lane B builds the slice in small commits; until a pair's commit lands, `run_job` refuses it and the app says "… is coming" (D35).
+- **Remove Metadata, TIFF:**
+  - A compact rewrite of every IFD: every page and SubIFD, image blocks byte for byte, the byte order and classic/BigTIFF kind kept.
+  - A whitelist of layout, color, resolution and page tags, with ICC and Orientation.
+  - Photoshop's IRB is filtered down to paths, the clipping path, alpha channel names, resolution, guides and display info.
+  - The DCF Adobe RGB Exif goes back when that's how the file signaled its color.
+  - Exif, GPS, XMP, IPTC, GeoTIFF, Photoshop layers (37724) and every other tag are dropped and reported.
+  - Refused: DNG, old-style JPEG, metadata inside JPEG strips, and ImageJ/OME files, whose layout lives in their description.
+  - The output is re-read before publishing.
+- **Remove Metadata, HEIC:**
+  - `meta` is rebuilt in place without its Exif, XMP and other metadata items, or the `udes`/`crtt`/`mdft` properties (`ipma` renumbered).
+  - A top-level `free` box takes up the bytes saved, so no offset changes. Removed bytes are zeroed.
+  - XMP and C2PA `uuid` boxes become zeroed `free` boxes. Trailing motion-photo data is cut.
+  - Every image item (thumbnails, alpha, depth, gain maps, `tmap`) and every other property stays byte for byte.
+  - No helper and no decode. Sequences and layouts it can't rewrite safely are refused.
+- **Compress, TIFF:**
+  - Lossless at every preset.
+  - Each None, LZW, Deflate or PackBits strip or tile is re-deflated at zlib level 9, with horizontal differencing added for 8- and 16-bit integer samples. The layout and every other tag stay.
+  - Each block is inflated again and checked against the source's CRC32 before publishing.
+  - An IFD Grape can't decode is copied as it is. Other codecs and FillOrder 2 are copied as they are.
+  - Ends `NoChange` as soon as the output passes 95 %.
+- **Compress, WebP:**
+  - Lossy sources: image-webp decodes, Grape scales, then libwebp 1.6.0 at method 6 (≤2048 q70 / ≤4096 q80 / full q85, alpha lossless).
+  - Lossless sources: lossless at every preset (`-z 9`, exact), checked pixel for pixel.
+  - ICCP, EXIF (dimensions patched) and XMP are carried in a VP8X container Grape writes.
+  - Animated files are refused.
+- **Compress, HEIC:**
+  - The helper decodes upright 8-bit pixels; Grape scales (≤2048 / ≤4096 / full ≤35.65 MP); the helper encodes at libheif q40/50/60 or ImageIO 0.60/0.70/0.80 (provisional).
+  - Grape grafts back the source's Exif (Orientation 1, dimensions patched, a sideways IFD1 unlinked), its XMP (Orientation 1) and other metadata items.
+  - Gain maps, depth, mattes, thumbnails, motion-photo video and C2PA are dropped, as D26's JPEG drops them.
+  - Refused: 10-bit, wide `nclx` the helper hands back without a profile, a second picture, non-square pixels, sequences, and High over one HEVC picture ("Try Balanced").
+  - A Mac without a HEVC encoder is told before anything is decoded.
+- **API:** `imagetool::runs_tool(tool, from, heif)`. No new `MetaField` or `Note`.
+- **New dependencies:**
+  - libwebp-sys =0.14.4: crate MIT, published 2026-04-29; vendors libwebp 1.6.0, BSD-3-Clause with Google's patent grant; `default-features = false, features = ["std"]`; +1 lock package.
+  - Grape's own `grape-webp` crate (MIT), which holds the only `unsafe` for images and calls only the encoder.
+  - weezl 0.1.12 becomes direct (MIT OR Apache-2.0, already locked).
+  - tiff 0.11.3 as a dev-dependency (MIT, already locked).
+  - `deny.toml` and `about.toml` clarify libwebp-sys as MIT AND BSD-3-Clause; `about.hbs` prints `PATENTS`. A build must never set `TARGET_CPU`.
+- **Lane A:** `heif::Encoder` (with `max_picture`, `check_encode` and `encode`), `Decoder::decode_within`, `other_heif` made `pub(crate)`, a fake helper that writes real HEIF and echoes the quality, four fixtures, the app tests that used TIFF as "coming", and CI's heif-it cases. The protocol stays at v1.
+- **Not chosen:**
+  - webp 0.3.1 (libwebp 1.3.1, before CVE-2023-4863's fix);
+  - webpx (4 more crates);
+  - zenwebp (AGPL);
+  - protocol v2 metadata fields (ImageIO's Exif path is lossy, and the two OSes would differ);
+  - re-striping TIFF;
+  - piecewise TIFF relocation;
+  - an allow-list of auxiliary-image XMP;
+  - compacting HEIC;
+  - scaling a 48 MP HEIC quietly at High.
+- **Status 2026-10-28:** designed; no pair runs yet. Each pair's commit adds its line here.
+- **Tested:** nothing yet.
+- **Needs the PC and a Mac:** `TESTING.md` → "Image tools, slice 2, M4 (D28)", added with the pairs.
+- **Open for Maxwell** (each has the default above):
+  - HEIC Compress drops gain maps, depth, mattes and thumbnails, so HDR photos come out SDR. Or refuse such files, or carry the gain map later?
+  - A 48 MP HEIC at High is refused with "Try Balanced". Or scale it quietly to one HEVC picture until grid encoding lands?
+  - HEIC Remove Metadata keeps `thmb` thumbnails as image data. Or drop and report them, since a stale one can show an uncropped original?
+  - TIFF Remove Metadata drops Photoshop layers (37724) and GeoTIFF tags and refuses ImageJ/OME files. Keep any of them instead?
+  - TIFF Compress is lossless at every preset (Deflate plus predictor), and lossless WebP stays lossless. Lossy at Small instead?
+  - The WebP and HEIC qualities are provisional until QA.
+  - Should JPG and HEIC → WebP conversions turn lossy now that libwebp is in? Default: a separate decision later.
+- **Revisit if:**
+  - libwebp ships a security release (bump under D9's override);
+  - Windows Photos or WIC misreads Deflate plus predictor, or 16-bit predictor (fall back to LZW, or to 8-bit only);
+  - one-row strips miss the 95 % rule in QA (re-strip);
+  - lane A lands grid encoding (lift High's limit) or 10-bit output;
+  - QA shows Apple's HDR rendering is lost after Remove Metadata;
+  - users ask for lossy TIFF, animated WebP or lossy WebP conversions.
 
 ---
 
