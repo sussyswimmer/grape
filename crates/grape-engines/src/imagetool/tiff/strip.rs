@@ -21,7 +21,8 @@
 //!   up to its first scan when that's a sequential frame's only one, and
 //!   through every scan otherwise), and JPEG data Grape can't check, whose
 //!   segments or scans run past the first [`MAX_SCAN`] bytes read before
-//!   that; ImageJ and OME files, whose layout is in their description.
+//!   that, or that's hierarchical; ImageJ and OME files, whose layout is
+//!   in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -392,8 +393,9 @@ enum Seen {
     Clean,
     /// An APP1, APP13 or COM segment.
     Metadata,
-    /// Segments or scans that run on past what was read: what follows
-    /// can't be seen.
+    /// What Grape can't see through: segments or scans that run on past
+    /// what was read, or a hierarchical JPEG (DHP), whose frames after the
+    /// first it doesn't read.
     Unseen,
 }
 
@@ -402,8 +404,9 @@ enum Seen {
 /// can't be seen. Its segments are read up to its first scan when that
 /// holds every component of a sequential frame, which then has no other
 /// scan, so only its end follows; otherwise past every scan, each to the
-/// marker after its coded data, to the end. Anything that isn't a stream
-/// of segments is clean: it's copied as it is.
+/// marker after its coded data, to the end. A hierarchical JPEG isn't
+/// read past its DHP. Anything that isn't a stream of segments is clean:
+/// it's copied as it is.
 fn segments(jpeg: &[u8], whole: bool) -> Seen {
     // Where what was read ends too soon.
     let cut = if whole { Seen::Clean } else { Seen::Unseen };
@@ -425,6 +428,9 @@ fn segments(jpeg: &[u8], whole: bool) -> Seen {
         rest = &rest[fill + 1..];
         match marker {
             0xE1 | 0xED | 0xFE => return Seen::Metadata,
+            // A hierarchical JPEG (DHP): its frames after the first,
+            // which may have segments between them, aren't read.
+            0xDE => return Seen::Unseen,
             0xD9 => return Seen::Clean,
             0x01 | 0xD0..=0xD7 => continue,
             _ => {}
@@ -1280,6 +1286,28 @@ mod tests {
             };
             assert_eq!(why, UNCHECKED);
         }
+    }
+
+    #[test]
+    fn a_hierarchical_jpeg_is_refused_as_unchecked() {
+        // DHP, then a first frame that's a sequential one of one scan, and
+        // after it an APP1 and a differential frame.
+        let stream = [
+            b"\xFF\xD8".to_vec(),
+            frame(0xDE, 1),
+            frame(0xC0, 1),
+            scan(1),
+            segment(0xE1, b"Exif\0\0MM\0*"),
+            frame(0xC5, 1),
+            scan(1),
+            b"\xFF\xD9".to_vec(),
+        ]
+        .concat();
+        assert_eq!(segments(&stream, true), Seen::Unseen);
+        let Err(Error::Refused(why)) = plan(&jpeg_page(stream, None)) else {
+            panic!("not refused")
+        };
+        assert_eq!(why, UNCHECKED);
     }
 
     #[test]
