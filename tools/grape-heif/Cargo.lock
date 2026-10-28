@@ -43,7 +43,7 @@ checksum = "795cbfc56d419a7ce47ccbb7504dd9a5b7c484c083c356e797de08bd988d9629"
 
 [[package]]
 name = "grape-heif"
-version = "1.23.7-grape.1"
+version = "1.23.7-grape.2"
 dependencies = [
  "grape-heif-proto",
  "libheif-rs",

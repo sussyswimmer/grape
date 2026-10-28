@@ -34,9 +34,9 @@ apps/desktop/src-tauri/   Tauri app: windows, tray, commands, event wiring  (has
 apps/desktop/ui/          Wheel overlay + settings UI                       (has CLAUDE.md)
 crates/grape-core/        Format registry, matrix, tools, naming, job plans (has CLAUDE.md)
 crates/grape-engines/     Executes job plans: FFmpeg sidecar, image, PDF... (has CLAUDE.md)
-crates/grape-heif-proto/  The HEIC helper protocol: pure, std only (D33)   (has CLAUDE.md)
+crates/grape-heif-proto/  The image helper protocol (HEIC, AVIF): pure, std only (D33, D41) (has CLAUDE.md)
 crates/grape-platform/    Drag detection, modifiers, file actions per OS    (has CLAUDE.md)
-tools/grape-heif/         grape-heif.exe, the Windows HEIC helper: its own workspace, GPL as built (D33)
+tools/grape-heif/         grape-heif.exe, the Windows image helper (HEIC, AVIF): its own workspace, GPL as built (D33, D41)
 docs/                     Specs — the source of truth for behavior
 .claude/commands/         Slash commands for recurring tasks
 ```
@@ -63,8 +63,9 @@ cargo test -p grape-engines --features pdf-it   # PDF tests that load PDFium: se
 .\scripts\bsdtar\build.ps1 -Install     # Windows: Grape's bsdtar for RAR (D27) into src-tauri/binaries/
 ./scripts/bsdtar/build.sh --install      # macOS: the same, universal
 cargo test -p grape-engines --features rar-it --lib archive::rar   # RAR tests with the real bsdtar: set GRAPE_TEST_BSDTAR
-.\tools\grape-heif\build.ps1 -Install   # Windows: Grape's HEIC helper, grape-heif.exe (D33), into src-tauri/binaries/ (30+ min the first time)
-cargo test -p grape-engines --features heif-it   # HEIC with the real helper: set GRAPE_TEST_HEIF and GRAPE_TEST_HEIF_FIXTURES (D33)
+.\tools\grape-heif\build.ps1 -Install   # Windows: Grape's image helper for HEIC and AVIF, grape-heif.exe (D33, D41), into src-tauri/binaries/ (about 45-50 min and 5 GB the first time)
+cargo test -p grape-engines --features heif-it   # HEIC and AVIF with the real helper: set GRAPE_TEST_HEIF and GRAPE_TEST_HEIF_FIXTURES (D33, D41)
+cargo test -p grape-platform --features avif-encode   # the Mac worker's AVIF encoder (rav1e), on any OS (D41)
 cargo deny --locked check licenses bans sources   # license check (D23)
 cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs   # after a dependency change
 ```

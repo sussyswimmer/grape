@@ -3,7 +3,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { join } from 'node:path';
 
-import { check, defaultOverlay, firstLine, hasSection, sidecarFile, sidecarName } from './check-sidecars.mjs';
+import {
+  bannerProtocol,
+  check,
+  defaultOverlay,
+  firstLine,
+  grapeProtocol,
+  hasSection,
+  PROTOCOL_SOURCE,
+  sidecarFile,
+  sidecarName,
+} from './check-sidecars.mjs';
 
 const REPO = '/repo';
 const APP = join(REPO, 'apps', 'desktop', 'src-tauri');
@@ -372,11 +382,11 @@ test("the bsdtar workflow's cache keys cover the copyright lines its full build 
   }
 });
 
-// grape-heif (D33): Grape's HEIC helper on Windows, built from tools/grape-heif.
+// grape-heif (D33, D41): Grape's image helper on Windows, built from tools/grape-heif.
 const HEIF_EXE = join(APP, 'binaries', 'grape-heif-x86_64-pc-windows-msvc.exe');
 const GRAPE_HEIF =
-  'grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors\r\n' +
-  'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1\r\n';
+  'grape-heif version 1.23.7-grape.2 Copyright (c) 2026 the Grape contributors\r\n' +
+  'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 dav1d=1.5.4 aom=3.15.2 plugins=disabled crt=static protocol=2\r\n';
 const GATE = 'node ../../scripts/check-sidecars.mjs && pnpm -C ui build';
 // An overlay file and a TAURI_CONFIG that list only grape-heif (for these
 // tests only), so the tests below are about its rule and the sources. A real
@@ -398,6 +408,9 @@ const HEIF_CONFIG = JSON.stringify({
   build: { beforeBuildCommand: GATE },
 });
 const NOTICES_HEIF = `${NOTICES}\n## grape-heif (HEIC on Windows)\n\nGrape converts HEIC on Windows with grape-heif.exe.\n`;
+// grape-heif-proto's PROTOCOL, which the banner's configuration line must name.
+const PROTO = join(REPO, ...PROTOCOL_SOURCE);
+const PROTO_RS = '/// The protocol version.\npub const PROTOCOL: u32 = 2;\n';
 const HEIF_LICENSES = ['LICENSE.txt', 'SOURCE.md', 'libheif.txt', 'libde265.txt', 'libde265-win32cond.txt', 'x265.txt', 'rust-crates.md'];
 
 /** Everything a passing check of grape-heif alone has. The default overlay lists FFmpeg, which isn't there. */
@@ -409,6 +422,7 @@ function heifOk(overrides = {}) {
       [join(REPO, 'about.hbs')]: NOTICES_HEIF,
       [join(REPO, 'THIRD_PARTY_NOTICES.md')]: NOTICES_HEIF,
       [HEIF_EXE]: 'MZ',
+      [PROTO]: PROTO_RS,
       ...overrides.files,
     },
     dirs: { [join(REPO, 'licenses', 'grape-heif')]: HEIF_LICENSES, ...overrides.dirs },
@@ -447,7 +461,11 @@ test('--overlay reads that file and names it', () => {
 });
 
 test("grape-heif: Grape's own build passes, anything else is refused", () => {
-  for (const out of [GRAPE_HEIF, 'grape-heif version 1.23.7-grape\n', 'grape-heif version 1.23.8-grape.12 Copyright\n']) {
+  for (const out of [
+    GRAPE_HEIF,
+    'grape-heif version 1.23.7-grape\nconfiguration: protocol=2\n',
+    'grape-heif version 1.23.8-grape.12 Copyright\nconfiguration: libheif=1.23.8 protocol=2 plugins=disabled\n',
+  ]) {
     assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: out } })), config: HEIF_CONFIG }), [], out);
   }
   for (const line of [
@@ -464,6 +482,63 @@ test("grape-heif: Grape's own build passes, anything else is refused", () => {
     assert.match(failures[0], /^grape-heif: this isn't Grape's own build\./, line);
     assert.match(failures[0], /tools\/grape-heif ever ships \(D33\)\.$/, line);
   }
+});
+
+test('grape-heif must speak the protocol in grape-heif-proto (D41)', () => {
+  const stale = (spoken) =>
+    `grape-heif: it ${spoken} and this Grape speaks 2, so it would refuse every HEIC and AVIF job. ` +
+    "Build it again with tools/grape-heif/build.ps1 -Install, or take it from CI's grape-heif workflow (D41).";
+  for (const [out, spoken] of [
+    // D33's build, from before AVIF.
+    [
+      'grape-heif version 1.23.7-grape.1 Copyright (c) 2026 the Grape contributors\r\n' +
+        'configuration: libheif=1.23.7 libde265=1.1.3 x265=4.3 plugins=disabled crt=static protocol=1\r\n',
+      'speaks protocol 1',
+    ],
+    // A newer helper than this checkout.
+    ['grape-heif version 1.23.8-grape.1\nconfiguration: libheif=1.23.8 protocol=3\n', 'speaks protocol 3'],
+    // No configuration line, or no protocol on it, or not a whole token.
+    ['grape-heif version 1.23.7-grape.2 Copyright\n', "doesn't say which protocol it speaks"],
+    ['grape-heif version 1.23.7-grape.2\nconfiguration: libheif=1.23.7 crt=static\n', "doesn't say which protocol it speaks"],
+    ['grape-heif version 1.23.7-grape.2\nconfiguration: protocol=2x\n', "doesn't say which protocol it speaks"],
+    ['grape-heif version 1.23.7-grape.2 protocol=2\nlicense: GPL-3.0-or-later\n', "doesn't say which protocol it speaks"],
+  ]) {
+    const failures = check({ repo: REPO, triple: WIN, io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: out } })), config: HEIF_CONFIG });
+    assert.deepEqual(failures, [stale(spoken)], out);
+  }
+  // A build that isn't Grape's is refused for that alone.
+  const foreign = check({
+    repo: REPO,
+    triple: WIN,
+    io: fakeIo(heifOk({ outputs: { [HEIF_EXE]: 'heif-enc libheif version: 1.23.7\nconfiguration: protocol=1\n' } })),
+    config: HEIF_CONFIG,
+  });
+  assert.equal(foreign.length, 1);
+  assert.match(foreign[0], /^grape-heif: this isn't Grape's own build\./);
+  // Without grape-heif-proto's PROTOCOL the gate can't tell, so it refuses.
+  for (const source of [undefined, 'pub const PROTOCOL: u32 = two;\n']) {
+    const base = heifOk();
+    if (source === undefined) delete base.files[PROTO];
+    else base.files[PROTO] = source;
+    assert.deepEqual(check({ repo: REPO, triple: WIN, io: fakeIo(base), config: HEIF_CONFIG }), [
+      'grape-heif: couldn\'t read PROTOCOL from crates/grape-heif-proto/src/lib.rs.',
+    ]);
+  }
+});
+
+test("the gate reads the real PROTOCOL, and the banner fixture speaks it", async () => {
+  const { readFileSync } = await import('node:fs');
+  const { fileURLToPath } = await import('node:url');
+  const source = readFileSync(fileURLToPath(new URL(`../${PROTOCOL_SOURCE.join('/')}`, import.meta.url)), 'utf8');
+  const protocol = grapeProtocol(source);
+  assert.ok(Number.isInteger(protocol) && protocol >= 2, `${protocol}`);
+  assert.equal(bannerProtocol(GRAPE_HEIF), protocol);
+  // tools/grape-heif's banner docs show the same line.
+  const banner = readFileSync(fileURLToPath(new URL('../tools/grape-heif/src/banner.rs', import.meta.url)), 'utf8');
+  const shown = banner.split('\n').find((l) => l.startsWith('//! configuration: '));
+  assert.equal(bannerProtocol(shown.slice('//! '.length)), protocol, shown);
+  assert.equal(grapeProtocol('pub const PROTOCOL: u32 = 12;'), 12);
+  assert.equal(grapeProtocol('const PROTOCOL: u32 = 2;'), undefined);
 });
 
 test('a missing grape-heif.exe points at build.ps1 and the grape-heif workflow', () => {
@@ -580,7 +655,13 @@ test("a Windows build's real merged list passes with Grape's four sidecars, and 
   const all = allOk(WIN, BSDTAR_WINDOWS);
   const heif = heifOk();
   const base = {
-    files: { ...all.files, [HEIF_EXE]: 'MZ', [join(REPO, 'about.hbs')]: `${NOTICES_ALL}${NOTICES_HEIF}`, [join(REPO, 'THIRD_PARTY_NOTICES.md')]: `${NOTICES_ALL}${NOTICES_HEIF}` },
+    files: {
+      ...all.files,
+      [HEIF_EXE]: 'MZ',
+      [PROTO]: PROTO_RS,
+      [join(REPO, 'about.hbs')]: `${NOTICES_ALL}${NOTICES_HEIF}`,
+      [join(REPO, 'THIRD_PARTY_NOTICES.md')]: `${NOTICES_ALL}${NOTICES_HEIF}`,
+    },
     dirs: { ...all.dirs, ...heif.dirs },
     outputs: { ...all.outputs, ...heif.outputs },
   };

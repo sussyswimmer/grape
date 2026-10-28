@@ -37,7 +37,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 | splitPDF | SPLIT | Split PDF |  |  | ✓ | v1 | lopdf → one PDF per page in a folder |
 | organizePDF | ORGANIZE | Organize PDF | ✓ |  |  | v2 | pdfium thumbnails + lopdf |
 | mergePDF | MERGE PDF | Merge PDFs | ✓ | ✓ | ✓ | v1 | lopdf (panel = reorder list) |
-| createPDF | CREATE PDF | Create PDF |  | ✓ | ✓ | v1 | Grape's own PDF writer: one page per image in selection order, mixed formats OK (JPG, PNG, WebP, TIFF; HEIC with Grape's HEIC helper). A file Grape can't read stops the whole PDF, and the toast names it (D37) |
+| createPDF | CREATE PDF | Create PDF |  | ✓ | ✓ | v1 | Grape's own PDF writer: one page per image in selection order, mixed formats OK (JPG, PNG, WebP, TIFF; HEIC with Grape's image helper; never AVIF, which has no tools in v1, D41). A file Grape can't read stops the whole PDF, and the toast names it (D37) |
 | createCollage | COLLAGE | Create Collage | ✓ | ✓ | ✓ | v2 | image pipeline |
 | extractArchive | EXTRACT | Extract Archive |  |  | ✓ | v1 | zip / tar / flate2; RAR through Grape's bsdtar (D27) |
 

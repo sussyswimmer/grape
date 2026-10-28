@@ -5,12 +5,12 @@ use std::hint::black_box;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
-use crate::MAX_LINE_BYTES;
+use crate::{FormatCaps, MAX_LINE_BYTES};
 
 /// What the fake codec does.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
-    /// Decode an RGB image (encode: a HEIC-looking file).
+    /// Decode an RGB image (encode: a file of the format asked for).
     Rgb,
     /// Decode an RGBA image.
     Rgba,
@@ -38,8 +38,10 @@ enum Mode {
     OwnError,
     /// Recurse deeply before decoding.
     DeepStack,
-    /// Encode: return bytes that aren't HEIC.
+    /// Encode: return bytes that aren't HEIF.
     NotHeic,
+    /// Encode: return the other format's bytes.
+    OtherFormat,
 }
 
 struct Fake {
@@ -47,7 +49,8 @@ struct Fake {
     width: u32,
     height: u32,
     calls: AtomicUsize,
-    encoded: Mutex<Vec<(Pixels, Option<u8>)>>,
+    encoded: Mutex<Vec<(Pixels, HeifFormat, Option<u8>)>>,
+    decoded: Mutex<Vec<HeifFormat>>,
     thread: Mutex<Option<String>>,
 }
 
@@ -59,6 +62,7 @@ impl Fake {
             height,
             calls: AtomicUsize::new(0),
             encoded: Mutex::new(Vec::new()),
+            decoded: Mutex::new(Vec::new()),
             thread: Mutex::new(None),
         }
     }
@@ -71,8 +75,14 @@ impl Fake {
 impl Codec for Fake {
     fn caps(&self) -> Caps {
         Caps {
-            decode: true,
-            encode: true,
+            heic: FormatCaps {
+                decode: true,
+                encode: true,
+            },
+            avif: FormatCaps {
+                decode: true,
+                encode: false,
+            },
             codec: "fake 1.0".to_string(),
         }
     }
@@ -80,10 +90,12 @@ impl Codec for Fake {
     fn decode(
         &self,
         _source: &Path,
+        format: HeifFormat,
         _limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.decoded.lock().unwrap().push(format);
         *self.thread.lock().unwrap() = thread::current().name().map(str::to_string);
         let channels = match self.mode {
             Mode::Rgba => 4,
@@ -138,20 +150,31 @@ impl Codec for Fake {
     fn encode(
         &self,
         pixels: &Pixels,
+        format: HeifFormat,
         quality: Option<u8>,
         _limits: &Limits,
     ) -> Result<Vec<u8>, Failure> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut written = format;
         match self.mode {
             Mode::Panic => panic!("encoding /secret/IMG_0001.HEIC"),
             Mode::Fail(kind) => return Err(Failure::new(kind, "from the codec")),
             Mode::NotHeic => return Ok(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec()),
+            Mode::OtherFormat => {
+                written = match format {
+                    HeifFormat::Heic => HeifFormat::Avif,
+                    HeifFormat::Avif => HeifFormat::Heic,
+                }
+            }
             _ => {}
         }
-        self.encoded.lock().unwrap().push((pixels.clone(), quality));
-        let mut heic = heic_head();
-        heic.extend_from_slice(&pixels.data[..pixels.data.len().min(16)]);
-        Ok(heic)
+        self.encoded
+            .lock()
+            .unwrap()
+            .push((pixels.clone(), format, quality));
+        let mut bytes = head(written);
+        bytes.extend_from_slice(&pixels.data[..pixels.data.len().min(16)]);
+        Ok(bytes)
     }
 }
 
@@ -181,6 +204,20 @@ fn heic_head() -> Vec<u8> {
     let mut bytes = vec![0, 0, 0, 24];
     bytes.extend_from_slice(b"ftypheic\0\0\0\0mif1heic");
     bytes
+}
+
+/// The start of an AVIF as libavif writes it.
+fn avif_head() -> Vec<u8> {
+    let mut bytes = vec![0, 0, 0, 32];
+    bytes.extend_from_slice(b"ftypavif\0\0\0\0avifmif1miafMA1B");
+    bytes
+}
+
+fn head(format: HeifFormat) -> Vec<u8> {
+    match format {
+        HeifFormat::Heic => heic_head(),
+        HeifFormat::Avif => avif_head(),
+    }
 }
 
 /// A folder under the OS temp folder, removed on drop.
@@ -250,7 +287,11 @@ impl Case {
     }
 
     fn encode(&self, quality: Option<u8>) -> Request {
-        self.request(Op::Encode { quality })
+        self.encode_to(HeifFormat::Heic, quality)
+    }
+
+    fn encode_to(&self, format: HeifFormat, quality: Option<u8>) -> Request {
+        self.request(Op::Encode { format, quality })
     }
 
     /// Writes `input.rgba`.
@@ -578,19 +619,43 @@ fn codec_failures_pass_through() {
 }
 
 #[test]
+fn the_sniffed_format_reaches_the_codec() {
+    let mut old_avif_brand = vec![0, 0, 0, 24];
+    old_avif_brand.extend_from_slice(b"ftypavif\0\0\0\0mif1avif");
+    old_avif_brand.resize(32, 0);
+    for (bytes, format) in [
+        ([heic_head(), vec![0; 100]].concat(), HeifFormat::Heic),
+        ([avif_head(), vec![0; 100]].concat(), HeifFormat::Avif),
+        // The content decides, whatever the name (`IMG_0001.heic`).
+        (old_avif_brand, HeifFormat::Avif),
+    ] {
+        let case = Case::with_source(&bytes);
+        let fake = Fake::new(Mode::Rgb, 2, 2);
+        let run = serve_request(&fake, &case.decode());
+        assert!(run.done, "{format:?}");
+        assert_eq!(*fake.decoded.lock().unwrap(), vec![format]);
+        assert_eq!(case.entries(), vec![names::PIXELS]);
+    }
+}
+
+#[test]
 fn the_source_is_checked_before_the_codec_sees_it() {
-    let mut avif = vec![0, 0, 0, 24];
-    avif.extend_from_slice(b"ftypavif\0\0\0\0mif1avif");
-    avif.resize(32, 0);
+    // grape-heif-fixtures' `avci-brand.heic`: AVC, another HEIF codec.
+    let mut avci = vec![0, 0, 0, 24];
+    avci.extend_from_slice(b"ftypavci\0\0\0\0mif1avci");
+    avci.resize(32, 0);
     for (bytes, kind) in [
         (b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec(), FailKind::NotHeif),
         (Vec::new(), FailKind::NotHeif),
-        (avif, FailKind::Unsupported),
+        (avci, FailKind::Unsupported),
     ] {
         let case = Case::with_source(&bytes);
         let fake = Fake::new(Mode::Rgb, 2, 2);
         let run = serve_request(&fake, &case.decode());
         assert_eq!(run.failure().kind, kind);
+        if kind == FailKind::Unsupported {
+            assert_eq!(run.failure().detail, "a HEIF image that isn't HEVC or AV1");
+        }
         assert_eq!(run.lines.len(), 1);
         assert_eq!(fake.calls(), 0);
         assert!(case.entries().is_empty());
@@ -624,28 +689,33 @@ fn an_existing_pixel_file_is_never_replaced() {
 
 #[test]
 fn encode_reads_input_rgba_and_writes_out_heic() {
-    for (channels, icc, quality) in [
-        (3, None, None),
-        (4, None, Some(70)),
-        (3, Some(&b"profile"[..]), Some(1)),
-        (4, Some(&[9u8; 300][..]), Some(100)),
+    // And out.avif for an AVIF: the format reaches the codec, and only
+    // that format's output is made.
+    for (format, channels, icc, quality) in [
+        (HeifFormat::Heic, 3, None, None),
+        (HeifFormat::Heic, 4, None, Some(70)),
+        (HeifFormat::Heic, 3, Some(&b"profile"[..]), Some(1)),
+        (HeifFormat::Heic, 4, Some(&[9u8; 300][..]), Some(100)),
+        (HeifFormat::Avif, 3, None, None),
+        (HeifFormat::Avif, 4, Some(&b"profile"[..]), Some(50)),
     ] {
         let case = Case::new();
         let input = case.input(6, 4, channels, icc);
         let fake = Fake::new(Mode::Rgb, 0, 0);
-        let run = serve_request(&fake, &case.encode(quality));
+        let run = serve_request(&fake, &case.encode_to(format, quality));
         assert!(run.done);
-        let heic = fs::read(case.work().join(names::OUTPUT)).unwrap();
+        let output = fs::read(case.work().join(names::output(format))).unwrap();
         assert_eq!(
             run.lines,
             vec![Message::Done(Done {
-                bytes: heic.len() as u64,
+                bytes: output.len() as u64,
                 ..Done::default()
             })]
         );
-        assert_eq!(sniff(&heic), Sniff::Heic);
+        assert_eq!(sniff(&output).format(), Some(format));
         let encoded = fake.encoded.lock().unwrap();
-        let (pixels, seen_quality) = &encoded[0];
+        let (pixels, seen_format, seen_quality) = &encoded[0];
+        assert_eq!(*seen_format, format);
         assert_eq!(*seen_quality, quality);
         assert_eq!(
             (pixels.width, pixels.height, pixels.channels),
@@ -654,7 +724,7 @@ fn encode_reads_input_rgba_and_writes_out_heic() {
         assert_eq!(pixels.data, rows(6, 4, channels));
         assert_eq!(pixels.icc.as_deref(), icc);
         assert_eq!(fs::read(case.work().join(names::INPUT)).unwrap(), input);
-        assert_eq!(case.entries(), vec![names::INPUT, names::OUTPUT]);
+        assert_eq!(case.entries(), vec![names::INPUT, names::output(format)]);
     }
 }
 
@@ -705,7 +775,7 @@ fn encode_holds_its_limits_before_the_codec() {
         let run = serve_request(&fake, &case.encode(None));
         assert_eq!(run.failure().kind, FailKind::TooLarge, "{width}x{height}");
         assert_eq!(fake.calls(), 0);
-        assert!(!case.work().join(names::OUTPUT).exists());
+        assert!(!case.work().join(names::OUTPUT_HEIC).exists());
     }
     // At the limits: accepted.
     let mut case = Case::new();
@@ -737,22 +807,67 @@ fn a_missing_or_malformed_input_rgba_is_refused() {
 }
 
 #[test]
-fn the_encoders_output_must_be_heic() {
-    let case = Case::new();
-    case.input(2, 2, 3, None);
-    let run = serve_request(&Fake::new(Mode::NotHeic, 0, 0), &case.encode(None));
-    assert_internal(&run, "the encoder's output isn't HEIC");
-    assert!(!case.work().join(names::OUTPUT).exists());
+fn the_encoders_output_must_be_the_format_asked_for() {
+    for (mode, format, part) in [
+        (
+            Mode::NotHeic,
+            HeifFormat::Heic,
+            "the encoder's output isn't HEIC",
+        ),
+        (
+            Mode::NotHeic,
+            HeifFormat::Avif,
+            "the encoder's output isn't AVIF",
+        ),
+        // HEIC bytes for an AVIF, and AVIF bytes for a HEIC.
+        (
+            Mode::OtherFormat,
+            HeifFormat::Avif,
+            "the encoder's output isn't AVIF",
+        ),
+        (
+            Mode::OtherFormat,
+            HeifFormat::Heic,
+            "the encoder's output isn't HEIC",
+        ),
+    ] {
+        let case = Case::new();
+        case.input(2, 2, 3, None);
+        let run = serve_request(&Fake::new(mode, 0, 0), &case.encode_to(format, None));
+        assert_internal(&run, part);
+        assert_eq!(case.entries(), vec![names::INPUT], "{mode:?} {format:?}");
+    }
 }
 
 #[test]
-fn an_existing_out_heic_is_never_replaced() {
+fn an_existing_output_is_never_replaced() {
+    for format in HeifFormat::ALL {
+        let case = Case::new();
+        case.input(2, 2, 3, None);
+        let out = case.work().join(names::output(format));
+        fs::write(&out, b"keep").unwrap();
+        let run = serve_request(&Fake::new(Mode::Rgb, 0, 0), &case.encode_to(format, None));
+        assert_eq!(run.failure().kind, FailKind::Write);
+        let name = names::output(format);
+        assert_eq!(
+            run.failure().detail,
+            format!("creating {name}: AlreadyExists")
+        );
+        assert_eq!(fs::read(&out).unwrap(), b"keep");
+    }
+    // The other format's output doesn't stand in the way.
     let case = Case::new();
     case.input(2, 2, 3, None);
-    fs::write(case.work().join(names::OUTPUT), b"keep").unwrap();
-    let run = serve_request(&Fake::new(Mode::Rgb, 0, 0), &case.encode(None));
-    assert_eq!(run.failure().kind, FailKind::Write);
-    assert_eq!(fs::read(case.work().join(names::OUTPUT)).unwrap(), b"keep");
+    fs::write(case.work().join(names::OUTPUT_HEIC), b"keep").unwrap();
+    let run = serve_request(
+        &Fake::new(Mode::Rgb, 0, 0),
+        &case.encode_to(HeifFormat::Avif, None),
+    );
+    assert!(run.done);
+    assert_eq!(
+        fs::read(case.work().join(names::OUTPUT_HEIC)).unwrap(),
+        b"keep"
+    );
 }
 
 #[test]
@@ -825,7 +940,7 @@ fn no_limit_may_be_zero() {
 fn another_protocol_is_refused_as_such() {
     let case = Case::new();
     let fake = Fake::new(Mode::Rgb, 2, 2);
-    for protocol in [0, 2, u32::MAX] {
+    for protocol in [0, 1, 3, u32::MAX] {
         let run = serve_request(
             &fake,
             &Request {
@@ -837,14 +952,20 @@ fn another_protocol_is_refused_as_such() {
             run.failure(),
             &Failure::new(
                 FailKind::Protocol,
-                format!("protocol {protocol}, but this helper speaks 1")
+                format!("protocol {protocol}, but this helper speaks 2")
             )
         );
     }
     // A later version's request, with fields this one doesn't know.
     let later =
-        br#"{"protocol":2,"workDir":"/t","op":{"kind":"thumbnail","size":256},"budget":{}}"#;
+        br#"{"protocol":3,"workDir":"/t","op":{"kind":"thumbnail","size":256},"budget":{}}"#;
     assert_eq!(serve_bytes(&fake, later).failure().kind, FailKind::Protocol);
+    // And protocol 1's encode, without a format: refused as protocol 1.
+    let earlier = br#"{"protocol":1,"workDir":"/t","op":{"kind":"encode"},"limits":{}}"#;
+    assert_eq!(
+        serde_json::to_value(serve_bytes(&fake, earlier).failure()).unwrap(),
+        serde_json::json!({"kind": "protocol", "detail": "protocol 1, but this helper speaks 2"})
+    );
     assert_eq!(fake.calls(), 0);
 }
 
@@ -857,12 +978,15 @@ fn a_bad_request_is_internal_and_never_quoted() {
         String::new(),
         "{".to_string(),
         "not json: /secret/IMG_0001.HEIC".to_string(),
-        r#"{"protocol":1,"workDir":"/secret/IMG_0001.HEIC"}"#.to_string(),
-        r#"{"protocol":"1","workDir":"/secret/IMG_0001.HEIC"}"#.to_string(),
+        r#"{"protocol":2,"workDir":"/secret/IMG_0001.HEIC"}"#.to_string(),
+        r#"{"protocol":"2","workDir":"/secret/IMG_0001.HEIC"}"#.to_string(),
+        good.replace(r#""kind":"decode""#, r#""kind":"encode""#),
         good.replacen('{', r#"{"note":"/secret/IMG_0001.HEIC","#, 1),
         format!("{good} /secret/IMG_0001.HEIC"),
         format!("{good}{good}"),
-        "[1]".to_string(),
+        // serde reads a struct from a sequence too, so this one's version is
+        // this helper's own.
+        "[2]".to_string(),
     ];
     for input in inputs {
         let run = serve_bytes(&fake, input.as_bytes());

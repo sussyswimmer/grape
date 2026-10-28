@@ -1,6 +1,7 @@
 //! Finds the sidecar programs Grape ships (FFmpeg, ffprobe, bsdtar and,
-//! on Windows, `grape-heif`), the PDFium library and the HEIC helper once
-//! at startup, and hands a copy to every job as [`SidecarPaths`].
+//! on Windows, `grape-heif`), the PDFium library and the image helper (for
+//! HEIC and AVIF) once at startup, and hands a copy to every job as
+//! [`SidecarPaths`].
 //!
 //! The programs sit next to Grape's own executable, without the
 //! target-triple suffix they have in `binaries/`: the installer puts them
@@ -26,13 +27,14 @@
 //! bsdtar (D27) reads RAR archives: `bsdtar.exe` next to `Grape.exe`,
 //! `Grape.app/Contents/MacOS/bsdtar`, by the same rule as FFmpeg.
 //!
-//! The HEIC helper (D33, `SidecarPaths::heif`) is started as
+//! The image helper (D33, D41, `SidecarPaths::heif`) is started as
 //! `<helper> --grape-heif-worker` on both systems. On Windows it's
 //! `grape-heif.exe` next to `Grape.exe`, Grape's own sidecar (libheif, a
 //! GPL program of its own, built by CI from `tools/grape-heif`; the
 //! `tauri.sidecars.windows.conf.json` overlay bundles it), by the same rule as
-//! FFmpeg. On macOS it's Grape's own executable (ImageIO, `main.rs`), like
-//! the PDF worker, so it's always there and isn't logged as a sidecar.
+//! FFmpeg. On macOS it's Grape's own executable (ImageIO, and rav1e for
+//! AVIF output, `main.rs`), like the PDF worker, so it's always there and
+//! isn't logged as a sidecar.
 //! Other systems have none.
 //!
 //! A sidecar that isn't there stays `None`, and nothing looks for it
@@ -50,7 +52,7 @@ const GRAPE_HEIF: &str = "grape-heif";
 const BSDTAR: &str = "bsdtar";
 const PDFIUM: &str = "pdfium";
 
-/// Where this system's HEIC helper is (D33), or `None` where there's none.
+/// Where this system's image helper is (D33), or `None` where there's none.
 const HEIF_AT: Option<HeifAt> = if cfg!(windows) {
     Some(HeifAt::NextToExe)
 } else if cfg!(target_os = "macos") {
@@ -59,7 +61,7 @@ const HEIF_AT: Option<HeifAt> = if cfg!(windows) {
     None
 };
 
-/// The HEIC helper, from Grape's executable.
+/// The image helper, from Grape's executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeifAt {
     /// The `grape-heif` sidecar in the executable's own folder (Windows):
@@ -154,7 +156,7 @@ pub fn for_jobs(app: &AppHandle) -> SidecarPaths {
 
 /// Every sidecar for the executable `exe`: the programs in its folder
 /// ([`resolve`]), PDFium and the PDF worker ([`resolve_pdf`]), and the
-/// HEIC helper where `heif_at` says.
+/// image helper where `heif_at` says.
 fn resolve_all(
     exe: &Path,
     suffix: &str,
@@ -572,7 +574,7 @@ mod tests {
     fn windows_without_grape_heif_has_no_heic_helper() {
         let dir = Path::new("install");
         let exe = dir.join("Grape.exe");
-        // Grape.exe itself is never the HEIC helper on Windows.
+        // Grape.exe itself is never the image helper on Windows.
         let paths = resolve_all(
             &exe,
             ".exe",
@@ -602,6 +604,51 @@ mod tests {
             summary_of(&paths, HeifAt::is_sidecar(MAC_HEIF), true),
             "found pdfium; missing ffmpeg, ffprobe, bsdtar"
         );
+    }
+
+    /// D41, on this system's own rules: an install where every file but
+    /// `grape-heif` is there. On Windows an AVIF drop (or a PNG to AVIF)
+    /// names the missing image helper; on macOS it runs, because the
+    /// helper is Grape itself; elsewhere AVIF is coming.
+    #[test]
+    fn an_avif_drop_without_grape_heif_on_this_system() {
+        use grape_core::{Format, Operation, SelectionItem};
+
+        use crate::jobs::{check_runnable, NotRunnable};
+
+        let exe = Path::new("install").join(format!("Grape{EXE_SUFFIX}"));
+        let paths = resolve_all(&exe, EXE_SUFFIX, HEIF_AT, PDFIUM_AT, |path| {
+            path.file_stem().is_none_or(|stem| stem != "grape-heif")
+        });
+        let avif = [SelectionItem::file("/a/photo.avif")];
+        let png = [SelectionItem::file("/a/photo.png")];
+        for (to, items, coming) in [
+            (Format::Png, &avif, "AVIF to PNG is coming."),
+            (Format::Avif, &png, "PNG to AVIF is coming."),
+            (Format::Pdf, &avif, "AVIF to PDF is coming."),
+        ] {
+            let ran = check_runnable(&Operation::Convert { to }, items, &paths);
+            if cfg!(windows) {
+                assert_eq!(
+                    ran,
+                    Err(NotRunnable {
+                        title: "Grape's image helper is missing".to_owned(),
+                        detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
+                    }),
+                    "{coming}"
+                );
+            } else if cfg!(target_os = "macos") {
+                assert_eq!(ran, Ok(()), "{coming}");
+            } else {
+                assert_eq!(
+                    ran,
+                    Err(NotRunnable {
+                        title: "Not in this build yet".to_owned(),
+                        detail: Some(coming.to_owned()),
+                    })
+                );
+            }
+        }
     }
 
     #[test]

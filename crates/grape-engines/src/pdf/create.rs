@@ -1,13 +1,13 @@
 //! Images → PDF and the Create PDF tool (DECISIONS D37), in Grape's own
 //! process: no PDF worker and no PDFium, because no PDF is parsed. The
 //! only untrusted input is the images, which the raster engine decodes
-//! with its own limits ([`image::decode`]) and Grape's HEIC helper decodes
-//! in its own process ([`heif::Decoder`]).
+//! with its own limits ([`image::decode`]) and Grape's image helper decodes
+//! in its own process ([`heif::Decoder`]): HEIC and AVIF (D33, D41).
 //!
 //! - **One page per image,** in the job's input order: JPG, PNG, WebP,
-//!   TIFF and BMP always, HEIC with the helper ([`reads`]); Create PDF
-//!   takes the same but BMP, which FORMAT_MATRIX gives no tools
-//!   ([`combines`]). The page is the
+//!   TIFF and BMP always, HEIC and AVIF with the helper ([`reads`]); Create
+//!   PDF takes the same but BMP and AVIF, which FORMAT_MATRIX gives no
+//!   tools ([`combines`]). The page is the
 //!   upright image at one pixel a point (72 dpi), scaled down uniformly
 //!   when its longer side is over [`MAX_SIDE`] (Acrobat's 200 inches); the
 //!   pixels are never resampled ([`page_size`]). No image object has a side
@@ -20,9 +20,9 @@
 //!      PDF readers take as Grape's decoder does goes in as its original
 //!      data, minus its metadata ([`jpeg::passthrough`]); its EXIF
 //!      orientation is applied by the page's matrix ([`placement`]);
-//!   2. HEIC, lossy WebP and a JPEG that can't pass through are re-encoded
-//!      as JPEG at quality 90 from their upright pixels, alpha kept as a
-//!      soft mask;
+//!   2. HEIC, AVIF, lossy WebP and a JPEG that can't pass through are
+//!      re-encoded as JPEG at quality 90 from their upright pixels, alpha
+//!      kept as a soft mask;
 //!   3. PNG, BMP, TIFF and lossless WebP are stored losslessly: 8-bit gray
 //!      or RGB, Flate with PNG predictors ([`flate`]), alpha as a soft
 //!      mask, and pure black-and-white gray at 1 bit a pixel.
@@ -59,7 +59,7 @@
 //!   `/ID`: nothing in it names the source, its folder, the user or the
 //!   time.
 //! - **Errors:** a file that can't be read stops the whole PDF; the message
-//!   names that file the way the raster and HEIC engines do. A write
+//!   names that file the way the raster and HEIC/AVIF engines do. A write
 //!   failure names the destination folder. No detail written here holds a
 //!   path, a name or file contents; but details passed through from
 //!   [`image::decode`] and [`publish`] name the source's path or the
@@ -68,7 +68,7 @@
 //! - **Cancel** is checked before each input, every [`flate::CANCEL_ROWS`]
 //!   rows, at every write into a stream's buffer and of the file.
 //!   **Progress** for input `i` of `n`: decoded at `(i + 0.5) / n` (the
-//!   HEIC helper's own fractions within `[i / n, (i + 0.5) / n]`), written
+//!   image helper's own fractions within `[i / n, (i + 0.5) / n]`), written
 //!   at `(i + 1) / n`, and 1.0 once the PDF is published.
 
 use std::fs::File;
@@ -128,13 +128,16 @@ const MAX_WEBP_CHUNKS: u32 = 1 << 16;
 const COMBINES: [Format; 4] = [Format::Jpg, Format::Png, Format::Webp, Format::Tiff];
 
 /// True when this build puts an input of format `from` on a PDF page:
-/// JPG, PNG, WebP, TIFF and BMP always, HEIC with the helper.
+/// JPG, PNG, WebP, TIFF and BMP always, HEIC and AVIF with the helper
+/// ([`heif::HEIF`]).
 pub(crate) fn reads(from: Format, sidecars: &SidecarPaths) -> bool {
-    image::RASTER.contains(&from) || (from == Format::Heic && sidecars.heif.is_some())
+    image::RASTER.contains(&from) || (heif::HEIF.contains(&from) && sidecars.heif.is_some())
 }
 
 /// True when Create PDF takes an input of format `from` in this build:
 /// JPG, PNG, WebP and TIFF always, HEIC with the helper ([`COMBINES`]).
+/// Never AVIF: FORMAT_MATRIX gives it no tools in v1, so AVIF → PDF is a
+/// conversion only.
 pub(crate) fn combines(from: Format, sidecars: &SidecarPaths) -> bool {
     COMBINES.contains(&from) || (from == Format::Heic && sidecars.heif.is_some())
 }
@@ -149,11 +152,11 @@ pub(crate) fn convert(
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
 ) -> Result<JobOutcome, GrapeError> {
-    if !image::RASTER.contains(&from) && from != Format::Heic {
+    if !image::RASTER.contains(&from) && !heif::HEIF.contains(&from) {
         return Err(crate::not_yet_supported(job, Some(from)));
     }
-    let heic = heif::Decoder::from_sidecars(&ctx.sidecars);
-    write_pdf(job, &[(src, from)], dest, ctx, progress, heic.as_ref())
+    let helper = heif::Decoder::from_sidecars(&ctx.sidecars);
+    write_pdf(job, &[(src, from)], dest, ctx, progress, helper.as_ref())
 }
 
 /// Create PDF: one page per input, in the job's order, at `dest`.
@@ -172,8 +175,8 @@ pub(crate) fn combine(
             from => return Err(crate::not_yet_supported(job, from)),
         }
     }
-    let heic = heif::Decoder::from_sidecars(&ctx.sidecars);
-    write_pdf(job, &inputs, dest, ctx, progress, heic.as_ref())
+    let helper = heif::Decoder::from_sidecars(&ctx.sidecars);
+    write_pdf(job, &inputs, dest, ctx, progress, helper.as_ref())
 }
 
 /// Progress passed on only forwards.
@@ -192,14 +195,14 @@ impl Forward<'_> {
 }
 
 /// Writes one page per input into a temp file in `dest`'s folder and
-/// publishes it there. `heic` decodes HEIC inputs.
+/// publishes it there. `helper` decodes HEIC and AVIF inputs.
 fn write_pdf(
     job: &Job,
     inputs: &[(&Path, Format)],
     dest: &Path,
     ctx: &EngineCtx,
     progress: &mut dyn FnMut(f32),
-    heic: Option<&heif::Decoder>,
+    helper: Option<&heif::Decoder>,
 ) -> Result<JobOutcome, GrapeError> {
     let cancel = &ctx.cancel;
     let Some(&(first, first_from)) = inputs.first() else {
@@ -231,7 +234,15 @@ fn write_pdf(
         let span = (at / n, (at + 0.5) / n);
         let picture = {
             let mut helper_progress = |fraction: f32| forward.to(fraction);
-            read(src, from, &input, cancel, heic, span, &mut helper_progress)?
+            read(
+                src,
+                from,
+                &input,
+                cancel,
+                helper,
+                span,
+                &mut helper_progress,
+            )?
         };
         forward.to(span.1);
         write_page(&mut pdf, picture, &input, &names, cancel)?;
@@ -264,7 +275,7 @@ fn write_pdf(
 /// How a picture's pixels are stored when they aren't passed through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Storage {
-    /// Re-encoded as JPEG (HEIC, lossy WebP, a JPEG that can't pass
+    /// Re-encoded as JPEG (HEIC, AVIF, lossy WebP, a JPEG that can't pass
     /// through).
     Lossy,
     /// Flate with PNG predictors.
@@ -289,23 +300,25 @@ enum Picture {
     },
 }
 
-/// Decodes `src`: HEIC through the helper (one that isn't HEIF at all
-/// through the raster engine, as HEIC → JPG does), the rest through the
-/// raster engine.
+/// Decodes `src`: HEIC and AVIF through the helper, HEIC or AVIF by the
+/// content whatever the name (one that isn't HEIF at all through the
+/// raster engine, as HEIC → JPG does), the rest through the raster engine.
+/// A HEIC's or an AVIF's page is stored lossy: they're a photo codec's
+/// output.
 fn read(
     src: &Path,
     from: Format,
     names: &Names,
     cancel: &CancelToken,
-    heic: Option<&heif::Decoder>,
+    helper: Option<&heif::Decoder>,
     span: (f32, f32),
     progress: &mut dyn FnMut(f32),
 ) -> Result<Picture, GrapeError> {
-    if from == Format::Heic {
-        let Some(helper) = heic else {
+    if heif::HEIF.contains(&from) {
+        let Some(helper) = helper else {
             return Err(GrapeError::new(
                 ErrorKind::NotYetSupported,
-                "Grape's HEIC helper is missing.",
+                "Grape's image helper is missing.",
                 "SidecarPaths::heif is None",
             ));
         };
@@ -1116,9 +1129,10 @@ mod tests {
     use lopdf::{Dictionary, Document, Object};
 
     use super::*;
-    use crate::heif::tests::{fake, fake_heic, nowhere};
+    use crate::heif::tests::{fake, fake_heic, fake_image, nowhere};
     use crate::output::unique_suffix;
     use crate::pdf::writer::tests::xref;
+    use grape_heif_proto::HeifFormat;
 
     fn names() -> Names {
         Names::new(
@@ -1890,7 +1904,7 @@ mod tests {
         names
     }
 
-    /// Runs `job` with the fake HEIC helper in `mode`.
+    /// Runs `job` with the fake image helper in `mode`.
     fn run_with_helper(
         dir: &TestDir,
         job: &Job,
@@ -2072,10 +2086,206 @@ mod tests {
             (err.kind, err.user_message.as_str()),
             (
                 ErrorKind::NotYetSupported,
-                "Grape's HEIC helper is missing."
+                "Grape's image helper is missing."
             )
         );
         assert_eq!(listing(&dir.0), ["photo.heic", "work"]);
+        assert_untouched(&paths, &before);
+    }
+
+    #[test]
+    fn avif_to_pdf_is_a_lossy_page_with_its_profile() {
+        // D41: an AVIF goes through the helper as HEIC does, its page
+        // re-encoded as JPEG, its ICC profile kept.
+        let dir = test_dir();
+        let rows = rgb_rows(50, 20);
+        let mut profile: Vec<u8> = (0..200u8).collect();
+        profile[16..20].copy_from_slice(b"RGB ");
+        let (paths, job) = planned(
+            &dir,
+            &[(
+                "photo.avif",
+                fake_image(HeifFormat::Avif, 50, 20, 3, &rows, Some(&profile)),
+            )],
+            Operation::convert(Format::Pdf),
+        );
+        let before = snapshot(&paths);
+        let (result, progress) = run_with_helper(&dir, &job, Some("ok"));
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, vec![dir.0.join("photo.pdf")]);
+        assert!(progress.windows(2).all(|w| w[0] <= w[1]), "{progress:?}");
+        assert!(progress.contains(&0.5), "{progress:?}");
+        assert_eq!(progress.last(), Some(&1.0));
+        let (doc, pages) = pages(&fs::read(dir.0.join("photo.pdf")).unwrap());
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].media_box, [0.0, 0.0, 50.0, 20.0]);
+        assert!(pages[0].mask.is_none());
+        assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
+        let decoded = ::image::load_from_memory(&pages[0].data).unwrap().to_rgb8();
+        assert_eq!(decoded.dimensions(), (50, 20));
+        let space = pages[0]
+            .image
+            .get(b"ColorSpace")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(space[0].as_name().unwrap(), b"ICCBased");
+        let stream = doc
+            .get_object(space[1].as_reference().unwrap())
+            .unwrap()
+            .as_stream()
+            .unwrap();
+        let mut inflated = Vec::new();
+        ZlibDecoder::new(&stream.content[..])
+            .read_to_end(&mut inflated)
+            .unwrap();
+        assert_eq!(inflated, profile);
+        assert_untouched(&paths, &before);
+        assert_eq!(listing(&dir.0), ["photo.avif", "photo.pdf", "work"]);
+    }
+
+    #[test]
+    fn the_content_decides_between_heic_and_avif() {
+        // An AVIF named .heic and a HEIC named .avif both go to the helper,
+        // which decodes what's there.
+        let rows = rgb_rows(50, 20);
+        for (file, bytes) in [
+            (
+                "a.heic",
+                fake_image(HeifFormat::Avif, 50, 20, 3, &rows, None),
+            ),
+            ("b.avif", fake_heic(50, 20, 3, &rows, None)),
+        ] {
+            let dir = test_dir();
+            let (paths, job) = planned(&dir, &[(file, bytes)], Operation::convert(Format::Pdf));
+            let before = snapshot(&paths);
+            let (result, _) = run_with_helper(&dir, &job, Some("ok"));
+            let outcome = result.unwrap();
+            let (_, pages) = pages(&fs::read(&outcome.outputs[0]).unwrap());
+            assert_eq!(pages[0].media_box, [0.0, 0.0, 50.0, 20.0], "{file}");
+            assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode", "{file}");
+            assert_untouched(&paths, &before);
+        }
+    }
+
+    #[test]
+    fn an_avif_that_isnt_heif_is_read_as_its_content() {
+        let dir = test_dir();
+        let photo = DynamicImage::ImageRgb8(gradient(4, 3));
+        let (paths, job) = planned(
+            &dir,
+            &[("photo.avif", png_bytes(&photo))],
+            Operation::convert(Format::Pdf),
+        );
+        let before = snapshot(&paths);
+        // `nowhere`: a helper that would fail if started.
+        let (result, _) = run_with_helper(&dir, &job, None);
+        result.unwrap();
+        let (_, pages) = pages(&fs::read(dir.0.join("photo.pdf")).unwrap());
+        assert_eq!(name(&pages[0].image, b"Filter"), "FlateDecode");
+        assert_eq!(
+            rows_of(&pages[0].image, &pages[0].data),
+            photo.to_rgb8().into_raw()
+        );
+        assert_untouched(&paths, &before);
+    }
+
+    #[test]
+    fn avif_failures_name_the_avif_and_write_nothing() {
+        for (mode, kind, message) in [
+            (
+                Some("error-damaged"),
+                ErrorKind::DecodeFailed,
+                "photo.avif isn't a readable AVIF image.",
+            ),
+            (
+                Some("error-unsupported"),
+                ErrorKind::DecodeFailed,
+                "photo.avif is a kind of AVIF image Grape can't read yet.",
+            ),
+        ] {
+            let dir = test_dir();
+            let (paths, job) = planned(
+                &dir,
+                &[(
+                    "photo.avif",
+                    fake_image(HeifFormat::Avif, 1, 1, 3, &[1, 2, 3], None),
+                )],
+                Operation::convert(Format::Pdf),
+            );
+            let before = snapshot(&paths);
+            let (result, _) = run_with_helper(&dir, &job, mode);
+            let err = result.unwrap_err();
+            assert_eq!((err.kind, err.user_message.as_str()), (kind, message));
+            assert_eq!(listing(&dir.0), ["photo.avif", "work"]);
+            assert_untouched(&paths, &before);
+        }
+        // Without the helper.
+        let dir = test_dir();
+        let (paths, job) = planned(
+            &dir,
+            &[(
+                "photo.avif",
+                fake_image(HeifFormat::Avif, 1, 1, 3, &[1, 2, 3], None),
+            )],
+            Operation::convert(Format::Pdf),
+        );
+        let err = convert(
+            &job,
+            &paths[0],
+            &dest(&job),
+            Format::Avif,
+            &EngineCtx::default(),
+            &mut |_| {},
+        )
+        .unwrap_err();
+        assert_eq!(
+            (err.kind, err.user_message.as_str()),
+            (
+                ErrorKind::NotYetSupported,
+                "Grape's image helper is missing."
+            )
+        );
+        assert_eq!(listing(&dir.0), ["photo.avif", "work"]);
+    }
+
+    #[test]
+    fn create_pdf_never_takes_an_avif() {
+        // FORMAT_MATRIX gives AVIF no tools in v1 (D41): AVIF → PDF is a
+        // conversion only, with the helper.
+        let with_heif = SidecarPaths {
+            heif: Some(std::path::PathBuf::from("grape-heif")),
+            ..SidecarPaths::default()
+        };
+        assert!(reads(Format::Avif, &with_heif));
+        assert!(!reads(Format::Avif, &SidecarPaths::default()));
+        assert!(!combines(Format::Avif, &with_heif));
+        assert!(!combines(Format::Avif, &SidecarPaths::default()));
+        // grape-core doesn't plan Create PDF with an AVIF either, so the job
+        // is planned for two PNGs and its second input swapped.
+        let dir = test_dir();
+        let photo = png_bytes(&DynamicImage::ImageRgb8(gradient(2, 2)));
+        let (mut paths, mut job) = planned(
+            &dir,
+            &[("a.png", photo.clone()), ("b.png", photo)],
+            Operation::tool(ToolKey::CreatePdf),
+        );
+        fs::remove_file(&paths[1]).unwrap();
+        paths[1] = dir.0.join("b.avif");
+        fs::write(
+            &paths[1],
+            fake_image(HeifFormat::Avif, 2, 2, 3, &rgb_rows(2, 2), None),
+        )
+        .unwrap();
+        job.inputs[1] = paths[1].clone();
+        let before = snapshot(&paths);
+        let ctx = EngineCtx {
+            sidecars: with_heif,
+            ..EngineCtx::default()
+        };
+        let err = combine(&job, &dest(&job), &ctx, &mut |_| {}).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported);
+        assert_eq!(listing(&dir.0), ["a.png", "b.avif", "work"]);
         assert_untouched(&paths, &before);
     }
 }

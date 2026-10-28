@@ -60,10 +60,11 @@ pub struct SidecarPaths {
     /// The program started as `<worker> --grape-pdf-worker` (D29): Grape's
     /// own executable.
     pub pdf_worker: Option<PathBuf>,
-    /// The HEIC helper (D33), started as `<helper> --grape-heif-worker` on
-    /// both systems: `grape-heif.exe` next to Grape's executable on
-    /// Windows (Grape's own sidecar, on libheif), Grape's own executable on
-    /// macOS (ImageIO).
+    /// Grape's image helper for HEIC and AVIF (D33, D41), started as
+    /// `<helper> --grape-heif-worker` on both systems: `grape-heif.exe` next
+    /// to Grape's executable on Windows (Grape's own sidecar, on libheif),
+    /// Grape's own executable on macOS (ImageIO, and rav1e for AVIF
+    /// output).
     pub heif: Option<PathBuf>,
     /// The `bsdtar` sidecar that reads RAR archives (D27): `bsdtar.exe` next
     /// to Grape's executable on Windows, `Contents/MacOS/bsdtar` on macOS.
@@ -248,8 +249,8 @@ impl GrapeError {
 }
 
 /// Can this build execute `op` for an input of format `from`, with no
-/// sidecars? So never for RAR, PDF or HEIC, which need theirs. The app asks
-/// [`supports_with`], with the sidecars it found.
+/// sidecars? So never for RAR, PDF, HEIC or AVIF, which need theirs. The
+/// app asks [`supports_with`], with the sidecars it found.
 pub fn supports(op: &Operation, from: Option<Format>) -> bool {
     supports_with(op, std::slice::from_ref(&from), &SidecarPaths::default())
 }
@@ -263,9 +264,10 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// pairs); SRT to VTT or TXT and VTT to SRT or TXT (4); ZIP, TAR and GZIP
 /// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
 /// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); audio and video
-/// among each other (104) with `ffmpeg` and `ffprobe`; HEIC to and from JPG,
-/// PNG, WebP, TIFF and BMP with `heif` (10); JPG, PNG, WebP, TIFF and BMP
-/// to PDF (5), and HEIC to PDF with `heif` (1). Tools: Extract Archive on
+/// among each other (104) with `ffmpeg` and `ffprobe`; with `heif` (D41),
+/// HEIC and AVIF to and from JPG, PNG, WebP, TIFF and BMP (20) and HEIC to
+/// AVIF and back (2); JPG, PNG, WebP, TIFF and BMP to PDF (5), and HEIC and
+/// AVIF to PDF with `heif` (2). Tools (none for AVIF): Extract Archive on
 /// ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs and Remove
 /// Metadata on PDFs with `pdfium` and `pdf_worker`; Create PDF on JPG, PNG,
 /// WebP and TIFF (and HEIC with `heif`); with `ffmpeg` and `ffprobe` (D26),
@@ -299,7 +301,7 @@ enum Engine {
     Pdf,
     /// Audio and video through the FFmpeg sidecar ([`media`]).
     Media,
-    /// HEIC, in a helper process ([`heif`]).
+    /// HEIC and AVIF, in a helper process ([`heif`]).
     Heif,
     /// Images → PDF in Grape's own process (`pdf::create`).
     PdfCreate,

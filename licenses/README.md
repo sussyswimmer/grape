@@ -1,10 +1,10 @@
 # licenses/
 
-License texts for the third-party programs and libraries Grape ships as separate files: sidecars like FFmpeg, ffprobe and `bsdtar`, the DLLs some of them need, PDFium, the PDF library Grape's PDF helper loads, and `grape-heif`, Grape's own HEIC helper on Windows, which is GPL because of the libraries built into it. This is rule 3 in `docs/ENGINES.md` → Licensing rules.
+License texts for the third-party programs and libraries Grape ships as separate files: sidecars like FFmpeg, ffprobe and `bsdtar`, the DLLs some of them need, PDFium, the PDF library Grape's PDF helper loads, and `grape-heif`, Grape's own image helper for HEIC and AVIF on Windows, which is GPL because of the libraries built into it. This is rule 3 in `docs/ENGINES.md` → Licensing rules.
 
-PDFium is the first to ship (`pdfium/`, DECISIONS D29). `ffmpeg/` has the texts for Grape's own FFmpeg build (D24), and `libarchive/` those of libarchive's `bsdtar`, which Grape reads RAR archives with (D27). Both ship in every installer and DMG, with the per-OS sidecars overlays, from CI's builds of the programs in the same run (D25). `grape-heif.exe` has its texts and its source's whereabouts in `grape-heif/` (D33); it ships in the Windows installer through the same Windows overlay.
+PDFium is the first to ship (`pdfium/`, DECISIONS D29). `ffmpeg/` has the texts for Grape's own FFmpeg build (D24), and `libarchive/` those of libarchive's `bsdtar`, which Grape reads RAR archives with (D27). Both ship in every installer and DMG, with the per-OS sidecars overlays, from CI's builds of the programs in the same run (D25). `grape-heif.exe` has its texts and its source's whereabouts in `grape-heif/` (D33, D41); it ships in the Windows installer through the same Windows overlay.
 
-The Rust crates and JavaScript compiled into Grape itself aren't covered here. Their notices are in `THIRD_PARTY_NOTICES.md` at the repo root, which cargo-about generates (DECISIONS D23).
+The Rust crates and JavaScript compiled into Grape itself aren't covered here. Their notices are in `THIRD_PARTY_NOTICES.md` at the repo root, which cargo-about generates (DECISIONS D23). That includes rav1e, the AVIF encoder compiled into Grape's macOS build (D41): its AV1 patent license (`PATENTS`, the Alliance for Open Media Patent License 1.0) and the notices of the libaom and dav1d code in it are a hand-written section of `about.hbs`, "rav1e (AVIF on macOS)", because cargo-about takes only a crate's license files.
 
 ## The rule
 
@@ -29,15 +29,20 @@ licenses/
     x264.txt         one text per library built in, when it differs
     lame.txt
     ...
-  grape-heif/        Grape's HEIC helper on Windows: libheif, libde265 and x265 linked
-                     statically, so GPL as a whole (D33)
+  grape-heif/        Grape's image helper on Windows, HEIC and AVIF: libheif, libde265, x265,
+                     dav1d and libaom linked statically, so GPL as a whole (D33, D41)
     LICENSE.txt      GPL-3.0, the license of the program as a whole (gnu.org's gpl-3.0.txt)
-    SOURCE.md        version, vcpkg commit, the three source archives and their hashes,
-                     the overlay port, how it's built, where the source bundle is
+    SOURCE.md        version, vcpkg commit, the five source archives and their hashes,
+                     the two overlay ports, how it's built, where the source bundle is
     libheif.txt      libheif's COPYING (LGPL-3.0-or-later)
     libde265.txt     libde265's COPYING (LGPL-3.0-or-later)
     libde265-win32cond.txt   the DOC notice of libde265's Windows condition variables
     x265.txt         x265's COPYING (GPL-2.0-or-later)
+    dav1d.txt        dav1d's COPYING (BSD-2-Clause)
+    dav1d-PATENTS.txt   dav1d's doc/PATENTS (the Alliance for Open Media Patent License 1.0)
+    dav1d-x86inc.txt the ISC notice of dav1d's x86inc.asm
+    aom.txt          vcpkg's copyright file for libaom: its LICENSE (BSD-2-Clause) and PATENTS,
+                     and the fastfeat, vector and x86inc licenses
     rust-crates.md   its Rust crates (cargo-about from tools/grape-heif/Cargo.lock)
   libarchive/        bsdtar, which Grape reads RAR with (D27)
     LICENSE.txt      BSD-2-Clause, the tarball's COPYING

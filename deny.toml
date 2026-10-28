@@ -20,10 +20,13 @@ exclude-dev = true
 # Exactly the licenses the dependency graph uses, build tools included.
 # No GPL, AGPL or LGPL: nothing copyleft may be linked into Grape's own
 # binaries (golden rule 6). MPL-2.0 is allowed only for the crates below.
+# BSD-2-Clause joined in a D23 amendment (D41, shared with D39): rav1e,
+# v_frame and av1-grain, the Mac worker's AVIF encoder (macOS only).
 allow = [
     "MIT",
     "Apache-2.0",
     "BSD-3-Clause",
+    "BSD-2-Clause",
     "Zlib",
     "Unicode-3.0",
     "ISC",

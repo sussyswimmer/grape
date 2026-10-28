@@ -20,7 +20,7 @@ use crate::message::{Caps, Done, FailKind, Failure, ImageInfo, Message};
 use crate::pixels::{read_pixels, PixelError, PixelHeader, PixelLimits, PixelWriter, Pixels};
 use crate::request::{Limits, Op, Request};
 use crate::sniff::{sniff, Sniff};
-use crate::{names, MAX_REQUEST_BYTES, PROTOCOL, SNIFF_BYTES};
+use crate::{names, HeifFormat, MAX_REQUEST_BYTES, PROTOCOL, SNIFF_BYTES};
 
 /// The job thread's name; its panics are silent ([`silence_job_panics`]).
 const JOB_THREAD: &str = "grape-heif-job";
@@ -53,28 +53,34 @@ pub trait PixelSink {
     fn row(&mut self, row: &[u8]) -> Result<(), Failure>;
 }
 
-/// A HEIC codec: libheif in `grape-heif.exe`, ImageIO on the Mac, or a
-/// test fake.
+/// A HEIC and AVIF codec: libheif in `grape-heif.exe`, ImageIO (and an
+/// AV1 encoder) on the Mac, or a test fake.
 pub trait Codec {
-    /// What it can do on this machine.
+    /// What it can do on this machine, per format.
     fn caps(&self) -> Caps;
-    /// Decodes the primary image of `source` (a file that sniffed as
-    /// [`Sniff::Heic`]), upright, 8-bit, straight alpha, under `limits`:
-    /// [`PixelSink::begin`] once, before any row is written and as early as
-    /// the codec knows the upright size and channels (libheif: before
-    /// decoding; ImageIO: after its own decode and its draw, which first
-    /// have to fit [`Limits::max_decoder_memory`]), then every row in order.
+    /// Decodes the primary image of `source`, a file that sniffed as
+    /// `format` ([`Sniff::Heic`] or [`Sniff::Avif`]), upright, 8-bit,
+    /// straight alpha, under `limits`: [`PixelSink::begin`] once, before any
+    /// row is written and as early as the codec knows the upright size and
+    /// channels (libheif: before decoding; ImageIO: after its own decode and
+    /// its draw, which first have to fit [`Limits::max_decoder_memory`]),
+    /// then every row in order. A format it can't read is
+    /// [`FailKind::Unsupported`].
     fn decode(
         &self,
         source: &Path,
+        format: HeifFormat,
         limits: &Limits,
         out: &mut dyn PixelSink,
     ) -> Result<(), Failure>;
-    /// The HEIC file's bytes for `pixels`. `quality`: `None` is this codec's
-    /// default, otherwise 1..=100.
+    /// The bytes of a `format` file for `pixels`, which [`sniff`] must take
+    /// for `format`. `quality`: `None` is this codec's default for the
+    /// format, otherwise 1..=100. A format it can't write is
+    /// [`FailKind::NoEncoder`].
     fn encode(
         &self,
         pixels: &Pixels,
+        format: HeifFormat,
         quality: Option<u8>,
         limits: &Limits,
     ) -> Result<Vec<u8>, Failure>;
@@ -238,6 +244,7 @@ fn check(request: &Request) -> Result<(), Failure> {
         }
         Op::Encode {
             quality: Some(quality),
+            ..
         } if !(1..=100).contains(quality) => {
             return Err(internal(format!("quality {quality} isn't in 1..=100")));
         }
@@ -293,17 +300,18 @@ fn execute<W: Write>(
             ..Done::default()
         }),
         Op::Decode { source } => {
-            check_source(source, limits)?;
+            let format = check_source(source, limits)?;
             let mut sink = FileSink::new(work_dir.join(names::PIXELS), limits, lines);
-            let decoded = codec.decode(source, limits, &mut sink);
+            let decoded = codec.decode(source, format, limits, &mut sink);
             sink.finish(decoded)
         }
-        Op::Encode { quality } => encode(codec, *quality, work_dir, limits),
+        Op::Encode { format, quality } => encode(codec, *format, *quality, work_dir, limits),
     }
 }
 
-/// The source's size and its `ftyp` box, before the codec sees it.
-fn check_source(source: &Path, limits: &Limits) -> Result<(), Failure> {
+/// The source's size and its `ftyp` box, before the codec sees it: the
+/// format it sniffed as.
+fn check_source(source: &Path, limits: &Limits) -> Result<HeifFormat, Failure> {
     let file = File::open(source).map_err(|e| read_failed("opening the source", &e))?;
     let len = file
         .metadata()
@@ -320,10 +328,11 @@ fn check_source(source: &Path, limits: &Limits) -> Result<(), Failure> {
         .read_to_end(&mut head)
         .map_err(|e| read_failed("reading the source", &e))?;
     match sniff(&head) {
-        Sniff::Heic => Ok(()),
+        Sniff::Heic => Ok(HeifFormat::Heic),
+        Sniff::Avif => Ok(HeifFormat::Avif),
         Sniff::OtherHeif => Err(Failure::new(
             FailKind::Unsupported,
-            "a HEIF image that isn't HEVC",
+            "a HEIF image that isn't HEVC or AV1",
         )),
         Sniff::NotHeif => Err(Failure::new(FailKind::NotHeif, "no HEIF ftyp box")),
     }
@@ -489,9 +498,11 @@ impl<W: Write> PixelSink for FileSink<'_, W> {
     }
 }
 
-/// `input.rgba` → the codec → `out.heic`.
+/// `input.rgba` → the codec → `out.heic` or `out.avif`, which must sniff as
+/// `format`.
 fn encode(
     codec: &(dyn Codec + Sync),
+    format: HeifFormat,
     quality: Option<u8>,
     work_dir: &Path,
     limits: &Limits,
@@ -512,21 +523,25 @@ fn encode(
         PixelError::TooLarge(why) => Failure::new(FailKind::TooLarge, why),
         PixelError::Malformed(why) => internal(format!("input.rgba: {why}")),
     })?;
-    let heic = codec.encode(&pixels, quality, limits)?;
+    let encoded = codec.encode(&pixels, format, quality, limits)?;
     drop(pixels);
-    if sniff(&heic[..heic.len().min(SNIFF_BYTES)]) != Sniff::Heic {
-        return Err(internal("the encoder's output isn't HEIC"));
+    if sniff(&encoded[..encoded.len().min(SNIFF_BYTES)]).format() != Some(format) {
+        return Err(internal(format!(
+            "the encoder's output isn't {}",
+            format.name()
+        )));
     }
+    let name = names::output(format);
     let mut out = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(work_dir.join(names::OUTPUT))
-        .map_err(|e| write_failed("creating out.heic", &e))?;
-    out.write_all(&heic)
+        .open(work_dir.join(name))
+        .map_err(|e| write_failed(&format!("creating {name}"), &e))?;
+    out.write_all(&encoded)
         .and_then(|()| out.sync_all())
-        .map_err(|e| write_failed("writing out.heic", &e))?;
+        .map_err(|e| write_failed(&format!("writing {name}"), &e))?;
     Ok(Done {
-        bytes: heic.len() as u64,
+        bytes: encoded.len() as u64,
         ..Done::default()
     })
 }

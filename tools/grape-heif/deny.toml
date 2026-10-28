@@ -13,8 +13,8 @@ exclude-dev = true
 [licenses]
 # Exactly the licenses this graph uses, build tools included. The program
 # itself is GPL-3.0-or-later because of the C libraries it links (libheif,
-# libde265, x265; licenses/grape-heif), which aren't Rust crates; its Rust
-# crates are all permissive.
+# libde265, x265, dav1d, libaom; licenses/grape-heif), which aren't Rust
+# crates; its Rust crates are all permissive.
 allow = [
     "MIT",
     "Apache-2.0",

@@ -287,7 +287,8 @@ fn grape_heif_encodes_the_largest_picture_under_the_cap() {
     use std::os::windows::process::CommandExt;
 
     use grape_heif_proto::{
-        names, Limits, Message, Op, PixelHeader, PixelWriter, Request, PROTOCOL, WORKER_FLAG,
+        names, HeifFormat, Limits, Message, Op, PixelHeader, PixelWriter, Request, PROTOCOL,
+        WORKER_FLAG,
     };
 
     let exe = std::env::var_os("GRAPE_TEST_HEIF")
@@ -332,7 +333,10 @@ fn grape_heif_encodes_the_largest_picture_under_the_cap() {
     let request = Request {
         protocol: PROTOCOL,
         work_dir: work.clone(),
-        op: Op::Encode { quality: None },
+        op: Op::Encode {
+            format: HeifFormat::Heic,
+            quality: None,
+        },
         limits: Limits::DEFAULT,
     };
     // As grape-engines' helper.rs starts it: DETACHED_PROCESS, so no console.
@@ -380,6 +384,6 @@ fn grape_heif_encodes_the_largest_picture_under_the_cap() {
         other => panic!("grape-heif.exe ended with {other:?} ({status})"),
     }
     assert!(status.success(), "{status}");
-    let out = std::fs::metadata(work.join(names::OUTPUT)).unwrap();
+    let out = std::fs::metadata(work.join(names::OUTPUT_HEIC)).unwrap();
     assert!(out.len() > 0);
 }

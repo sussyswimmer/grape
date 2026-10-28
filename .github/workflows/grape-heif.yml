@@ -1,12 +1,13 @@
 name: grape-heif
 
-# Grape's own HEIC helper for Windows (DECISIONS D33): tools/grape-heif on
-# libheif, libde265 and x265, which vcpkg builds at the commit pinned in
+# Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41):
+# tools/grape-heif on libheif with libde265 and x265 (HEIC) and dav1d and
+# libaom's encoder (AVIF), which vcpkg builds at the commit pinned in
 # tools/grape-heif/vcpkg.lock.json and which are linked statically. Built,
 # tested and checked here, with its GPL source bundle (GPL-3.0 section 6) and
-# the HEIC test fixtures, as artifacts for the jobs of the run that called
-# this. No GitHub Release until M7; release.yml attaches the source bundle to
-# its draft.
+# the HEIC and AVIF test fixtures, as artifacts for the jobs of the run that
+# called this (ci.yml's heif-it jobs on Windows and macOS). No GitHub Release
+# until M7; release.yml attaches the source bundle to its draft.
 on:
   workflow_call:
     inputs:
@@ -83,7 +84,7 @@ jobs:
           $tools = (Get-Content -Raw -LiteralPath $default).Trim()
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "key=vs$vs-msvc$tools"
           Write-Output "Visual Studio $vs, MSVC $tools"
-      # vcpkg's binary cache: the built libheif, libde265 and x265.
+      # vcpkg's binary cache: the built libheif, libde265, x265, dav1d and aom.
       - if: inputs.cache
         uses: actions/cache@v6
         with:
@@ -97,6 +98,19 @@ jobs:
           path: tools/grape-heif/target
           key: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-${{ hashFiles('tools/grape-heif/src/**', 'crates/grape-heif-proto/**') }}
           restore-keys: grape-heif-cargo-v2-${{ steps.msvc.outputs.key }}-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**', 'tools/grape-heif/Cargo.lock') }}-
+      # The build tools vcpkg downloads into downloads\tools at the pin (D41):
+      # Strawberry Perl for libaom (304 MB zipped), Python and meson for
+      # dav1d, and CMake, NASM and ninja. --only-downloads fetches them on
+      # every fresh runner, even when the binary cache has every port. Restored
+      # into the vcpkg root before build.ps1 clones vcpkg there (a root that
+      # holds only downloads counts as empty), and saved when the job passes.
+      # vcpkg uses an unpacked tool as it finds it, so release.yml (cache:
+      # false) always fetches them fresh.
+      - if: inputs.cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}\vcpkg\downloads\tools
+          key: grape-heif-vcpkg-tools-v1-${{ hashFiles('tools/grape-heif/vcpkg.lock.json', 'tools/grape-heif/vcpkg/**') }}
       # The PC's own shell: build.ps1's checks must work in Windows PowerShell
       # 5.1 too. Dot-sourcing only defines its functions.
       - name: build.ps1's checks work in Windows PowerShell 5.1
@@ -104,10 +118,26 @@ jobs:
         run: |
           . ./tools/grape-heif/build.ps1
           $lock = Read-Lock (Resolve-Path tools/grape-heif/vcpkg.lock.json).Path
-          $overlay = (Resolve-Path tools/grape-heif/vcpkg/ports/libheif).Path
-          if ((Get-PortSha512 "$overlay\portfile.cmake") -cne $lock.Sources[0].Sha512) { throw 'the overlay and the lock disagree' }
-          if ((Get-PortVersion "$overlay\vcpkg.json") -cne $lock.Sources[0].Version) { throw 'the overlay and the lock disagree' }
-          Write-Output "vcpkg $($lock.Commit), $($lock.Sources.Count) sources"
+          # Each overlay port (libheif and aom) checks the archive the lock
+          # pins for it, at the lock's version.
+          $overlays = @(Get-ChildItem -LiteralPath (Resolve-Path tools/grape-heif/vcpkg/ports).Path -Directory | Sort-Object Name)
+          $names = ($overlays | ForEach-Object { $_.Name }) -join ', '
+          if ($names -cne 'aom, libheif') { throw "the overlays are $names, not aom and libheif" }
+          foreach ($o in $overlays) {
+            $s = @($lock.Sources | Where-Object { $_.Port -ceq $o.Name })
+            if ($s.Count -ne 1) { throw "the lock has $($s.Count) sources for the $($o.Name) overlay, not one" }
+            if ((Get-PortSha512 (Join-Path $o.FullName 'portfile.cmake')) -cne $s[0].Sha512) { throw "the $($o.Name) overlay and the lock disagree on the SHA-512" }
+            if ((Get-PortVersion (Join-Path $o.FullName 'vcpkg.json')) -cne $s[0].Version) { throw "the $($o.Name) overlay and the lock disagree on the version" }
+          }
+          # BUILDINFO's tool lines, on a made-up downloads\tools.
+          $fake = Join-Path $env:RUNNER_TEMP 'heif-fake-vcpkg'
+          foreach ($d in 'downloads\tools\perl\5.42.2.1', 'downloads\tools\python\python-3.14.7-x64', 'downloads\tools\meson-1.9.0-abcdef', 'downloads\tools\cmake-3.31.10-windows') {
+            New-Item -ItemType Directory -Force -Path (Join-Path $fake $d) | Out-Null
+          }
+          $got = @(Get-DownloadedTools $fake) -join '|'
+          $expected = '  perl: downloads\tools\perl\5.42.2.1 (unknown)|  python: downloads\tools\python\python-3.14.7-x64 (unknown)|  meson: downloads\tools\meson-1.9.0-abcdef'
+          if ($got -cne $expected) { throw "Get-DownloadedTools gave $got" }
+          Write-Output "vcpkg $($lock.Commit), $($lock.Sources.Count) sources, overlays $names"
       - name: Build (vcpkg at the pin, sources checked first, then cargo)
         env:
           USE_CACHE: ${{ inputs.cache }}
@@ -155,7 +185,7 @@ jobs:
           $lines | ForEach-Object { Write-Output "  $_" }
           if ($lines[0] -cnotmatch ('^grape-heif version ' + [regex]::Escape($want['libheif']) + '-grape\.\d+ ')) { Bad "Banner line 1: $($lines[0])" }
           $tokens = @("$($lines[1])" -split ' ')
-          foreach ($t in "libheif=$($want['libheif'])", "libde265=$($want['libde265'])", "x265=$($want['x265'])", 'plugins=disabled', 'crt=static', 'protocol=1') {
+          foreach ($t in "libheif=$($want['libheif'])", "libde265=$($want['libde265'])", "x265=$($want['x265'])", "dav1d=$($want['dav1d'])", "aom=$($want['aom'])", 'plugins=disabled', 'crt=static', 'protocol=2') {
             if ($tokens -cnotcontains $t) { Bad "Banner line 2 lacks $t`: $($lines[1])" }
           }
 
@@ -175,9 +205,13 @@ jobs:
           $work = Join-Path $env:RUNNER_TEMP 'heif-probe'
           New-Item -ItemType Directory -Force -Path $work | Out-Null
           $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
-          $probe = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $probe = [ordered]@{ protocol = 2; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
           $answer = @($probe | & $exe --grape-heif-worker)
-          if ($LASTEXITCODE -ne 0 -or "$($answer[-1])" -notmatch '^\{"done":\{"caps":\{"decode":true,"encode":true,') { Bad "Probe with LIBHEIF_PLUGIN_PATH set: $($answer -join ' / ')" }
+          # Both formats both ways, from the codecs libheif has built in, and
+          # the pinned versions (D41).
+          $codec = "libheif $($want['libheif']) (libde265 $($want['libde265']), x265 $($want['x265']), dav1d $($want['dav1d']), aom $($want['aom']))"
+          $caps = '{"done":{"caps":{"heic":{"decode":true,"encode":true},"avif":{"decode":true,"encode":true},"codec":"' + $codec + '"}}}'
+          if ($LASTEXITCODE -ne 0 -or "$($answer[-1])" -cne $caps) { Bad "Probe with LIBHEIF_PLUGIN_PATH set: $($answer -join ' / ') (expected $caps)" }
           Remove-Item Env:LIBHEIF_PLUGIN_PATH
 
           # The DLLs it imports: Windows' own only (heic-spec J34; the first
@@ -191,7 +225,7 @@ jobs:
             $allowed = 'KERNEL32.dll', 'ADVAPI32.dll', 'ntdll.dll', 'bcryptprimitives.dll', 'bcrypt.dll', 'api-ms-win-core-synch-l1-2-0.dll', 'USERENV.dll', 'WS2_32.dll'
             foreach ($d in $deps) {
               if ($d -like 'vcruntime*' -or $d -like 'msvcp*' -or $d -like 'api-ms-win-crt-*' -or $d -like 'ucrtbase*') { Bad "grape-heif.exe needs the Visual C++ runtime ($d): it must be linked statically." }
-              elseif ($d -like 'heif*' -or $d -like 'libde265*' -or $d -like '*x265*') { Bad "grape-heif.exe loads ${d}: the codecs must be linked statically." }
+              elseif ($d -like 'heif*' -or $d -like 'libde265*' -or $d -like '*x265*' -or $d -like '*dav1d*' -or $d -like '*aom*') { Bad "grape-heif.exe loads ${d}: the codecs must be linked statically." }
               elseif ($allowed -notcontains $d) { Bad "grape-heif.exe imports $d, which isn't on the list." }
             }
           }
@@ -200,39 +234,106 @@ jobs:
           # build (heic-spec J35), line endings aside.
           $share = Join-Path $env:VCPKG_ROOT 'installed\x64-windows-static\share'
           function Text([string]$p) { [System.IO.File]::ReadAllText((Resolve-Path $p).Path).Replace("`r`n", "`n") }
-          foreach ($pair in @(@('libheif', 'libheif.txt'), @('x265', 'x265.txt'))) {
+          foreach ($pair in @(@('libheif', 'libheif.txt'), @('x265', 'x265.txt'), @('aom', 'aom.txt'))) {
             if ((Text "$share\$($pair[0])\copyright") -cne (Text "licenses/grape-heif/$($pair[1])")) { Bad "licenses/grape-heif/$($pair[1]) isn't vcpkg's $($pair[0]) copyright file." }
           }
-          $de265 = Text "$share\libde265\copyright"
-          foreach ($f in 'libde265.txt', 'libde265-win32cond.txt') {
-            if (-not $de265.Contains((Text "licenses/grape-heif/$f").TrimEnd())) { Bad "vcpkg's libde265 copyright file doesn't contain licenses/grape-heif/$f." }
+          # libde265's and dav1d's copyright files also hold a whole source
+          # file (win32cond.c, x86inc.asm); only its notice ships.
+          foreach ($pair in @(@('libde265', 'libde265.txt'), @('libde265', 'libde265-win32cond.txt'), @('dav1d', 'dav1d.txt'), @('dav1d', 'dav1d-x86inc.txt'))) {
+            if (-not (Text "$share\$($pair[0])\copyright").Contains((Text "licenses/grape-heif/$($pair[1])").TrimEnd())) { Bad "vcpkg's $($pair[0]) copyright file doesn't contain licenses/grape-heif/$($pair[1])." }
+          }
+          # dav1d's patent license isn't in vcpkg's copyright file: it must be
+          # doc/PATENTS of the dav1d archive this build compiled (D41).
+          $dav1dSha = @((Get-Content -Raw -LiteralPath tools/grape-heif/vcpkg.lock.json | ConvertFrom-Json).sources | Where-Object { $_.port -ceq 'dav1d' } | ForEach-Object { $_.sha512 })
+          $archive = @(Get-ChildItem -LiteralPath (Join-Path $env:VCPKG_ROOT 'downloads') -File -Filter '*.tar.gz' | Where-Object { $dav1dSha.Count -eq 1 -and (Get-FileHash -Algorithm SHA512 -LiteralPath $_.FullName).Hash.ToLowerInvariant() -ceq $dav1dSha[0] })
+          if ($archive.Count -ne 1) { Bad "vcpkg's downloads hold $($archive.Count) archives with dav1d's SHA-512, not one." } else {
+            $unpacked = Join-Path $env:RUNNER_TEMP 'heif-dav1d-source'
+            New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
+            & "$env:SystemRoot\System32\tar.exe" -xzf $archive[0].FullName -C $unpacked
+            $patents = @(Get-ChildItem -LiteralPath $unpacked -Directory | ForEach-Object { Join-Path $_.FullName 'doc\PATENTS' } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf })
+            if ($LASTEXITCODE -ne 0 -or $patents.Count -ne 1) { Bad "No one doc/PATENTS in $($archive[0].Name)." }
+            elseif ((Text $patents[0]) -cne (Text 'licenses/grape-heif/dav1d-PATENTS.txt')) { Bad "licenses/grape-heif/dav1d-PATENTS.txt isn't doc/PATENTS of $($archive[0].Name)." }
           }
           if ($script:bad -gt 0) { exit 1 }
           Write-Output 'Every check passed.'
           exit 0
-      - name: Write the HEIC test fixtures
+      # The HEIC and AVIF fixtures (heic-spec §5.6, D41), each sniffed as what
+      # its name says before it's written. ci.yml's heif-it jobs read them on
+      # Windows (grape-heif.exe) and macOS (ImageIO decodes the AVIF ones).
+      - name: Write the HEIC and AVIF test fixtures
         run: |
           $icc = 'C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm'
           if (-not (Test-Path -LiteralPath $icc -PathType Leaf)) { Write-Output "::error::$icc is missing."; exit 1 }
-          ./tools/grape-heif/target/release/grape-heif-fixtures.exe (Join-Path $env:RUNNER_TEMP 'heif-fixtures') --icc $icc
-          exit $LASTEXITCODE
-      # libheif's own limits come from its compiled-in defaults, so an
-      # inherited LIBHEIF_SECURITY_LIMITS=off changes nothing (Grape removes
-      # it too, heic-spec J38).
-      - name: A decode with LIBHEIF_SECURITY_LIMITS=off
+          $out = Join-Path $env:RUNNER_TEMP 'heif-fixtures'
+          ./tools/grape-heif/target/release/grape-heif-fixtures.exe $out --icc $icc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $names = 'opaque.heic', 'alpha.heic', 'rotate90.heic', 'grid.heic', 'odd.heic', 'icc.heic', 'truncated.heic', 'avci-brand.heic',
+            'opaque.avif', 'alpha.avif', 'odd-3x5.avif', 'deep.avif', 'grid.avif', 'icc.avif', 'damaged.avif'
+          $missing = @($names | Where-Object { -not (Test-Path -LiteralPath (Join-Path $out $_) -PathType Leaf) })
+          if ($missing.Count -gt 0) { Write-Output "::error::No $($missing -join ', ') among the fixtures."; exit 1 }
+          exit 0
+      # Through the worker, as Grape runs it: every AVIF fixture decodes to
+      # its size (dav1d, D41), a damaged one is refused, and the decoded
+      # pixels encode again as AVIF (libaom) and HEIC (x265). libheif's own
+      # limits come from its compiled-in defaults, so an inherited
+      # LIBHEIF_SECURITY_LIMITS=off changes nothing (Grape removes it too,
+      # heic-spec J38).
+      - name: Decodes and encodes through the worker, with LIBHEIF_SECURITY_LIMITS=off
         run: |
           $exe = (Resolve-Path tools/grape-heif/target/out/grape-heif.exe).Path
-          $work = Join-Path $env:RUNNER_TEMP 'heif-decode'
-          New-Item -ItemType Directory -Force -Path $work | Out-Null
-          $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
-          $source = Join-Path $env:RUNNER_TEMP 'heif-fixtures\opaque.heic'
-          $request = [ordered]@{ protocol = 1; workDir = $work; op = [ordered]@{ kind = 'decode'; source = $source }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $fixtures = Join-Path $env:RUNNER_TEMP 'heif-fixtures'
+          $script:bad = 0
+          $script:n = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          # Grape's limits (heif.rs, grape-heif-proto's Limits::for_encode).
+          function Limits([int]$Side) { [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = $Side; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 } }
+          # One request in a new work folder; returns the folder and the lines.
+          function Run($Op, [int]$Side, [string]$From) {
+            $script:n++
+            $work = Join-Path $env:RUNNER_TEMP "heif-worker-$($script:n)"
+            New-Item -ItemType Directory -Force -Path $work | Out-Null
+            if ($From) { Copy-Item -LiteralPath $From -Destination (Join-Path $work 'input.rgba') }
+            $request = [ordered]@{ protocol = 2; workDir = $work; op = $Op; limits = (Limits $Side) } | ConvertTo-Json -Compress -Depth 5
+            $lines = @($request | & $exe --grape-heif-worker)
+            [pscustomobject]@{ Work = $work; Code = $LASTEXITCODE; Last = "$($lines[-1])"; All = ($lines -join ' / ') }
+          }
           $env:LIBHEIF_SECURITY_LIMITS = 'off'
-          $answer = @($request | & $exe --grape-heif-worker)
-          $code = $LASTEXITCODE
-          $answer | ForEach-Object { Write-Output "  $_" }
-          if ($code -ne 0 -or "$($answer[-1])" -cne '{"done":{"width":128,"height":96,"channels":3}}') { Write-Output '::error::The decode with LIBHEIF_SECURITY_LIMITS=off failed.'; exit 1 }
-          if (-not (Test-Path -LiteralPath (Join-Path $work 'pixels.rgba') -PathType Leaf)) { Write-Output '::error::No pixels.rgba.'; exit 1 }
+          # icc.avif carries the sRGB profile the fixtures step gave it.
+          $iccLength = (Get-Item -LiteralPath 'C:\Windows\System32\spool\drivers\color\sRGB Color Space Profile.icm').Length
+          $decodes = [ordered]@{
+            'opaque.heic' = '{"done":{"width":128,"height":96,"channels":3}}'
+            'opaque.avif' = '{"done":{"width":128,"height":96,"channels":3}}'
+            'alpha.avif' = '{"done":{"width":64,"height":64,"channels":4}}'
+            'odd-3x5.avif' = '{"done":{"width":3,"height":5,"channels":3}}'
+            'deep.avif' = '{"done":{"width":64,"height":48,"channels":3}}'
+            'grid.avif' = '{"done":{"width":128,"height":128,"channels":3}}'
+            'icc.avif' = '{"done":{"width":64,"height":64,"channels":3,"iccBytes":' + $iccLength + '}}'
+          }
+          $pixels = $null
+          foreach ($name in $decodes.Keys) {
+            $r = Run ([ordered]@{ kind = 'decode'; source = (Join-Path $fixtures $name) }) 16888 $null
+            Write-Output "  ${name}: $($r.All)"
+            if ($r.Code -ne 0 -or $r.Last -cne $decodes[$name]) { Bad "Decoding $name gave $($r.Last), not $($decodes[$name])." }
+            elseif (-not (Test-Path -LiteralPath (Join-Path $r.Work 'pixels.rgba') -PathType Leaf)) { Bad "Decoding $name left no pixels.rgba." }
+            elseif ($name -ceq 'opaque.avif') { $pixels = Join-Path $r.Work 'pixels.rgba' }
+          }
+          $r = Run ([ordered]@{ kind = 'decode'; source = (Join-Path $fixtures 'damaged.avif') }) 16888 $null
+          Write-Output "  damaged.avif: $($r.All)"
+          if ($r.Code -ne 1 -or $r.Last -cnotmatch '^\{"error":\{"kind":"(damaged|noImage)",') { Bad "damaged.avif gave $($r.Last), not a damaged or noImage error." }
+          if ($null -eq $pixels) { Bad 'No pixels from opaque.avif to encode.' } else {
+            foreach ($e in @(@('avif', 16384, 'out.avif', 'ftypavif'), @('heic', 16888, 'out.heic', 'ftypheic'))) {
+              $r = Run ([ordered]@{ kind = 'encode'; format = $e[0] }) $e[1] $pixels
+              Write-Output "  encode $($e[0]): $($r.All)"
+              $file = Join-Path $r.Work $e[2]
+              if ($r.Code -ne 0 -or $r.Last -cnotmatch '^\{"done":\{"bytes":[1-9][0-9]*\}\}$' -or -not (Test-Path -LiteralPath $file -PathType Leaf)) { Bad "Encoding $($e[0]) gave $($r.Last)." }
+              else {
+                $head = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($file), 4, 8)
+                if ($head -cne $e[3]) { Bad "$($e[2]) starts with $head, not $($e[3])." }
+              }
+            }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          Write-Output 'Every decode and encode passed.'
           exit 0
       # GPL-3.0 section 6: the complete corresponding source travels with the
       # program. `shell: bash` is Git Bash (GNU tar); a bare bash from pwsh can

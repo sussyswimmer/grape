@@ -1,11 +1,13 @@
-//! `grape-heif.exe`, Grape's HEIC helper on Windows (DECISIONS D33).
+//! `grape-heif.exe`, Grape's image helper on Windows: HEIC and AVIF
+//! (DECISIONS D33, D41).
 //!
 //! Grape starts it as `grape-heif.exe --grape-heif-worker`, writes one
 //! request to its stdin and reads JSON lines from its stdout: the protocol in
-//! `crates/grape-heif-proto`. The codec is libheif with libde265 (decode) and
-//! x265 (encode), linked statically from vcpkg by `build.ps1`, with plugin
-//! loading compiled out. The program is GPL-3.0-or-later as a whole, so it
-//! only ever ships as this separate executable (golden rule 6).
+//! `crates/grape-heif-proto`. The codec is libheif with libde265 (HEIC
+//! decode), x265 (HEIC encode), dav1d (AVIF decode) and libaom (AVIF encode),
+//! linked statically from vcpkg by `build.ps1`, with plugin loading compiled
+//! out. The program is GPL-3.0-or-later as a whole, so it only ever ships as
+//! this separate executable (golden rule 6).
 //!
 //! `grape-heif.exe -hide_banner -version` prints the banner that Grape's
 //! bundling gate (`scripts/check-sidecars.mjs`, D25) and CI read.
@@ -62,7 +64,7 @@ fn main() -> ExitCode {
         }
         Mode::Usage => {
             eprintln!(
-                "grape-heif: Grape's HEIC helper. Grape runs it as `grape-heif {}`; `grape-heif -version` prints its version.",
+                "grape-heif: Grape's image helper (HEIC and AVIF). Grape runs it as `grape-heif {}`; `grape-heif -version` prints its version.",
                 grape_heif_proto::WORKER_FLAG
             );
             ExitCode::from(2)
