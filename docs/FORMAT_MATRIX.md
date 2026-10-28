@@ -8,7 +8,7 @@ The source of truth for *what Grape can do to which file*. `grape-core` encodes 
 
 1. Each input format maps to a fixed target list (tables below). A format never converts to itself.
 2. **Input-only formats** are never offered as targets: `rar`, `ppt`, `xls`, `rtf`, `rtfd`, `textClipping`.
-3. Formats are identified by the lowercased extension. `.tgz` / `.tar.gz` are treated as `gz` for naming. **[Grape]** Sniff magic bytes when the extension is missing or lies, and use `jpeg` → `jpg`, `tif` → `tiff`, `heif` → `heic`, `hif` → `heic`, `aif` → `aiff`, `htm` → `html`, `markdown` → `md`.
+3. Formats are identified by the lowercased extension. `.tgz` / `.tar.gz` are treated as `gz` for naming. **[Grape]** Sniff magic bytes when the extension is missing or lies, and use `jpeg` → `jpg`, `tif` → `tiff`, `heif` → `heic`, `hif` → `heic`, `svgz` → `svg`, `aif` → `aiff`, `htm` → `html`, `markdown` → `md`.
 4. Display names are uppercase extensions, except `gz` displays as **GZIP**.
 5. Converting to `gz` writes `name.tar.gz`. A single file or folder is tarred first.
 
