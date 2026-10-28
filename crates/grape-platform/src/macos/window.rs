@@ -45,6 +45,13 @@
 //! `set_visible_on_all_workspaces(false)` clears `CanJoinAllSpaces` from the
 //! collection behavior. tao's `set_ignore_cursor_events` only sets
 //! `ignoresMouseEvents` and leaves both alone.
+//!
+//! [`harden_window`] also turns `canHide` off, so `NSApp hide:` (the
+//! default menu's Hide, Cmd+H, which the app keeps for Close Window's
+//! Cmd+W) leaves these four windows on screen and they can still be
+//! ordered front while Grape is hidden. Only Settings hides. tao never
+//! turns `canHide` back on (it only turns it off, when it hides the Dock
+//! icon).
 
 use std::ffi::c_void;
 use std::panic::AssertUnwindSafe;
@@ -116,6 +123,12 @@ pub struct PanelShown {
 /// app. The level stays below 500: any higher and it would cover the image
 /// the user is dragging.
 ///
+/// It also turns `canHide` off for every role, so Hide (Cmd+H, `NSApp
+/// hide:`) leaves the window alone: an Accessory app has no Dock icon to
+/// unhide it from, and while Grape is hidden a window that can hide stays
+/// off screen even after `orderFrontRegardless`, so the next wheel, toast,
+/// panel or shelf would never appear.
+///
 /// For [`WindowRole::Shelf`] it also sets the `Closable` style bit, which
 /// tao leaves off a window without decorations: with it, the default
 /// menu's Close Window (Cmd+W) is a close request instead of a beep. No
@@ -143,6 +156,7 @@ pub unsafe fn harden_window(ns_window: *mut c_void, role: WindowRole) -> Result<
         window.setLevel(role.level());
         window.setCollectionBehavior(behavior);
         window.setHidesOnDeactivate(false);
+        window.setCanHide(false);
         if role == WindowRole::Shelf {
             let responder = window.firstResponder();
             window.setStyleMask(window.styleMask() | NSWindowStyleMask::Closable);
@@ -152,7 +166,7 @@ pub unsafe fn harden_window(ns_window: *mut c_void, role: WindowRole) -> Result<
         }
     }))
     .map_err(|_| PlatformError::Os {
-        context: "setting the window's level and collection behavior",
+        context: "setting the window's level, collection behavior and hiding",
         code: NO_CODE,
     })
 }
@@ -216,7 +230,7 @@ pub unsafe fn show_panel(ns_window: *mut c_void, frame: Rect) -> Result<PanelSho
 /// Hides a tool panel (`orderOut`). If it was the key window and Grape is
 /// still the active app, it hands activation back to the app with
 /// `back_to_pid` when that one is still running. Returns whether it did.
-/// Never `NSApp.hide`, which would hide the overlay and the toast too.
+/// Never `NSApp.hide`, which would hide Settings too.
 ///
 /// # Safety
 /// As [`harden_window`].
@@ -343,10 +357,11 @@ fn order_out_and_hand_back(
     })
 }
 
-/// The window's level, collection behavior, whether it's the key window
-/// and whether Grape is the active app, for a log line. For example
-/// `level 101 (pop-up menu), behavior 0x151 CanJoinAllSpaces|Stationary|
-/// IgnoresCycle|FullScreenAuxiliary, key no, app active no`.
+/// The window's level, collection behavior, whether it's the key window,
+/// whether Grape is the active app and whether Hide (Cmd+H) hides the
+/// window, for a log line. For example `level 101 (pop-up menu), behavior
+/// 0x151 CanJoinAllSpaces|Stationary|IgnoresCycle|FullScreenAuxiliary, key
+/// no, app active no, hides no`.
 ///
 /// # Safety
 /// As [`harden_window`].
@@ -358,12 +373,13 @@ pub unsafe fn describe_window(ns_window: *mut c_void) -> String {
             let behavior = window.collectionBehavior();
             let active = NSApplication::sharedApplication(mtm).isActive();
             format!(
-                "level {level} ({}), behavior {:#x} {}, key {}, app active {}",
+                "level {level} ({}), behavior {:#x} {}, key {}, app active {}, hides {}",
                 level_name(level),
                 behavior.bits(),
                 behavior_names(behavior),
                 yes_no(window.isKeyWindow()),
                 yes_no(active),
+                yes_no(window.canHide()),
             )
         }
         Err(err) => format!("no window to describe: {err}"),
