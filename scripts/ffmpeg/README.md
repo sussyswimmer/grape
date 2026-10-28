@@ -49,10 +49,10 @@ For `windows-x86_64`, also:
 
 ```
 sudo apt-get install --no-install-recommends gcc-mingw-w64-x86-64-win32 \
-  binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
+  g++-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
 ```
 
-The compiler must use the win32 thread model, which keeps winpthreads (and its DLL) out of the exe. The exe links parts of the mingw-w64 runtime (v11.0.1 in Ubuntu 24.04): if the image's version changes, change `runtime_sources` in `sources.json` to match, and `licenses/ffmpeg/mingw-w64-runtime.txt`. The script checks. If `x86_64-w64-mingw32-gcc` points at the posix variant: `sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32`.
+libvpx compiles one C++ file (`vp9/ratectrl_rtc.cc`, which FFmpeg doesn't link), so the C++ compiler is needed too. Both compilers must use the win32 thread model, which keeps winpthreads (and its DLL) out of the exe. The exe links parts of the mingw-w64 runtime (v11.0.1 in Ubuntu 24.04): if the image's version changes, change `runtime_sources` in `sources.json` to match, and `licenses/ffmpeg/mingw-w64-runtime.txt`. The script checks. If `x86_64-w64-mingw32-gcc` or `-g++` points at the posix variant: `sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32`, and the same for `g++`.
 
 **macOS:** the Xcode Command Line Tools (`xcode-select --install`), then `brew install nasm meson ninja pkgconf python`. nasm is for `macos-x86_64` only; the rest for both. curl, tar and bzip2 come with macOS.
 

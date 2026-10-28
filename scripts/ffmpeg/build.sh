@@ -180,14 +180,17 @@ case "$target" in
   *x86_64) need nasm ;;
 esac
 if [ -n "$cross" ]; then
-  for tool in ar ranlib strip nm windres objdump; do
+  # g++ for libvpx's one C++ file (vp9/ratectrl_rtc.cc, not linked).
+  for tool in g++ ar ranlib strip nm windres objdump; do
     need "$cross-$tool"
   done
   # Only the win32 thread model keeps winpthreads out of the exe.
   # (sed, not grep -q, which would cut gcc's output short under pipefail)
-  model=$("$cc" -v 2>&1 | sed -n 's/^Thread model: //p')
-  [ "$model" = "win32" ] ||
-    fail "$cc doesn't use the win32 thread model. On Debian or Ubuntu: sudo update-alternatives --set $cc /usr/bin/$cc-win32"
+  for compiler in "$cc" "$cross-g++"; do
+    model=$("$compiler" -v 2>&1 | sed -n 's/^Thread model: //p')
+    [ "$model" = "win32" ] ||
+      fail "$compiler doesn't use the win32 thread model. On Debian or Ubuntu: sudo update-alternatives --set $compiler /usr/bin/$compiler-win32"
+  done
 fi
 if [ "$host_os" = "Darwin" ]; then
   need xcrun
@@ -865,7 +868,8 @@ first_line() { # command...; its first output line, or "?"
       if command -v dpkg-query >/dev/null 2>&1; then
         # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
         echo "  packages: $(dpkg-query -W -f '${Package} ${Version}, ' gcc-mingw-w64-x86-64-win32 \
-          mingw-w64-x86-64-dev binutils-mingw-w64-x86-64 2>/dev/null | sed 's/, $//')"
+          g++-mingw-w64-x86-64-win32 mingw-w64-x86-64-dev binutils-mingw-w64-x86-64 2>/dev/null |
+          sed 's/, $//')"
       fi
       ;;
     linux-*)
