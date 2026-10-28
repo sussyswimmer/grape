@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use common::{assert_no_leftovers, TestDir};
 use grape_core::{
     plan, DirSnapshot, Format, ItemKind, JobOutput, Operation, OutputLocation, PlanError,
-    SelectionItem, Settings,
+    SelectionItem, Settings, ToolKey,
 };
 use grape_engines::build_selection;
 
@@ -455,4 +455,153 @@ fn a_drop_from_or_into_the_fallback_reads_it() {
     assert!(!job.used_fallback);
     assert_eq!(job.output, JobOutput::File(fallback.join("photo 2.jpg")));
     assert_no_leftovers(&fallback);
+}
+
+/// The fallback's snapshot as `build_selection` took it on every drop
+/// before it became lazy, written out here so the old behaviour stays
+/// reachable: none for an empty path; a present path listed and probed;
+/// a missing one writable when its nearest existing ancestor is a folder
+/// that passes the probe.
+fn eager_fallback(fallback: &Path) -> DirSnapshot {
+    if fallback.as_os_str().is_empty() {
+        return DirSnapshot::default();
+    }
+    let present = |path: &Path| fs::symlink_metadata(path).is_ok();
+    if present(fallback) {
+        let Ok(entries) = fs::read_dir(fallback) else {
+            return DirSnapshot::default();
+        };
+        let names: Vec<String> = entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        return DirSnapshot::new(names, probe(fallback));
+    }
+    let ancestor = fallback.ancestors().skip(1).find(|dir| present(dir));
+    let writable = ancestor.is_some_and(|dir| dir.is_dir() && probe(dir));
+    DirSnapshot::new(Vec::<String>::new(), writable)
+}
+
+/// Creates a file in `dir` and deletes it again, as the real probe does.
+fn probe(dir: &Path) -> bool {
+    let path = dir.join(".grape-probe-by-hand");
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+    {
+        Ok(file) => {
+            drop(file);
+            fs::remove_file(&path).is_ok()
+        }
+        Err(_) => false,
+    }
+}
+
+#[test]
+fn the_lazy_fallback_plans_exactly_like_the_eager_one() {
+    let dir = TestDir::new("fallback-same-plans");
+    let file = |path: PathBuf| {
+        fs::write(&path, b"x").unwrap();
+        path
+    };
+    let folder = |path: PathBuf| {
+        fs::create_dir_all(&path).unwrap();
+        path
+    };
+    let photos = folder(dir.join("photos"));
+    let a = file(photos.join("a.png"));
+    let b = file(photos.join("b.png"));
+    file(photos.join("a.jpg"));
+    let more = folder(dir.join("more"));
+    let c = file(more.join("c.png"));
+    let pdf = file(folder(dir.join("docs")).join("doc.pdf"));
+    // Source folders that aren't writable: a missing one, and a file.
+    let gone = dir.join("gone").join("d.png");
+    let blocker = file(dir.join("blocked"));
+    let blocked = blocker.join("e.png");
+    let downloads = folder(dir.join("Downloads"));
+    let grape = folder(downloads.join("Grape"));
+    // Names a plan into the fallback must step around.
+    for name in ["a.jpg", "a 2.jpg", "d.jpg", "e.jpg", "inside.png", "doc"] {
+        file(grape.join(name));
+    }
+    let converted = folder(dir.join("Converted"));
+    file(converted.join("a.jpg"));
+
+    let fallbacks = [
+        grape.clone(),
+        downloads.join("Missing"),
+        dir.join("Nowhere").join("Grape"),
+        blocker.clone(),
+        // A source folder as the fallback.
+        photos.clone(),
+        PathBuf::new(),
+    ];
+    let ops = [
+        Operation::convert(Format::Jpg),
+        Operation::tool(ToolKey::CreatePdf),
+        Operation::convert(Format::Png),
+    ];
+    let (mut plans, mut read, mut unread, mut fell_back) = (0, 0, 0, 0);
+    for fallback in &fallbacks {
+        let inside = fallback.join("inside.png");
+        let drops = [
+            vec![],
+            vec![a.clone()],
+            vec![a.clone(), b.clone(), c.clone()],
+            vec![c.clone(), gone.clone(), a.clone()],
+            vec![blocked.clone()],
+            // No parent folder.
+            vec![PathBuf::from("f.png")],
+            vec![inside.clone()],
+            vec![a.clone(), inside.clone()],
+            vec![pdf.clone()],
+        ];
+        let outputs = [
+            OutputLocation::NextToSource,
+            OutputLocation::Folder(converted.clone()),
+            OutputLocation::Folder(dir.join("Missing output")),
+            OutputLocation::Folder(fallback.clone()),
+        ];
+        for output in outputs {
+            let settings = Settings {
+                output,
+                ..Settings::new(fallback)
+            };
+            for paths in &drops {
+                let lazy = build_selection(paths, &settings);
+                let eager_snapshot = eager_fallback(fallback);
+                // Where the lazy one read it, it read the same.
+                let lazy_snapshot = &lazy.dirs[fallback];
+                if *lazy_snapshot != DirSnapshot::default() {
+                    assert_eq!(*lazy_snapshot, eager_snapshot, "{paths:?}, {settings:?}");
+                    read += 1;
+                } else if eager_snapshot != DirSnapshot::default() {
+                    unread += 1;
+                }
+                let eager = lazy.clone().with_dir(fallback.clone(), eager_snapshot);
+                for op in &ops {
+                    let planned = plan(&lazy, op, &settings);
+                    assert_eq!(
+                        planned,
+                        plan(&eager, op, &settings),
+                        "{op:?} for {paths:?}, {settings:?}"
+                    );
+                    plans += 1;
+                    if let Ok(planned) = planned {
+                        fell_back += planned.jobs.iter().filter(|j| j.used_fallback).count();
+                    }
+                }
+            }
+        }
+    }
+    // Both sides were reached: read and left unread, and plans that fell back.
+    assert_eq!(plans, 6 * 4 * 9 * 3);
+    assert!(
+        read > 0 && unread > 0 && fell_back > 0,
+        "{read} {unread} {fell_back}"
+    );
+    for folder in [&dir.path, &photos, &more, &downloads, &grape, &converted] {
+        assert_no_leftovers(folder);
+    }
 }
