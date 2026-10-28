@@ -266,13 +266,14 @@ pub(super) fn stripped<'a>(
 /// art: each image attachment a copy turned into a video track, which comes
 /// back without the cover-art mark, a still image ([`STILL_CODECS`]) of one
 /// frame. How that shows: an MP4 or MOV counts the frames
-/// ([`StreamInfo::frames`]); an MKV doesn't, but the track keeps the
-/// attachment's MIME type ([`Tags::image_tracks`]). A track of more than one
-/// frame is always video, and so is a camera's MJPEG track, which has no
-/// MIME type. Only beside a video that isn't one, so a cover that is the
-/// only video stays.
+/// ([`StreamInfo::frames`]), so there a track of more than one frame is
+/// always video; an MKV counts none, but the track keeps the attachment's
+/// MIME type ([`Tags::image_tracks`]), which a camera's MJPEG track hasn't.
+/// Only beside a video that isn't one, so a cover that is the only video
+/// stays. An M4A keeps no video at all, so there each such track is the
+/// cover art it drops.
 pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> {
-    if !matches!(to, Format::Mp4 | Format::Mov | Format::Mkv) {
+    if !matches!(to, Format::Mp4 | Format::Mov | Format::Mkv | Format::M4a) {
         return Vec::new();
     }
     let one_frame = |s: &StreamInfo| match s.frames {
@@ -284,7 +285,7 @@ pub(super) fn copied_covers(to: Format, probe: &Probe, tags: &Tags) -> Vec<u32> 
         .iter()
         .filter(|s| s.kind == StreamKind::Video && !s.attached_pic)
         .partition(|s| is_still(s) && one_frame(s));
-    if videos.is_empty() {
+    if videos.is_empty() && to != Format::M4a {
         return Vec::new();
     }
     covers.iter().map(|s| s.index).collect()
@@ -852,7 +853,7 @@ fn is_still(stream: &StreamInfo) -> bool {
 
 /// Codecs of still images, which a video track rarely is but cover art
 /// copied into one is.
-const STILL_CODECS: [&str; 5] = ["png", "mjpeg", "bmp", "webp", "gif"];
+const STILL_CODECS: [&str; 6] = ["png", "mjpeg", "bmp", "webp", "gif", "tiff"];
 
 /// The streams Compress on a video keeps, in the source's order: the
 /// first video that isn't cover art (encoded), every audio track, and what
@@ -1494,10 +1495,20 @@ pub(super) mod tests {
                 );
             }
         }
-        // An M4A leaves out every video by its own rule.
+        // An M4A leaves out every video by its own rule, and says which of
+        // them was a cover, even with no other video.
         let m4a = probe_of("mov,mp4,m4a,3gp,3g2,mj2", typed(Some(1)).streams);
         assert_eq!(indexes(Format::M4a, &m4a, &none), [1]);
-        assert!(copied_covers(Format::M4a, &m4a, &none).is_empty());
+        assert_eq!(copied_covers(Format::M4a, &m4a, &none), [2]);
+        let mut cover_only = m4a.clone();
+        cover_only.streams.remove(0);
+        assert_eq!(copied_covers(Format::M4a, &cover_only, &none), [2]);
+        // A copied TIFF cover in an MKV, which FFmpeg's demuxer counts as
+        // cover art when it's attached.
+        assert_eq!(
+            copied_covers(Format::Mkv, &mkv(["h264", "tiff"]), &copied),
+            [2]
+        );
     }
 
     #[test]
