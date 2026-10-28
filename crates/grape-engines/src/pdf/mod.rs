@@ -1,5 +1,7 @@
 //! Grape's PDF engine, slice 1 (DECISIONS D29): PDF → JPG, PNG, TXT and
-//! MD, and the Split PDF, Merge PDFs and Remove Metadata tools.
+//! MD, and the Split PDF, Merge PDFs and Remove Metadata tools. And images
+//! → PDF (D37), which parse no PDF and so run in Grape's own process
+//! ([`create`]).
 //!
 //! - **The PDF work runs in a worker process.** PDFium (C++, through
 //!   `pdfium-render`) and lopdf parse untrusted files. A fault in either one
@@ -21,13 +23,17 @@
 //!   app and the test binary use them). Everything else is crate-private.
 
 mod copy;
+pub(crate) mod create;
+mod flate;
 pub mod heap;
+mod jpeg;
 mod meta;
 mod protocol;
 mod render;
 mod run;
 mod text;
 mod worker;
+mod writer;
 
 #[cfg(feature = "pdf-it")]
 pub mod it;

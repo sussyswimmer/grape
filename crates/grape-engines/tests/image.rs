@@ -978,7 +978,6 @@ fn a_missing_source_is_a_read_error() {
 fn unsupported_targets_write_nothing() {
     for (to, message) in [
         (Format::Avif, "PNG to AVIF isn't in this build yet."),
-        (Format::Pdf, "PNG to PDF isn't in this build yet."),
         (Format::Heic, "PNG to HEIC isn't in this build yet."),
     ] {
         let dir = TestDir::new("unsupported");

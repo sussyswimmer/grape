@@ -230,11 +230,12 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
 /// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); audio and video
 /// among each other (104) with `ffmpeg` and `ffprobe`; HEIC to and from JPG,
-/// PNG, WebP, TIFF and BMP with `heif` (10). Tools: Extract
-/// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
-/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`. Pure: it
-/// doesn't check that the sidecar files are there; [`run_job`] fails
-/// cleanly if one is missing.
+/// PNG, WebP, TIFF and BMP with `heif` (10); JPG, PNG, WebP, TIFF and BMP
+/// to PDF (5), and HEIC to PDF with `heif` (1). Tools: Extract Archive on
+/// ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs and Remove
+/// Metadata on PDFs with `pdfium` and `pdf_worker`. Pure: it doesn't check
+/// that the sidecar files are there; [`run_job`] fails cleanly if one is
+/// missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
         && formats.iter().all(|from| match (op, *from) {
@@ -261,6 +262,8 @@ enum Engine {
     Media,
     /// HEIC, in a helper process ([`heif`]).
     Heif,
+    /// Images → PDF in Grape's own process (`pdf::create`).
+    PdfCreate,
 }
 
 /// The engine that converts `from` to `to` with these sidecars, if this
@@ -275,6 +278,8 @@ fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engin
         Some(Engine::Archive)
     } else if pdf::supports(from, to) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         Some(Engine::Pdf)
+    } else if to == Format::Pdf && pdf::create::reads(from, sidecars) {
+        Some(Engine::PdfCreate)
     } else if media::supports(from, to) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
     } else if heif::supports(from, to) && sidecars.heif.is_some() {
@@ -339,6 +344,9 @@ pub fn run_job(
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
                 Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Heif) => heif::convert(job, src, dest, from, to, ctx, progress),
+                Some(Engine::PdfCreate) => {
+                    pdf::create::convert(job, src, dest, from, ctx, progress)
+                }
                 None => Err(not_yet_supported(job, Some(from))),
             }
         }

@@ -1,5 +1,6 @@
-//! HEIC ⇄ JPG, PNG, WebP, TIFF and BMP through Grape's HEIC helper, a
-//! separate process (DECISIONS D33). Lane A's module, by agreement with
+//! HEIC ⇄ JPG, PNG, WebP, TIFF and BMP (and HEIC's pixels for
+//! `pdf::create`) through Grape's HEIC helper, a separate process
+//! (DECISIONS D33). Lane A's module, by agreement with
 //! lane B, who owns this crate.
 //!
 //! The helper is `grape-heif.exe` (libheif) on Windows and
@@ -18,6 +19,8 @@
 //!   working set ([`image::pixels_fit`]) is stopped there. The pixels are
 //!   read once, into the one buffer `pixels_fit` counted, and published by
 //!   [`image::publish_pixels`] (no EXIF, so nothing is rotated twice).
+//!   That decode half ([`decode_pixels`]) also serves HEIC → PDF
+//!   (`pdf::create`, D37), through [`Decoder`].
 //! - **Raster → HEIC:** the raster engine decodes the source
 //!   ([`image::decode`], EXIF orientation applied), its size is checked
 //!   against one HEVC picture's ([`Limits`]), and its 8-bit RGB or RGBA rows
@@ -245,6 +248,51 @@ pub(crate) enum Decoded {
     /// The file isn't HEIF at all: the raster engine reads it
     /// (FORMAT_MATRIX rule 3). Nothing was started.
     NotHeif,
+}
+
+/// Grape's HEIC helper and the bounds a job holds it to, for an engine
+/// that needs a HEIC's pixels rather than a raster file (`pdf::create`).
+pub(crate) struct Decoder {
+    launch: Launch,
+    limits: Limits,
+}
+
+impl Decoder {
+    /// The helper in the app's sidecars, if it found one, with Grape's
+    /// limits.
+    pub(crate) fn from_sidecars(sidecars: &crate::SidecarPaths) -> Option<Decoder> {
+        let program = sidecars.heif.as_deref()?;
+        Some(Decoder {
+            launch: Launch::heif_helper(program),
+            limits: Limits::default(),
+        })
+    }
+
+    /// This helper and these limits (the tests' fake helper).
+    #[cfg(test)]
+    pub(crate) fn new(launch: Launch, limits: Limits) -> Decoder {
+        Decoder { launch, limits }
+    }
+
+    /// Decodes `src` as [`decode_pixels`] does, its pixels held to what
+    /// converting them to `fit` may use ([`image::pixels_fit`]). The
+    /// helper's progress goes to `progress` within `span`.
+    pub(crate) fn decode(
+        &self,
+        src: &Path,
+        names: &Names,
+        fit: Format,
+        cancel: &CancelToken,
+        span: (f32, f32),
+        progress: &mut dyn FnMut(f32),
+    ) -> Result<Decoded, GrapeError> {
+        let run = Run {
+            launch: &self.launch,
+            limits: &self.limits,
+            cancel,
+        };
+        decode_pixels(src, names, fit, &run, span, progress)
+    }
 }
 
 /// The decode half of HEIC → anything: `src`'s `ftyp` is sniffed (not HEIF
@@ -893,7 +941,7 @@ fn io_detail(e: &io::Error) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! The engine with the test binary itself as a fake helper: it runs
     //! only [`fake_helper`] (`--exact … --ignored`) with [`FAKE`] set to a
     //! mode, and serves the request with `grape_heif_proto::serve` and
@@ -943,7 +991,7 @@ mod tests {
     /// A fake HEIC file: [`FTYP`], `FAKE`, the width and height (u32 LE),
     /// the channels, the ICC profile's length (u32 LE), the profile, the
     /// rows.
-    fn fake_heic(
+    pub(crate) fn fake_heic(
         width: u32,
         height: u32,
         channels: u8,
@@ -1181,7 +1229,7 @@ mod tests {
     }
 
     /// The test binary as a fake helper in `mode`.
-    fn fake(mode: &str) -> Launch {
+    pub(crate) fn fake(mode: &str) -> Launch {
         Launch {
             program: std::env::current_exe().unwrap(),
             args: [
@@ -1202,7 +1250,7 @@ mod tests {
 
     /// A helper that doesn't exist: a job that starts it fails with
     /// "couldn't start", so success proves nothing was started.
-    fn nowhere() -> Launch {
+    pub(crate) fn nowhere() -> Launch {
         Launch {
             program: std::env::temp_dir().join(format!("grape-no-heif-helper-{}", unique_suffix())),
             args: Vec::new(),
@@ -1553,7 +1601,8 @@ mod tests {
             assert!(!crate::supports(&convert(raster), Some(Format::Heic)));
             assert!(!crate::supports(&convert(Format::Heic), Some(raster)));
         }
-        // Over every pair, the helper adds exactly the ten.
+        // Over every pair, the helper adds exactly the ten, and HEIC → PDF
+        // (pdf::create, D37).
         let count = |sidecars: &SidecarPaths| {
             Format::ALL
                 .into_iter()
@@ -1561,7 +1610,17 @@ mod tests {
                 .filter(|&(from, to)| crate::supports_with(&convert(to), &[Some(from)], sidecars))
                 .count()
         };
-        assert_eq!(count(&with_heif), count(&SidecarPaths::default()) + 10);
+        assert_eq!(count(&with_heif), count(&SidecarPaths::default()) + 11);
+        assert!(crate::supports_with(
+            &convert(Format::Pdf),
+            &[Some(Format::Heic)],
+            &with_heif
+        ));
+        assert!(!crate::supports_with(
+            &convert(Format::Pdf),
+            &[Some(Format::Heic)],
+            &SidecarPaths::default()
+        ));
 
         // Without the helper, run_job refuses before reading anything.
         let case = case(
