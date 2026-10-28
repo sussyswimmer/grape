@@ -21,7 +21,8 @@ src/
   imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
                     strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
                     and png_compress.rs (PNG, lossless), scale.rs (Compress's scaling and its peak); mod.rs sniffs the
-                    content, which decides the code that runs
+                    content, which decides the code that runs. tiff/ (D28): read.rs (a TIFF's model, by seeking),
+                    write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);

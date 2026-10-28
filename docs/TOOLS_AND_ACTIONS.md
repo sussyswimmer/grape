@@ -15,7 +15,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 | Key | Wheel title | Name | Panel | Combine | Multi-OK | Tier | Engine (see ENGINES.md) |
 |---|---|---|---|---|---|---|---|
 | compress | COMPRESS | Compress | ✓ |  | ✓ | v1 (img/audio/video), v2 (pdf) | image (JPG, PNG) / FFmpeg (audio, video) / lopdf (v2) |
-| removeMetadata | METADATA | Remove Metadata | ✓ |  | ✓ | v1 | container strip (JPG PNG WebP GIF) / FFmpeg `-map_metadata -1 -c copy` / lopdf |
+| removeMetadata | METADATA | Remove Metadata | ✓ |  | ✓ | v1 | container strip (JPG PNG WebP GIF TIFF) / FFmpeg `-map_metadata -1 -c copy` / lopdf |
 | editImage | EDIT | Edit Photo | ✓ |  |  | v2 | image pipeline |
 | annotateImage | ANNOTATE | Annotate Photo | ✓ |  |  | v2 | canvas in UI → PNG |
 | frameImage | ADD BG | Add Background | ✓ |  |  | v2 | image pipeline |
@@ -48,7 +48,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 - **Audio Channels** is Mono / Stereo, starting at Mono every time.
 - **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
 - **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder. Its panel opens once Grape's PDF library is found (D35).
-- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); on PDFs, on JPG, PNG, WebP and GIF (no helper needed), and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26); images and media say "No metadata found" when they had none.
+- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); on PDFs, on JPG, PNG, WebP, GIF and TIFF (no helper needed; TIFF D28), and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26); images and media say "No metadata found" when they had none.
 
 ## File actions
 

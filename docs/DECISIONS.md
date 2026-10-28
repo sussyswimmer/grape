@@ -1016,9 +1016,9 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - an allow-list of auxiliary-image XMP;
   - compacting HEIC;
   - scaling a 48 MP HEIC quietly at High.
-- **Status 2026-10-28:** designed; no pair runs yet. Each pair's commit adds its line here.
-- **Tested:** nothing yet.
-- **Needs the PC and a Mac:** `TESTING.md` → "Image tools, slice 2, M4 (D28)", added with the pairs.
+- **Status 2026-10-28:** designed. Remove Metadata on TIFF runs (39 tool pairs with every sidecar); the other four pairs are coming. Each pair's commit adds its line here.
+- **Tested:** Remove Metadata on TIFF: unit tests on files the tests build (the reader in both byte orders and kinds, every cap, a cut at every byte; the writer, which the tiff crate decodes back to the same samples; the plan's report, IRB filter, DCF Exif, refusals and self-check), and `tests/image_tools.rs` through `run_job`. On Linux, 28 real files from Pillow 12.3 and ImageMagick 6.9.12 (LZW, Deflate with and without a predictor, PackBits, JPEG, none; II and MM; classic and BigTIFF; tiles; up to 10 pages; 8 and 16-bit and float; SubIFDs grafted on; Exif with GPS and Interop, XMP, IPTC, a Photoshop IRB, ICC, GeoTIFF, the DCF signal and the text tags): the ImageJ one refused, the 27 others with every page pixel-identical in both readers and every block byte-identical, only the kept tags, the IRB down to its kept resources, the DCF Exif where it belonged, and none of the dropped text. A 144 MB file took 1.6 s (debug build) in 11 MiB. Not yet on the PC or a Mac.
+- **Needs the PC and a Mac:** `TESTING.md` → "Image tools, slice 2, M4 (D28)", which grows with the pairs.
 - **Open for Maxwell** (each has the default above):
   - HEIC Compress drops gain maps, depth, mattes and thumbnails, so HDR photos come out SDR. Or refuse such files, or carry the gain map later?
   - A 48 MP HEIC at High is refused with "Try Balanced". Or scale it quietly to one HEVC picture until grid encoding lands?

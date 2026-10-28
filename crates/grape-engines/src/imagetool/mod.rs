@@ -1,13 +1,12 @@
-//! Grape's own image tools (D26), in Rust with no sidecar: Remove Metadata
-//! on JPEG, PNG, WebP and GIF by stripping the container, which keeps the
-//! image data byte for byte, and Compress on JPEG and PNG.
+//! Grape's own image tools (D26, D28), in Rust with no sidecar: Remove
+//! Metadata on JPEG, PNG, WebP, GIF and TIFF by stripping the container,
+//! which keeps the image data byte for byte, and Compress on JPEG and PNG.
 //!
 //! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG.
 //! - [`scale`]: scaling a picture down for Compress, and what that holds.
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
-//!   ([`jpeg`], [`png`], [`webp`], [`gif`]).
+//!   ([`jpeg`], [`png`], [`webp`], [`gif`], and [`tiff`]'s rewrite).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
-//! - [`tiff`]: a TIFF's model, for the TIFF tools (D28).
 //!
 //! The content decides which code runs, not the name ([`Kind`]): a PNG
 //! named `.jpg` is stripped and compressed as a PNG, and keeps its name.
@@ -20,8 +19,6 @@ mod png;
 mod png_compress;
 mod scale;
 mod strip;
-// The TIFF tools that use it come next.
-#[cfg_attr(not(test), allow(dead_code))]
 mod tiff;
 mod webp;
 
@@ -76,6 +73,7 @@ enum Kind {
     Png,
     Webp,
     Gif,
+    Tiff,
 }
 
 impl Kind {
@@ -89,6 +87,8 @@ impl Kind {
             Some(Kind::Webp)
         } else if gif::sniff(head) {
             Some(Kind::Gif)
+        } else if tiff::sniff(head) {
+            Some(Kind::Tiff)
         } else {
             None
         }
