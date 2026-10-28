@@ -130,7 +130,9 @@ fn strips(n: u32, at: At) -> Vec<u8> {
 #[test]
 fn remove_metadata_on_a_tiff_of_a_million_strips_holds_two_models_and_a_half_at_most() {
     let _turn = turn();
-    let n = 1 << 20;
+    // Just past a power of two, where a list grown by doubling would
+    // hold twice what it needs.
+    let n = (1 << 20) + 2;
     let dir = TestDir::new("tiff-heap");
     // The model holds 16 bytes a strip. The self-check holds the plan's
     // and the output's, and little else; when the output's strips are out

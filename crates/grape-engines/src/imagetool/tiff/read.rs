@@ -364,7 +364,7 @@ impl Tiff {
         ifds.sort_unstable();
         ifds.dedup();
         let ifds_apart = ifds.windows(2).all(|w| w[1].0 >= w[0].1);
-        if ifds_apart && clear_of(in_order(|| self.listed()), &ifds) {
+        if ifds_apart && clear_of(InOrder::new(|| self.listed()).iter(), &ifds) {
             Ok(())
         } else {
             Err(Error::Broken("blocks or IFDs overlap".into()))
@@ -374,20 +374,31 @@ impl Tiff {
 
 /// The blocks that `listed` (blocks with bytes, given afresh each call)
 /// holds more than once, sorted, so that a writer writes each once.
+/// They're counted before they're collected, so the list is held at its
+/// size, never grown beside the sorted references.
 pub(crate) fn repeats<'a, I>(listed: impl Fn() -> I) -> Vec<Block>
 where
     I: Iterator<Item = &'a Block> + 'a,
 {
-    let mut shared: Vec<Block> = Vec::new();
+    let blocks = InOrder::new(listed);
+    let mut shared = Vec::with_capacity(each_repeat(blocks.iter()).count());
+    shared.extend(each_repeat(blocks.iter()).copied());
+    shared
+}
+
+/// Each block that `blocks` (in the file's order, a repeat in a row)
+/// holds more than once, once.
+fn each_repeat<'a>(blocks: impl Iterator<Item = &'a Block>) -> impl Iterator<Item = &'a Block> {
     let mut last = None;
-    for block in in_order(listed) {
-        if last == Some(block) && shared.last() != Some(block) {
-            shared.push(*block);
+    let mut said = None;
+    blocks.filter(move |&block| {
+        let first = last == Some(block) && said != Some(block);
+        if first {
+            said = Some(block);
         }
         last = Some(block);
-    }
-    shared.shrink_to_fit();
-    shared
+        first
+    })
 }
 
 /// The blocks `listed` gives, in the file's order, one that's listed more
@@ -395,20 +406,37 @@ where
 /// their order already, as writers lay them out (Grape's output among
 /// them); otherwise through a sorted list of references to them, never a
 /// copy.
-fn in_order<'a, I>(listed: impl Fn() -> I) -> Box<dyn Iterator<Item = &'a Block> + 'a>
+struct InOrder<'a, L> {
+    listed: L,
+    /// The references, sorted, when the blocks aren't listed in order.
+    sorted: Option<Vec<&'a Block>>,
+}
+
+impl<'a, L, I> InOrder<'a, L>
 where
+    L: Fn() -> I,
     I: Iterator<Item = &'a Block> + 'a,
 {
-    if listed()
-        .zip(listed().skip(1))
-        .all(|(a, b)| a == b || apart(a, b))
-    {
-        return Box::new(listed());
+    fn new(listed: L) -> Self {
+        let in_order = listed()
+            .zip(listed().skip(1))
+            .all(|(a, b)| a == b || apart(a, b));
+        let sorted = (!in_order).then(|| {
+            let mut sorted: Vec<&Block> = Vec::with_capacity(listed().count());
+            sorted.extend(listed());
+            sorted.sort_unstable();
+            sorted
+        });
+        InOrder { listed, sorted }
     }
-    let mut sorted: Vec<&Block> = Vec::with_capacity(listed().count());
-    sorted.extend(listed());
-    sorted.sort_unstable();
-    Box::new(sorted.into_iter())
+
+    /// The blocks, in the file's order, afresh each call.
+    fn iter(&self) -> Box<dyn Iterator<Item = &'a Block> + '_> {
+        match &self.sorted {
+            Some(sorted) => Box::new(sorted.iter().copied()),
+            None => Box::new((self.listed)()),
+        }
+    }
 }
 
 /// Whether block `b` starts where block `a` ends, or after.
