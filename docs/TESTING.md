@@ -40,6 +40,21 @@
 
 In Phase 1 (Windows first), run every unmarked item and every **win:** item on the Windows PC, either with `pnpm tauri dev` or with the installer from CI (`PLATFORM_WINDOWS.md` → "Running a CI build"; the "Debug: flash overlay" item needs `pnpm tauri dev`). The **mac:** items need a Mac with the DMG from CI (`PLATFORM_MACOS.md` → "Running a CI build"); the Mac port started early (D18).
 
+First session: a short pass through the parts nobody has tried by hand yet, in this order, the safety checks first. Each step names the section below that has its full expectations. Use scratch copies, and check each original with `Get-FileHash` (`shasum -a 256` on a Mac) before and after. The keys are Shift, Ctrl and Alt on Windows and Shift, Command and Control on a Mac.
+1. Install the latest CI build: `PLATFORM_WINDOWS.md` → "Running a CI build" (on a Mac, `PLATFORM_MACOS.md` → "Running a CI build"). Grape's icon is in the notification area (the menu bar on a Mac), and the welcome card opens Settings ("App shell", "Settings, M6").
+2. Without tapping a key, drag a file from one folder to another → Explorer (Finder) does what it always does: Grape stays out of the way.
+3. **Shift-drop never deletes the source**, ten times ("Drag + wheel", the bold item). If a source ever goes missing, stop there and send the log.
+4. Drag a file, tap Shift, press Esc → the wheel closes and the drag ends ("Drag + wheel").
+5. Pause Grape from the tray (the menu bar) → drags behave as if Grape weren't installed; then turn Pause off ("Robustness").
+6. Shift-drop `photo.png` on JPG → `photo.jpg` appears next to it, and a second drop makes `photo 2.jpg` ("Wheel look and image conversions").
+7. One drop of each kind: Shift-drop a HEIC or AVIF photo on JPG, an MP4 on MP3, a PDF on PNG and an SVG on PNG, and Ctrl-drop (Command-drop) a ZIP on EXTRACT ("HEIC, D33", "Audio and video", "PDF", "Archives", "SVG").
+8. Ctrl-drop (Command-drop) two JPGs on COMPRESS → the panel opens; Run → the toast says how much smaller ("Tool panels", "Image tools").
+9. Alt-drop (Control-drop) on COPY, then paste in a folder → copies appear. Alt-drop on MOVE → the folder picker opens in front of Explorer (Finder) ("File actions").
+10. In Settings, give Tools the Shift key → Conversions takes Tools' key in its place, and the next drag uses the new keys ("Settings, M6").
+11. Quit from the tray (the menu bar) → no Grape process is left.
+
+What to send back with any failure: what you did, and Grape's log, `%LOCALAPPDATA%\io.github.sussyswimmer.grape\logs\Grape.log` (on a Mac, `~/Library/Logs/io.github.sussyswimmer.grape/Grape.log`). Grape's own lines name no files or folders.
+
 App shell
 - [ ] win: the tray menu shows Settings…, Pause Grape and Quit. Settings opens the settings window; Pause toggles its check mark and the tooltip.
 - [ ] win: Quit ends the process (no Grape process left in Task Manager).
