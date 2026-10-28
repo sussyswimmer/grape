@@ -60,12 +60,15 @@ const UNIQUE_ATTEMPTS: usize = 8;
 /// of a helper whose stdout has closed.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
-/// Puts a helper process Grape just started into an OS container (D33):
-/// a Job Object on Windows, set by the app ([`set_contain`]).
+/// Puts a process Grape just started into an OS container (D33): a Job
+/// Object on Windows, set by the app ([`set_contain`]). The image helper
+/// and the SVG worker, and `ffmpeg` and `ffprobe` (D22).
 pub trait Contain: Send + Sync + fmt::Debug {
-    /// Contains `child`, which hasn't been given any work yet. `max_memory`
-    /// caps its committed memory, where the OS can. An `Err` says why, for
-    /// the log; the engine then kills the helper and fails the job.
+    /// Contains `child` right after its start: before a helper's request is
+    /// written, and before FFmpeg's output is read. `max_memory` caps its
+    /// committed memory, where the OS can. An `Err` says why, for the log.
+    /// A helper is then killed and its job fails (the container is its
+    /// memory cap); FFmpeg runs on uncontained (`media/run.rs`, D22).
     fn contain(&self, child: &Child, max_memory: Option<u64>)
         -> Result<Box<dyn Contained>, String>;
 }

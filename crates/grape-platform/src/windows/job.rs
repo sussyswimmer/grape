@@ -69,13 +69,13 @@ impl JobGuard {
     /// `child` is already in a job, the new one is nested under it and sets
     /// no UI limits, which nested jobs can't have.
     ///
-    /// Call it right after the spawn and before the helper is given any
-    /// work.
+    /// Call it right after the spawn: before a helper is given any work,
+    /// and before FFmpeg's output is read (the media engine, D22).
     ///
     /// # Errors
     /// [`PlatformError::Os`] if the job can't be made, configured or given
-    /// the process. The caller should then kill the helper: it isn't
-    /// contained (heic-spec J6).
+    /// the process. A helper's caller then kills it: it isn't contained
+    /// (heic-spec J6). FFmpeg's runs on without one (D22).
     pub fn assign(child: &Child, max_memory: Option<u64>) -> Result<JobGuard, PlatformError> {
         let process = HANDLE(child.as_raw_handle());
         let nested = in_a_job(process)?;

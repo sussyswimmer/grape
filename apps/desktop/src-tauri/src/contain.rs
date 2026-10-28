@@ -1,4 +1,4 @@
-//! Puts the helper processes Grape starts into an OS container (D33).
+//! Puts the processes Grape starts for a job into an OS container (D33).
 //!
 //! On Windows every image helper (`grape-heif.exe`) and every SVG worker
 //! (`Grape.exe --grape-svg-worker`, D39) runs in a Job Object of its own (`grape_platform::windows::job`): its memory is capped, it ends
@@ -11,7 +11,10 @@
 //! reaches it through the process-wide hook `grape_engines::set_contain`,
 //! which [`install`] sets once in setup, before any drop can run. The
 //! engine fails closed: a helper it can't contain is killed and its job
-//! says the helper couldn't start.
+//! says the helper couldn't start. Every `ffmpeg` and `ffprobe` run gets a
+//! job too (lane B's media engine, D22), with no memory cap: there the job
+//! only ends it with Grape, so a run that can't be contained runs on (it
+//! fails open), and the nested-job log line above covers it too.
 //!
 //! On macOS and elsewhere there's nothing to install: the image helper
 //! worker and the SVG worker (Grape itself) end on their own once Grape is
