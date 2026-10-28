@@ -364,7 +364,7 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
         Some(Engine::PdfCreate)
     } else if media::tools::runs_tool(tool, from) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
-    } else if imagetool::runs_tool(tool, from) {
+    } else if imagetool::runs_tool(tool, from, sidecars.heif.is_some()) {
         Some(Engine::ImageTool)
     } else {
         None

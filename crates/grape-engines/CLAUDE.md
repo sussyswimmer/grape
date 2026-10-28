@@ -20,7 +20,8 @@ src/
   image.rs          image crate (raster). publish_pixels and pixels_fit serve heif.rs and svg/; decode_stored serves Compress
   imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
                     strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
-                    and png_compress.rs (PNG, lossless)
+                    and png_compress.rs (PNG, lossless), scale.rs (Compress's scaling and its peak); mod.rs sniffs the
+                    content, which decides the code that runs
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);

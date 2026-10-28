@@ -16,12 +16,12 @@
 //!   or re-encode a 4:4:4 or gray one over quality 73. A subsampled (4:2:0)
 //!   JPEG Small wouldn't scale isn't sent there: its 4:4:4 output is
 //!   rarely smaller.
-//! - Scaling: a picture over twice the long side is first averaged down by
-//!   a whole factor (Grape's own loop, which a cancel stops at the next
-//!   row), then Lanczos3 takes it the rest of the way, so that step holds
-//!   and takes no more than for a picture of twice the long side. What the
-//!   steps hold together is checked against D16's limit before decoding
-//!   ([`peak`]).
+//! - Scaling ([`scale`]): a picture over twice the long side is first
+//!   averaged down by a whole factor (Grape's own loop, which a cancel
+//!   stops at the next row), then Lanczos3 takes it the rest of the way, so
+//!   that step holds and takes no more than for a picture of twice the long
+//!   side. What the steps hold together is checked against D16's limit
+//!   before decoding ([`peak`]).
 //! - Carried: the EXIF (PixelXDimension and PixelYDimension follow a
 //!   scale), the JFIF pixel density, the ICC profile, XMP and extended
 //!   XMP, IPTC (APP13) and comments. A JPEG with MPF or data after EOI (a
@@ -35,13 +35,11 @@ use std::path::Path;
 
 use grape_core::{CompressPreset, Format, Job};
 use image::codecs::jpeg::{JpegEncoder, PixelDensity, PixelDensityUnit};
-use image::imageops::FilterType;
-use image::{
-    ColorType, DynamicImage, GenericImageView, GrayImage, ImageEncoder, RgbImage, RgbaImage,
-};
+use image::{ColorType, DynamicImage, GenericImageView, ImageEncoder};
 
 use super::exif;
 use super::jpeg::{self, Header};
+use super::scale;
 use super::strip::Error;
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
@@ -77,120 +75,18 @@ fn small_does_more(long: u32, subsampled: bool, estimate: Option<u8>) -> bool {
     scales || (!subsampled && !leaves(CompressPreset::Small, long, estimate))
 }
 
-/// The whole factor a picture with a `long` side is averaged down by
-/// before Lanczos3 takes it to `cap`: none (1) unless it's over twice
-/// `cap`, and never below `cap`.
-fn shrink_factor(long: u64, cap: u64) -> u64 {
-    if long > 2 * cap {
-        long.div_ceil(2 * cap)
-    } else {
-        1
-    }
-}
-
-/// `w`×`h` fitted inside `cap`×`cap`, about as `resize` rounds it.
-fn fit(w: u64, h: u64, cap: u64) -> (u64, u64) {
-    let long = w.max(h).max(1);
-    (
-        (w * cap).div_ceil(long).max(1),
-        (h * cap).div_ceil(long).max(1),
-    )
-}
-
 /// What Compress holds at its peak for a `width`×`height` decoded picture
-/// of `bpp` bytes a pixel at `preset`, its steps one after another:
-/// - the decoded picture and its averaged copy;
-/// - the picture Lanczos3 starts from, its intermediate (`image` keeps one
-///   of 16 bytes a pixel, the source's width by the result's height) and
-///   the result;
-/// - the picture encoded, an RGB copy unless it's gray or RGB, and up to 2
-///   bytes a pixel of JPEG (quality 85 at 4:4:4 on noise is about 1.6), or
-///   1 for gray (about 0.7).
+/// of `bpp` bytes a pixel at `preset` ([`scale::peak`]): to encode, the
+/// picture, an RGB copy unless it's gray or RGB, and up to 2 bytes a pixel
+/// of JPEG (quality 85 at 4:4:4 on noise is about 1.6), or 1 for gray
+/// (about 0.7).
 fn peak(width: u32, height: u32, bpp: u64, preset: CompressPreset) -> u64 {
-    let (w, h) = (u64::from(width), u64::from(height));
-    let size = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp);
-    let copy = if bpp == 1 || bpp == 3 { 0 } else { 3 };
-    let jpeg = if bpp == 1 { 1 } else { 2 };
-    let encode = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp + copy + jpeg);
-    let long = w.max(h);
-    let Some(cap) = plan(preset).1.map(u64::from).filter(|&cap| long > cap) else {
-        return encode(w, h);
+    let encode = |w: u64, h: u64, bpp: u64| {
+        let copy = if bpp == 1 || bpp == 3 { 0 } else { 3 };
+        let jpeg = if bpp == 1 { 1 } else { 2 };
+        w.saturating_mul(h).saturating_mul(bpp + copy + jpeg)
     };
-    let k = shrink_factor(long, cap);
-    let (sw, sh) = (w.div_ceil(k), h.div_ceil(k));
-    let averaged = if k > 1 { size(sw, sh) } else { 0 };
-    let from = if k > 1 { averaged } else { size(w, h) };
-    let (nw, nh) = fit(sw, sh, cap);
-    let lanczos = sw.saturating_mul(nh).saturating_mul(16);
-    [
-        size(w, h).saturating_add(averaged),
-        from.saturating_add(lanczos).saturating_add(size(nw, nh)),
-        encode(nw, nh),
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(u64::MAX)
-}
-
-/// `src`, `w`×`h` pixels of `ch` 8-bit channels, with each `k`×`k` block
-/// averaged into one pixel (the last ones from what's left); `None` if
-/// cancelled, which is checked every output row.
-fn average(src: &[u8], w: u32, h: u32, ch: usize, k: u32, cancel: &CancelToken) -> Option<Vec<u8>> {
-    let (w, h, k) = (w as usize, h as usize, k as usize);
-    let (nw, nh) = (w.div_ceil(k), h.div_ceil(k));
-    let mut out = Vec::with_capacity(nw * nh * ch);
-    let mut sums = vec![0u32; nw * ch];
-    for oy in 0..nh {
-        if cancel.is_cancelled() {
-            return None;
-        }
-        sums.fill(0);
-        let rows = oy * k..((oy + 1) * k).min(h);
-        let tall = rows.len();
-        for y in rows {
-            let row = src.get(y * w * ch..(y + 1) * w * ch)?;
-            for (x, px) in row.chunks_exact(ch).enumerate() {
-                let at = x / k * ch;
-                for (c, &v) in px.iter().enumerate() {
-                    sums[at + c] += u32::from(v);
-                }
-            }
-        }
-        for ox in 0..nw {
-            let wide = ((ox + 1) * k).min(w) - ox * k;
-            let n = (wide * tall) as u32;
-            for c in 0..ch {
-                out.push(((sums[ox * ch + c] + n / 2) / n) as u8);
-            }
-        }
-    }
-    Some(out)
-}
-
-/// `img` averaged down by `k` ([`average`]); `None` if cancelled.
-fn shrink(img: DynamicImage, k: u32, cancel: &CancelToken) -> Option<DynamicImage> {
-    let (w, h) = img.dimensions();
-    let (nw, nh) = (w.div_ceil(k), h.div_ceil(k));
-    // `from_raw` is given exactly the buffer it wants.
-    match img {
-        DynamicImage::ImageLuma8(b) => {
-            GrayImage::from_raw(nw, nh, average(&b, w, h, 1, k, cancel)?)
-                .map(DynamicImage::ImageLuma8)
-        }
-        DynamicImage::ImageRgb8(b) => RgbImage::from_raw(nw, nh, average(&b, w, h, 3, k, cancel)?)
-            .map(DynamicImage::ImageRgb8),
-        DynamicImage::ImageRgba8(b) => {
-            RgbaImage::from_raw(nw, nh, average(&b, w, h, 4, k, cancel)?)
-                .map(DynamicImage::ImageRgba8)
-        }
-        // Not what a JPEG decodes to: an RGB copy first.
-        other => {
-            let rgb = other.to_rgb8();
-            drop(other);
-            RgbImage::from_raw(nw, nh, average(&rgb, w, h, 3, k, cancel)?)
-                .map(DynamicImage::ImageRgb8)
-        }
-    }
+    scale::peak(width, height, bpp, plan(preset).1, &encode)
 }
 
 /// Runs Compress at `preset` on the JPEG `src` (named as `from`) into
@@ -271,22 +167,7 @@ pub(crate) fn run(
     }
     progress(0.4);
     let (quality, cap) = plan(preset);
-    let img = match cap {
-        Some(cap) if img.width().max(img.height()) > cap => {
-            let long = u64::from(img.width().max(img.height()));
-            let k = u32::try_from(shrink_factor(long, u64::from(cap))).unwrap_or(u32::MAX);
-            let img = if k > 1 {
-                shrink(img, k, cancel).ok_or_else(|| crate::cancelled(src))?
-            } else {
-                img
-            };
-            if cancel.is_cancelled() {
-                return Err(crate::cancelled(src));
-            }
-            img.resize(cap, cap, FilterType::Lanczos3)
-        }
-        _ => img,
-    };
+    let img = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
@@ -425,6 +306,8 @@ fn splice(jpeg: Vec<u8>, segments: Vec<&[u8]>) -> Spliced<'_> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
+    use image::GrayImage;
+
     use super::*;
 
     #[test]
@@ -496,9 +379,9 @@ mod tests {
             assert!(p <= limit, "{w}x{h}x{bpp} {preset:?}: {p}");
         }
         // Over twice the cap: averaged by 2, then Lanczos3 from 6000 px.
-        assert_eq!(shrink_factor(12_000, 4096), 2);
-        assert_eq!(shrink_factor(8192, 4096), 1);
-        assert_eq!(shrink_factor(8193, 4096), 2);
+        assert_eq!(scale::shrink_factor(12_000, 4096), 2);
+        assert_eq!(scale::shrink_factor(8192, 4096), 1);
+        assert_eq!(scale::shrink_factor(8193, 4096), 2);
         // No scale: the picture, and up to 2 bytes a pixel of JPEG, or 1
         // for gray, so a gray picture up to the decode limit fits at High.
         assert_eq!(peak(100, 10, 3, High), 5000);
@@ -506,45 +389,12 @@ mod tests {
         assert!(peak(19_000, 19_000, 1, High) <= limit);
         // A 4:1 picture just over the cap: 16 bytes a pixel of 4097 by
         // its new height, besides the picture and its result.
-        let (nw, nh) = fit(4097, 1024, 4096);
+        let (nw, nh) = scale::fit(4097, 1024, 4096);
         assert_eq!((nw, nh), (4096, 1024));
         assert_eq!(
             peak(4097, 1024, 3, Balanced),
             4097 * 1024 * 3 + 4097 * 1024 * 16 + 4096 * 1024 * 3
         );
-    }
-
-    #[test]
-    fn averaging_takes_each_block_including_the_last_partial_ones() {
-        let cancel = CancelToken::default();
-        // 5×3 gray, by 2: blocks of 2×2, 1×2, 2×1 and 1×1.
-        let src: Vec<u8> = (0..15).map(|v| v * 10).collect();
-        let out = average(&src, 5, 3, 1, 2, &cancel).unwrap();
-        // (0+10+50+60)/4, (20+30+70+80)/4, (40+90)/2; (100+110)/2, ..., 140.
-        assert_eq!(out, [30, 50, 65, 105, 125, 140]);
-        // RGB keeps its channels apart.
-        let rgb = [10, 20, 30, 30, 40, 50];
-        assert_eq!(average(&rgb, 2, 1, 3, 2, &cancel).unwrap(), [20, 30, 40]);
-        cancel.cancel();
-        assert!(average(&src, 5, 3, 1, 2, &cancel).is_none());
-    }
-
-    #[test]
-    fn shrinking_keeps_gray_rgb_and_rgba_as_they_are() {
-        let cancel = CancelToken::default();
-        let rgb = RgbImage::from_raw(2, 1, vec![10, 20, 30, 30, 40, 50]).unwrap();
-        let out = shrink(DynamicImage::ImageRgb8(rgb.clone()), 2, &cancel).unwrap();
-        assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
-        let gray = GrayImage::from_raw(2, 1, vec![10, 30]).unwrap();
-        let out = shrink(DynamicImage::ImageLuma8(gray), 2, &cancel).unwrap();
-        assert_eq!(out.as_luma8().unwrap().as_raw(), &[20]);
-        let rgba = RgbaImage::from_raw(2, 1, vec![10, 20, 30, 40, 30, 40, 50, 60]).unwrap();
-        let out = shrink(DynamicImage::ImageRgba8(rgba), 2, &cancel).unwrap();
-        assert_eq!(out.as_rgba8().unwrap().as_raw(), &[20, 30, 40, 50]);
-        // Anything else is averaged as RGB.
-        let wide = DynamicImage::ImageRgb8(rgb).to_rgb16();
-        let out = shrink(DynamicImage::ImageRgb16(wide), 2, &cancel).unwrap();
-        assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
     }
 
     #[test]

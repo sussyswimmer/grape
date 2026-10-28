@@ -3,9 +3,13 @@
 //! image data byte for byte, and Compress on JPEG and PNG.
 //!
 //! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG.
+//! - [`scale`]: scaling a picture down for Compress, and what that holds.
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`]).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
+//!
+//! The content decides which code runs, not the name ([`Kind`]): a PNG
+//! named `.jpg` is stripped and compressed as a PNG, and keeps its name.
 
 mod compress;
 pub(crate) mod exif;
@@ -13,17 +17,24 @@ mod gif;
 mod jpeg;
 mod png;
 mod png_compress;
+mod scale;
 mod strip;
 mod webp;
 
+use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use grape_core::{Format, Job, ToolKey, ToolParams};
+use grape_heif_proto::SNIFF_BYTES;
 
 use crate::{EngineCtx, GrapeError, JobOutcome};
 
-/// True when this engine runs `tool` on a file named as `from`.
-pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
+/// True when this engine runs `tool` on a file named as `from`. `_heif`
+/// says whether this install has the HEIC helper (D33), as
+/// `archive::extracts` is told about bsdtar: no tool here needs it yet;
+/// Compress on HEIC will (D28).
+pub(crate) fn runs_tool(tool: ToolKey, from: Format, _heif: bool) -> bool {
     match tool {
         ToolKey::RemoveMetadata => strip::strips(from),
         ToolKey::Compress => compress::compresses(from),
@@ -45,19 +56,48 @@ pub(crate) fn run(
 ) -> Result<JobOutcome, GrapeError> {
     match tool {
         ToolKey::RemoveMetadata => strip::run(job, src, dest, from, ctx, progress),
-        // The content decides: a PNG named .jpg is compressed as a PNG.
-        ToolKey::Compress if is_png(src) => png_compress::run(job, src, dest, from, ctx, progress),
-        ToolKey::Compress => compress::run(job, src, dest, from, params.compress, ctx, progress),
+        ToolKey::Compress => match sniff(src) {
+            Some(Kind::Png) => png_compress::run(job, src, dest, from, ctx, progress),
+            // JPEG, or "isn't a readable …".
+            _ => compress::run(job, src, dest, from, params.compress, ctx, progress),
+        },
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
 
-/// Whether `src` starts as a PNG does (an unreadable file isn't: the JPEG
-/// path then says it can't be read).
-fn is_png(src: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0; 8];
-    std::fs::File::open(src)
-        .and_then(|mut f| f.read_exact(&mut head))
-        .is_ok_and(|()| &head == b"\x89PNG\r\n\x1a\n")
+/// The image containers the tools read, by a file's first bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Jpeg,
+    Png,
+    Webp,
+    Gif,
+}
+
+impl Kind {
+    /// The container `head` (a file's first bytes) starts.
+    fn of(head: &[u8]) -> Option<Kind> {
+        if jpeg::sniff(head) {
+            Some(Kind::Jpeg)
+        } else if png::sniff(head) {
+            Some(Kind::Png)
+        } else if webp::sniff(head) {
+            Some(Kind::Webp)
+        } else if gif::sniff(head) {
+            Some(Kind::Gif)
+        } else {
+            None
+        }
+    }
+}
+
+/// The container `src` starts, from its first [`SNIFF_BYTES`] bytes (what
+/// HEIF's sniff needs too); `None` for a file that can't be read, or that
+/// no tool here reads.
+fn sniff(src: &Path) -> Option<Kind> {
+    let mut head = Vec::with_capacity(SNIFF_BYTES);
+    File::open(src)
+        .and_then(|f| f.take(SNIFF_BYTES as u64).read_to_end(&mut head))
+        .ok()?;
+    Kind::of(&head)
 }

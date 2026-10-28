@@ -14,7 +14,7 @@ use std::path::Path;
 
 use grape_core::{Format, Job};
 
-use super::{gif, jpeg, png, webp};
+use super::{gif, jpeg, png, webp, Kind};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -74,32 +74,6 @@ pub(crate) fn more_after(r: &mut dyn BufRead, padding: &[u8]) -> Result<bool, Er
     }
 }
 
-/// The image containers Remove Metadata strips.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Container {
-    Jpeg,
-    Png,
-    Webp,
-    Gif,
-}
-
-impl Container {
-    /// The container `head` (the file's first bytes) starts.
-    fn sniff(head: &[u8]) -> Option<Container> {
-        if jpeg::sniff(head) {
-            Some(Container::Jpeg)
-        } else if png::sniff(head) {
-            Some(Container::Png)
-        } else if webp::sniff(head) {
-            Some(Container::Webp)
-        } else if gif::sniff(head) {
-            Some(Container::Gif)
-        } else {
-            None
-        }
-    }
-}
-
 /// The formats Remove Metadata runs on through this engine, by name; the
 /// content decides the container.
 pub(crate) fn strips(from: Format) -> bool {
@@ -138,18 +112,18 @@ pub(crate) fn run(
     let head = reader
         .fill_buf()
         .map_err(|e| read_error(&names, src, &ctx.cancel, e))?;
-    let Some(container) = Container::sniff(head) else {
+    let Some(kind) = Kind::of(head) else {
         return Err(names.decode_failed(format!("{}: not a JPEG, PNG, WebP or GIF", src.display())));
     };
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
     let mut writer = BufWriter::with_capacity(64 * 1024, Cancellable::new(out, &ctx.cancel));
-    let found = match container {
-        Container::Jpeg => jpeg::strip(&mut reader, &mut writer),
-        Container::Png => png::strip(&mut reader, &mut writer),
-        Container::Webp => webp::strip(&mut reader, &mut writer),
-        Container::Gif => gif::strip(&mut reader, &mut writer),
+    let found = match kind {
+        Kind::Jpeg => jpeg::strip(&mut reader, &mut writer),
+        Kind::Png => png::strip(&mut reader, &mut writer),
+        Kind::Webp => webp::strip(&mut reader, &mut writer),
+        Kind::Gif => gif::strip(&mut reader, &mut writer),
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
     let found = found.map_err(|e| {
@@ -202,5 +176,12 @@ impl<R: Read> Read for Counting<'_, R> {
             (self.progress)(done as f32);
         }
         Ok(n)
+    }
+}
+
+/// Seeking is passed through; what was read still counts.
+impl<R: Seek> Seek for Counting<'_, R> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
     }
 }
