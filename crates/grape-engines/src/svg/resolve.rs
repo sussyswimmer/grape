@@ -6,10 +6,15 @@
 //! `/dev/zero` read until memory runs out, and on Windows a UNC path that
 //! talks SMB (a network call in the conversion path, golden rule 3). So
 //! Grape's resolver ([`Budget::resolver`]) never resolves a string, and
-//! admits embedded data only within [`Budget`]'s bounds, which every nested
-//! tree shares (usvg's `from_data_nested` keeps the outer `resolve_data`
-//! and forces `resolve_string` off). usvg caches nothing: every reference,
-//! every `<use>` copy included, asks again and is counted again.
+//! admits embedded data only within [`Budget`]'s bounds. usvg caches
+//! nothing: every reference, every `<use>` copy included, asks again and is
+//! counted again.
+//!
+//! An embedded SVG is parsed the way the worker parses the file (UTF-8, no
+//! entity resolver, within what is left of the job's node limit) and drawn
+//! with this same resolver, so its own references are refused, counted and
+//! budgeted with the file's. usvg's `from_data_nested` isn't used: it
+//! parses with no node limit and drops a nested SVG's links uncounted.
 //!
 //! What is refused is counted once per distinct reference: an external
 //! href by a hash of its text, refused data by its length and a hash of
@@ -21,9 +26,10 @@ use std::collections::HashSet;
 use std::hash::Hasher;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use resvg::usvg::{self, ImageHrefResolver, ImageKind};
+use resvg::usvg::{self, roxmltree, FontResolver, ImageHrefResolver, ImageKind};
 
-use super::protocol::Limits;
+use super::protocol::{FailKind, Failure, Limits};
+use super::worker;
 
 /// How much of refused data is hashed to tell one from another.
 const HASHED_BYTES: usize = 4096;
@@ -42,6 +48,9 @@ pub(crate) struct Budget {
     max_side: u32,
     /// An embedded raster's pixels.
     max_pixels: u64,
+    /// The most XML nodes parsed in all: the file's own and every embedded
+    /// SVG's.
+    max_nodes: u32,
     /// What was admitted and refused so far.
     spent: Mutex<Spent>,
 }
@@ -53,12 +62,35 @@ struct Spent {
     nested: u32,
     /// Decoded bytes admitted.
     bytes: u64,
+    /// XML nodes parsed: the file's and the embedded SVGs'.
+    nodes: u64,
     /// One key per distinct refusal.
     refused: HashSet<u64>,
 }
 
 /// How usvg is told what embedded raster data is.
 type RasterKind = fn(Arc<Vec<u8>>) -> ImageKind;
+
+/// Why an embedded SVG isn't drawn.
+enum Unfit {
+    /// Over a limit (what's left of the node limit, roxmltree's attribute
+    /// or namespace limit, usvg's element or depth limit): refused and
+    /// counted.
+    TooLarge,
+    /// Not UTF-8, not XML, or not an SVG usvg draws: nothing to draw, as
+    /// for an embedded raster whose data is damaged past its header.
+    Unreadable,
+}
+
+impl From<Failure> for Unfit {
+    fn from(failure: Failure) -> Unfit {
+        if failure.kind == FailKind::TooLarge {
+            Unfit::TooLarge
+        } else {
+            Unfit::Unreadable
+        }
+    }
+}
 
 /// What a `data:` reference's MIME type says it is.
 enum Embedded {
@@ -76,6 +108,7 @@ impl Budget {
             max_data_bytes: limits.max_data_bytes,
             max_side: limits.max_embedded_side,
             max_pixels: limits.max_embedded_pixels,
+            max_nodes: limits.max_nodes,
             spent: Mutex::new(Spent::default()),
         }
     }
@@ -92,6 +125,14 @@ impl Budget {
         }
     }
 
+    /// Counts `doc`'s nodes against the node limit: the file's own XML
+    /// (the worker), then each embedded SVG's.
+    pub(crate) fn count_nodes(&self, doc: &roxmltree::Document) {
+        let nodes = u64::try_from(doc.descendants().count()).unwrap_or(u64::MAX);
+        let mut spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
+        spent.nodes = spent.nodes.saturating_add(nodes);
+    }
+
     /// How many distinct references were refused.
     pub(crate) fn left_out(&self) -> u32 {
         let spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
@@ -101,8 +142,9 @@ impl Budget {
     /// Embedded data of type `mime`, decoded: a PNG, JPEG, GIF or WebP
     /// whose header gives a size within the bounds (its kind taken from
     /// its content, as a browser sniffs it), or an SVG while nested SVGs
-    /// are within theirs, and either only while the job's decoded bytes
-    /// stay within theirs. Anything else is refused and counted.
+    /// and the job's XML nodes are within theirs ([`Budget::nested_tree`]),
+    /// and either only while the job's decoded bytes stay within theirs.
+    /// Anything else is refused and counted.
     pub(crate) fn admit(
         &self,
         mime: &str,
@@ -127,16 +169,61 @@ impl Budget {
                 Some(kind(data))
             }
             Embedded::Svg => {
-                // usvg's `svgz` feature is off, so it would refuse this
-                // anyway; Grape never inflates embedded data.
+                // Grape never inflates embedded data (usvg's `svgz`
+                // feature is off too).
                 if data.starts_with(&GZIP) || !self.take(&data, true) {
                     return self.refuse_data(&data);
                 }
-                usvg::Tree::from_data_nested(&data, options)
-                    .ok()
-                    .map(ImageKind::SVG)
+                match self.nested_tree(&data, options) {
+                    Ok(tree) => Some(ImageKind::SVG(tree)),
+                    Err(Unfit::TooLarge) => self.refuse_data(&data),
+                    Err(Unfit::Unreadable) => None,
+                }
             }
         }
+    }
+
+    /// An embedded SVG's tree, parsed the way the worker parses the file:
+    /// UTF-8 ([`worker::decode_text`]), no entity resolver and at most
+    /// what is left of the node limit ([`worker::parse_svg_xml`]). It is
+    /// drawn with `outer`'s settings, as usvg's `from_data_nested` would
+    /// (no resources folder, no style sheet, the fonts it started with),
+    /// but with this resolver, so its links are refused and counted and
+    /// its data shares the budget.
+    fn nested_tree(&self, data: &[u8], outer: &usvg::Options) -> Result<usvg::Tree, Unfit> {
+        let text = worker::decode_text(data)?;
+        let doc =
+            worker::parse_svg_xml(text, self.nodes_left()).map_err(|e| worker::xml_failure(&e))?;
+        self.count_nodes(&doc);
+        let options = usvg::Options {
+            resources_dir: None,
+            dpi: outer.dpi,
+            font_size: outer.font_size,
+            languages: outer.languages.clone(),
+            shape_rendering: outer.shape_rendering,
+            text_rendering: outer.text_rendering,
+            image_rendering: outer.image_rendering,
+            default_size: outer.default_size,
+            image_href_resolver: self.resolver(),
+            fontdb: outer.fontdb.clone(),
+            // A resolver can't be cloned: these forward to `outer`'s.
+            font_resolver: FontResolver {
+                select_font: Box::new(|font, db| (outer.font_resolver.select_font)(font, db)),
+                select_fallback: Box::new(|c, used, db| {
+                    (outer.font_resolver.select_fallback)(c, used, db)
+                }),
+            },
+            style_sheet: None,
+            ..usvg::Options::default()
+        };
+        usvg::Tree::from_xmltree(&doc, &options).map_err(|e| Unfit::from(worker::tree_failure(e)))
+    }
+
+    /// What is left of the node limit.
+    fn nodes_left(&self) -> u32 {
+        let spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
+        let left = u64::from(self.max_nodes).saturating_sub(spent.nodes);
+        u32::try_from(left).unwrap_or(self.max_nodes)
     }
 
     /// The kind a raster is drawn as, from its content, if its header's
@@ -164,11 +251,14 @@ impl Budget {
     }
 
     /// Counts `data` against the byte budget (and, for an SVG, the nested
-    /// SVGs), or changes nothing and says no.
+    /// SVGs, while any of the node limit is left), or changes nothing and
+    /// says no.
     fn take(&self, data: &[u8], svg: bool) -> bool {
         let mut spent = self.spent.lock().unwrap_or_else(PoisonError::into_inner);
         let bytes = spent.bytes.saturating_add(data.len() as u64);
-        if bytes > self.max_data_bytes || (svg && spent.nested >= self.max_nested_svgs) {
+        let svg_over =
+            spent.nested >= self.max_nested_svgs || spent.nodes >= u64::from(self.max_nodes);
+        if bytes > self.max_data_bytes || (svg && svg_over) {
             return false;
         }
         spent.bytes = bytes;
@@ -401,6 +491,73 @@ mod tests {
         long.push(1);
         assert!(admit(&budget, "text/plain", long).is_none());
         assert_eq!(budget.left_out(), 4);
+    }
+
+    #[test]
+    fn an_embedded_svgs_links_are_refused_and_counted() {
+        // A design tool's nested export: an embedded SVG that links a
+        // file, and embeds another SVG that links one more.
+        let budget = Budget::new(&Limits::DEFAULT);
+        let innermost = svg(r#"<image href="../private/secret.png" width="4" height="4"/>"#);
+        let inner = svg(&format!(
+            r#"<image href="photo.png" width="4" height="4"/><image href="data:image/svg+xml;base64,{}" width="4" height="4"/>"#,
+            base64_png(&innermost)
+        ));
+        assert_eq!(kind_name(admit(&budget, "image/svg+xml", inner)), "svg");
+        assert_eq!(budget.left_out(), 2);
+        assert_eq!(budget.spent.lock().unwrap().nested, 2);
+    }
+
+    /// An SVG of `nodes` XML nodes, roxmltree's count: the document, the
+    /// `<svg>` element and `nodes - 2` groups.
+    fn nodes(nodes: usize) -> Vec<u8> {
+        svg(&"<g/>".repeat(nodes - 2))
+    }
+
+    #[test]
+    fn embedded_svgs_share_the_files_node_limit() {
+        let limits = Limits {
+            max_nodes: 10,
+            ..Limits::DEFAULT
+        };
+        let budget = Budget::new(&limits);
+        // The file's own 4 nodes leave 6.
+        let file = nodes(4);
+        let file = roxmltree::Document::parse(std::str::from_utf8(&file).unwrap()).unwrap();
+        budget.count_nodes(&file);
+        assert_eq!(budget.nodes_left(), 6);
+        // 7 nodes are too many: refused and counted, and nothing parsed is
+        // kept.
+        assert!(admit(&budget, "image/svg+xml", nodes(7)).is_none());
+        assert_eq!(budget.left_out(), 1);
+        assert_eq!(budget.nodes_left(), 6);
+        // 6 fit, and use the rest up.
+        assert_eq!(kind_name(admit(&budget, "image/svg+xml", nodes(6))), "svg");
+        assert_eq!(budget.nodes_left(), 0);
+        // Then no embedded SVG is parsed, and the refusal spends nothing.
+        let bytes = budget.spent.lock().unwrap().bytes;
+        assert!(admit(&budget, "image/svg+xml", nodes(2)).is_none());
+        assert_eq!(budget.left_out(), 2);
+        let spent = budget.spent.lock().unwrap();
+        assert_eq!((spent.nested, spent.bytes), (2, bytes));
+        drop(spent);
+        // The node limit is the XML's: an embedded raster still fits.
+        assert!(admit(&budget, "image/png", png_header(4, 4)).is_some());
+    }
+
+    #[test]
+    fn a_damaged_embedded_svg_draws_nothing_and_isnt_counted() {
+        // As an embedded raster damaged past its header: there is nothing
+        // to draw, and nothing was refused.
+        let budget = Budget::new(&Limits::DEFAULT);
+        for data in [
+            &b"<svg xmlns='http://www.w3.org/2000/svg'"[..],
+            &b"\xff\xfe<\0s\0v\0g\0/\0>\0"[..],
+            &b"<html/>"[..],
+        ] {
+            assert!(admit(&budget, "image/svg+xml", data.to_vec()).is_none());
+        }
+        assert_eq!(budget.left_out(), 0);
     }
 
     #[test]

@@ -24,7 +24,8 @@
 //! 4. Parse the XML with roxmltree: DTDs allowed (Illustrator's and
 //!    Inkscape's files carry the SVG 1.1 DOCTYPE), no entity resolver (so
 //!    no `SYSTEM` entity or external DTD is ever fetched), at most
-//!    `maxNodes` nodes. Entity amplification is left to the heap bound.
+//!    `maxNodes` nodes, which embedded SVGs share ([`Budget`]). Entity
+//!    amplification is left to the heap bound.
 //! 5. Load the system's fonts, only when the document can draw text: an
 //!    element named `text` in the SVG namespace or in none, or an embedded
 //!    SVG (which may hold text).
@@ -273,6 +274,8 @@ fn execute<W: Write>(request: &Request, lines: &Lines<W>) -> Result<Done, Failur
     lines.progress(0.3);
 
     let budget = Budget::new(limits);
+    // Embedded SVGs get what the file's own XML leaves of the node limit.
+    budget.count_nodes(&doc);
     let tree = {
         let options = options(&budget, fonts);
         usvg::Tree::from_xmltree(&doc, &options).map_err(tree_failure)?
@@ -409,8 +412,9 @@ fn gunzip(bytes: Vec<u8>, limits: &Limits) -> Result<Vec<u8>, Failure> {
     Ok(text)
 }
 
-/// The SVG's text: UTF-8, a byte order mark allowed.
-fn decode_text(bytes: &[u8]) -> Result<&str, Failure> {
+/// The SVG's text: UTF-8, a byte order mark allowed. An embedded SVG's
+/// too ([`Budget`]).
+pub(super) fn decode_text(bytes: &[u8]) -> Result<&str, Failure> {
     if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
         return Err(Failure::new(FailKind::NotSvg, "UTF-16 text isn't read"));
     }
@@ -426,12 +430,22 @@ fn decode_text(bytes: &[u8]) -> Result<&str, Failure> {
 /// The XML, parsed with DTDs allowed, no entity resolver and at most
 /// `maxNodes` nodes.
 fn parse_xml<'a>(text: &'a str, limits: &Limits) -> Result<roxmltree::Document<'a>, Failure> {
+    parse_svg_xml(text, limits.max_nodes).map_err(|e| xml_failure(&e))
+}
+
+/// `text` parsed as every SVG in a job is, the file's own and embedded
+/// ones ([`Budget`]): DTDs allowed, no entity resolver (no `SYSTEM` entity
+/// or external DTD is ever fetched), at most `nodes_limit` nodes.
+pub(super) fn parse_svg_xml(
+    text: &str,
+    nodes_limit: u32,
+) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
     let options = roxmltree::ParsingOptions {
         allow_dtd: true,
-        nodes_limit: limits.max_nodes,
+        nodes_limit,
         entity_resolver: None,
     };
-    roxmltree::Document::parse_with_options(text, options).map_err(|e| xml_failure(&e))
+    roxmltree::Document::parse_with_options(text, options)
 }
 
 /// True when the document can draw text: an element named `text` in the
@@ -480,7 +494,7 @@ fn options(budget: &Budget, fonts: fontdb::Database) -> usvg::Options<'_> {
 }
 
 /// usvg's error in the worker's words.
-fn tree_failure(e: usvg::Error) -> Failure {
+pub(super) fn tree_failure(e: usvg::Error) -> Failure {
     match e {
         usvg::Error::ParsingFailed(e) => xml_failure(&e),
         usvg::Error::ElementsLimitReached => {
@@ -497,7 +511,7 @@ fn tree_failure(e: usvg::Error) -> Failure {
 
 /// roxmltree's error by its kind and position, never with the names or
 /// text it quotes. Over a limit is `tooLarge`; the rest `notSvg`.
-fn xml_failure(e: &roxmltree::Error) -> Failure {
+pub(super) fn xml_failure(e: &roxmltree::Error) -> Failure {
     use roxmltree::Error as E;
     let what = match e {
         E::NodesLimitReached => {
@@ -1000,6 +1014,46 @@ mod tests {
         assert!(!done);
         assert_eq!(last_failure(&lines).kind, FailKind::TooLarge);
         assert!(!dir.work().join(PIXELS).exists());
+    }
+
+    #[test]
+    fn an_embedded_svgs_links_are_counted_in_done() {
+        let dir = TestDir::new();
+        // As design tools nest an export: percent-encoded, linking a file.
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">
+            <image href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='50'%20height='50'%3E%3Cimage%20href='/no/such/photo.png'%20width='50'%20height='50'/%3E%3C/svg%3E" width="50" height="50"/></svg>"#;
+        let (done, lines) = serve_on(&dir, svg, Limits::DEFAULT);
+        assert!(done, "{lines:?}");
+        match lines.last() {
+            Some(Message::Done(done)) => assert_eq!(done.left_out, 1),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_embedded_svg_past_the_node_limit_is_left_out() {
+        // The file is 3 nodes (the document, `svg`, `image`), so a limit of
+        // 8 leaves 5 for the embedded SVG: 2 plus its groups.
+        let with_groups = |groups: usize| {
+            format!(
+                "<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10'><image href=\"data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20width='10'%20height='10'%3E{}%3C/svg%3E\" width='10' height='10'/></svg>",
+                "%3Cg/%3E".repeat(groups)
+            )
+        };
+        let limits = Limits {
+            max_nodes: 8,
+            ..Limits::DEFAULT
+        };
+        let dir = TestDir::new();
+        for (groups, left_out) in [(3, 0), (4, 1)] {
+            let (done, lines) = serve_on(&dir, with_groups(groups).as_bytes(), limits);
+            assert!(done, "{groups}: {lines:?}");
+            match lines.last() {
+                Some(Message::Done(done)) => assert_eq!(done.left_out, left_out, "{groups}"),
+                other => panic!("{other:?}"),
+            }
+            fs::remove_file(dir.work().join(PIXELS)).unwrap();
+        }
     }
 
     #[test]
