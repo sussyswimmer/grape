@@ -234,7 +234,7 @@ Audio and video, M3 (D22, D24; win; the CI installer carries Grape's own FFmpeg,
 - [ ] win: Shift-drop a phone video (MOV) on MP4 → it plays upright in Media Player and Photos; the toast's bar moves while it converts.
 - [ ] win: an MKV with H.264 video on MP4 → done in seconds (copied, not re-encoded), and it plays.
 - [ ] win: a video on GIF → the GIF animates in a browser; a video on MP3 → only the sound.
-- [ ] win: no black console window flashes during any conversion.
+- [ ] win: no black console window flashes during any conversion, and no `conhost.exe` comes and goes with `ffmpeg.exe` in Task Manager (Process Explorer, if it's around: `ffmpeg.exe` and `ffprobe.exe` have no child process).
 - [ ] win: start converting a long video to WEBM, then quit Grape from the tray → no `ffmpeg.exe` is left in Task Manager and no `.grape-tmp-…` file stays next to the video.
 - [ ] win: with Windows Security → Ransomware protection → Controlled folder access on, convert a video in Documents → either it works or the toast says Grape couldn't save; never a half-written file.
 

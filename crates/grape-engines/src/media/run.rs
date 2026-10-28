@@ -50,9 +50,14 @@ pub(crate) const MAX_PROBE_OUTPUT: usize = 4 * 1024 * 1024;
 /// and how much of a longer line [`probe_lines`] hands over.
 pub(crate) const MAX_LINE: usize = 4 * 1024;
 
-/// `CREATE_NO_WINDOW`: no console window flashes up for a child of a GUI app.
+/// `DETACHED_PROCESS`: the child gets no console at all, so no console
+/// window flashes up and Windows starts no `conhost.exe` for it. Its stdio
+/// are a null handle and pipes, so it needs none. `CREATE_NO_WINDOW` would
+/// still give these console programs a hidden console, whose host is a
+/// second process, one more than a Job Object that allows one would hold
+/// (D33 chose this flag for `grape-heif.exe` for that reason).
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// `BELOW_NORMAL_PRIORITY_CLASS`: an encode doesn't starve the desktop.
 #[cfg(windows)]
@@ -110,8 +115,8 @@ pub(crate) struct Finished {
 
 /// A [`Command`] for the sidecar at `program`: stdin empty, stdout and
 /// stderr piped, `FFREPORT` removed so a user's setting can't make FFmpeg
-/// write a report file. On Windows the child gets no console window and
-/// below-normal priority.
+/// write a report file. On Windows the child gets no console at all
+/// ([`DETACHED_PROCESS`]) and below-normal priority.
 pub(crate) fn command(program: &Path, args: &[OsString]) -> Result<Command, RunError> {
     if !program.is_absolute() {
         return Err(RunError::NotAbsolute(program.to_path_buf()));
@@ -126,7 +131,7 @@ pub(crate) fn command(program: &Path, args: &[OsString]) -> Result<Command, RunE
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
+        command.creation_flags(DETACHED_PROCESS | BELOW_NORMAL_PRIORITY_CLASS);
     }
     Ok(command)
 }
