@@ -1,8 +1,8 @@
 //! The pure rules under the Windows layer: which app Terminal starts, what
 //! Share leaves out, how it spells paths for the sheet, what the sheet's
 //! title says and where its anchor goes, what hiding the tool panel does
-//! with the foreground, and when a window's frame is set again after a
-//! DPI change moved it.
+//! with the foreground, when a window's frame is set again after a DPI
+//! change moved it, and what the `Run` keys say about launch at login.
 //!
 //! No Win32 here, so these build and are tested on every OS, not only on
 //! Windows. The `windows` module is the only caller outside the tests.
@@ -231,6 +231,94 @@ pub(crate) fn reframe(now: Option<Rect>, frame: Rect, reframed: u32, most: u32) 
     }
 }
 
+/// What one `Run` key (the current user's or the machine's) holds under
+/// Grape's value name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunEntry {
+    /// No such value, or no `Run` key.
+    Absent,
+    /// A value of that name, naming this executable (`names_exe`) or
+    /// another program.
+    Present { names_exe: bool },
+    /// The key or the value couldn't be read.
+    Unreadable,
+}
+
+/// What Task Manager's record for a startup entry (`StartupApproved\Run`,
+/// in one hive) says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Approval {
+    /// No record, or one that says on.
+    NotOff,
+    /// Turned off in Task Manager → Startup apps.
+    Off,
+    /// The record couldn't be read.
+    Unreadable,
+}
+
+/// Whether Windows still starts Grape at sign-in, from the `Run` keys'
+/// value named after it, read directly: never from auto-launch's
+/// `is_enabled`, which is also false while Task Manager has Grape turned
+/// off, and whose `enable` would turn it back on over that choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunValue {
+    /// Neither `Run` key has the value, and Task Manager has no "off" for
+    /// it: launch at login is gone, as after an uninstall.
+    Missing,
+    /// Neither has the value, but Task Manager's record for the name says
+    /// off: the user turned Grape off there before the value went.
+    MissingTurnedOff,
+    /// One names this executable, whether Task Manager has it on or off.
+    ThisExe,
+    /// One names another program (another copy of Grape, say), and none
+    /// names this one.
+    OtherExe,
+    /// A key or value couldn't be read.
+    Unreadable,
+}
+
+/// [`RunValue`] from what the current user's and the machine's `Run` keys
+/// hold under the name, and their Task Manager records.
+pub(crate) fn run_value_of(entries: [RunEntry; 2], approvals: [Approval; 2]) -> RunValue {
+    if entries.contains(&RunEntry::Present { names_exe: true }) {
+        RunValue::ThisExe
+    } else if entries.contains(&RunEntry::Present { names_exe: false }) {
+        RunValue::OtherExe
+    } else if entries.contains(&RunEntry::Unreadable) {
+        RunValue::Unreadable
+    } else if approvals.contains(&Approval::Off) {
+        RunValue::MissingTurnedOff
+    } else if approvals.contains(&Approval::Unreadable) {
+        RunValue::Unreadable
+    } else {
+        RunValue::Missing
+    }
+}
+
+/// Whether Task Manager's record for a startup entry says off: its last
+/// eight bytes (when it was turned off) aren't all zero, as auto-launch
+/// reads it. A record too short for that reads as on.
+pub(crate) fn approval_is_off(record: &[u8]) -> bool {
+    record.len() >= 8 && record[record.len() - 8..].iter().any(|byte| *byte != 0)
+}
+
+/// Whether a `Run` value's command line starts `exe`: quoted
+/// (`"C:\…\Grape.exe" --at-login`) or bare, as auto-launch writes it
+/// (`C:\…\Grape.exe --at-login`), ignoring case as Windows paths do.
+pub(crate) fn run_value_names(command: &str, exe: &Path) -> bool {
+    let exe = exe.to_string_lossy().to_lowercase();
+    let command = command.trim_start().to_lowercase();
+    if exe.is_empty() {
+        return false;
+    }
+    if let Some(quoted) = command.strip_prefix('"') {
+        return quoted.split('"').next() == Some(exe.as_str()) && quoted.contains('"');
+    }
+    command
+        .strip_prefix(exe.as_str())
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +329,121 @@ mod tests {
         width: 1920,
         height: 1080,
     };
+
+    const EXE: &str = r"C:\Users\Max\AppData\Local\Grape\Grape.exe";
+
+    #[test]
+    fn the_run_value_names_this_exe_quoted_or_bare_in_any_case() {
+        let exe = Path::new(EXE);
+        for command in [
+            r"C:\Users\Max\AppData\Local\Grape\Grape.exe --at-login",
+            r"C:\Users\Max\AppData\Local\Grape\Grape.exe",
+            r#""C:\Users\Max\AppData\Local\Grape\Grape.exe" --at-login"#,
+            r#"  "c:\users\max\appdata\local\grape\GRAPE.EXE""#,
+            "c:\\users\\max\\appdata\\local\\grape\\grape.exe\t--at-login",
+        ] {
+            assert!(run_value_names(command, exe), "{command}");
+        }
+        for command in [
+            r"C:\Program Files\Grape\Grape.exe --at-login",
+            r"C:\Users\Max\AppData\Local\Grape\Grape.exe.old --at-login",
+            r"C:\Users\Max\AppData\Local\Grape\Grape.exe2",
+            r#""C:\Users\Max\AppData\Local\Grape\Grape.exe --at-login"#,
+            r#""C:\Users\Max\AppData\Local\Grape\Grape.exe2""#,
+            r"%LOCALAPPDATA%\Grape\Grape.exe --at-login",
+            "",
+        ] {
+            assert!(!run_value_names(command, exe), "{command}");
+        }
+        assert!(!run_value_names("", Path::new("")));
+        assert!(!run_value_names(" --at-login", Path::new("")));
+    }
+
+    #[test]
+    fn task_managers_off_is_a_record_with_a_time() {
+        // What Task Manager writes: 2 (on) or 3 (off), then the time it was
+        // turned off, zero while it's on.
+        let on = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let off = [3, 0, 0, 0, 0x70, 0x3b, 0x1c, 0x5e, 0xa4, 0x3a, 0xdb, 0x01];
+        assert!(!approval_is_off(&on));
+        assert!(approval_is_off(&off));
+        assert!(!approval_is_off(&[]));
+        assert!(!approval_is_off(&[3, 0, 0, 0, 1, 1, 1]));
+        assert!(approval_is_off(&[1; 8]));
+    }
+
+    #[test]
+    fn a_run_value_naming_this_exe_wins_over_everything_else() {
+        let this = RunEntry::Present { names_exe: true };
+        for other in [
+            RunEntry::Absent,
+            RunEntry::Present { names_exe: false },
+            RunEntry::Unreadable,
+        ] {
+            for approvals in [
+                [Approval::NotOff, Approval::NotOff],
+                [Approval::Off, Approval::Unreadable],
+            ] {
+                assert_eq!(run_value_of([this, other], approvals), RunValue::ThisExe);
+                assert_eq!(run_value_of([other, this], approvals), RunValue::ThisExe);
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_value_naming_another_program_is_someone_elses() {
+        let other = RunEntry::Present { names_exe: false };
+        for second in [RunEntry::Absent, other, RunEntry::Unreadable] {
+            assert_eq!(
+                run_value_of([other, second], [Approval::Off, Approval::NotOff]),
+                RunValue::OtherExe
+            );
+            assert_eq!(
+                run_value_of([second, other], [Approval::NotOff, Approval::NotOff]),
+                RunValue::OtherExe
+            );
+        }
+    }
+
+    #[test]
+    fn launch_at_login_is_missing_only_when_both_keys_say_so_and_task_manager_agrees() {
+        let absent = [RunEntry::Absent, RunEntry::Absent];
+        assert_eq!(
+            run_value_of(absent, [Approval::NotOff, Approval::NotOff]),
+            RunValue::Missing
+        );
+        // Turned off in Task Manager before the value went: never turned
+        // back on over that.
+        for approvals in [
+            [Approval::Off, Approval::NotOff],
+            [Approval::NotOff, Approval::Off],
+            [Approval::Off, Approval::Unreadable],
+        ] {
+            assert_eq!(
+                run_value_of(absent, approvals),
+                RunValue::MissingTurnedOff,
+                "{approvals:?}"
+            );
+        }
+        for (entries, approvals) in [
+            (
+                [RunEntry::Unreadable, RunEntry::Absent],
+                [Approval::NotOff, Approval::NotOff],
+            ),
+            (
+                [RunEntry::Absent, RunEntry::Unreadable],
+                [Approval::Off, Approval::NotOff],
+            ),
+            (absent, [Approval::Unreadable, Approval::NotOff]),
+            (absent, [Approval::NotOff, Approval::Unreadable]),
+        ] {
+            assert_eq!(
+                run_value_of(entries, approvals),
+                RunValue::Unreadable,
+                "{entries:?} {approvals:?}"
+            );
+        }
+    }
 
     #[test]
     fn a_window_at_its_frame_is_left_alone() {

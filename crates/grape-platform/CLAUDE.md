@@ -12,7 +12,7 @@ src/
   avif.rs             the Mac worker's AVIF encoder (D41), behind `avif-encode`: rav1e through ravif (quality 80 by default, speed 6, 8-bit, 4:4:4, at most 8 threads), RGB ICC converted to sRGB with moxcms first, other pixels handed over uncopied; an RGBA picture's color and alpha encodes take turns (ravif without its `threading` feature, rav1e with its own: never turn ravif's on, a test reads Cargo.lock for it); safe Rust and OS-neutral, so it's tested on every OS
   file_actions.rs     copy, copy path, terminal (TerminalApp), move, share (ShareOutcome: opened + skipped), reveal, pick_folder (Settings): the API the app calls, per-OS dispatch
   mac_rules.rs        pure macOS rules (Cocoa <-> top-left flips, screen pick, labels, open args, Terminal or iTerm2, volume roots, judge_move, the image helper worker's decoder budget, the drag-out mask, outcome and own-drag rules, icon types and frames, the list of apps last activated); tested on every OS
-  win_rules.rs        pure Windows rules (Terminal: wt, or PowerShell for a `;` path or by choice; Share: what's skipped, `\\?\` stripped, the sheet's title, the anchor's frame; the tool panel's hand-back plan; when a window's frame is set again after a DPI change moved it, at most three times for the overlay); tested on every OS
+  win_rules.rs        pure Windows rules (Terminal: wt, or PowerShell for a `;` path or by choice; Share: what's skipped, `\\?\` stripped, the sheet's title, the anchor's frame; the tool panel's hand-back plan; when a window's frame is set again after a DPI change moved it, at most three times for the overlay; what the Run keys and Task Manager's records say about launch at login, and whether a Run value names this exe); tested on every OS
   macos/
     drag.rs           the drag thread: pressedMouseButtons + modifierFlags + drag-pasteboard changeCount/types; starts at once on a file drag session, ignores a press in which Grape started its own drag out, holds an App Nap activity
     display.rs        screen cache filled on the main thread (refresh_screens), CoreGraphics fallback
@@ -31,6 +31,7 @@ src/
     share.rs          the share sheet: files looked up as StorageFiles (MTA, 10 s), then the "grape-share" STA thread's invisible anchor window owns the sheet (30 s for DataRequested, Chromium's handler rules)
     actions.rs        CF_HDROP and text clipboard, IFileOpenDialog on an STA thread of its own (Move and pick_folder), IFileOperation move, wt/PowerShell, explorer /select
     job.rs            JobGuard: the Job Object around one helper process (D33): memory cap, kill on close, die on unhandled exception, one active process, UI limits unless the helper is already in a job (then nested, without them: has_ui_limits); peak_memory
+    run_key.rs        run_value: whether HKCU's or HKLM's Run key still has the value launch at login wrote (and whether it names this exe), and Task Manager's StartupApproved "off", read with RegGetValueW, never written; the app registers launch at login again only for RunValue::Missing (D19)
   mock.rs             scripted DragSignal sequences for app-level tests
   unsupported.rs      every entry point returns Unsupported (Linux and other hosts)
   bin/

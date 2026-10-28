@@ -119,7 +119,7 @@ Stored in `settings.json` in the app's data folder by `tauri-plugin-store` (D19)
 | `output.fallback_dir` | `~/Downloads/Grape` | used when the destination isn't writable. Absent means the default. A chosen folder is used only while it exists. |
 | `sounds` | on | the highlight tick |
 | `haptics` | on (mac) | the trackpad tick, separate from `sounds` |
-| `launch_at_login` | on | the user's choice. A release build turns it on at first launch (D19). |
+| `launch_at_login` | on | the user's choice. A release build turns it on at first launch, and on Windows registers it again when `true` is stored but an uninstall took the Run value (D19). |
 | `terminal_app` | Terminal / Windows Terminal | `"terminal"` or `"iterm2"` on macOS, `"windows_terminal"` or `"powershell"` on Windows |
 | `onboarding.done` | absent | `true` once the welcome card's "Got it" is clicked; until then Settings opens at launch (not at login) |
 | `tools.compress` | `balanced` | `"small"`, `"balanced"` or `"high"`; the last Compress preset that ran |

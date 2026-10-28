@@ -20,9 +20,10 @@
 //!   shows. The window never sends a path: folders are picked here, with
 //!   the OS's folder picker.
 //! - Launch at login is tauri-plugin-autostart. A release build turns it on
-//!   at its first launch ([`first_launch_rule`]); a debug build never
-//!   touches it on its own, so `pnpm tauri dev` doesn't register a dev
-//!   binary at login.
+//!   at its first launch ([`first_launch_rule`]), and on Windows registers
+//!   it again when "on" is stored but an uninstall took the `Run` value; a
+//!   debug build never touches it on its own, so `pnpm tauri dev` doesn't
+//!   register a dev binary at login.
 //! - Until the welcome card is dismissed, setup opens Settings at launch
 //!   to show it ([`SettingsState::welcome_at_launch`]).
 //! - The tool panels start from the last Compress preset and Normalize
@@ -817,10 +818,14 @@ impl SettingsState {
             );
         }
         let exe = std::env::current_exe();
+        let release = !cfg!(debug_assertions);
+        let stored_on = settings.launch_at_login == Some(true);
         let facts = LaunchFacts {
-            release: !cfg!(debug_assertions),
+            release,
             platform: THIS_OS,
             missing: report.missing.contains(&LAUNCH_AT_LOGIN),
+            stored_on,
+            run_value_missing: release && stored_on && run_value_missing(app, exe.as_deref().ok()),
             has_store: store.is_some(),
             unreadable: file.was_unreadable(),
             exe: exe.as_deref().ok(),
@@ -941,14 +946,29 @@ impl SettingsState {
     /// ARCHITECTURE's default for launch at login is on: when
     /// [`first_launch_rule`] says so, this turns it on and stores `true`.
     /// If that fails, nothing is stored and the next launch tries again.
-    /// Otherwise autostart is left as it is, and the log says why.
+    /// When "on" is stored but the `Run` value is gone, it registers Grape
+    /// again. Otherwise autostart is left as it is, and the log says why.
     fn first_launch_at_login(&self, app: &AppHandle, facts: &LaunchFacts<'_>) {
-        if let FirstLaunch::Leave(why) = first_launch_rule(facts) {
-            log::info!("settings: leaving launch at login as it is: {why}");
-            if facts.unreadable && facts.has_store {
-                self.keep_launch_state(app);
+        match first_launch_rule(facts) {
+            FirstLaunch::Leave(why) => {
+                log::info!("settings: leaving launch at login as it is: {why}");
+                if facts.unreadable && facts.has_store {
+                    self.keep_launch_state(app);
+                }
+                return;
             }
-            return;
+            FirstLaunch::RegisterAgain => {
+                log::info!(
+                    "settings: launch at login: the Run value was gone (an uninstall?); registering again"
+                );
+                // `true` is already stored; a failure leaves it so, and the
+                // next launch tries again.
+                if let Err(err) = set_autostart(app, true) {
+                    log::warn!("settings: could not register launch at login again: {err}");
+                }
+                return;
+            }
+            FirstLaunch::TurnOn => {}
         }
         let mut settings = self.lock();
         if let Err(err) = set_autostart(app, true) {
@@ -1170,6 +1190,13 @@ struct LaunchFacts<'a> {
     /// Nothing at all is stored for `launch_at_login`. An unusable value
     /// doesn't count: the user may have turned it off.
     missing: bool,
+    /// `true` is stored for `launch_at_login`.
+    stored_on: bool,
+    /// Windows only: neither the current user's nor the machine's `Run`
+    /// key has a value named after Grape, and Task Manager has no "off"
+    /// for it, as after an uninstall that kept `settings.json`. Looked up
+    /// only in a release build with `true` stored ([`run_value_missing`]).
+    run_value_missing: bool,
     /// There's a store to remember the choice in.
     has_store: bool,
     /// `settings.json` was there at this launch but couldn't be read or
@@ -1185,6 +1212,9 @@ struct LaunchFacts<'a> {
 enum FirstLaunch {
     /// Turn launch at login on and store `true`.
     TurnOn,
+    /// `true` is stored, but Windows lost the `Run` value: register Grape
+    /// again.
+    RegisterAgain,
     /// Leave autostart alone and store nothing, for this reason.
     Leave(&'static str),
 }
@@ -1196,8 +1226,16 @@ enum FirstLaunch {
 /// (`/Volumes/…`), a translocated copy (`…/AppTranslocation/…`) or an
 /// unknown path: the login item would name a path that goes away. The
 /// next launch, from Applications, tries again.
+///
+/// On Windows, with `true` stored and the `Run` value gone (an uninstall
+/// deletes it and keeps `settings.json`), the same release build, store
+/// and readable file register Grape again, so a reinstall keeps the
+/// user's "on". A value that's there, on or off in Task Manager, is never
+/// touched.
 fn first_launch_rule(facts: &LaunchFacts<'_>) -> FirstLaunch {
-    if !facts.missing {
+    let again =
+        facts.stored_on && facts.run_value_missing && matches!(facts.platform, Platform::Windows);
+    if !facts.missing && !again {
         return FirstLaunch::Leave("a value is stored for it");
     }
     if !facts.release {
@@ -1208,6 +1246,9 @@ fn first_launch_rule(facts: &LaunchFacts<'_>) -> FirstLaunch {
     }
     if facts.unreadable {
         return FirstLaunch::Leave("settings.json was unreadable at this launch");
+    }
+    if again {
+        return FirstLaunch::RegisterAgain;
     }
     if matches!(facts.platform, Platform::MacOs) {
         match facts.exe {
@@ -1231,6 +1272,49 @@ fn transient_mac_location(exe: &Path) -> bool {
         || exe
             .components()
             .any(|part| part.as_os_str() == "AppTranslocation")
+}
+
+/// Windows: whether the `Run` value the autostart plugin writes (named
+/// after the product, as the plugin names it) is gone from both hives with
+/// no "off" left in Task Manager ([`grape_platform::windows::run_value`]).
+/// Never auto-launch's `is_enabled`, which is also false while Task Manager
+/// has Grape off. A value naming another program, one Task Manager turned
+/// off, or keys that can't be read count as not missing, and the log says
+/// so. An unknown executable path counts as not missing too.
+#[cfg(target_os = "windows")]
+fn run_value_missing(app: &AppHandle, exe: Option<&Path>) -> bool {
+    use grape_platform::windows::RunValue;
+    let Some(exe) = exe else {
+        return false;
+    };
+    match grape_platform::windows::run_value(&app.package_info().name, exe) {
+        RunValue::Missing => true,
+        RunValue::ThisExe => false,
+        RunValue::MissingTurnedOff => {
+            log::info!(
+                "settings: launch at login: the Run value is gone, but Task Manager had Grape turned off; leaving it off"
+            );
+            false
+        }
+        RunValue::OtherExe => {
+            log::info!(
+                "settings: launch at login: the Run value names another program (another copy of Grape?); leaving it"
+            );
+            false
+        }
+        RunValue::Unreadable => {
+            log::warn!(
+                "settings: launch at login: can't read the Run keys; leaving them as they are"
+            );
+            false
+        }
+    }
+}
+
+/// Elsewhere there's no `Run` value to lose.
+#[cfg(not(target_os = "windows"))]
+fn run_value_missing(_app: &AppHandle, _exe: Option<&Path>) -> bool {
+    false
 }
 
 /// Whether Grape is registered to launch at login, or `None` if the
@@ -2613,9 +2697,25 @@ mod tests {
             release: true,
             platform,
             missing: true,
+            stored_on: false,
+            run_value_missing: false,
             has_store: true,
             unreadable: false,
             exe,
+        }
+    }
+
+    /// A release build's launch on Windows after an uninstall that kept
+    /// `settings.json` with launch at login on: the `Run` value is gone.
+    fn reinstalled() -> LaunchFacts<'static> {
+        LaunchFacts {
+            missing: false,
+            stored_on: true,
+            run_value_missing: true,
+            ..first_launch(
+                Platform::Windows,
+                Some(Path::new(r"C:\Users\Max\AppData\Local\Grape\Grape.exe")),
+            )
         }
     }
 
@@ -2666,6 +2766,87 @@ mod tests {
                 assert!(left(first_launch_rule(&facts)), "{facts:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_reinstall_that_kept_launch_at_login_on_registers_it_again() {
+        assert_eq!(
+            first_launch_rule(&reinstalled()),
+            FirstLaunch::RegisterAgain
+        );
+    }
+
+    #[test]
+    fn launch_at_login_is_registered_again_only_in_a_release_build_with_a_readable_store() {
+        let base = reinstalled();
+        for facts in [
+            LaunchFacts {
+                release: false,
+                ..base
+            },
+            LaunchFacts {
+                has_store: false,
+                ..base
+            },
+            LaunchFacts {
+                unreadable: true,
+                ..base
+            },
+        ] {
+            assert!(left(first_launch_rule(&facts)), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn launch_at_login_is_registered_again_only_when_on_is_stored_and_the_value_is_gone() {
+        let base = reinstalled();
+        // The value is there (on or off in Task Manager), names another
+        // program, or couldn't be read.
+        let present = LaunchFacts {
+            run_value_missing: false,
+            ..base
+        };
+        // The user turned it off in Settings.
+        let off = LaunchFacts {
+            stored_on: false,
+            ..base
+        };
+        // An unusable stored value: neither stored nor on.
+        let unusable = LaunchFacts {
+            stored_on: false,
+            run_value_missing: false,
+            ..base
+        };
+        for facts in [present, off, unusable] {
+            assert_eq!(
+                first_launch_rule(&facts),
+                FirstLaunch::Leave("a value is stored for it"),
+                "{facts:?}"
+            );
+        }
+        // Nothing stored is a first launch, whatever the Run keys hold.
+        for run_value_missing in [false, true] {
+            let facts = LaunchFacts {
+                missing: true,
+                stored_on: false,
+                run_value_missing,
+                ..base
+            };
+            assert_eq!(first_launch_rule(&facts), FirstLaunch::TurnOn);
+        }
+    }
+
+    #[test]
+    fn a_mac_never_registers_launch_at_login_again() {
+        let facts = LaunchFacts {
+            platform: Platform::MacOs,
+            exe: Some(Path::new("/Applications/Grape.app/Contents/MacOS/Grape")),
+            ..reinstalled()
+        };
+        assert_eq!(
+            first_launch_rule(&facts),
+            FirstLaunch::Leave("a value is stored for it")
+        );
     }
 
     #[test]

@@ -28,6 +28,9 @@
 //! - `job`: the Job Object a helper process runs in ([`job::JobGuard`],
 //!   D33): it ends the helper with Grape, caps its memory and keeps it to
 //!   one process.
+//! - `run_key`: whether the `Run` keys still start Grape at sign-in
+//!   ([`run_value`]), read directly, for launch at login after a
+//!   reinstall (D19).
 //!
 //! Inside this crate, write the Win32 bindings as `::windows::…`: a bare
 //! `windows::…` can be confused with this module.
@@ -40,6 +43,7 @@ mod drop_target;
 mod hook;
 pub mod job;
 mod overlay;
+mod run_key;
 mod share;
 
 pub use drag_out::{drag_out, DragOut};
@@ -49,6 +53,9 @@ pub use overlay::{
     hide_shelf, other_app_foreground, raise_topmost, reframe_overlay, show_panel, show_shelf,
     HandBack, Reframed,
 };
+
+pub use crate::win_rules::RunValue;
+pub use run_key::run_value;
 
 pub(crate) use actions::{
     copy_files, copy_paths, move_to_chosen_folder, open_terminal, pick_folder, reveal,
