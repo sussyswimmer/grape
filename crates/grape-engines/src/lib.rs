@@ -20,6 +20,7 @@ mod headers;
 mod heif;
 mod helper;
 mod image;
+mod imagetool;
 mod media;
 mod output;
 #[doc(hidden)] // Public only for the worker entry, `pdf::worker_main` (D29).
