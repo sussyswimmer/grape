@@ -441,7 +441,9 @@ enum DecoderKeeps {
     Little,
     /// The PNG decoder: the `metadata` [`headers::png_metadata`] counted,
     /// plus the decoder's own limit when there is an ICC profile to
-    /// inflate. The pixel data is read as it goes.
+    /// inflate. The pixel data is read as it goes, through up to about
+    /// four rows of buffers (a picture millions of pixels wide was
+    /// measured at three and a half).
     Png { metadata: u64 },
     /// The JPEG decoder: what it `holds` besides pixels
     /// ([`headers::JpegScan::decoder_holds`]: the file, its metadata copies
@@ -527,7 +529,10 @@ fn working_set(
             };
             holds.saturating_add(coefficients)
         }
-        DecoderKeeps::Png { metadata } => metadata,
+        DecoderKeeps::Png { metadata } => {
+            let row = u64::from(width).saturating_mul(u64::from(color.bytes_per_pixel()));
+            metadata.saturating_add(row.saturating_mul(4))
+        }
         DecoderKeeps::WebP { layout } => match layout {
             WebpLayout::Simple | WebpLayout::Still { lossy_alpha: false } => size(ColorType::Rgba8),
             WebpLayout::Still { lossy_alpha: true } => pixels.saturating_mul(13) / 2,
@@ -910,6 +915,13 @@ mod tests {
             metadata: 100 * MIB,
         };
         assert_eq!(mib(Rgb8, png, none, Format::Tiff), 103);
+        // Its rows count where a picture is very wide: 4 rows of 120 M
+        // gray pixels hold 4 more while they're read.
+        let png = DecoderKeeps::Png { metadata: 0 };
+        assert_eq!(
+            working_set(120_000_000, 4, L8, png, none, Format::Png, 0),
+            8 * 120_000_000
+        );
 
         // The profile counts throughout: gray to BMP with 2 MiB of it.
         assert_eq!(
