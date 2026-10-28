@@ -468,9 +468,11 @@ jobs:
           kill -0 "$pid" 2> /dev/null || die "Grape (pid $pid) is gone 10 s after finishing setup."
           echo "Grape runs as pid $pid. First launch: $first."
 
+          # A line's target is the module that logs it, nested ones included
+          # (float::window).
           has '\]\[grape_app::sidecars\]\[INFO\] sidecars: found ffmpeg, ffprobe, bsdtar, pdfium$' || error "The log lacks the sidecars line naming all four."
           has '\]\[grape_app::wheel\]\[INFO\] drag monitor running$' || error "The log lacks 'drag monitor running'."
-          has '\]\[grape_app::float\]\[INFO\] float: shelf window built$' || error "The log lacks the float shelf built at launch (D43)."
+          has '\]\[grape_app::float::window\]\[INFO\] float: shelf window built$' || error "The log lacks the float shelf built at launch (D43)."
           if [ "$first" = yes ]; then
             has '\]\[grape_app::settings\]\[INFO\] settings: first launch; launch at login is on$' || error "The log lacks the first launch's launch at login."
             has "\]\[grape_app::settings\]\[INFO\] settings: the welcome card isn't dismissed yet; opening Settings$" || error "The log lacks the welcome card opening Settings."
