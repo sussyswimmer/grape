@@ -9,13 +9,14 @@
 //! window for the length of the call.
 //!
 //! The overlay and the toast never become key, so the frontmost app keeps
-//! focus. A toast with nothing to reveal also ignores the mouse
-//! ([`show_toast`]), so a click on it never activates Grape. That comes from `"focusable": false` in `tauri.conf.json`, not
+//! focus. That comes from `"focusable": false` in `tauri.conf.json`, not
 //! from this module: tao's `TaoWindow` answers `canBecomeKeyWindow` and
-//! `canBecomeMainWindow` from its `focusable` flag. [`frame_and_show`]
-//! uses `orderFrontRegardless` because a plain `orderFront` from an
-//! inactive app doesn't come above the active app's windows, and it sets
-//! the frame and orders the window front in one main-thread call.
+//! `canBecomeMainWindow` from its `focusable` flag. It doesn't stop a click
+//! from activating Grape, so a toast with nothing to reveal also ignores
+//! the mouse ([`show_toast`]). [`frame_and_show`] uses
+//! `orderFrontRegardless` because a plain `orderFront` from an inactive app
+//! doesn't come above the active app's windows, and it sets the frame and
+//! orders the window front in one main-thread call.
 //!
 //! The tool panel is the one hardened window that becomes key
 //! (`"focusable": true`): [`show_panel`] orders it front the same way,
