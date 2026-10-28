@@ -381,9 +381,11 @@ const HELPERS: [Helper; 4] = [
         ships: cfg!(any(windows, target_os = "macos")),
         with: with_bsdtar,
     },
+    // 31 characters, inside the title's 248 px; the detail may wrap to a
+    // second line.
     Helper {
-        title: "Grape's HEIC helper is missing",
-        detail: "Reinstall Grape to convert HEIC files.",
+        title: "Grape's image helper is missing",
+        detail: "Reinstall Grape to convert HEIC and AVIF files.",
         ships: cfg!(windows),
         with: with_heif,
     },
@@ -1245,8 +1247,8 @@ mod tests {
                 assert_eq!(
                     why,
                     NotRunnable {
-                        title: "Grape's HEIC helper is missing".to_owned(),
-                        detail: Some("Reinstall Grape to convert HEIC files.".to_owned()),
+                        title: "Grape's image helper is missing".to_owned(),
+                        detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
                     },
                     "{coming}"
                 );
@@ -1275,7 +1277,7 @@ mod tests {
         // elsewhere the HEIC, first, names the toast.
         let why = check_runnable(&to_png, &mixed, &installed()).unwrap_err();
         if cfg!(windows) {
-            assert_eq!(why.title, "Grape's HEIC helper is missing");
+            assert_eq!(why.title, "Grape's image helper is missing");
         } else {
             assert_eq!(why.title, "Not in this build yet");
             assert_eq!(why.detail.as_deref(), Some("HEIC to PNG is coming."));
@@ -1667,8 +1669,8 @@ mod tests {
         assert_eq!(check_runnable(&to_pdf, &avif, &heif_only), Ok(()));
 
         let missing = NotRunnable {
-            title: "Grape's HEIC helper is missing".to_owned(),
-            detail: Some("Reinstall Grape to convert HEIC files.".to_owned()),
+            title: "Grape's image helper is missing".to_owned(),
+            detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
         };
         let coming = |detail: &str| NotRunnable {
             title: "Not in this build yet".to_owned(),
