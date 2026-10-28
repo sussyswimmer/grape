@@ -45,6 +45,7 @@ App shell
 - [ ] win: Quit ends the process (no Grape process left in Task Manager).
 - [ ] win: the overlay never gets a taskbar button or an Alt-Tab entry (debug build: tray → "Debug: flash overlay").
 - [ ] win: a second launch adds no second tray icon; it opens Settings in the running instance. CI also checks the hand-over since 2026-10-28: the second process exits and the first logs it. The tray icon is still checked here.
+- [ ] win: with Grape running, run `& "$env:LOCALAPPDATA\Grape\Grape.exe" --at-login` in PowerShell → no second tray icon and no Settings window; the log says `second launch at login: Grape already runs; nothing to open`. The same without `--at-login` opens Settings.
 - [ ] win: the debug overlay flash doesn't steal focus (the window you were typing in keeps the keyboard), and the log shows the overlay's ex-style with `TOOLWINDOW|NOACTIVATE|TOPMOST`.
 - [ ] win: after installing from CI's `Grape-Windows-x64` installer, `%LOCALAPPDATA%\Grape` holds `THIRD_PARTY_NOTICES.md` and `LICENSE.txt` next to Grape's .exe, and both open and read correctly in Notepad.
 - [ ] win: the installed `THIRD_PARTY_NOTICES.md` matches the repo's at that build's commit.
