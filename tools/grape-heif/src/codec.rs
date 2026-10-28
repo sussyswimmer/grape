@@ -147,7 +147,10 @@ impl Codec for LibheifCodec {
         let height = handle.height();
         let alpha = handle.has_alpha_channel();
         let channels: u8 = if alpha { 4 } else { 3 };
-        // An nclx-only HEIC has no ICC and reads as sRGB (heic-spec J11).
+        // An nclx-only HEIC or AVIF has no ICC and reads as sRGB (heic-spec
+        // J11). libheif turns YCbCr into RGB but keeps the file's primaries
+        // and transfer, so a P3 or BT.2020 nclx-only AVIF comes out
+        // desaturated and a PQ or HLG one flat: a known limit (D41).
         let icc = handle
             .color_profile_raw()
             .filter(|p| {
