@@ -590,6 +590,18 @@ fn bitmap_takes(target: &Target, layout: Layout) -> bool {
     bitmap(&mut pixel, 1, 1, 4, target, layout).is_some()
 }
 
+/// RGB → RGBX: an opaque fourth byte after every pixel, or `None` when
+/// the copy doesn't fit in memory.
+fn rgb_to_rgbx(rgb: &[u8]) -> Option<Vec<u8>> {
+    let mut rgbx = Vec::new();
+    rgbx.try_reserve_exact(rgb.len().checked_div(3)?.checked_mul(4)?)
+        .ok()?;
+    for pixel in rgb.as_chunks::<3>().0 {
+        rgbx.extend_from_slice(&[pixel[0], pixel[1], pixel[2], u8::MAX]);
+    }
+    Some(rgbx)
+}
+
 /// RGBX → RGB: drops every fourth byte.
 fn rgbx_to_rgb(line: &[u8], row: &mut Vec<u8>) {
     for pixel in line.as_chunks::<4>().0 {
@@ -628,11 +640,9 @@ fn encode(pixels: &Pixels, quality: Option<u8>) -> Result<Vec<u8>, Failure> {
         ));
     }
     let channels = usize::from(pixels.channels);
-    let alpha = match pixels.channels {
-        3 => CGImageAlphaInfo::None,
-        4 => CGImageAlphaInfo::Last,
-        other => return Err(fail(FailKind::Internal, format!("{other} channels"))),
-    };
+    if !matches!(channels, 3 | 4) {
+        return Err(fail(FailKind::Internal, format!("{channels} channels")));
+    }
     let (w, h) = (pixels.width as usize, pixels.height as usize);
     let stride = w
         .checked_mul(channels)
@@ -646,18 +656,29 @@ fn encode(pixels: &Pixels, quality: Option<u8>) -> Result<Vec<u8>, Failure> {
 
     let space = encode_space(pixels.icc.as_deref())
         .ok_or_else(|| fail(FailKind::Encode, "no color space for the pixels"))?;
-    let data = CFData::from_bytes(&pixels.data);
+    // ImageIO gets 32-bit pixels either way: RGB is padded to RGBX, the
+    // layout CoreGraphics and its encoders take most often (24-bit rows
+    // came back with the wrong color from a 1×1 picture on CI's Mac).
+    let (data, alpha) = if channels == 3 {
+        let padded = rgb_to_rgbx(&pixels.data)
+            .ok_or_else(|| fail(FailKind::TooLarge, "the image doesn't fit in memory"))?;
+        (CFData::from_bytes(&padded), CGImageAlphaInfo::NoneSkipLast)
+    } else {
+        (CFData::from_bytes(&pixels.data), CGImageAlphaInfo::Last)
+    };
+    let stride = w * 4;
     let provider = CGDataProvider::with_cf_data(Some(&*data))
         .ok_or_else(|| fail(FailKind::Encode, "no data provider"))?;
-    // SAFETY: the provider holds exactly `h` rows of `stride` bytes (checked
-    // above): 8 bits per component, `channels` components a pixel, straight
-    // alpha last when there are 4. `decode` is null, which means none.
+    // SAFETY: the provider holds exactly `h` rows of `stride` (4 × `w`)
+    // bytes (the length checked above, padded to 4 bytes a pixel for RGB):
+    // 8 bits per component, 4 components a pixel, straight alpha or an
+    // unused byte last. `decode` is null, which means none.
     let image = unsafe {
         CGImage::new(
             w,
             h,
             8,
-            8 * channels,
+            32,
             stride,
             Some(&*space),
             CGBitmapInfo(alpha.0 | CGImageByteOrderInfo::OrderDefault.0),
@@ -734,6 +755,15 @@ fn encode_space(icc: Option<&[u8]>) -> Option<CFRetained<CGColorSpace>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_gets_an_opaque_fourth_byte() {
+        assert_eq!(
+            rgb_to_rgbx(&[1, 2, 3, 4, 5, 6]),
+            Some(vec![1, 2, 3, 255, 4, 5, 6, 255])
+        );
+        assert_eq!(rgb_to_rgbx(&[]), Some(vec![]));
+    }
 
     #[test]
     fn rgbx_drops_the_fourth_byte() {

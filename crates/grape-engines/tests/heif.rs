@@ -419,16 +419,25 @@ fn alpha_is_kept() {
 #[test]
 fn odd_sizes_round_trip() {
     let _turn = serial();
-    for (width, height) in [(1, 1), (3, 5)] {
+    // Every size is tried before the test fails, so a failure names them all.
+    let mut wrong = Vec::new();
+    for (width, height) in [(1, 1), (2, 2), (3, 5), (17, 9)] {
         let img =
             DynamicImage::ImageRgb8(RgbImage::from_pixel(width, height, image::Rgb([0, 200, 0])));
         let Some(back) = round_trip("odd.png", &png(&img)) else {
             return;
         };
         assert_eq!((back.width(), back.height()), (width, height));
-        let at = format!("{width}x{height}, {:?}", back.color());
-        assert_near(&back.to_rgb8().get_pixel(0, 0).0, &[0, 200, 0], 12, &at);
+        let found = back.to_rgb8().get_pixel(0, 0).0;
+        if !found
+            .iter()
+            .zip([0u8, 200, 0])
+            .all(|(&f, e)| f.abs_diff(e) <= 12)
+        {
+            wrong.push(format!("{width}x{height} {:?}: {found:?}", back.color()));
+        }
     }
+    assert!(wrong.is_empty(), "expected [0, 200, 0] ±12: {wrong:?}");
 }
 
 /// libheif stores a profile's bytes as they are; ImageIO reads them into a
