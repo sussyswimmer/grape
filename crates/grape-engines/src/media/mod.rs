@@ -425,7 +425,8 @@ fn probe_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
 /// (only at the end of each pass when the duration is unknown), so a
 /// retry fills what's left. The GIF palette pass reports no output time
 /// until it ends. Returns what the last pass wrote to stderr: FFmpeg's
-/// warnings, for the detail of a failed check.
+/// warnings, for the detail of a failed check (with why it ran
+/// uncontained, if it did: [`run::Finished::warnings`]).
 fn run_passes(
     ffmpeg: &Path,
     passes: &[Pass],
@@ -447,7 +448,7 @@ fn run_passes(
                 bar.to(start + span * (done + weight * fraction));
             }
         };
-        warnings = run::transcode(ffmpeg, &pass.args, &ctx.cancel, &mut on_time)?.stderr_tail;
+        warnings = run::transcode(ffmpeg, &pass.args, &ctx.cancel, &mut on_time)?.warnings();
         done = (done + weight).min(1.0);
         bar.to(start + span * done);
     }
@@ -1363,6 +1364,7 @@ mod tests {
         let e = RunError::Exit {
             code: Some(1),
             stderr_tail: stderr.to_string(),
+            uncontained: None,
         };
         ffmpeg_failed(&names, e, Path::new("/in/clip.mkv")).kind
     }
@@ -1427,6 +1429,31 @@ mod tests {
         );
         let cancelled = ffmpeg_failed(&names, RunError::Cancelled, Path::new("a.wav"));
         assert_eq!(cancelled.kind, Cancelled);
+    }
+
+    #[test]
+    fn why_a_run_wasnt_contained_is_logged_but_never_judged() {
+        // Fail open (D22): the hook's reason, whatever it says, goes in the
+        // detail; the error is FFmpeg's.
+        let names = Names::new(
+            Path::new("/in/clip.mkv"),
+            Path::new("/out/clip.mp4"),
+            Format::Mkv,
+            Format::Mp4,
+        );
+        let e = RunError::Exit {
+            code: Some(1),
+            stderr_tail: "[in#0 @ 0x1] Error opening input: Invalid data found".to_string(),
+            uncontained: Some("Access is denied. (os error 5)".to_string()),
+        };
+        let err = ffmpeg_failed(&names, e, Path::new("/in/clip.mkv"));
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert!(
+            err.detail
+                .contains("code 1 (not contained: Access is denied. (os error 5)): [in#0"),
+            "{}",
+            err.detail
+        );
     }
 
     #[test]

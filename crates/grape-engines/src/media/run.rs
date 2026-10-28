@@ -14,6 +14,13 @@
 //!   is killed and then waited for, on every way out of a run, a panic in
 //!   the caller's callback included ([`Reaper`]): on Windows its temp
 //!   output can't be deleted while the process still holds it open.
+//! - **Contained where the app contains:** right after the spawn, before
+//!   anything of its output is read, the child goes through the app's
+//!   containment hook ([`helper::contain_hook`], D33): on Windows a Job
+//!   Object of its own, which ends it when Grape ends, however Grape ends.
+//!   No memory cap. A hook that fails leaves the child running uncontained
+//!   (fail open, D22, unlike the helpers), its reason kept with the run's
+//!   exit ([`Finished::uncontained`], [`RunError::Exit`]) for the log.
 //! - **Two at a time:** [`acquire`] holds an FFmpeg job back until one of
 //!   the [`MAX_FFMPEG_JOBS`] slots is free (`docs/ARCHITECTURE.md`).
 
@@ -23,10 +30,11 @@ use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::helper::{self, Contain, Contained};
 use crate::CancelToken;
 
 /// How many FFmpeg jobs may run at once (`docs/ARCHITECTURE.md`).
@@ -53,9 +61,10 @@ pub(crate) const MAX_LINE: usize = 4 * 1024;
 /// `DETACHED_PROCESS`: the child gets no console at all, so no console
 /// window flashes up and Windows starts no `conhost.exe` for it. Its stdio
 /// are a null handle and pipes, so it needs none. `CREATE_NO_WINDOW` would
-/// still give these console programs a hidden console, whose host is a
-/// second process, one more than a Job Object that allows one would hold
-/// (D33 chose this flag for `grape-heif.exe` for that reason).
+/// still give these console programs a hidden console, whose host would
+/// start inside the Job Object the app's hook puts the child in and race
+/// that job's one-process limit (D33 chose this flag for `grape-heif.exe`
+/// for the same reason).
 #[cfg(windows)]
 const DETACHED_PROCESS: u32 = 0x0000_0008;
 
@@ -73,12 +82,16 @@ pub(crate) enum RunError {
     #[error("couldn't start the sidecar: {0}")]
     Spawn(io::Error),
     /// The child exited with a failure status.
-    #[error("the sidecar exited with {}", exit_text(.code))]
+    #[error("the sidecar exited with {}{}", exit_text(.code), uncontained_text(.uncontained))]
     Exit {
         /// The exit code; `None` when a signal ended the child.
         code: Option<i32>,
-        /// The end of what it wrote to stderr.
+        /// The end of what it wrote to stderr: FFmpeg's words only, which
+        /// the engine judges the failure by.
         stderr_tail: String,
+        /// Why the app's hook couldn't contain it, if it couldn't
+        /// ([`supervise`]). Part of the message, for the log.
+        uncontained: Option<String>,
     },
     /// The token was cancelled. The child, if it was started, is gone.
     #[error("cancelled")]
@@ -105,12 +118,38 @@ fn exit_text(code: &Option<i32>) -> String {
     }
 }
 
+/// " (not contained: why)" for a child the app's hook couldn't contain,
+/// else nothing.
+fn uncontained_text(why: &Option<String>) -> String {
+    match why {
+        Some(why) => format!(" (not contained: {why})"),
+        None => String::new(),
+    }
+}
+
 /// A child that exited with status 0.
 #[derive(Debug)]
 pub(crate) struct Finished {
     /// The end of what it wrote to stderr (FFmpeg warns there even when it
     /// succeeds), for the log.
     pub(crate) stderr_tail: String,
+    /// Why the app's hook couldn't contain it, if it couldn't
+    /// ([`supervise`]).
+    pub(crate) uncontained: Option<String>,
+}
+
+impl Finished {
+    /// What a later failure's detail quotes: the stderr tail, then why the
+    /// child wasn't contained, if it wasn't.
+    pub(crate) fn warnings(self) -> String {
+        match &self.uncontained {
+            None => self.stderr_tail,
+            Some(_) => {
+                let note = uncontained_text(&self.uncontained);
+                format!("{}{note}", self.stderr_tail.trim_end())
+            }
+        }
+    }
 }
 
 /// A [`Command`] for the sidecar at `program`: stdin empty, stdout and
@@ -139,27 +178,30 @@ pub(crate) fn command(program: &Path, args: &[OsString]) -> Result<Command, RunE
 /// Runs `ffmpeg` with `args` (which include `-progress pipe:1`) and calls
 /// `on_time`, on this thread, with each output time it reports. Kills it
 /// when `cancel` is cancelled, even as it exits. Nothing is started if the
-/// token is already cancelled.
+/// token is already cancelled. Contained by the app's hook, if it set one.
 pub(crate) fn transcode(
     program: &Path,
     args: &[OsString],
     cancel: &CancelToken,
     on_time: &mut dyn FnMut(Duration),
 ) -> Result<Finished, RunError> {
+    let contain = helper::contain_hook();
     #[cfg(test)]
     if let Some(fake) = tests::next_fake(args) {
-        return fake.transcode(cancel, on_time);
+        return fake.transcode(contain, cancel, on_time);
     }
-    transcode_command(command(program, args)?, cancel, on_time)
+    transcode_command(command(program, args)?, contain, cancel, on_time)
 }
 
-/// [`transcode`] with a ready [`Command`] (tests add environment to it).
+/// [`transcode`] with a ready [`Command`] (tests add environment to it)
+/// and the hook to contain it with (tests pass a fake).
 fn transcode_command(
     command: Command,
+    contain: Option<Arc<dyn Contain>>,
     cancel: &CancelToken,
     on_time: &mut dyn FnMut(Duration),
 ) -> Result<Finished, RunError> {
-    supervise(command, cancel, None, read_progress, &mut |time| {
+    supervise(command, contain, cancel, None, read_progress, &mut |time| {
         on_time(time);
         Ok(())
     })
@@ -167,23 +209,27 @@ fn transcode_command(
 
 /// Runs `ffprobe` with `args` and returns its stdout (lossy UTF-8). Kills
 /// it when `cancel` is cancelled or after `timeout`, and refuses more than
-/// [`MAX_PROBE_OUTPUT`] of output ([`RunError::TooMuch`]).
+/// [`MAX_PROBE_OUTPUT`] of output ([`RunError::TooMuch`]). Contained by
+/// the app's hook, if it set one.
 pub(crate) fn probe(
     program: &Path,
     args: &[OsString],
     cancel: &CancelToken,
     timeout: Duration,
 ) -> Result<String, RunError> {
+    let contain = helper::contain_hook();
     #[cfg(test)]
     if let Some(fake) = tests::next_fake(args) {
-        return fake.probe(cancel, timeout);
+        return fake.probe(contain, cancel, timeout);
     }
-    probe_command(command(program, args)?, cancel, timeout)
+    probe_command(command(program, args)?, contain, cancel, timeout)
 }
 
-/// [`probe`] with a ready [`Command`] (tests add environment to it).
+/// [`probe`] with a ready [`Command`] (tests add environment to it) and
+/// the hook to contain it with.
 fn probe_command(
     command: Command,
+    contain: Option<Arc<dyn Contain>>,
     cancel: &CancelToken,
     timeout: Duration,
 ) -> Result<String, RunError> {
@@ -193,7 +239,7 @@ fn probe_command(
         output = Some(read?);
         Ok(())
     };
-    supervise(command, cancel, deadline, read_all, &mut keep)?;
+    supervise(command, contain, cancel, deadline, read_all, &mut keep)?;
     let bytes =
         output.ok_or_else(|| RunError::Io(io::Error::other("the sidecar's stdout was lost")))?;
     Ok(String::from_utf8_lossy(&bytes).into_owned())
@@ -206,7 +252,7 @@ fn probe_command(
 /// matters line by line needs no room for all of it. Kills it when `cancel`
 /// is cancelled, after `timeout`, or once it printed more than `limit`
 /// bytes ([`RunError::TooMuch`], with every whole line before that handed
-/// over).
+/// over). Contained by the app's hook, if it set one.
 pub(crate) fn probe_lines(
     program: &Path,
     args: &[OsString],
@@ -215,16 +261,20 @@ pub(crate) fn probe_lines(
     limit: u64,
     each: &mut (dyn FnMut(&str, bool) + Send),
 ) -> Result<(), RunError> {
+    let contain = helper::contain_hook();
     #[cfg(test)]
     if let Some(fake) = tests::next_fake(args) {
-        return fake.probe_lines(cancel, timeout, limit, each);
+        return fake.probe_lines(contain, cancel, timeout, limit, each);
     }
-    probe_lines_command(command(program, args)?, cancel, timeout, limit, each)
+    let command = command(program, args)?;
+    probe_lines_command(command, contain, cancel, timeout, limit, each)
 }
 
-/// [`probe_lines`] with a ready [`Command`] (tests add environment to it).
+/// [`probe_lines`] with a ready [`Command`] (tests add environment to it)
+/// and the hook to contain it with.
 fn probe_lines_command(
     command: Command,
+    contain: Option<Arc<dyn Contain>>,
     cancel: &CancelToken,
     timeout: Duration,
     limit: u64,
@@ -235,17 +285,19 @@ fn probe_lines_command(
         // The receiver outlives the reader: both live in one scope.
         let _ = ended.send(read_heads(stdout, limit, each));
     };
-    supervise(command, cancel, deadline, read, &mut |ended| ended)?;
+    supervise(command, contain, cancel, deadline, read, &mut |ended| ended)?;
     Ok(())
 }
 
-/// Starts `command` and sees it through: `read_stdout` runs on its own
-/// thread and sends messages that `on_message` handles on this one; stderr
-/// is drained into a [`Tail`]. An error or a panic from `on_message`, a
-/// cancel or the deadline kills the child ([`Reaper`]). Returns once the
-/// child is gone and both readers have finished.
+/// Starts `command`, contains it with `contain` if there is a hook, and
+/// sees it through: `read_stdout` runs on its own thread and sends
+/// messages that `on_message` handles on this one; stderr is drained into
+/// a [`Tail`]. An error or a panic from `on_message`, a cancel or the
+/// deadline kills the child ([`Reaper`]). Returns once the child is gone
+/// and both readers have finished.
 fn supervise<M: Send>(
     mut command: Command,
+    contain: Option<Arc<dyn Contain>>,
     cancel: &CancelToken,
     deadline: Option<Instant>,
     read_stdout: impl FnOnce(ChildStdout, Sender<M>) + Send,
@@ -257,7 +309,21 @@ fn supervise<M: Send>(
     let mut child = Reaper {
         child: command.spawn().map_err(RunError::Spawn)?,
         exited: false,
+        contained: None,
     };
+    // Right after the spawn, while its pipes are still unread. No memory
+    // cap (D22). FFmpeg fails open, unlike the helpers, whose job is their
+    // memory cap (D33): FFmpeg's job only ends it with Grape, so a run that
+    // can't be put in one (FFmpeg already exited, on a source it refused at
+    // once) goes on without, and the reason goes to the log, not into the
+    // user's error.
+    let mut uncontained = None;
+    if let Some(hook) = contain {
+        match hook.contain(&child.child, None) {
+            Ok(contained) => child.contained = Some(contained),
+            Err(why) => uncontained = Some(why),
+        }
+    }
     let (Some(stdout), Some(stderr)) = (child.child.stdout.take(), child.child.stderr.take())
     else {
         return Err(RunError::Io(io::Error::other(
@@ -291,11 +357,15 @@ fn supervise<M: Send>(
         }
         drained?;
         if status.success() {
-            Ok(Finished { stderr_tail })
+            Ok(Finished {
+                stderr_tail,
+                uncontained,
+            })
         } else {
             Err(RunError::Exit {
                 code: status.code(),
                 stderr_tail,
+                uncontained,
             })
         }
     })
@@ -343,6 +413,12 @@ struct Reaper {
     child: Child,
     /// Set once `try_wait` saw the child exit, which also reaped it.
     exited: bool,
+    /// The app's container for the child, if it's in one. Released only
+    /// once the child is reaped, so the child never runs outside it: the
+    /// fields drop after `Drop::drop` has killed and waited for the child
+    /// (or `try_wait` reaped it), in the order they're declared, so this
+    /// one stays last, after `child`.
+    contained: Option<Box<dyn Contained>>,
 }
 
 impl Drop for Reaper {
@@ -657,22 +733,25 @@ pub(super) mod tests {
             }
         }
 
-        /// The outcome of a scripted `ffmpeg` run.
+        /// The outcome of a scripted `ffmpeg` run; a child is contained
+        /// with `contain`, as a real run.
         pub(super) fn transcode(
             self,
+            contain: Option<Arc<dyn Contain>>,
             cancel: &CancelToken,
             on_time: &mut dyn FnMut(Duration),
         ) -> Result<Finished, RunError> {
             match self.fake {
                 Fake::Fails(e) => Err(e),
                 Fake::Prints(_) | Fake::Runs(_) => panic!("ffmpeg was scripted as ffprobe"),
-                Fake::Child(..) => transcode_command(self.command(), cancel, on_time),
+                Fake::Child(..) => transcode_command(self.command(), contain, cancel, on_time),
             }
         }
 
         /// The outcome of a scripted `ffprobe` run.
         pub(super) fn probe(
             self,
+            contain: Option<Arc<dyn Contain>>,
             cancel: &CancelToken,
             timeout: Duration,
         ) -> Result<String, RunError> {
@@ -680,7 +759,7 @@ pub(super) mod tests {
                 Fake::Prints(text) => Ok(text),
                 Fake::Runs(run) => Ok(run()),
                 Fake::Fails(e) => Err(e),
-                Fake::Child(..) => probe_command(self.command(), cancel, timeout),
+                Fake::Child(..) => probe_command(self.command(), contain, cancel, timeout),
             }
         }
 
@@ -688,6 +767,7 @@ pub(super) mod tests {
         /// it prints goes through the same reader as a child's stdout.
         pub(super) fn probe_lines(
             self,
+            contain: Option<Arc<dyn Contain>>,
             cancel: &CancelToken,
             timeout: Duration,
             limit: u64,
@@ -698,7 +778,7 @@ pub(super) mod tests {
                 Fake::Runs(run) => read_heads(run().as_bytes(), limit, each),
                 Fake::Fails(e) => Err(e),
                 Fake::Child(..) => {
-                    probe_lines_command(self.command(), cancel, timeout, limit, each)
+                    probe_lines_command(self.command(), contain, cancel, timeout, limit, each)
                 }
             }
         }
@@ -945,41 +1025,40 @@ pub(super) mod tests {
             let pid = std::fs::read_to_string(&self.file).unwrap();
             std::fs::remove_file(&self.file).unwrap();
             let pid = pid.trim();
-            #[cfg(target_os = "linux")]
-            assert!(
-                !Path::new(&format!("/proc/{pid}")).exists(),
-                "child {pid} is still in the process table"
-            );
-            #[cfg(all(unix, not(target_os = "linux")))]
-            {
-                let status = Command::new("/bin/ps")
-                    .args(["-p", pid])
-                    .stdout(Stdio::null())
-                    .status()
-                    .unwrap();
-                assert!(
-                    !status.success(),
-                    "child {pid} is still in the process table"
-                );
-            }
-            #[cfg(windows)]
-            {
-                let filter = format!("PID eq {pid}");
-                let out = Command::new("tasklist")
-                    .args(["/FI", filter.as_str(), "/NH"])
-                    .stdin(Stdio::null())
-                    .output()
-                    .unwrap();
-                assert!(out.status.success(), "tasklist /FI {filter:?} failed");
-                // A match is a row with the pid; no match, a message in the
-                // system's language without it.
-                let listed = String::from_utf8_lossy(&out.stdout);
-                assert!(
-                    !listed.split_whitespace().any(|word| word == pid),
-                    "child {pid} is still running: {listed}"
-                );
-            }
+            assert!(!listed(pid), "child {pid} is still in the process table");
         }
+    }
+
+    /// True while `pid` is in the process table: running, or on Unix a
+    /// zombie not yet waited for. On Windows, while `tasklist` lists it,
+    /// which it doesn't once the process has exited (Windows doesn't reuse
+    /// a process id at once).
+    fn listed(pid: &str) -> bool {
+        #[cfg(target_os = "linux")]
+        let listed = Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(all(unix, not(target_os = "linux")))]
+        let listed = Command::new("/bin/ps")
+            .args(["-p", pid])
+            .stdout(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        #[cfg(windows)]
+        let listed = {
+            let filter = format!("PID eq {pid}");
+            let out = Command::new("tasklist")
+                .args(["/FI", filter.as_str(), "/NH"])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "tasklist /FI {filter:?} failed");
+            // A match is a row with the pid; no match, a message in the
+            // system's language without it.
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .any(|word| word == pid)
+        };
+        listed
     }
 
     impl Drop for Held {
@@ -1007,7 +1086,7 @@ pub(super) mod tests {
         let token = CancelToken::new();
         let _watchdog = watchdog(&token);
         let mut times = Vec::new();
-        transcode_command(fake("progress"), &token, &mut |time| times.push(time)).unwrap();
+        transcode_command(fake("progress"), None, &token, &mut |time| times.push(time)).unwrap();
         assert_eq!(times, [0, 500, 1000, 1500, 2000].map(Duration::from_millis));
     }
 
@@ -1015,7 +1094,7 @@ pub(super) mod tests {
     fn a_stderr_flood_cannot_block_the_child_and_only_its_tail_is_kept() {
         let token = CancelToken::new();
         let _watchdog = watchdog(&token);
-        let finished = transcode_command(fake("stderr-flood"), &token, &mut |_| {}).unwrap();
+        let finished = transcode_command(fake("stderr-flood"), None, &token, &mut |_| {}).unwrap();
         let tail = finished.stderr_tail;
         assert!(tail.len() <= TAIL_BYTES, "{}", tail.len());
         assert!(tail.ends_with("stderr flood line 0044999\n"));
@@ -1034,7 +1113,7 @@ pub(super) mod tests {
                 Instant::now()
             })
         };
-        let result = transcode_command(fake("sleep"), &token, &mut |_| {});
+        let result = transcode_command(fake("sleep"), None, &token, &mut |_| {});
         let returned = Instant::now();
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
         // Returning means both readers saw their pipe close, which the kill
@@ -1049,7 +1128,7 @@ pub(super) mod tests {
         let token = CancelToken::new();
         let _watchdog = watchdog(&token);
         // It reports progress once it holds the file.
-        let result = transcode_command(holding(&held.file), &token, &mut |_| token.cancel());
+        let result = transcode_command(holding(&held.file), None, &token, &mut |_| token.cancel());
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
         held.assert_gone();
 
@@ -1066,7 +1145,7 @@ pub(super) mod tests {
                 token.cancel();
             })
         };
-        let result = probe_command(holding(&held.file), &token, Duration::from_secs(20));
+        let result = probe_command(holding(&held.file), None, &token, Duration::from_secs(20));
         assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
         canceller.join().unwrap();
         held.assert_gone();
@@ -1077,6 +1156,7 @@ pub(super) mod tests {
         let held = Held::new();
         let result = probe_command(
             holding(&held.file),
+            None,
             &CancelToken::new(),
             Duration::from_secs(1),
         );
@@ -1095,7 +1175,7 @@ pub(super) mod tests {
         let (returned, unwound) = mpsc::channel();
         let run = thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                transcode_command(child, &CancelToken::new(), &mut |_| {
+                transcode_command(child, None, &CancelToken::new(), &mut |_| {
                     panic!("the progress callback failed")
                 })
             }));
@@ -1111,7 +1191,7 @@ pub(super) mod tests {
     #[test]
     fn a_cancel_as_the_child_exits_still_cancels() {
         let token = CancelToken::new();
-        let result = transcode_command(fake("progress"), &token, &mut |time| {
+        let result = transcode_command(fake("progress"), None, &token, &mut |time| {
             if time == Duration::from_secs(2) {
                 token.cancel();
             }
@@ -1124,7 +1204,7 @@ pub(super) mod tests {
         let token = CancelToken::new();
         let _watchdog = watchdog(&token);
         let mut first = true;
-        let result = transcode_command(fake("progress"), &token, &mut |time| {
+        let result = transcode_command(fake("progress"), None, &token, &mut |time| {
             // The child prints the rest and exits meanwhile, so the later
             // times are only read once it is gone.
             if first {
@@ -1164,11 +1244,12 @@ pub(super) mod tests {
     fn a_failing_child_reports_its_code_and_stderr() {
         let token = CancelToken::new();
         let _watchdog = watchdog(&token);
-        let result = transcode_command(fake("fail"), &token, &mut |_| {});
+        let result = transcode_command(fake("fail"), None, &token, &mut |_| {});
         match result {
             Err(RunError::Exit {
                 code: Some(3),
                 stderr_tail,
+                uncontained: None,
             }) => assert!(stderr_tail.contains("boom"), "{stderr_tail:?}"),
             other => panic!("{other:?}"),
         }
@@ -1177,7 +1258,7 @@ pub(super) mod tests {
     #[test]
     fn probe_returns_stdout() {
         let token = CancelToken::new();
-        let output = probe_command(fake("probe"), &token, Duration::from_secs(10)).unwrap();
+        let output = probe_command(fake("probe"), None, &token, Duration::from_secs(10)).unwrap();
         // The test harness prints its own lines around it.
         assert!(output.contains(PROBE_OUTPUT), "{output:?}");
     }
@@ -1190,7 +1271,7 @@ pub(super) mod tests {
     #[test]
     fn probe_refuses_more_than_4_mib() {
         let token = CancelToken::new();
-        let result = probe_command(fake("big"), &token, Duration::from_secs(10));
+        let result = probe_command(fake("big"), None, &token, Duration::from_secs(10));
         assert!(too_much(&result, MAX_PROBE_OUTPUT), "{result:?}");
         let message = result.unwrap_err().to_string();
         assert_eq!(message, "the sidecar printed more than 4 MiB");
@@ -1201,7 +1282,7 @@ pub(super) mod tests {
         let token = CancelToken::new();
         let started = Instant::now();
         // The child never closes its stdout: only the limit ends the read.
-        let result = probe_command(fake("big-hold"), &token, Duration::from_secs(10));
+        let result = probe_command(fake("big-hold"), None, &token, Duration::from_secs(10));
         assert!(too_much(&result, MAX_PROBE_OUTPUT), "{result:?}");
         let took = started.elapsed();
         assert!(took < Duration::from_secs(5), "{took:?}");
@@ -1276,6 +1357,7 @@ pub(super) mod tests {
             let started = Instant::now();
             let result = probe_lines_command(
                 fake(mode),
+                None,
                 &token,
                 Duration::from_secs(20),
                 limit as u64,
@@ -1290,6 +1372,7 @@ pub(super) mod tests {
         let mut seen = Vec::new();
         let result = probe_lines_command(
             fake("probe"),
+            None,
             &token,
             Duration::from_secs(10),
             limit as u64,
@@ -1318,6 +1401,7 @@ pub(super) mod tests {
         };
         let result = probe_lines_command(
             holding(&held.file),
+            None,
             &token,
             Duration::from_secs(20),
             u64::MAX,
@@ -1328,11 +1412,269 @@ pub(super) mod tests {
         held.assert_gone();
     }
 
+    /// What a [`FakeContain`] saw, in order, with the output a test notes.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Seen {
+        /// `contain` was called for this child, with this memory cap, and
+        /// its stdout and stderr were still in place, so unread.
+        Contained {
+            pid: u32,
+            max_memory: Option<u64>,
+            unread: bool,
+        },
+        /// The run handed the test some output.
+        Output,
+        /// The container was released, and whether the child was still in
+        /// the process table then ([`listed`]).
+        Released { pid: u32, listed: bool },
+    }
+
+    /// A containment hook that notes what it's given, and refuses with
+    /// `refuse` if it's set.
+    #[derive(Debug)]
+    struct FakeContain {
+        refuse: Option<&'static str>,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl FakeContain {
+        fn new(refuse: Option<&'static str>) -> Arc<FakeContain> {
+            Arc::new(FakeContain {
+                refuse,
+                seen: Arc::default(),
+            })
+        }
+
+        /// The hook as a run takes it.
+        fn hook(self: &Arc<Self>) -> Option<Arc<dyn Contain>> {
+            Some(Arc::clone(self) as Arc<dyn Contain>)
+        }
+
+        fn note(&self, seen: Seen) {
+            note(&self.seen, seen);
+        }
+
+        fn seen(&self) -> Vec<Seen> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    /// Adds `seen` to `list`, even after a panic elsewhere.
+    fn note(list: &Mutex<Vec<Seen>>, seen: Seen) {
+        list.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(seen);
+    }
+
+    impl Contain for FakeContain {
+        fn contain(
+            &self,
+            child: &Child,
+            max_memory: Option<u64>,
+        ) -> Result<Box<dyn Contained>, String> {
+            let pid = child.id();
+            let unread = child.stdout.is_some() && child.stderr.is_some();
+            self.note(Seen::Contained {
+                pid,
+                max_memory,
+                unread,
+            });
+            match self.refuse {
+                Some(why) => Err(why.to_string()),
+                None => Ok(Box::new(FakeContained {
+                    pid,
+                    seen: Arc::clone(&self.seen),
+                })),
+            }
+        }
+    }
+
+    /// A [`FakeContain`]'s container: notes when it's released.
+    struct FakeContained {
+        pid: u32,
+        seen: Arc<Mutex<Vec<Seen>>>,
+    }
+
+    impl Contained for FakeContained {
+        fn peak_memory(&self) -> Option<u64> {
+            None
+        }
+    }
+
+    impl Drop for FakeContained {
+        fn drop(&mut self) {
+            let listed = listed(&self.pid.to_string());
+            note(
+                &self.seen,
+                Seen::Released {
+                    pid: self.pid,
+                    listed,
+                },
+            );
+        }
+    }
+
+    /// Asserts that `seen` is one contained run: contained once, with no
+    /// memory cap and before any of its output was read, and released
+    /// only once the child was reaped. Returns how much output came in
+    /// between.
+    fn assert_one_contained_run(seen: &[Seen]) -> usize {
+        match (seen.first(), seen.last()) {
+            (
+                Some(Seen::Contained {
+                    pid,
+                    max_memory: None,
+                    unread: true,
+                }),
+                Some(Seen::Released {
+                    pid: released,
+                    listed: false,
+                }),
+            ) if pid == released => {}
+            _ => panic!("not one contained run: {seen:?}"),
+        }
+        let between = &seen[1..seen.len() - 1];
+        assert!(between.iter().all(|s| *s == Seen::Output), "{seen:?}");
+        between.len()
+    }
+
+    #[test]
+    fn each_run_is_contained_before_its_output_is_read_and_released_once_reaped() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let hook = FakeContain::new(None);
+        let finished = transcode_command(fake("progress"), hook.hook(), &token, &mut |_| {
+            hook.note(Seen::Output);
+        })
+        .unwrap();
+        assert_eq!(finished.uncontained, None);
+        assert_eq!(assert_one_contained_run(&hook.seen()), 5);
+
+        let hook = FakeContain::new(None);
+        let output =
+            probe_command(fake("probe"), hook.hook(), &token, Duration::from_secs(10)).unwrap();
+        assert!(output.contains(PROBE_OUTPUT), "{output:?}");
+        assert_eq!(assert_one_contained_run(&hook.seen()), 0);
+
+        let hook = FakeContain::new(None);
+        probe_lines_command(
+            fake("probe"),
+            hook.hook(),
+            &token,
+            Duration::from_secs(10),
+            1 << 20,
+            &mut |_, _| hook.note(Seen::Output),
+        )
+        .unwrap();
+        assert!(assert_one_contained_run(&hook.seen()) > 0);
+
+        // A failing run is released once reaped too.
+        let hook = FakeContain::new(None);
+        let result = transcode_command(fake("fail"), hook.hook(), &token, &mut |_| {});
+        assert!(
+            matches!(
+                result,
+                Err(RunError::Exit {
+                    code: Some(3),
+                    uncontained: None,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
+        assert_eq!(assert_one_contained_run(&hook.seen()), 0);
+    }
+
+    #[test]
+    fn a_contained_child_is_still_killed_on_cancel() {
+        let held = Held::new();
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let hook = FakeContain::new(None);
+        // It reports progress once it holds the file.
+        let result = transcode_command(holding(&held.file), hook.hook(), &token, &mut |_| {
+            hook.note(Seen::Output);
+            token.cancel();
+        });
+        assert!(matches!(result, Err(RunError::Cancelled)), "{result:?}");
+        held.assert_gone();
+        assert_eq!(assert_one_contained_run(&hook.seen()), 1);
+    }
+
+    #[test]
+    fn a_run_the_hook_cannot_contain_goes_on_and_says_why() {
+        let token = CancelToken::new();
+        let _watchdog = watchdog(&token);
+        let hook = FakeContain::new(Some("no job for it"));
+        let mut times = 0;
+        let finished =
+            transcode_command(fake("progress"), hook.hook(), &token, &mut |_| times += 1).unwrap();
+        assert_eq!(times, 5);
+        assert_eq!(finished.uncontained.as_deref(), Some("no job for it"));
+        let warnings = finished.warnings();
+        assert!(
+            warnings.ends_with("(not contained: no job for it)"),
+            "{warnings:?}"
+        );
+        // Tried once, before any output; nothing to release.
+        let seen = hook.seen();
+        assert!(
+            matches!(
+                seen[..],
+                [Seen::Contained {
+                    max_memory: None,
+                    unread: true,
+                    ..
+                }]
+            ),
+            "{seen:?}"
+        );
+
+        // A run that fails says why in its message, for the log, but not
+        // in the stderr tail the engine judges the failure by.
+        let hook = FakeContain::new(Some("access is denied"));
+        let result = transcode_command(fake("fail"), hook.hook(), &token, &mut |_| {});
+        let Err(e) = result else { panic!("{result:?}") };
+        assert_eq!(
+            e.to_string(),
+            "the sidecar exited with code 3 (not contained: access is denied)"
+        );
+        let RunError::Exit {
+            stderr_tail,
+            uncontained,
+            ..
+        } = e
+        else {
+            panic!("{e:?}")
+        };
+        assert!(stderr_tail.contains("boom"), "{stderr_tail:?}");
+        assert!(!stderr_tail.contains("denied"), "{stderr_tail:?}");
+        assert_eq!(uncontained.as_deref(), Some("access is denied"));
+
+        // Probes go on too.
+        let hook = FakeContain::new(Some("no job for it"));
+        let output =
+            probe_command(fake("probe"), hook.hook(), &token, Duration::from_secs(10)).unwrap();
+        assert!(output.contains(PROBE_OUTPUT), "{output:?}");
+        let mut lines = 0;
+        probe_lines_command(
+            fake("probe"),
+            hook.hook(),
+            &token,
+            Duration::from_secs(10),
+            1 << 20,
+            &mut |_, _| lines += 1,
+        )
+        .unwrap();
+        assert!(lines > 0);
+        assert_eq!(hook.seen().len(), 2, "{:?}", hook.seen());
+    }
+
     #[test]
     fn probe_times_out() {
         let token = CancelToken::new();
         let started = Instant::now();
-        let result = probe_command(fake("sleep"), &token, Duration::from_millis(300));
+        let result = probe_command(fake("sleep"), None, &token, Duration::from_millis(300));
         assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
         let took = started.elapsed();
         assert!(took >= Duration::from_millis(300), "{took:?}");

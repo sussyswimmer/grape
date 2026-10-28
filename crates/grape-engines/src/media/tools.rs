@@ -1113,6 +1113,7 @@ mod tests {
         let exit = run::RunError::Exit {
             code: Some(1),
             stderr_tail: "boom".to_owned(),
+            uncontained: None,
         };
         script([mp4("aac"), Fake::Fails(exit)]);
         let (result, _) = case.run();
