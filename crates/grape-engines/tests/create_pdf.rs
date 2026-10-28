@@ -1,7 +1,8 @@
 //! Images → PDF and Create PDF end to end through `run_job` (D37): in
 //! Grape's own process, so no sidecar is needed. Every image is generated
-//! here; every test checks that the sources are unchanged and that no temp
-//! file is left. The PDFs are read back with lopdf.
+//! here; every test that runs a job hashes its sources before and after
+//! and checks that no temp file is left. The PDFs are read back with
+//! lopdf.
 
 #![allow(clippy::unwrap_used)]
 
@@ -431,16 +432,18 @@ fn a_black_and_white_scan_is_one_bit_a_pixel() {
     let gray = GrayImage::from_fn(101, 33, |x, _| Luma([(x * 2) as u8]));
     for (stem, img, bits) in [("text", text, 1), ("gray", gray, 8)] {
         let bytes = encode(&DynamicImage::ImageLuma8(img), ImageFormat::Png);
-        let (_, job) = plan_one(
+        let (src, job) = plan_one(
             &dir,
             &format!("{stem}.png"),
             &bytes,
             Operation::convert(Format::Pdf),
         );
+        let before = SourceState::of(&src);
         run(&job).0.unwrap();
         let (_, pages) = read_pdf(&planned_file(&job));
         assert_eq!(name(&pages[0].image, b"ColorSpace"), "DeviceGray");
         assert_eq!(int(&pages[0].image, b"BitsPerComponent"), bits, "{stem}");
+        before.assert_unchanged();
     }
     assert_no_leftovers(&dir.path);
 }
@@ -516,6 +519,7 @@ fn create_pdf_makes_one_page_per_image_in_order() {
 fn a_name_taken_after_planning_gets_the_next_number() {
     let dir = TestDir::new("create-taken");
     let (paths, job) = plan_create(&dir, &three_images());
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
     let taken = dir.join("a Combined.pdf");
     fs::write(&taken, b"someone else's").unwrap();
 
@@ -526,7 +530,9 @@ fn a_name_taken_after_planning_gets_the_next_number() {
     assert!(outcome.renamed);
     assert_eq!(fs::read(&taken).unwrap(), b"someone else's");
     assert_eq!(read_pdf(&renamed).1.len(), 3);
-    assert_eq!(paths.len(), 3);
+    for source in &sources {
+        source.assert_unchanged();
+    }
     assert_no_leftovers(&dir.path);
 }
 
@@ -554,16 +560,21 @@ fn a_missing_image_is_named() {
     let dir = TestDir::new("create-missing");
     let (paths, job) = plan_create(&dir, &three_images());
     fs::remove_file(&paths[2]).unwrap();
+    let sources: Vec<SourceState> = paths[..2].iter().map(|p| SourceState::of(p)).collect();
     let err = run(&job).0.unwrap_err();
     assert_eq!(err.kind, ErrorKind::ReadFailed);
     assert_eq!(err.user_message, "Grape couldn't read c.tiff.");
     assert_eq!(dir.names(), ["a.jpg", "b.png"]);
+    for source in &sources {
+        source.assert_unchanged();
+    }
 }
 
 #[test]
 fn a_cancelled_job_writes_nothing() {
     let dir = TestDir::new("create-cancel");
     let (paths, job) = plan_create(&dir, &three_images());
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
     let names_before = dir.names();
     let ctx = EngineCtx::default();
     ctx.cancel.cancel();
@@ -583,8 +594,8 @@ fn a_cancelled_job_writes_nothing() {
     .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Cancelled);
     assert_eq!(dir.names(), names_before);
-    for path in &paths {
-        assert!(path.exists());
+    for source in &sources {
+        source.assert_unchanged();
     }
 }
 
@@ -593,7 +604,8 @@ fn heic_needs_the_helper_even_in_a_mix() {
     let dir = TestDir::new("create-heic");
     let mut files = three_images();
     files.push(("d.heic", b"\0\0\0\x18ftypheic\0\0\0\0mif1heic".to_vec()));
-    let (_, job) = plan_create(&dir, &files);
+    let (paths, job) = plan_create(&dir, &files);
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
     let formats: Vec<Option<Format>> = [Format::Jpg, Format::Png, Format::Tiff, Format::Heic]
         .into_iter()
         .map(Some)
@@ -609,15 +621,21 @@ fn heic_needs_the_helper_even_in_a_mix() {
     assert_eq!(err.kind, ErrorKind::NotYetSupported);
     assert_eq!(dir.names(), names_before);
 
-    let (_, job) = plan_one(
+    let (src, job) = plan_one(
         &dir,
         "e.heic",
         b"\0\0\0\x18ftypheic\0\0\0\0mif1heic",
         Operation::convert(Format::Pdf),
     );
+    let before = SourceState::of(&src);
     let err = run(&job).0.unwrap_err();
     assert_eq!(err.kind, ErrorKind::NotYetSupported);
     assert_eq!(err.user_message, "HEIC to PDF isn't in this build yet.");
+    before.assert_unchanged();
+    for source in &sources {
+        source.assert_unchanged();
+    }
+    assert_no_leftovers(&dir.path);
 }
 
 #[test]

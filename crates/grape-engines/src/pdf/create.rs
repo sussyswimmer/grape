@@ -1853,6 +1853,24 @@ mod tests {
         (paths, jobs.remove(0))
     }
 
+    /// Each source's bytes and modification time.
+    type Snapshot = Vec<(Vec<u8>, std::time::SystemTime)>;
+
+    fn snapshot(paths: &[PathBuf]) -> Snapshot {
+        paths
+            .iter()
+            .map(|path| {
+                let modified = fs::metadata(path).unwrap().modified().unwrap();
+                (fs::read(path).unwrap(), modified)
+            })
+            .collect()
+    }
+
+    /// Panics if a source's bytes or modification time changed.
+    fn assert_untouched(paths: &[PathBuf], before: &Snapshot) {
+        assert_eq!(&snapshot(paths), before, "a source changed");
+    }
+
     fn dest(job: &Job) -> PathBuf {
         match &job.output {
             JobOutput::File(path) => path.clone(),
@@ -1932,7 +1950,7 @@ mod tests {
             ],
             Operation::tool(ToolKey::CreatePdf),
         );
-        let before: Vec<Vec<u8>> = paths.iter().map(|p| fs::read(p).unwrap()).collect();
+        let before = snapshot(&paths);
         let (result, progress) = run_with_helper(&dir, &job, Some("ok"));
         let outcome = result.unwrap();
         assert_eq!(outcome.outputs, vec![dir.0.join("a Combined.pdf")]);
@@ -1951,9 +1969,7 @@ mod tests {
         assert_eq!(rows_of(mask, mask_data), alpha);
         assert_eq!(pages[1].media_box, [0.0, 0.0, 3.0, 5.0]);
         assert_eq!(name(&pages[1].image, b"Filter"), "FlateDecode");
-        for (path, bytes) in paths.iter().zip(before) {
-            assert_eq!(fs::read(path).unwrap(), bytes);
-        }
+        assert_untouched(&paths, &before);
         assert_eq!(
             listing(&dir.0),
             ["a Combined.pdf", "a.heic", "b.png", "work"]
@@ -1964,11 +1980,12 @@ mod tests {
     fn heic_to_pdf_runs_one_page() {
         let dir = test_dir();
         let rows = rgb_rows(50, 20);
-        let (_, job) = planned(
+        let (paths, job) = planned(
             &dir,
             &[("photo.heic", fake_heic(50, 20, 3, &rows, None))],
             Operation::convert(Format::Pdf),
         );
+        let before = snapshot(&paths);
         let (result, progress) = run_with_helper(&dir, &job, Some("ok"));
         let outcome = result.unwrap();
         assert_eq!(outcome.outputs, vec![dir.0.join("photo.pdf")]);
@@ -1979,17 +1996,19 @@ mod tests {
         assert_eq!(name(&pages[0].image, b"Filter"), "DCTDecode");
         let decoded = ::image::load_from_memory(&pages[0].data).unwrap().to_rgb8();
         assert_eq!(decoded.dimensions(), (50, 20));
+        assert_untouched(&paths, &before);
     }
 
     #[test]
     fn a_heic_that_isnt_heif_is_read_as_its_content() {
         let dir = test_dir();
         let photo = DynamicImage::ImageRgb8(gradient(4, 3));
-        let (_, job) = planned(
+        let (paths, job) = planned(
             &dir,
             &[("photo.heic", png_bytes(&photo))],
             Operation::convert(Format::Pdf),
         );
+        let before = snapshot(&paths);
         // `nowhere`: a helper that would fail if started.
         let (result, _) = run_with_helper(&dir, &job, None);
         result.unwrap();
@@ -1999,13 +2018,14 @@ mod tests {
             rows_of(&pages[0].image, &pages[0].data),
             photo.to_rgb8().into_raw()
         );
+        assert_untouched(&paths, &before);
     }
 
     #[test]
     fn a_helper_failure_names_the_heic_and_writes_nothing() {
         let dir = test_dir();
         let photo = png_bytes(&DynamicImage::ImageRgb8(gradient(2, 2)));
-        let (_, job) = planned(
+        let (paths, job) = planned(
             &dir,
             &[
                 ("a.png", photo),
@@ -2013,6 +2033,7 @@ mod tests {
             ],
             Operation::tool(ToolKey::CreatePdf),
         );
+        let before = snapshot(&paths);
         let (result, _) = run_with_helper(&dir, &job, Some("error-damaged"));
         let err = result.unwrap_err();
         assert_eq!(
@@ -2023,6 +2044,7 @@ mod tests {
             )
         );
         assert_eq!(listing(&dir.0), ["a.png", "b.heic", "work"]);
+        assert_untouched(&paths, &before);
     }
 
     #[test]
@@ -2033,6 +2055,7 @@ mod tests {
             &[("photo.heic", fake_heic(1, 1, 3, &[1, 2, 3], None))],
             Operation::convert(Format::Pdf),
         );
+        let before = snapshot(&paths);
         let err = convert(
             &job,
             &paths[0],
@@ -2050,5 +2073,6 @@ mod tests {
             )
         );
         assert_eq!(listing(&dir.0), ["photo.heic", "work"]);
+        assert_untouched(&paths, &before);
     }
 }

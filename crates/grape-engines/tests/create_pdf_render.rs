@@ -302,6 +302,7 @@ fn lossless_pages_draw_as_their_images() {
         fs::write(&path, bytes).unwrap();
         paths.push(path);
     }
+    let sources: Vec<SourceState> = paths.iter().map(|p| SourceState::of(p)).collect();
     let settings = Settings::new(dir.join("fallback"));
     let selection = build_selection(&paths, &settings);
     let job = plan(&selection, &Operation::tool(ToolKey::CreatePdf), &settings)
@@ -319,6 +320,9 @@ fn lossless_pages_draw_as_their_images() {
         );
         let error = mean_error(&page.pixels, expected);
         assert!(error < 1.0, "{name}: {error}");
+    }
+    for source in &sources {
+        source.assert_unchanged();
     }
     assert_no_leftovers(&dir.path);
 }
