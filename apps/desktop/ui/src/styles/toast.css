@@ -122,11 +122,14 @@ body {
  * done") take up to two lines each: three lines at most, which fit the pill.
  * An info toast's detail too: it can be a tool's own sentence under
  * "Nothing to change" ("song.mp3 is already compact. Try Small."), whose
- * reason comes after the file's name.
+ * reason comes after the file's name. And a done toast's detail, which can
+ * end with what didn't change after the output's name ("IMG_1234
+ * Compressed.jpg; 1 already compact").
  */
 .toast[data-tone="error"] .toast-title:only-child,
 .toast[data-tone="error"] .toast-detail,
-.toast[data-tone="info"] .toast-detail {
+.toast[data-tone="info"] .toast-detail,
+.toast[data-tone="done"] .toast-detail {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -136,7 +139,8 @@ body {
 
 /* Under a title, a little tighter, so the three lines clear the pill's edge. */
 .toast[data-tone="error"] .toast-detail,
-.toast[data-tone="info"] .toast-detail {
+.toast[data-tone="info"] .toast-detail,
+.toast[data-tone="done"] .toast-detail {
   line-height: 1.2;
 }
 

@@ -46,10 +46,12 @@ export const NOTES: {
   readonly audioChannels: Readonly<Record<Channels, string>>;
 } = {
   compress: {
-    // True for every format Compress runs on (ENGINES.md → Tools): PNG is
-    // lossless at every preset and FLAC from 16-bit or 48 kHz sources can
-    // be too, so none says quality is lost or the file gets much smaller.
-    small: "Smallest file. Large photos and videos are scaled down.",
+    // Nothing here is false for a format Compress runs on (ENGINES.md →
+    // Tools): PNG is lossless at every preset, so its three give the same
+    // file and Small scales only JPEGs and videos; FLAC from 16-bit or
+    // 48 kHz sources can be lossless too. So none says quality is lost or
+    // the file gets much smaller.
+    small: "Smallest file. Large JPEGs and videos are scaled down.",
     balanced: "Smaller, and hard to tell apart.",
     high: "Best quality. Saves the least space.",
   },

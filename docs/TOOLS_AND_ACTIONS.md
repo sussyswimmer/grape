@@ -48,7 +48,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 - **Audio Channels** is Mono / Stereo, starting at Mono every time.
 - **Normalize Volume** is a target loudness slider from −24 to −10 LUFS in steps of 1, −16 LUFS by default, and remembers the last target that ran (`tools.normalize_lufs`).
 - **Merge PDFs** is an order list (pointer drag, Alt+↑/↓, Move up and Move down) showing the merged file's name; the first file names it and picks its folder. Its panel opens once Grape's PDF library is found (D35).
-- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); for now on PDFs and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26), which say "No metadata found" when they had none. D26 adds JPG, PNG, WebP and GIF next.
+- **Remove Metadata** runs at once (although the table marks it Panel). Its toast says what it removed ("Removed author, title and 3 more", or "No document metadata found": page-level XMP and the images' own metadata stay, ENGINES.md → Metadata removal); on PDFs, on JPG, PNG, WebP and GIF (no helper needed), and on audio and video (MP3, M4A, WAV, FLAC, MP4, MOV, MKV; D26); images and media say "No metadata found" when they had none.
 
 ## File actions
 
