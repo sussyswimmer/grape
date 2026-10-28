@@ -252,7 +252,7 @@ fn alias_rule_matches() {
         );
         seen += 1;
     }
-    assert_eq!(seen, 5);
+    assert_eq!(seen, 7);
 }
 
 #[test]

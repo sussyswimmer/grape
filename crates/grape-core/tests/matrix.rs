@@ -322,6 +322,9 @@ fn video_to_mp3_is_offered() {
 fn aliases_resolve() {
     assert_eq!(Format::from_extension("jpeg"), Some(Jpg));
     assert_eq!(Format::from_extension("tif"), Some(Tiff));
+    // Camera HEIF (Canon, Fujifilm, Sony) is HEIC to Grape (lane A's D33).
+    assert_eq!(Format::from_extension("heif"), Some(Heic));
+    assert_eq!(Format::from_extension("HIF"), Some(Heic));
     assert_eq!(Format::from_extension("aif"), Some(Aiff));
     assert_eq!(Format::from_extension("htm"), Some(Html));
     assert_eq!(Format::from_extension("markdown"), Some(Md));
