@@ -36,6 +36,15 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 ///   that passes the probe. The engine creates it only when a job writes
 ///   into it (by falling back, or because `OutputLocation::Folder` names
 ///   it). No folder is ever created here.
+/// - **The fallback is read only when a plan may write there**: a folder
+///   the planner tries first (the `OutputLocation::Folder` path, otherwise
+///   each item's parent) is the fallback or isn't writable. Otherwise it
+///   gets `DirSnapshot::default()`, as an empty fallback path always does,
+///   without touching the disk: the planner never looks at it then, so the
+///   plan is the same. On macOS, Grape's first read in `~/Downloads` asks
+///   the user for the Downloads folder (TCC's Files and Folders; a drop
+///   covers only the dropped items), and a drop that can't fall back must
+///   not ask.
 ///
 /// Never panics; problems show up as `writable = false` and the planner
 /// then falls back or reports `NoWritableDestination`.
@@ -57,9 +66,21 @@ pub fn build_selection(paths: &[PathBuf], settings: &Settings) -> Selection {
     for dir in dirs.iter().filter(|dir| *dir != fallback) {
         selection = selection.with_dir(dir.clone(), snapshot(dir));
     }
+    // The folders the planner tries first (with outputs next to the
+    // source, `dirs` holds just the parents). It looks at the fallback's
+    // snapshot (writable, then names) only when one of them is the
+    // fallback or isn't writable.
+    let preferred: Vec<&PathBuf> = match &settings.output {
+        OutputLocation::Folder(dir) => vec![dir],
+        OutputLocation::NextToSource => dirs.iter().collect(),
+    };
+    let may_fall_back = preferred.iter().any(|dir| {
+        *dir == fallback || !selection.dirs.get(*dir).is_some_and(|known| known.writable)
+    });
     // An empty fallback path gets a snapshot nobody can write to, so the
-    // planner reports `NoWritableDestination`, not a missing snapshot.
-    let fallback_snapshot = if fallback.as_os_str().is_empty() {
+    // planner reports `NoWritableDestination`, not a missing snapshot. So
+    // does a fallback no plan reaches, unread.
+    let fallback_snapshot = if fallback.as_os_str().is_empty() || !may_fall_back {
         DirSnapshot::default()
     } else {
         fallback_snapshot(fallback)

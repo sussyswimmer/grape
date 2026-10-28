@@ -8,10 +8,19 @@ use std::path::{Path, PathBuf};
 
 use common::{assert_no_leftovers, TestDir};
 use grape_core::{
-    plan, Format, ItemKind, JobOutput, Operation, OutputLocation, PlanError, SelectionItem,
-    Settings,
+    plan, DirSnapshot, Format, ItemKind, JobOutput, Operation, OutputLocation, PlanError,
+    SelectionItem, Settings,
 };
 use grape_engines::build_selection;
+
+/// Settings whose output folder is missing, so every plan falls back and
+/// `build_selection` has to read the fallback.
+fn falling_back(dir: &TestDir, fallback: impl Into<PathBuf>) -> Settings {
+    Settings {
+        output: OutputLocation::Folder(dir.join("Missing output")),
+        ..Settings::new(fallback)
+    }
+}
 
 #[test]
 fn files_and_folders_are_classified() {
@@ -94,8 +103,9 @@ fn a_missing_fallback_folder_is_probed_but_not_created() {
     let downloads = dir.join("Downloads");
     fs::create_dir(&downloads).unwrap();
     let fallback = downloads.join("Grape");
+    let settings = falling_back(&dir, &fallback);
 
-    let sel = build_selection(&[src], &Settings::new(&fallback));
+    let sel = build_selection(&[src], &settings);
 
     // Only a job that really falls back creates it.
     assert!(!fallback.exists());
@@ -104,6 +114,12 @@ fn a_missing_fallback_folder_is_probed_but_not_created() {
     assert!(snapshot.names.is_empty());
     // The probe ran in the nearest existing ancestor and cleaned up.
     assert_no_leftovers(&downloads);
+    let job = plan(&sel, &Operation::convert(Format::Jpg), &settings)
+        .unwrap()
+        .jobs
+        .remove(0);
+    assert!(job.used_fallback);
+    assert_eq!(job.output, JobOutput::File(fallback.join("photo.jpg")));
 }
 
 #[test]
@@ -113,7 +129,7 @@ fn a_missing_fallback_under_a_missing_parent_probes_the_nearest_folder() {
     fs::write(&src, b"x").unwrap();
     let fallback = dir.join("Downloads").join("Grape");
 
-    let sel = build_selection(&[src], &Settings::new(&fallback));
+    let sel = build_selection(&[src], &falling_back(&dir, &fallback));
 
     assert!(!dir.join("Downloads").exists());
     assert!(sel.dirs[&fallback].writable);
@@ -151,13 +167,17 @@ fn a_link_to_nowhere_on_the_fallback_path_is_not_writable() {
     fs::create_dir(&downloads).unwrap();
     let fallback = downloads.join("Grape");
     dangling_link(&fallback, &dir.join("gone"));
-    let settings = Settings::new(&fallback);
+    let settings = falling_back(&dir, &fallback);
 
     let sel = build_selection(std::slice::from_ref(&src), &settings);
     assert!(!sel.dirs[&fallback].writable);
+    assert_eq!(
+        plan(&sel, &Operation::convert(Format::Jpg), &settings),
+        Err(PlanError::NoWritableDestination)
+    );
 
     // The same for a link to nowhere in place of a parent folder.
-    let deeper = Settings::new(fallback.join("More"));
+    let deeper = falling_back(&dir, fallback.join("More"));
     let sel = build_selection(std::slice::from_ref(&src), &deeper);
     assert!(!sel.dirs[&deeper.fallback_dir].writable);
     assert_no_leftovers(&downloads);
@@ -200,7 +220,7 @@ fn a_file_where_a_folder_should_be_is_not_writable() {
     let blocker = dir.join("Grape");
     fs::write(&blocker, b"x").unwrap();
 
-    let sel = build_selection(&[src], &Settings::new(&blocker));
+    let sel = build_selection(&[src], &falling_back(&dir, &blocker));
 
     let snapshot = &sel.dirs[&blocker];
     assert!(!snapshot.writable);
@@ -296,8 +316,143 @@ fn without_a_fallback_folder_the_plan_has_nowhere_to_write() {
 fn an_empty_drop_still_snapshots_the_fallback() {
     let dir = TestDir::new("empty");
     let fallback = dir.join("fallback");
-    let sel = build_selection(&[], &Settings::new(&fallback));
+    // A missing output folder: plans would fall back, so it's read.
+    let sel = build_selection(&[], &falling_back(&dir, &fallback));
     assert!(sel.items.is_empty());
-    assert_eq!(sel.dirs.len(), 1);
+    assert_eq!(sel.dirs.len(), 2);
     assert!(sel.dirs[&fallback].writable);
+
+    // Next to the source, nothing can fall back: it's there, unread.
+    let sel = build_selection(&[], &Settings::new(&fallback));
+    assert_eq!(sel.dirs.len(), 1);
+    assert_eq!(sel.dirs[&fallback], DirSnapshot::default());
+}
+
+#[test]
+fn a_drop_that_cant_fall_back_leaves_the_fallback_unread() {
+    // On macOS, reading `~/Downloads` asks the user for the Downloads
+    // folder, so a plan that can't reach the fallback mustn't read it.
+    let dir = TestDir::new("fallback-unread");
+    let photos = dir.join("photos");
+    fs::create_dir(&photos).unwrap();
+    let src = photos.join("photo.png");
+    fs::write(&src, b"x").unwrap();
+    let downloads = dir.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let fallback = downloads.join("Grape");
+    fs::create_dir(&fallback).unwrap();
+    fs::write(fallback.join("photo.jpg"), b"x").unwrap();
+    let settings = Settings::new(&fallback);
+    let jpg = Operation::convert(Format::Jpg);
+
+    let sel = build_selection(std::slice::from_ref(&src), &settings);
+
+    // A read would have listed `photo.jpg` and found the folder writable.
+    assert_eq!(sel.dirs[&fallback], DirSnapshot::default());
+    let job = plan(&sel, &jpg, &settings).unwrap().jobs.remove(0);
+    assert!(!job.used_fallback);
+    assert_eq!(job.output, JobOutput::File(photos.join("photo.jpg")));
+
+    // A missing fallback's parent isn't probed either: it is writable.
+    let missing = Settings::new(downloads.join("Missing"));
+    let sel = build_selection(std::slice::from_ref(&src), &missing);
+    assert_eq!(sel.dirs[&missing.fallback_dir], DirSnapshot::default());
+
+    // A writable output folder is tried first, so a source folder that
+    // isn't writable doesn't matter.
+    let out = dir.join("Converted");
+    fs::create_dir(&out).unwrap();
+    let to_out = Settings {
+        output: OutputLocation::Folder(out.clone()),
+        ..settings.clone()
+    };
+    let gone = dir.join("gone").join("photo.png");
+    let sel = build_selection(std::slice::from_ref(&gone), &to_out);
+    assert!(!sel.dirs[&dir.join("gone")].writable);
+    assert_eq!(sel.dirs[&fallback], DirSnapshot::default());
+    let job = plan(&sel, &jpg, &to_out).unwrap().jobs.remove(0);
+    assert!(!job.used_fallback);
+    assert_eq!(job.output, JobOutput::File(out.join("photo.jpg")));
+}
+
+/// Sets `dirs`' mtimes back to a fixed time, so creating or deleting
+/// anything in them (as a probe does) shows. Unix only: there a folder
+/// opened read-only takes a new mtime.
+#[cfg(unix)]
+fn set_back(dirs: &[&Path]) -> std::time::SystemTime {
+    let then = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    for dir in dirs {
+        fs::File::open(dir).unwrap().set_modified(then).unwrap();
+    }
+    then
+}
+
+#[cfg(unix)]
+fn modified(dir: &Path) -> std::time::SystemTime {
+    fs::metadata(dir).unwrap().modified().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_drop_that_cant_fall_back_probes_nothing_near_the_fallback() {
+    let dir = TestDir::new("fallback-unprobed");
+    let src = dir.join("photo.png");
+    fs::write(&src, b"x").unwrap();
+    let downloads = dir.join("Downloads");
+    fs::create_dir(&downloads).unwrap();
+    let fallback = downloads.join("Grape");
+    fs::create_dir(&fallback).unwrap();
+    let missing = downloads.join("Missing");
+
+    // Present: the fallback itself would be probed; missing: its parent.
+    let then = set_back(&[&fallback, &downloads]);
+    build_selection(std::slice::from_ref(&src), &Settings::new(&fallback));
+    build_selection(std::slice::from_ref(&src), &Settings::new(&missing));
+    assert_eq!(modified(&fallback), then);
+    assert_eq!(modified(&downloads), then);
+
+    // The watch works: a plan that may fall back probes both.
+    build_selection(std::slice::from_ref(&src), &falling_back(&dir, &fallback));
+    build_selection(std::slice::from_ref(&src), &falling_back(&dir, &missing));
+    assert_ne!(modified(&fallback), then);
+    assert_ne!(modified(&downloads), then);
+    assert_no_leftovers(&fallback);
+    assert_no_leftovers(&downloads);
+}
+
+#[test]
+fn a_drop_from_or_into_the_fallback_reads_it() {
+    let dir = TestDir::new("fallback-used");
+    let fallback = dir.join("Grape");
+    fs::create_dir(&fallback).unwrap();
+    let inside = fallback.join("photo.png");
+    fs::write(&inside, b"x").unwrap();
+    fs::write(fallback.join("photo.jpg"), b"x").unwrap();
+    let jpg = Operation::convert(Format::Jpg);
+
+    // A source in the fallback: the plan writes next to it.
+    let settings = Settings::new(&fallback);
+    let sel = build_selection(std::slice::from_ref(&inside), &settings);
+    let snapshot = &sel.dirs[&fallback];
+    assert!(snapshot.writable);
+    assert!(snapshot.names.contains("photo.jpg"));
+    let job = plan(&sel, &jpg, &settings).unwrap().jobs.remove(0);
+    assert!(!job.used_fallback);
+    assert_eq!(job.output, JobOutput::File(fallback.join("photo 2.jpg")));
+
+    // The output folder setting names the fallback.
+    let photos = dir.join("photos");
+    fs::create_dir(&photos).unwrap();
+    let src = photos.join("photo.png");
+    fs::write(&src, b"x").unwrap();
+    let into = Settings {
+        output: OutputLocation::Folder(fallback.clone()),
+        ..settings
+    };
+    let sel = build_selection(std::slice::from_ref(&src), &into);
+    assert!(sel.dirs[&fallback].names.contains("photo.jpg"));
+    let job = plan(&sel, &jpg, &into).unwrap().jobs.remove(0);
+    assert!(!job.used_fallback);
+    assert_eq!(job.output, JobOutput::File(fallback.join("photo 2.jpg")));
+    assert_no_leftovers(&fallback);
 }

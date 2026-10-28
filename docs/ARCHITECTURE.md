@@ -32,7 +32,7 @@
 - `output_name(source, &Operation, taken: &HashSet<String>) -> String`: the naming rules, with case-insensitive collisions. Page helpers: `produces_pages`, `pages_folder_name`, `page_file_name`.
 - `wheel_layout(n) -> Vec<Segment>` and `hit_test(dx, dy, n) -> Option<usize>`: geometry from `INTERACTION_SPEC.md` §4. `GEOMETRY` exposes the constants to the UI, and `clamp_anchor(anchor, work_area)` implements §3.
 - `wheel_content(items, mode, features) -> WheelContent`: what each wheel shows, or which empty state.
-- `plan(&Selection, &Operation, &Settings) -> Result<JobPlan, PlanError>`: a list of `Job { inputs, output: JobOutput, op, used_fallback }`. The tool's `ToolParams` travel inside `op`, and `JobOutput` is `File`, `Folder` or `PagesFileOrFolder`. The `Selection` carries a `DirSnapshot { names, writable }` per folder the plan may write to, so core does no I/O. **No execution.**
+- `plan(&Selection, &Operation, &Settings) -> Result<JobPlan, PlanError>`: a list of `Job { inputs, output: JobOutput, op, used_fallback }`. The tool's `ToolParams` travel inside `op`, and `JobOutput` is `File`, `Folder` or `PagesFileOrFolder`. The `Selection` carries a `DirSnapshot { names, writable }` per folder the plan may write to, so core does no I/O. `grape_engines::build_selection` reads the fallback folder only when a plan may write there (D16), so a Mac drop doesn't ask for Downloads. **No execution.**
 - `Tier` gating: `Features { v2, later }` decides whether v2/later items appear. The full tables stay in the data and are filtered at the edge. See `DECISIONS.md` D12.
 
 ### `grape-engines` (executes `JobPlan`s)

@@ -391,6 +391,7 @@ macOS, first build (D18; mac; use scratch copies of files)
 - [ ] mac: hover the segments → each highlights with a tick, and a Force Touch trackpad gives a light haptic.
 - [ ] mac: after the wheel closes, Finder is still the active app (its menu bar still shows), and the ring never covers the dragged file's image.
 - [ ] mac: Shift-drop on JPG → "Making photo.jpg…" then "Done"; `photo.jpg` is next to the original, and Finder didn't move or copy the original anywhere. One click on the toast → Finder shows `photo.jpg` selected.
+- [ ] mac: on a fresh install (or after `tccutil reset SystemPolicyDownloadsFolder io.github.sussyswimmer.grape`), Shift-drop a PNG from `~/Pictures` on JPG, then one from the Desktop → no "would like to access files in your Downloads folder" prompt (the Desktop one may ask for the Desktop). Then Shift-drop a PNG from a read-only folder (a mounted DMG) on JPG → only now macOS asks for Downloads; Allow → the JPG lands in `~/Downloads/Grape`.
 - [ ] mac: hold Command, drop on a tool, then hold Control and drop on COPY → each runs exactly once. Note whether the log says it ran "on release because no drop arrived" (AppKit refused the drop) or shows a normal drop.
 - [ ] mac: Esc mid-drag → the ring hides within about a quarter second, Finder cancels its drag, and the file is untouched. Moving on and releasing reopens nothing.
 - [ ] mac: drop in the middle or off the ring, including over a Finder window under the overlay → nothing happens, and the file doesn't land in that window.
