@@ -28,6 +28,9 @@ heif-it = []
 grape-core.workspace = true
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
 zune-jpeg = "0.5.15"
+# PNG Compress (D26): lossless re-encoding with its metadata. Already in
+# Cargo.lock through image.
+png = "0.18.1"
 thiserror.workspace = true
 zip = { version = "=9.0.2", default-features = false, features = ["deflate-flate2", "deflate64"] }
 tar = { version = "0.4.46", default-features = false }

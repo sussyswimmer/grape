@@ -1007,12 +1007,19 @@ fn tools_multiple_inputs_and_folder_outputs_are_not_supported() {
     let b = dir.join("b.png");
     fs::write(&a, encode(&gradient(), Format::Png)).unwrap();
     fs::write(&b, encode(&gradient(), Format::Png)).unwrap();
+    // Compress on TIFF is a later slice (D26).
+    let tiff = dir.join("t.tiff");
+    fs::write(&tiff, encode(&gradient(), Format::Tiff)).unwrap();
     let names_before = dir.names();
-    let sources_before = [SourceState::of(&a), SourceState::of(&b)];
+    let sources_before = [
+        SourceState::of(&a),
+        SourceState::of(&b),
+        SourceState::of(&tiff),
+    ];
     let jobs = [
         Job {
-            inputs: vec![a.clone()],
-            output: JobOutput::File(dir.join("a Compressed.png")),
+            inputs: vec![tiff.clone()],
+            output: JobOutput::File(dir.join("t Compressed.tiff")),
             op: Operation::tool(ToolKey::Compress),
             used_fallback: false,
         },

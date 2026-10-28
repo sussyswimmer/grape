@@ -2,7 +2,7 @@
 //! on JPEG, PNG, WebP and GIF by stripping the container, which keeps the
 //! image data byte for byte, and Compress on JPEG and PNG.
 //!
-//! - [`compress`]: Compress on JPEG.
+//! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG.
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`]).
 //! - [`exif`]: what an EXIF block holds, and the minimal EXIF written back.
@@ -12,6 +12,7 @@ pub(crate) mod exif;
 mod gif;
 mod jpeg;
 mod png;
+mod png_compress;
 mod strip;
 mod webp;
 
@@ -44,7 +45,19 @@ pub(crate) fn run(
 ) -> Result<JobOutcome, GrapeError> {
     match tool {
         ToolKey::RemoveMetadata => strip::run(job, src, dest, from, ctx, progress),
+        // The content decides: a PNG named .jpg is compressed as a PNG.
+        ToolKey::Compress if is_png(src) => png_compress::run(job, src, dest, from, ctx, progress),
         ToolKey::Compress => compress::run(job, src, dest, from, params.compress, ctx, progress),
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
+}
+
+/// Whether `src` starts as a PNG does (an unreadable file isn't: the JPEG
+/// path then says it can't be read).
+fn is_png(src: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0; 8];
+    std::fs::File::open(src)
+        .and_then(|mut f| f.read_exact(&mut head))
+        .is_ok_and(|()| &head == b"\x89PNG\r\n\x1a\n")
 }

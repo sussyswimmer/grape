@@ -117,7 +117,7 @@ pub(crate) const MAX_SOURCE: u64 = 512 * MIB;
 /// - what the decoder's own limit holds: the inflated ICC profile, the raw
 ///   text and its row buffers. A profile that would inflate past it is
 ///   dropped, and the image still converts.
-const PNG_METADATA_LIMIT: u64 = 128 * MIB;
+pub(crate) const PNG_METADATA_LIMIT: u64 = 128 * MIB;
 
 /// The most work the JPEG decoder's header parse may do, as
 /// [`headers::JpegScan::header_work`] bounds it. The parse re-checks every

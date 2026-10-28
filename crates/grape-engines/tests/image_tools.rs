@@ -510,3 +510,78 @@ fn compress_refuses_a_cmyk_jpeg() {
         "print.jpg is a print (CMYK) JPEG, which Compress can't keep yet."
     );
 }
+
+#[test]
+fn compress_repacks_a_png_exactly_and_keeps_its_text() {
+    let dir = TestDir::new("compress-png");
+    // A screenshot-like picture written fast and as 16-bit RGBA, though
+    // it's opaque and 8-bit.
+    let shot = image::ImageBuffer::from_fn(160, 90, |x, y| {
+        let v = u16::from(u8::try_from((x / 20 + y / 15) % 4 * 60).unwrap()) * 257;
+        image::Rgba([v, v / 2, 65535 - v, u16::MAX])
+    });
+    let mut wide = Vec::new();
+    image::codecs::png::PngEncoder::new_with_quality(
+        &mut wide,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::NoFilter,
+    )
+    .write_image(
+        bytemuck_u16(shot.as_raw()).as_slice(),
+        160,
+        90,
+        image::ExtendedColorType::Rgba16,
+    )
+    .unwrap();
+    let src = png_with(&wide, &[chunk(b"tEXt", b"Title\0kept title")]);
+    for name in ["shot.png", "shot.jpg"] {
+        let outcome = compress(&dir, name, &src, grape_core::CompressPreset::Small).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::Compressed {
+                before: src.len() as u64,
+                after: out.len() as u64
+            }]
+        );
+        assert!(out.len() * 20 <= src.len() * 19);
+        assert_eq!(
+            image::load_from_memory(&out)
+                .unwrap()
+                .to_rgba16()
+                .into_raw(),
+            shot.clone().into_raw()
+        );
+        assert!(out.windows(10).any(|w| w == b"kept title"));
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
+/// `samples` as bytes in native order, as image's encoder takes 16-bit
+/// pixels.
+fn bytemuck_u16(samples: &[u16]) -> Vec<u8> {
+    samples.iter().flat_map(|v| v.to_ne_bytes()).collect()
+}
+
+#[test]
+fn compress_leaves_an_optimal_png_alone_and_refuses_an_animated_one() {
+    let dir = TestDir::new("compress-png-none");
+    let tiny = plain_png();
+    let first = compress(&dir, "tiny.png", &tiny, grape_core::CompressPreset::High).unwrap();
+    let packed = fs::read(&first.outputs[0]).unwrap();
+    // Its own output can't be made 5 % smaller again.
+    let err = compress(&dir, "again.png", &packed, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "again.png is already as small as Grape makes it."
+    );
+    let apng = png_with(&tiny, &[chunk(b"acTL", &[0, 0, 0, 1, 0, 0, 0, 0])]);
+    let err = compress(&dir, "anim.png", &apng, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "anim.png is animated. Compress works on still PNGs for now."
+    );
+}

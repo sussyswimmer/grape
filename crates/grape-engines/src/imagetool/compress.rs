@@ -1,4 +1,4 @@
-//! Compress on JPEG (D26): decoded as stored (the EXIF orientation not
+//! Compress on JPEG (D26; PNG is [`super::png_compress`]): decoded as stored (the EXIF orientation not
 //! applied), scaled down at Small and Balanced, encoded again with
 //! image's encoder (4:4:4, baseline), its metadata carried, and kept only
 //! when it's at most 90 % of the source's size.
@@ -35,9 +35,10 @@ use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 
-/// The formats Compress runs on through this engine.
+/// The formats Compress runs on through this engine, by name; the content
+/// decides which compressor runs ([`super::run`]).
 pub(crate) fn compresses(from: Format) -> bool {
-    matches!(from, Format::Jpg)
+    matches!(from, Format::Jpg | Format::Png)
 }
 
 /// A JPEG preset's quality and the long side it scales down to.

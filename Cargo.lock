@@ -1667,6 +1667,7 @@ dependencies = [
  "image",
  "lopdf",
  "pdfium-render",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "tar",
