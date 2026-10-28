@@ -6,8 +6,12 @@
 //! The toast never takes focus: on Windows it gets the overlay's
 //! tool-window, no-activate styles; on macOS it can't become key and sits
 //! one level below the overlay, so an open wheel always covers it. On
-//! Windows it refuses drops (DECISIONS D13). On macOS wry accepts a drop
-//! on it as a copy and nothing happens, so the file is never moved (D18).
+//! macOS a click on any window activates Grape, so a toast with nothing to
+//! reveal (working, info, error) ignores the mouse and the click goes to
+//! the window under it; a revealable one keeps the click, and `open -R`
+//! then activates Finder. On Windows it refuses drops (DECISIONS D13). On
+//! macOS wry accepts a drop on it as a copy and nothing happens, so the
+//! file is never moved (D18).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -107,13 +111,13 @@ pub fn show(app: &AppHandle, toast: ToastShow, anchor: (i32, i32), display: &Dis
     };
     let toaster = app.state::<Toaster>();
     toaster.current.store(toast.id, Ordering::Release);
-    let (id, tone) = (toast.id, toast.tone);
+    let (id, tone, clickable) = (toast.id, toast.tone, toast.revealable);
 
     let (x, y) = place(anchor, display);
     if let Err(err) = app.emit_to(TOAST, "toast://show", toast) {
         log::error!("could not send toast://show: {err}");
     }
-    place_and_show(app, window, x, y);
+    place_and_show(app, window, x, y, clickable);
 
     if let Some(delay) = linger(tone) {
         let app = app.clone();
@@ -128,9 +132,10 @@ pub fn show(app: &AppHandle, toast: ToastShow, anchor: (i32, i32), display: &Dis
 }
 
 /// Moves the toast to (x, y) and shows it. Never `set_focus`: the app
-/// under the cursor keeps the keyboard.
+/// under the cursor keeps the keyboard. A click can't activate Grape here
+/// (the no-activate style on Windows), so every toast takes clicks.
 #[cfg(not(target_os = "macos"))]
-fn place_and_show(_app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32) {
+fn place_and_show(_app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32, _: bool) {
     if let Err(err) = window.set_position(tauri::PhysicalPosition::new(x, y)) {
         log::warn!("could not place the toast: {err}");
     }
@@ -139,10 +144,11 @@ fn place_and_show(_app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32
     }
 }
 
-/// Moves the toast to (x, y), in points, and orders it front in one
+/// Moves the toast to (x, y), in points, sets whether it takes the mouse
+/// (`clickable`: only while it can reveal) and orders it front, all in one
 /// main-thread call, although Grape isn't the active app.
 #[cfg(target_os = "macos")]
-fn place_and_show(app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32) {
+fn place_and_show(app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32, clickable: bool) {
     // Points on macOS (the display's scale is 1.0).
     let frame = Rect {
         x,
@@ -160,7 +166,8 @@ fn place_and_show(app: &AppHandle, window: tauri::WebviewWindow, x: i32, y: i32)
         };
         // SAFETY: this runs on the main thread, and `ns_window` is the
         // toast's NSWindow, which Tauri keeps alive while `window` is.
-        if let Err(err) = unsafe { grape_platform::macos::frame_and_show(ns_window, frame) } {
+        if let Err(err) = unsafe { grape_platform::macos::show_toast(ns_window, frame, clickable) }
+        {
             log::error!("could not show the toast: {err}");
         }
     });
@@ -182,10 +189,12 @@ pub fn hide(app: &AppHandle, id: u64) {
 }
 
 /// The page reports a click on toast `id`: reveal its output in Explorer
-/// or Finder.
+/// or Finder. On macOS the click activated Grape; when nothing is revealed
+/// (the output is gone), activation goes back to the app the user was in.
 #[tauri::command]
-pub fn toast_clicked(id: u64, toaster: State<'_, Toaster>) {
+pub fn toast_clicked(id: u64, app: AppHandle, toaster: State<'_, Toaster>) {
     let Some(path) = toaster.reveal_path(id) else {
+        hand_back(&app);
         return;
     };
     match grape_platform::file_actions::reveal(&path) {
@@ -193,9 +202,31 @@ pub fn toast_clicked(id: u64, toaster: State<'_, Toaster>) {
         Err(PlatformError::Unsupported) => {
             log::info!("reveal: not wired on this OS");
         }
-        Err(err) => log::error!("could not reveal the output: {err}"),
+        Err(err) => {
+            log::error!("could not reveal the output: {err}");
+            hand_back(&app);
+        }
     }
 }
+
+/// After a toast click that revealed nothing: on macOS, hands activation
+/// back to the app the user was last in, unless a Grape window is key
+/// (`grape_platform::macos::hand_back_activation`), on the main thread.
+/// Elsewhere the click never activated Grape.
+#[cfg(target_os = "macos")]
+fn hand_back(app: &AppHandle) {
+    let queued = app.run_on_main_thread(|| match grape_platform::macos::hand_back_activation() {
+        Ok(true) => log::info!("toast: nothing revealed; activation handed back"),
+        Ok(false) => {}
+        Err(err) => log::warn!("toast: could not hand activation back: {err}"),
+    });
+    if let Err(err) = queued {
+        log::warn!("toast: could not hand activation back: no main thread: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn hand_back(_app: &AppHandle) {}
 
 #[cfg(test)]
 mod tests {

@@ -9,7 +9,8 @@
 //! window for the length of the call.
 //!
 //! The overlay and the toast never become key, so the frontmost app keeps
-//! focus. That comes from `"focusable": false` in `tauri.conf.json`, not
+//! focus. A toast with nothing to reveal also ignores the mouse
+//! ([`show_toast`]), so a click on it never activates Grape. That comes from `"focusable": false` in `tauri.conf.json`, not
 //! from this module: tao's `TaoWindow` answers `canBecomeKeyWindow` and
 //! `canBecomeMainWindow` from its `focusable` flag. [`frame_and_show`]
 //! uses `orderFrontRegardless` because a plain `orderFront` from an
@@ -187,14 +188,77 @@ pub unsafe fn frame_and_show(ns_window: *mut c_void, frame: Rect) -> Result<(), 
     // SAFETY: the caller's contract is the one `retain_window` needs.
     let (window, mtm) = unsafe { retain_window(ns_window) }?;
     let rect = cocoa_frame(mtm, frame)?;
+    autoreleasepool(|_| order_front(&window, rect));
+    Ok(())
+}
+
+/// Shows the toast at `frame` as [`frame_and_show`] does, and in the same
+/// main-thread call, before it's ordered front, sets whether it takes the
+/// mouse. A toast with nothing to reveal (`clickable` false: working, info
+/// and error toasts) ignores mouse events, so a click on it goes to the
+/// window under it and never activates Grape: the toast is a plain
+/// `NSWindow`, not a non-activating panel, and a click on any window of an
+/// Accessory app activates it even when the window can't become key. A
+/// toast that reveals its output keeps the click (`open -R` then
+/// activates Finder). Every show sets it again, so an update of the same
+/// toast (working to done) flips it.
+///
+/// # Safety
+/// As [`harden_window`].
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] off the main thread.
+/// - [`PlatformError::Os`] for a null pointer, or when there are no screens.
+pub unsafe fn show_toast(
+    ns_window: *mut c_void,
+    frame: Rect,
+    clickable: bool,
+) -> Result<(), PlatformError> {
+    // SAFETY: the caller's contract is the one `retain_window` needs.
+    let (window, mtm) = unsafe { retain_window(ns_window) }?;
+    let rect = cocoa_frame(mtm, frame)?;
     autoreleasepool(|_| {
-        window.setFrame_display(rect, false);
-        // Never makeKeyAndOrderFront or activate: Grape must not take focus.
-        // A plain orderFront from an inactive app stays behind the active
-        // app's windows.
-        window.orderFrontRegardless();
+        window.setIgnoresMouseEvents(!clickable);
+        order_front(&window, rect);
     });
     Ok(())
+}
+
+/// [`frame_and_show`]'s and [`show_toast`]'s work: the frame, then
+/// `orderFrontRegardless`.
+fn order_front(window: &NSWindow, rect: NSRect) {
+    window.setFrame_display(rect, false);
+    // Never makeKeyAndOrderFront or activate: Grape must not take focus.
+    // A plain orderFront from an inactive app stays behind the active
+    // app's windows.
+    window.orderFrontRegardless();
+}
+
+/// Hands activation back to the app the user was last in, other than
+/// Grape, that still runs (`super::activations`), when Grape is the active
+/// app and none of its windows is key: after a click on the toast that
+/// revealed nothing, Grape would otherwise keep the keyboard with no
+/// window to type in. With a key window (Settings, a tool panel, a clicked
+/// shelf) the user is in Grape, so nothing changes. Returns whether it
+/// handed back.
+///
+/// # Errors
+/// [`PlatformError::WrongThread`] off the main thread.
+pub fn hand_back_activation() -> Result<bool, PlatformError> {
+    let mtm = MainThreadMarker::new().ok_or(PlatformError::WrongThread)?;
+    Ok(autoreleasepool(|_| {
+        let grape = NSApplication::sharedApplication(mtm);
+        if !grape.isActive() || grape.keyWindow().is_some() {
+            return false;
+        }
+        match activations::latest_running_app() {
+            Some(app) => {
+                hand_back(mtm, &app);
+                true
+            }
+            None => false,
+        }
+    }))
 }
 
 /// Shows a tool panel at `frame` (Grape's top-left points) and asks for
@@ -570,6 +634,12 @@ mod tests {
     }
 
     #[test]
+    fn handing_activation_back_is_refused_off_the_main_thread() {
+        // libtest runs every test on a thread of its own.
+        assert_eq!(hand_back_activation(), Err(PlatformError::WrongThread));
+    }
+
+    #[test]
     fn a_null_window_is_refused() {
         for role in [
             WindowRole::Overlay,
@@ -584,6 +654,11 @@ mod tests {
         // SAFETY: as above.
         let shown = unsafe { frame_and_show(std::ptr::null_mut(), Rect::default()) };
         assert!(matches!(shown, Err(PlatformError::Os { .. })));
+        for clickable in [false, true] {
+            // SAFETY: as above.
+            let toast = unsafe { show_toast(std::ptr::null_mut(), Rect::default(), clickable) };
+            assert!(matches!(toast, Err(PlatformError::Os { .. })));
+        }
         // SAFETY: as above.
         let panel = unsafe { show_panel(std::ptr::null_mut(), Rect::default()) };
         assert!(matches!(panel, Err(PlatformError::Os { .. })));

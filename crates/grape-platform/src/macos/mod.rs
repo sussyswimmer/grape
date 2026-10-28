@@ -15,9 +15,11 @@
 //!   [`WindowRole::Overlay`], 100 for [`WindowRole::Toast`], 99 for
 //!   [`WindowRole::Panel`] and 3 for [`WindowRole::Shelf`], so an open
 //!   wheel covers the toast and both cover the panel and the shelf),
-//!   [`frame_and_show`], [`describe_window`], the panel's [`show_panel`]
-//!   (the one hardened window Grape makes key, asking to be activated) and
-//!   [`hide_panel`] (activation handed back), and the shelf's
+//!   [`frame_and_show`], the toast's [`show_toast`] (mouse events ignored
+//!   while it has nothing to reveal), [`hand_back_activation`] (after a
+//!   toast click that revealed nothing), [`describe_window`], the panel's
+//!   [`show_panel`] (the one hardened window Grape makes key, asking to be
+//!   activated) and [`hide_panel`] (activation handed back), and the shelf's
 //!   [`show_shelf`] (never key, never activating), [`hide_shelf`]
 //!   (activation handed back if a click made it key) and [`window_frame`]
 //!   (its frame in points).
@@ -62,8 +64,8 @@ pub use activations::follow_app_activations;
 pub use display::refresh_screens;
 pub use drag_out::{drag_out, DragStart};
 pub use window::{
-    describe_window, frame_and_show, harden_window, hide_panel, hide_shelf, show_panel, show_shelf,
-    window_frame, PanelShown, WindowRole,
+    describe_window, frame_and_show, hand_back_activation, harden_window, hide_panel, hide_shelf,
+    show_panel, show_shelf, show_toast, window_frame, PanelShown, WindowRole,
 };
 
 pub(crate) use actions::{
