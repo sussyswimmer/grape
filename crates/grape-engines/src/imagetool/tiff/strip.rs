@@ -31,9 +31,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::super::exif;
-use super::super::strip::{read_at, read_exact, Error, Found, In, Out};
+use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
-use super::read::{read_value, seek, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value};
+use super::read::{read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value};
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
 
@@ -376,8 +376,7 @@ impl JpegScan<'_> {
                 }
             }
             buf.resize(block.len.min(MAX_SCAN) as usize, 0);
-            seek(r, block.offset)?;
-            read_exact(r, &mut buf)?;
+            read_at(r, block.offset, &mut buf)?;
             let seen = segments(&buf, block.len <= MAX_SCAN);
             if seen != Seen::Clean {
                 return Ok(seen);
@@ -1634,6 +1633,44 @@ mod tests {
             "{read} bytes read of {}",
             file.len()
         );
+    }
+
+    #[test]
+    fn blocks_listed_out_of_the_files_order_read_only_their_own_bytes() {
+        // A page of 4,096 one-byte strips, last first in the file, between
+        // a 64 KiB profile and 64 KiB of padding, plain or JPEG (scanned
+        // for metadata): refilling a 64 KiB buffer for each would read
+        // 256 MiB to write them, and as much again to scan them.
+        for compression in [1, 7] {
+            let strips = (0..4096).map(|i| B::Data(vec![(i % 251) as u8])).collect();
+            let mut page = gray(1, 4096, 1, strips);
+            page.tags.extend([
+                (259, V::Short(vec![compression])),
+                (34675, V::Bytes(7, vec![1; 64 * 1024])),
+            ]);
+            page.tags.sort_by_key(|t| t.0);
+            let file = Builder {
+                reversed: true,
+                tail: vec![0; 64 * 1024],
+                ..Builder::new(b'I', false, vec![page])
+            }
+            .build();
+            let mut r = std::io::BufReader::with_capacity(
+                64 * 1024,
+                Tally {
+                    file: Cursor::new(&file),
+                    read: 0,
+                },
+            );
+            let plan = Plan::new(&mut r, file.len() as u64).unwrap();
+            let mut out = Cursor::new(Vec::new());
+            plan.write(&mut r, &mut out, &CancelToken::new()).unwrap();
+            let read = r.get_ref().read;
+            assert!(
+                read < 2 * file.len() as u64,
+                "{compression}: {read} bytes read"
+            );
+        }
     }
 
     #[test]

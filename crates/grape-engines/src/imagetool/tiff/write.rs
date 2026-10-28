@@ -27,8 +27,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, SeekFrom, Write};
 use std::sync::Arc;
 
-use super::super::strip::{read_exact, Error, In, Out};
-use super::read::{repeats, seek, type_size, Block, Entry, Layout, Order, Value};
+use super::super::strip::{read_at, Error, In, Out};
+use super::read::{repeats, type_size, Block, Entry, Layout, Order, Value};
 use crate::CancelToken;
 
 /// The buffer blocks and values are copied through.
@@ -431,7 +431,8 @@ fn value(
     }
 }
 
-/// Copies `len` bytes at `offset` in `r` into `w`, through `buf`.
+/// Copies `len` bytes at `offset` in `r` into `w`, through `buf`: only
+/// they are read ([`read_at`]), however far from what was read before.
 fn copy(
     r: &mut dyn In,
     w: &mut dyn Write,
@@ -439,14 +440,15 @@ fn copy(
     len: u64,
     buf: &mut [u8],
 ) -> Result<(), Error> {
-    seek(r, offset)?;
-    let mut left = len;
-    while left > 0 {
-        let n = buf.len().min(usize::try_from(left).unwrap_or(usize::MAX));
+    let mut done = 0;
+    while done < len {
+        let n = buf
+            .len()
+            .min(usize::try_from(len - done).unwrap_or(usize::MAX));
         let step = &mut buf[..n];
-        read_exact(r, step)?;
+        read_at(r, offset + done, step)?;
         w.write_all(step).map_err(Error::Write)?;
-        left -= step.len() as u64;
+        done += step.len() as u64;
     }
     Ok(())
 }
