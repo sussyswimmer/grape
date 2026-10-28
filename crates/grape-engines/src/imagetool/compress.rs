@@ -211,6 +211,16 @@ pub(crate) fn run(
         .metadata()
         .map_err(|e| names.read_failed(format!("stat {}: {e}", src.display())))?
         .len();
+    // Refused unread, as a conversion would: the header check reads on to
+    // the end of the file.
+    if before > crate::image::MAX_SOURCE {
+        return Err(names.too_large(format!(
+            "compress {}: the file is {} MiB, over the {} MiB limit for a JPEG source",
+            src.display(),
+            before >> 20,
+            crate::image::MAX_SOURCE >> 20
+        )));
+    }
     let mut reader = BufReader::new(Cancellable::new(file, cancel));
     let header = jpeg::header(&mut reader).map_err(|e| {
         let e = match e {

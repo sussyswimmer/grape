@@ -378,20 +378,23 @@ fn camera_exif(w: u32, h: u32) -> Vec<u8> {
     seg(0xE1, &t)
 }
 
+fn compress_op(preset: grape_core::CompressPreset) -> Operation {
+    Operation::Tool {
+        tool: ToolKey::Compress,
+        params: grape_core::ToolParams {
+            compress: preset,
+            ..grape_core::ToolParams::DEFAULT
+        },
+    }
+}
+
 fn compress(
     dir: &TestDir,
     name: &str,
     bytes: &[u8],
     preset: grape_core::CompressPreset,
 ) -> Result<JobOutcome, GrapeError> {
-    let op = Operation::Tool {
-        tool: ToolKey::Compress,
-        params: grape_core::ToolParams {
-            compress: preset,
-            ..grape_core::ToolParams::DEFAULT
-        },
-    };
-    run(dir, name, bytes, op)
+    run(dir, name, bytes, compress_op(preset))
 }
 
 /// The Exif IFD's pixel dimensions in a JPEG Grape wrote.
@@ -512,6 +515,39 @@ fn compress_refuses_a_cmyk_jpeg() {
 }
 
 #[test]
+fn compress_refuses_a_jpeg_over_the_limit_before_reading_it() {
+    let dir = TestDir::new("compress-huge");
+    // A JPEG start whose headers would be refused as broken (a scan before
+    // any frame) if they were read, then zeros to just past 512 MiB:
+    // sparse where the file system allows, so the test stays cheap.
+    let mut head = vec![0xFF, 0xD8];
+    head.extend(seg(0xDA, &[1, 1, 0, 0, 63, 0]));
+    let (src, job) = plan_one(
+        &dir,
+        "big.jpg",
+        &head,
+        compress_op(grape_core::CompressPreset::Balanced),
+    );
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&src)
+        .unwrap()
+        .set_len(512 * 1024 * 1024 + 1)
+        .unwrap();
+    let mut reports = 0;
+    let err = run_job(&job, &EngineCtx::default(), &mut |_| reports += 1).unwrap_err();
+    assert_eq!(
+        err.user_message, "big.jpg is too large to convert.",
+        "{}",
+        err.detail
+    );
+    assert_eq!(reports, 0);
+    assert!(!planned_file(&job).exists());
+    assert_no_leftovers(&dir.path);
+    assert_eq!(fs::metadata(&src).unwrap().len(), 512 * 1024 * 1024 + 1);
+}
+
+#[test]
 fn compress_repacks_a_png_exactly_and_keeps_its_text() {
     let dir = TestDir::new("compress-png");
     // A screenshot-like picture written fast and as 16-bit RGBA, though
@@ -612,13 +648,6 @@ fn cancelled_at(name: &str, bytes: &[u8], op: Operation, nth: usize) {
 fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
     let big = jpeg_of(&photo(1200, 900), 95);
     assert!(big.len() > 2 * 64 * 1024);
-    let compress = |preset| Operation::Tool {
-        tool: ToolKey::Compress,
-        params: grape_core::ToolParams {
-            compress: preset,
-            ..grape_core::ToolParams::DEFAULT
-        },
-    };
     // The strip's second report comes after its temp file exists.
     cancelled_at(
         "photo.jpg",
@@ -630,13 +659,13 @@ fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
     cancelled_at(
         "photo.jpg",
         &big,
-        compress(grape_core::CompressPreset::Small),
+        compress_op(grape_core::CompressPreset::Small),
         1,
     );
     cancelled_at(
         "plain.png",
         &plain_png(),
-        compress(grape_core::CompressPreset::High),
+        compress_op(grape_core::CompressPreset::High),
         1,
     );
 }
