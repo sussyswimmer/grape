@@ -1477,7 +1477,9 @@ fn unescape_xml(text: &str) -> String {
 /// checks that the file is there. A file that's missing, names this Grape
 /// or another lasting copy that's there, or can't be read counts as not
 /// gone, and the log says so for the last two. Never logs a path. Called
-/// only on macOS.
+/// only on macOS, in setup: the `stat` of an old path in Desktop,
+/// Documents or Downloads may raise that folder's prompt then
+/// (`docs/PLATFORM_MACOS.md` → "Launch at login").
 fn agent_program_gone(app: &AppHandle, exe: Option<&Path>) -> bool {
     let Ok(home) = app.path().home_dir() else {
         log::warn!("settings: launch at login: can't find the home folder; leaving it");
