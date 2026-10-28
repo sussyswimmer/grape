@@ -1,10 +1,12 @@
 //! `grape-heif-fixtures <out-dir> [--icc <file>]`: writes the HEIC and AVIF
-//! test fixtures of heic-spec §5.6 and D41 with libheif directly, at quality
-//! 90 and 4:2:0: x265 for HEIC, libaom for AVIF. CI's grape-heif workflow
-//! runs it and uploads the folder for the heif-it tests on Windows and macOS
-//! (where ImageIO reads the AVIF ones). It never ships. Every file is
-//! sniffed (grape-heif-proto's `sniff`) before it's written, so a fixture
-//! that isn't what its name says stops the run.
+//! test fixtures of heic-spec §5.6, D41 and D28 with libheif directly, at
+//! quality 90 (`q95.heic` 95) and 4:2:0: x265 for HEIC, libaom for AVIF.
+//! CI's grape-heif workflow runs it and uploads the folder for the heif-it
+//! tests on Windows and macOS (where ImageIO reads the AVIF ones). It never
+//! ships. Every file is sniffed (grape-heif-proto's `sniff`) before it's
+//! written, so a fixture that isn't what its name says stops the run, and
+//! D28's are read back with libheif first, so one that lacks what it's for
+//! (its Exif, its thumbnail, its `nclx`) stops it too.
 //!
 //! | File | What |
 //! |---|---|
@@ -23,6 +25,10 @@
 //! | `grid.avif` | as `grid.heic`, with AV1 tiles; it sniffs as AVIF, or as HEIC when libheif gives the grid no codec brand (the run's log says which) |
 //! | `icc.avif` | as `icc.heic` (only with `--icc`) |
 //! | `damaged.avif` | the first half of `opaque.avif` |
+//! | `exif-xmp.heic` | as `rotate90.heic` (decodes as 64×96), as a phone writes one: an Exif item (`Exif\0\0`, then big-endian TIFF: Make, Model, Orientation 6, an Exif IFD with DateTimeOriginal, a GPS IFD) and an XMP item (`tiff:Orientation="6"`, Make, Model, DateTimeOriginal, GPS), for D28's metadata graft |
+//! | `thumb.heic` | 320×240 gradients under a checkerboard, with a thumbnail item at most 64 a side (`heif_context_encode_thumbnail`) |
+//! | `nclx-p3.heic` | 64×64 red, green and blue quarters and a white one, its color only an `nclx` box: primaries 12 (Display P3), transfer 13 (sRGB), matrix 6, full range; no ICC profile |
+//! | `q95.heic` | 1600×1200 of fine detail (noise over gradients and a checkerboard) at quality 95, so Compress has something to shrink |
 
 use std::ffi::OsString;
 use std::fs::OpenOptions;
@@ -33,9 +39,9 @@ use std::process::ExitCode;
 
 use grape_heif_proto::{sniff, HeifFormat, Sniff};
 use libheif_rs::{
-    color_profile_types, Channel, ColorProfileRaw, ColorSpace, CompressionFormat,
-    EncoderParameterValue, EncoderQuality, EncodingOptions, HeifContext, Image, ImageOrientation,
-    LibHeif, RgbChroma,
+    color_profile_types, Channel, ColorPrimaries, ColorProfileNCLX, ColorProfileRaw, ColorSpace,
+    CompressionFormat, EncoderParameterValue, EncoderQuality, EncodingOptions, HeifContext, Image,
+    ImageOrientation, LibHeif, RgbChroma, TransferCharacteristics,
 };
 
 /// `opaque.heic`'s blocks, row by row (4 across, 3 down).
@@ -55,6 +61,38 @@ const BLOCKS: [[u8; 3]; 12] = [
 ];
 
 const QUALITY: u8 = 90;
+
+/// `q95.heic`'s quality (D28).
+const QUALITY_95: u8 = 95;
+
+/// The bounding box of `thumb.heic`'s thumbnail.
+const THUMB_BOX: u32 = 64;
+
+/// `exif-xmp.heic`'s Make.
+const MAKE: &str = "Grape";
+
+/// `exif-xmp.heic`'s Model.
+const MODEL: &str = "Fixture Camera";
+
+/// `exif-xmp.heic`'s XMP packet: what a phone writes beside its Exif, with
+/// the same Orientation (6: turn 90° clockwise to show).
+const XMP: &str = concat!(
+    "<?xpacket begin=\"\u{feff}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>\n",
+    "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">\n",
+    " <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n",
+    "  <rdf:Description rdf:about=\"\"\n",
+    "    xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"\n",
+    "    xmlns:exif=\"http://ns.adobe.com/exif/1.0/\"\n",
+    "    tiff:Orientation=\"6\"\n",
+    "    tiff:Make=\"Grape\"\n",
+    "    tiff:Model=\"Fixture Camera\"\n",
+    "    exif:DateTimeOriginal=\"2026-10-28T12:34:56\"\n",
+    "    exif:GPSLatitude=\"48,51.4N\"\n",
+    "    exif:GPSLongitude=\"2,17.6667E\"/>\n",
+    " </rdf:RDF>\n",
+    "</x:xmpmeta>\n",
+    "<?xpacket end=\"w\"?>",
+);
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -198,6 +236,34 @@ fn run(args: Vec<OsString>) -> Result<()> {
         &opaque[..opaque.len() / 2],
         &[Sniff::Avif],
     )?;
+
+    // HEIC Compress and Remove Metadata (D28).
+    write(
+        &out,
+        "exif-xmp.heic",
+        &exif_xmp(&lib, &stored)?,
+        &[Sniff::Heic],
+    )?;
+    write(&out, "thumb.heic", &thumb(&lib)?, &[Sniff::Heic])?;
+    write(&out, "nclx-p3.heic", &nclx_p3(&lib)?, &[Sniff::Heic])?;
+    let detail = rgb(1600, 1200, |x, y| {
+        // A hash of the position: noise of 0 to 63 in every channel.
+        let hash =
+            (x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77)).wrapping_mul(0xC2B2_AE3D);
+        let noise = (hash >> 26) as u8;
+        let checker = if (x / 8 + y / 8) % 2 == 0 { 128 } else { 0 };
+        [
+            (x * 127 / 1599) as u8 + noise,
+            (y * 127 / 1199) as u8 + noise,
+            checker + noise,
+        ]
+    });
+    write(
+        &out,
+        "q95.heic",
+        &encode_at(&lib, heic, &detail, None, None, QUALITY_95)?,
+        &[Sniff::Heic],
+    )?;
     Ok(())
 }
 
@@ -294,7 +360,7 @@ fn image(p: &Picture, icc: Option<&[u8]>) -> Result<Image> {
     Ok(image)
 }
 
-fn encoder(lib: &LibHeif, format: HeifFormat) -> Result<libheif_rs::Encoder<'_>> {
+fn encoder(lib: &LibHeif, format: HeifFormat, quality: u8) -> Result<libheif_rs::Encoder<'_>> {
     let compression = match format {
         HeifFormat::Heic => CompressionFormat::Hevc,
         HeifFormat::Avif => CompressionFormat::Av1,
@@ -303,7 +369,7 @@ fn encoder(lib: &LibHeif, format: HeifFormat) -> Result<libheif_rs::Encoder<'_>>
         .encoder_for_format(compression)
         .map_err(|e| e.to_string())?;
     encoder
-        .set_quality(EncoderQuality::Lossy(QUALITY))
+        .set_quality(EncoderQuality::Lossy(quality))
         .map_err(|e| e.to_string())?;
     encoder
         .set_parameter_value("chroma", EncoderParameterValue::String("420".to_string()))
@@ -318,8 +384,19 @@ fn encode(
     icc: Option<&[u8]>,
     orientation: Option<ImageOrientation>,
 ) -> Result<Vec<u8>> {
+    encode_at(lib, format, p, icc, orientation, QUALITY)
+}
+
+fn encode_at(
+    lib: &LibHeif,
+    format: HeifFormat,
+    p: &Picture,
+    icc: Option<&[u8]>,
+    orientation: Option<ImageOrientation>,
+    quality: u8,
+) -> Result<Vec<u8>> {
     let image = image(p, icc)?;
-    let mut encoder = encoder(lib, format)?;
+    let mut encoder = encoder(lib, format, quality)?;
     let mut options = EncodingOptions::new().map_err(|e| e.to_string())?;
     options.set_save_alpha_channel(p.channels == 4);
     if let Some(orientation) = orientation {
@@ -362,7 +439,7 @@ fn deep(lib: &LibHeif) -> Result<Vec<u8>> {
             }
         }
     }
-    let mut encoder = encoder(lib, HeifFormat::Avif)?;
+    let mut encoder = encoder(lib, HeifFormat::Avif, QUALITY)?;
     let mut ctx = HeifContext::new().map_err(|e| e.to_string())?;
     ctx.encode_image(&image, &mut encoder, None)
         .map_err(|e| e.to_string())?;
@@ -374,7 +451,7 @@ fn grid(lib: &LibHeif, format: HeifFormat) -> Result<Vec<u8>> {
         .into_iter()
         .map(|color| image(&rgb(64, 64, |_, _| color), None))
         .collect::<Result<Vec<_>>>()?;
-    let mut encoder = encoder(lib, format)?;
+    let mut encoder = encoder(lib, format, QUALITY)?;
     let mut ctx = HeifContext::new().map_err(|e| e.to_string())?;
     let rows = NonZeroU16::new(2).ok_or("two rows")?;
     let mut handle = ctx
@@ -384,4 +461,255 @@ fn grid(lib: &LibHeif, format: HeifFormat) -> Result<Vec<u8>> {
     ctx.set_primary_image(&mut handle)
         .map_err(|e| e.to_string())?;
     ctx.write_to_bytes().map_err(|e| e.to_string())
+}
+
+/// `exif-xmp.heic`: `stored` (`rotate90.heic`'s picture) turned 90°
+/// clockwise by `irot`, with an Exif item ([`exif`]) and an XMP item
+/// ([`XMP`]) whose Orientation says the same, as a phone writes them. Read
+/// back: one Exif and one XMP block on the primary image, stored 96×64.
+fn exif_xmp(lib: &LibHeif, stored: &Picture) -> Result<Vec<u8>> {
+    let image = image(stored, None)?;
+    let mut encoder = encoder(lib, HeifFormat::Heic, QUALITY)?;
+    let mut options = EncodingOptions::new().map_err(|e| e.to_string())?;
+    options.set_image_orientation(ImageOrientation::Rotate90Cw);
+    let mut ctx = HeifContext::new().map_err(|e| e.to_string())?;
+    let handle = ctx
+        .encode_image(&image, &mut encoder, Some(options))
+        .map_err(|e| e.to_string())?;
+    ctx.add_exif_metadata(&handle, &exif())
+        .map_err(|e| e.to_string())?;
+    ctx.add_xmp_metadata(&handle, XMP.as_bytes())
+        .map_err(|e| e.to_string())?;
+    let bytes = ctx.write_to_bytes().map_err(|e| e.to_string())?;
+    {
+        let read = HeifContext::read_from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let primary = read.primary_image_handle().map_err(|e| e.to_string())?;
+        let exif_blocks = primary.number_of_metadata_blocks(b"Exif");
+        let xmp_blocks = primary.number_of_metadata_blocks(b"mime");
+        if (exif_blocks, xmp_blocks) != (1, 1) {
+            return Err(format!(
+                "exif-xmp.heic has {exif_blocks} Exif and {xmp_blocks} XMP blocks, not one each"
+            ));
+        }
+        let stored_size = (primary.ispe_width(), primary.ispe_height());
+        if stored_size != (96, 64) {
+            return Err(format!(
+                "exif-xmp.heic is stored {stored_size:?}, not 96×64"
+            ));
+        }
+    }
+    Ok(bytes)
+}
+
+/// TIFF field types.
+const BYTE: u16 = 1;
+const ASCII: u16 = 2;
+const SHORT: u16 = 3;
+const LONG: u16 = 4;
+const RATIONAL: u16 = 5;
+
+/// One IFD entry, its value big-endian.
+struct Entry {
+    tag: u16,
+    kind: u16,
+    count: u32,
+    value: Vec<u8>,
+}
+
+fn ascii(tag: u16, text: &str) -> Entry {
+    let mut value = text.as_bytes().to_vec();
+    value.push(0);
+    Entry {
+        tag,
+        kind: ASCII,
+        count: value.len() as u32,
+        value,
+    }
+}
+
+fn short(tag: u16, n: u16) -> Entry {
+    Entry {
+        tag,
+        kind: SHORT,
+        count: 1,
+        value: n.to_be_bytes().to_vec(),
+    }
+}
+
+fn long(tag: u16, n: u32) -> Entry {
+    Entry {
+        tag,
+        kind: LONG,
+        count: 1,
+        value: n.to_be_bytes().to_vec(),
+    }
+}
+
+fn rationals(tag: u16, parts: &[(u32, u32)]) -> Entry {
+    let mut value = Vec::with_capacity(parts.len() * 8);
+    for (numerator, denominator) in parts {
+        value.extend_from_slice(&numerator.to_be_bytes());
+        value.extend_from_slice(&denominator.to_be_bytes());
+    }
+    Entry {
+        tag,
+        kind: RATIONAL,
+        count: parts.len() as u32,
+        value,
+    }
+}
+
+/// A big-endian IFD that starts `at` bytes into its TIFF: the entries (in
+/// tag order), no next IFD, then the values longer than 4 bytes, each at an
+/// even offset.
+fn ifd(entries: &[Entry], at: u32) -> Vec<u8> {
+    let values_at = at + 2 + 12 * entries.len() as u32 + 4;
+    let mut table = (entries.len() as u16).to_be_bytes().to_vec();
+    let mut values = Vec::new();
+    for entry in entries {
+        table.extend_from_slice(&entry.tag.to_be_bytes());
+        table.extend_from_slice(&entry.kind.to_be_bytes());
+        table.extend_from_slice(&entry.count.to_be_bytes());
+        if entry.value.len() <= 4 {
+            let mut inline = entry.value.clone();
+            inline.resize(4, 0);
+            table.extend_from_slice(&inline);
+        } else {
+            table.extend_from_slice(&(values_at + values.len() as u32).to_be_bytes());
+            values.extend_from_slice(&entry.value);
+            if values.len() % 2 == 1 {
+                values.push(0);
+            }
+        }
+    }
+    table.extend_from_slice(&0u32.to_be_bytes());
+    table.extend_from_slice(&values);
+    table
+}
+
+/// `exif-xmp.heic`'s Exif: `Exif\0\0`, then a big-endian TIFF, as an
+/// iPhone's HEIC holds it. IFD0: Make, Model, Orientation 6 and the
+/// pointers to the Exif IFD (DateTimeOriginal) and the GPS IFD (version
+/// 2.3, 48°51'24" N, 2°17'40" E). libheif stores it after the 4-byte offset
+/// of the TIFF header (6).
+fn exif() -> Vec<u8> {
+    let ifd0 = |exif_at: u32, gps_at: u32| {
+        [
+            ascii(0x010F, MAKE),
+            ascii(0x0110, MODEL),
+            short(0x0112, 6),
+            long(0x8769, exif_at),
+            long(0x8825, gps_at),
+        ]
+    };
+    // The pointers are inline, so IFD0's length doesn't depend on them.
+    let exif_at = 8 + ifd(&ifd0(0, 0), 8).len() as u32;
+    let exif_ifd = ifd(&[ascii(0x9003, "2026:10:28 12:34:56")], exif_at);
+    let gps_at = exif_at + exif_ifd.len() as u32;
+    let gps_ifd = ifd(
+        &[
+            Entry {
+                tag: 0x0000,
+                kind: BYTE,
+                count: 4,
+                value: vec![2, 3, 0, 0],
+            },
+            ascii(0x0001, "N"),
+            rationals(0x0002, &[(48, 1), (51, 1), (2400, 100)]),
+            ascii(0x0003, "E"),
+            rationals(0x0004, &[(2, 1), (17, 1), (4000, 100)]),
+        ],
+        gps_at,
+    );
+    let mut data = b"Exif\0\0MM\0\x2a".to_vec();
+    data.extend_from_slice(&8u32.to_be_bytes());
+    data.extend_from_slice(&ifd(&ifd0(exif_at, gps_at), 8));
+    data.extend_from_slice(&exif_ifd);
+    data.extend_from_slice(&gps_ifd);
+    data
+}
+
+/// `thumb.heic`: 320×240 and a thumbnail item at most [`THUMB_BOX`] a
+/// side, which libheif encodes and assigns to the primary image. Read
+/// back: the primary image has one thumbnail.
+fn thumb(lib: &LibHeif) -> Result<Vec<u8>> {
+    let p = rgb(320, 240, |x, y| {
+        [
+            (x * 255 / 319) as u8,
+            (y * 255 / 239) as u8,
+            if (x / 40 + y / 40) % 2 == 0 { 255 } else { 0 },
+        ]
+    });
+    let image = image(&p, None)?;
+    let mut encoder = encoder(lib, HeifFormat::Heic, QUALITY)?;
+    let options = EncodingOptions::new().map_err(|e| e.to_string())?;
+    let mut ctx = HeifContext::new().map_err(|e| e.to_string())?;
+    let handle = ctx
+        .encode_image(&image, &mut encoder, Some(options))
+        .map_err(|e| e.to_string())?;
+    ctx.encode_thumbnail(&image, &handle, THUMB_BOX, &mut encoder, None)
+        .map_err(|e| e.to_string())?;
+    let bytes = ctx.write_to_bytes().map_err(|e| e.to_string())?;
+    {
+        let read = HeifContext::read_from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let primary = read.primary_image_handle().map_err(|e| e.to_string())?;
+        let thumbnails = primary.number_of_thumbnails();
+        if thumbnails != 1 {
+            return Err(format!("thumb.heic has {thumbnails} thumbnails, not one"));
+        }
+    }
+    Ok(bytes)
+}
+
+/// `nclx-p3.heic`: its color only an `nclx` profile, Display P3 primaries
+/// (12) with the sRGB transfer (13) and libheif's defaults otherwise
+/// (matrix 6, full range), and no ICC profile. libheif writes an image's
+/// `nclx` as a `colr` box only when it gets encoding options. Read back: a
+/// `colr nclx` with 12 and 13, and no ICC profile.
+fn nclx_p3(lib: &LibHeif) -> Result<Vec<u8>> {
+    let p = rgb(64, 64, |x, y| match (x < 32, y < 32) {
+        (true, true) => [255, 0, 0],
+        (false, true) => [0, 255, 0],
+        (true, false) => [0, 0, 255],
+        (false, false) => [255, 255, 255],
+    });
+    let mut image = image(&p, None)?;
+    let mut nclx = ColorProfileNCLX::new().ok_or("libheif gave no nclx profile")?;
+    nclx.set_color_primaries(ColorPrimaries::SMPTE_EG_432_1);
+    // heif_nclx_color_profile_alloc's default; no setter for it.
+    if nclx.transfer_characteristics() != TransferCharacteristics::IEC_61966_2_1 {
+        return Err("libheif's nclx default transfer isn't sRGB (13)".to_string());
+    }
+    image
+        .set_color_profile_nclx(&nclx)
+        .map_err(|e| e.to_string())?;
+    let mut encoder = encoder(lib, HeifFormat::Heic, QUALITY)?;
+    let options = EncodingOptions::new().map_err(|e| e.to_string())?;
+    let mut ctx = HeifContext::new().map_err(|e| e.to_string())?;
+    ctx.encode_image(&image, &mut encoder, Some(options))
+        .map_err(|e| e.to_string())?;
+    let bytes = ctx.write_to_bytes().map_err(|e| e.to_string())?;
+    {
+        let read = HeifContext::read_from_bytes(&bytes).map_err(|e| e.to_string())?;
+        let primary = read.primary_image_handle().map_err(|e| e.to_string())?;
+        if primary.color_profile_raw().is_some() {
+            return Err("nclx-p3.heic has an ICC profile".to_string());
+        }
+        let written = primary
+            .color_profile_nclx()
+            .ok_or("nclx-p3.heic has no colr nclx box")?;
+        let found = (
+            written.color_primaries(),
+            written.transfer_characteristics(),
+        );
+        if found
+            != (
+                ColorPrimaries::SMPTE_EG_432_1,
+                TransferCharacteristics::IEC_61966_2_1,
+            )
+        {
+            return Err(format!("nclx-p3.heic's nclx is {found:?}, not P3 and sRGB"));
+        }
+    }
+    Ok(bytes)
 }
