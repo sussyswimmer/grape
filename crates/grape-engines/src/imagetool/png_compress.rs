@@ -22,9 +22,11 @@
 //! Dropped: sBIT, bKGD, hIST, sPLT, the old PLTE and tRNS (made again),
 //! `iDOT` and unknown chunks. An animated PNG is refused.
 //!
-//! The pixels are read a row at a time, never copied whole, and the cancel
-//! token is checked every [`CANCEL_CHECK_ROWS`] rows while they are read
-//! and while the PNG is written.
+//! The pixels are read [`SPAN`] at a time, never copied whole, and the
+//! cancel token is checked before each span and between each
+//! [`ENCODE_STEP`] the encoder is given. The encoder compresses a row
+//! once it's whole, so a PNG with rows of many megabytes answers a cancel
+//! only after the row.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -37,7 +39,7 @@ use png::{BitDepth, ColorType, Compression, Filter};
 
 use super::strip::{read_exact, Error};
 use crate::cancel::Cancellable;
-use crate::image::{CANCEL_CHECK_ROWS, PNG_METADATA_LIMIT};
+use crate::image::PNG_METADATA_LIMIT;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
@@ -139,29 +141,57 @@ enum Scan {
     Cancelled,
 }
 
-/// Calls `f` with each row of `img` as RGBA, 16 bits a sample, until it
-/// returns false; checks `cancel` every [`CANCEL_CHECK_ROWS`] rows.
-fn scan(img: &DynamicImage, cancel: &CancelToken, mut f: impl FnMut(&[[u16; 4]]) -> bool) -> Scan {
+/// The most pixels [`scan`] reads at once: a row is read in spans of
+/// this many, so its buffer stays small however wide the picture.
+const SPAN: usize = 1 << 16;
+
+/// The most bytes given to the encoder between two cancel checks: about
+/// 35 ms of its best compression.
+const ENCODE_STEP: usize = 256 * 1024;
+
+/// What the deflater holds, about.
+const DEFLATER: u64 = 1 << 20;
+
+// The span's buffer is counted as the deflater's share ([`peak`]).
+const _: () = assert!(SPAN * std::mem::size_of::<[u16; 4]>() <= DEFLATER as usize);
+
+/// Calls `f` with each row of `img` as RGBA, 16 bits a sample, [`SPAN`]
+/// pixels at most at a time with the column they start at, until it
+/// returns false; checks `cancel` before each span.
+fn scan(
+    img: &DynamicImage,
+    cancel: &CancelToken,
+    mut f: impl FnMut(usize, &[[u16; 4]]) -> bool,
+) -> Scan {
     let width = img.width() as usize;
-    let mut row = Vec::with_capacity(width);
+    let mut span = Vec::with_capacity(width.min(SPAN));
     for y in 0..img.height() as usize {
-        if y % CANCEL_CHECK_ROWS == 0 && cancel.is_cancelled() {
-            return Scan::Cancelled;
-        }
-        row.clear();
-        fill_row(img, y, width, &mut row);
-        if !f(&row) {
-            return Scan::Stopped;
+        for x in (0..width).step_by(SPAN) {
+            if cancel.is_cancelled() {
+                return Scan::Cancelled;
+            }
+            span.clear();
+            fill_span(img, y, width, x..(x + SPAN).min(width), &mut span);
+            if !f(x, &span) {
+                return Scan::Stopped;
+            }
         }
     }
     Scan::Done
 }
 
-/// Row `y` of `img` (`width` pixels) as RGBA, 16 bits a sample.
-fn fill_row(img: &DynamicImage, y: usize, width: usize, row: &mut Vec<[u16; 4]>) {
+/// Columns `xs` of row `y` of `img` (`width` pixels wide) as RGBA, 16 bits
+/// a sample.
+fn fill_span(
+    img: &DynamicImage,
+    y: usize,
+    width: usize,
+    xs: std::ops::Range<usize>,
+    row: &mut Vec<[u16; 4]>,
+) {
     const OPAQUE: u16 = u16::MAX;
     let wide = |v: u8| u16::from(v) * 257;
-    let line = |n: usize| y * width * n..(y + 1) * width * n;
+    let line = |n: usize| (y * width + xs.start) * n..(y * width + xs.end) * n;
     match img {
         DynamicImage::ImageLuma8(b) => row.extend(b.as_raw()[line(1)].iter().map(|&v| {
             let v = wide(v);
@@ -212,7 +242,7 @@ fn fill_row(img: &DynamicImage, y: usize, width: usize, row: &mut Vec<[u16; 4]>)
                 .map(|p| [p[0], p[1], p[2], p[3]]),
         ),
         // Floating point, which a PNG never decodes to.
-        other => row.extend((0..width).map(|x| {
+        other => row.extend(xs.clone().map(|x| {
             let p = other.get_pixel(x as u32, y as u32).0;
             [wide(p[0]), wide(p[1]), wide(p[2]), wide(p[3])]
         })),
@@ -235,8 +265,8 @@ pub(super) fn reduce(img: &DynamicImage, free_color: bool, cancel: &CancelToken)
     let mut all_gray = true;
     // Whether every gray level fits 1, 2 or 4 bits.
     let mut fits = [true; 3];
-    let pass = scan(img, cancel, |row| {
-        for p in row {
+    let pass = scan(img, cancel, |_, span| {
+        for p in span {
             eight &= p.iter().all(|&v| v % 257 == 0);
             opaque &= !alpha_source || p[3] == u16::MAX;
             all_gray &= p[0] == p[1] && p[1] == p[2];
@@ -282,8 +312,8 @@ pub(super) fn reduce(img: &DynamicImage, free_color: bool, cancel: &CancelToken)
         (false, true) => ColorType::Rgba,
     };
     let mut data = Vec::with_capacity(width * height * channels.len() * if eight { 1 } else { 2 });
-    let pass = scan(img, cancel, |row| {
-        for p in row {
+    let pass = scan(img, cancel, |_, span| {
+        for p in span {
             for &c in channels {
                 if eight {
                     data.push((p[c] / 257) as u8);
@@ -324,10 +354,12 @@ fn low_gray(img: &DynamicImage, bits: usize, cancel: &CancelToken) -> Option<Pac
     };
     let row_bytes = (width * bits).div_ceil(8);
     let mut data = Vec::with_capacity(row_bytes * height);
-    let pass = scan(img, cancel, |row| {
-        let start = data.len();
-        data.resize(start + row_bytes, 0);
-        for (x, p) in row.iter().enumerate() {
+    let pass = scan(img, cancel, |x0, span| {
+        if x0 == 0 {
+            data.resize(data.len() + row_bytes, 0);
+        }
+        let start = data.len() - row_bytes;
+        for (x, p) in (x0..).zip(span) {
             let level = (p[0] / 257 / step) as u8;
             let bit = x * bits;
             data[start + bit / 8] |= level << (8 - bits - bit % 8);
@@ -369,8 +401,8 @@ fn palette(
     };
     let mut colors: Vec<[u8; 4]> = Vec::new();
     let mut index = HashMap::new();
-    let pass = scan(img, cancel, |row| {
-        for p in row {
+    let pass = scan(img, cancel, |_, span| {
+        for p in span {
             let c = key(p);
             if let std::collections::hash_map::Entry::Vacant(slot) = index.entry(c) {
                 if colors.len() == 256 {
@@ -400,10 +432,12 @@ fn palette(
     let bits = depth as usize;
     let row_bytes = (width * bits).div_ceil(8);
     let mut data = Vec::with_capacity(row_bytes * height);
-    let pass = scan(img, cancel, |row| {
-        let start = data.len();
-        data.resize(start + row_bytes, 0);
-        for (x, p) in row.iter().enumerate() {
+    let pass = scan(img, cancel, |x0, span| {
+        if x0 == 0 {
+            data.resize(data.len() + row_bytes, 0);
+        }
+        let start = data.len() - row_bytes;
+        for (x, p) in (x0..).zip(span) {
             let i = index[&key(p)];
             let bit = x * bits;
             data[start + bit / 8] |= i << (8 - bits - bit % 8);
@@ -425,12 +459,21 @@ fn palette(
     })
 }
 
-/// What Compress holds at its peak for a decoded image of `decoded` bytes,
-/// besides the decoder: the image and its packed form (never bigger), then
-/// the packed form and the PNG written from it, and the text after the
-/// image data throughout.
-fn peak(decoded: u64, after: u64) -> u64 {
-    decoded.saturating_mul(2).saturating_add(after)
+/// What Compress holds at its peak for a decoded image of `decoded` bytes
+/// in rows of `row` bytes, besides the decoder: the image and its packed
+/// form (never bigger) with a [`SPAN`] of pixels, then the packed form and
+/// the PNG written from it with the encoder's three rows and its deflater
+/// (the bigger of the two extras), and the text after the image data
+/// throughout.
+fn peak(decoded: u64, row: u64, after: u64) -> u64 {
+    let encoder = row
+        .saturating_add(1)
+        .saturating_mul(3)
+        .saturating_add(DEFLATER);
+    decoded
+        .saturating_mul(2)
+        .saturating_add(encoder)
+        .saturating_add(after)
 }
 
 /// Runs Compress on the PNG `src` (named as `from`) into `dest`.
@@ -490,10 +533,8 @@ pub(crate) fn run(
 
     let after = chunks.after_bytes;
     let tool_peak = |width: u32, height: u32, color: ImageColor| {
-        let decoded = u64::from(width)
-            .saturating_mul(u64::from(height))
-            .saturating_mul(u64::from(color.bytes_per_pixel()));
-        peak(decoded, after)
+        let row = u64::from(width).saturating_mul(u64::from(color.bytes_per_pixel()));
+        peak(row.saturating_mul(u64::from(height)), row, after)
     };
     let (img, _icc) =
         crate::image::decode_stored(src, from, Format::Png, &names, cancel, &tool_peak)
@@ -563,8 +604,6 @@ fn encode(
     info.uncompressed_latin1_text = source.uncompressed_latin1_text.clone();
     info.compressed_latin1_text = source.compressed_latin1_text.clone();
     info.utf8_text = source.utf8_text.clone();
-    let rows = (source.height as usize).max(1);
-    let step = (packed.data.len() / rows).max(1) * CANCEL_CHECK_ROWS;
     let mut out = Vec::new();
     {
         let mut encoder = png::Encoder::with_info(&mut out, info)?;
@@ -575,7 +614,7 @@ fn encode(
             writer.write_chunk(png::chunk::ChunkType(*kind), data)?;
         }
         let mut stream = writer.stream_writer()?;
-        for part in packed.data.chunks(step) {
+        for part in packed.data.chunks(ENCODE_STEP) {
             if cancel.is_cancelled() {
                 return Err(io::Error::other("cancelled").into());
             }
@@ -828,10 +867,53 @@ mod tests {
     }
 
     #[test]
-    fn the_peak_is_the_image_and_its_packed_form() {
-        // A 170 MP RGB image near the decode limit fits only just.
-        assert_eq!(peak(500, 7), 1007);
-        assert!(peak(512 << 20, 0) <= crate::image::WORKING_SET_LIMIT);
-        assert!(peak(513 << 20, 0) > crate::image::WORKING_SET_LIMIT);
+    fn the_peak_is_the_image_its_packed_form_and_the_encoders_rows() {
+        assert_eq!(peak(500, 7, 3), 1000 + 3 * 8 + DEFLATER + 3);
+        // One row of 134 M gray pixels is held three more times while
+        // it's written, so 128 MiB decoded counts as about 641 MiB.
+        let row = 134_000_000;
+        assert_eq!(peak(row, row, 0), 5 * row + 3 + DEFLATER);
+        assert!(peak(row, row, 0) <= crate::image::WORKING_SET_LIMIT);
+        assert!(peak(2 * row, 2 * row, 0) > crate::image::WORKING_SET_LIMIT);
+    }
+
+    #[test]
+    fn rows_wider_than_a_span_pack_whole() {
+        let width = SPAN as u32 * 2 + 3;
+        let gray = GrayImage::from_fn(width, 2, |x, y| Luma([((x * 7 + y) % 4 * 85) as u8]));
+        let rgb = RgbImage::from_fn(width, 2, |x, y| {
+            Rgb([[9, 0, 0], [0, 9, 0], [0, 0, 9]][((x + y) % 3) as usize])
+        });
+        for img in [DynamicImage::ImageLuma8(gray), DynamicImage::ImageRgb8(rgb)] {
+            let packed = reduced(&img, true);
+            assert!(matches!(packed.depth, BitDepth::Two), "{:?}", packed.color);
+            assert_eq!(decoded(&packed, width, 2), img.to_rgba8());
+        }
+    }
+
+    #[test]
+    fn a_scan_reads_spans_and_checks_the_cancel_before_each() {
+        let width = SPAN as u32 * 2 + 5;
+        let img =
+            DynamicImage::ImageLuma8(GrayImage::from_fn(width, 2, |x, y| Luma([(x + y) as u8])));
+        let mut seen = Vec::new();
+        let pass = scan(&img, &CancelToken::default(), |x0, span| {
+            assert_eq!(span[0][0] / 257, ((x0 + seen.len() / 3) % 256) as u16);
+            seen.push((x0, span.len()));
+            true
+        });
+        assert!(matches!(pass, Scan::Done));
+        let row = [(0, SPAN), (SPAN, SPAN), (2 * SPAN, 5)];
+        assert_eq!(seen, [row, row].concat());
+        // A cancel inside one row stops it at the next span.
+        let cancel = CancelToken::default();
+        let mut calls = 0;
+        let pass = scan(&img, &cancel, |_, _| {
+            calls += 1;
+            cancel.cancel();
+            true
+        });
+        assert!(matches!(pass, Scan::Cancelled));
+        assert_eq!(calls, 1);
     }
 }
