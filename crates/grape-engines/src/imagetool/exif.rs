@@ -65,6 +65,10 @@ pub(crate) fn walk(tiff: &[u8]) -> Exif {
         return exif;
     };
     let reader = Reader { tiff, order };
+    // The value bytes looked at so far: at most the block's own size, as
+    // when no two values share bytes. A crafted block can point a thousand
+    // entries at one long run of NULs; past it, values count as there.
+    let mut looked = 0usize;
     let mut queue = vec![(first, Ifd::Zero)];
     let mut visited = BTreeSet::new();
     while let Some((offset, kind)) = queue.pop() {
@@ -99,8 +103,14 @@ pub(crate) fn walk(tiff: &[u8]) -> Exif {
             let Some(field) = classify(kind, entry.tag) else {
                 continue;
             };
+            if exif.fields.contains(&field) {
+                continue;
+            }
             // A value it can't read is still there: it's reported.
-            let empty = value.is_some_and(|v| is_empty(entry.tag, entry.kind, v));
+            let empty = value.is_some_and(|v| {
+                looked = looked.saturating_add(v.len());
+                looked <= tiff.len() && is_empty(entry.tag, entry.kind, v)
+            });
             if !empty {
                 exif.fields.insert(field);
             }
@@ -413,6 +423,30 @@ pub(crate) mod tests {
 
     use super::*;
     use MetaField::*;
+
+    #[test]
+    fn values_that_share_bytes_are_looked_at_once_in_all() {
+        // `entries` Make entries, all pointing at one run of `len` NULs.
+        let shared = |entries: u16, len: u32| {
+            let at = 8 + 2 + 12 * u32::from(entries) + 4;
+            let mut t = b"II*\0\x08\0\0\0".to_vec();
+            t.extend_from_slice(&entries.to_le_bytes());
+            for _ in 0..entries {
+                t.extend_from_slice(&0x010Fu16.to_le_bytes());
+                t.extend_from_slice(&2u16.to_le_bytes());
+                t.extend_from_slice(&len.to_le_bytes());
+                t.extend_from_slice(&at.to_le_bytes());
+            }
+            t.extend_from_slice(&0u32.to_le_bytes());
+            t.resize(t.len() + len as usize, 0);
+            t
+        };
+        // A walk that read each of 1,000 would read 10 MB: past the
+        // block's own size, a value counts as there.
+        assert_eq!(walk(&shared(1000, 10_000)).fields, [Camera].into());
+        // Values that share no bytes always fit, and are read: empty.
+        assert!(walk(&shared(1, 10_000)).fields.is_empty());
+    }
 
     /// A value for [`tiff`]: inline (≤4 bytes) or stored after the IFDs.
     pub(crate) enum V<'a> {
