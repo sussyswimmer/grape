@@ -882,7 +882,7 @@ jobs:
       # copy of it from the temp folder and exits, so the files go a moment
       # later. Tauri's uninstaller removes the HKCU Run value only, so a
       # Run value the first launch left in HKLM (above) is removed here:
-      # the step says what it found, and that never fails it.
+      # the step warns about what it found, and that never fails it.
       - name: Uninstall Grape, silently
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         shell: pwsh
@@ -912,7 +912,7 @@ jobs:
           foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run') {
             $item = Get-ItemProperty -LiteralPath $key -Name $conf.productName -ErrorAction SilentlyContinue
             if ($null -eq $item) { Write-Output "$($key): no $($conf.productName) value."; continue }
-            Write-Output "$($key): $($conf.productName) = $($item.($conf.productName)) after the uninstall; removing it."
+            Write-Output "::warning::$($key): $($conf.productName) = $($item.($conf.productName)) is still there after the uninstall (Tauri's uninstaller only removes HKCU's Run value). Removing it."
             try { Remove-ItemProperty -LiteralPath $key -Name $conf.productName } catch { Write-Output "  Couldn't remove it: $($_.Exception.Message)" }
           }
           exit 0
