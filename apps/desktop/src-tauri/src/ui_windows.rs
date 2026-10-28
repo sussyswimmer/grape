@@ -109,6 +109,7 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     // The lock guards no data, so a panic in an earlier holder leaves
     // nothing broken: keep using it.
     let _creating = SETTINGS_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    unhide(app);
     if let Some(window) = app.get_webview_window(SETTINGS) {
         refuse_drops(app, &window);
         window.unminimize()?;
@@ -127,6 +128,26 @@ fn show_settings(app: &AppHandle) -> tauri::Result<()> {
     window.set_focus()?;
     Ok(())
 }
+
+/// macOS: Hide (Cmd+H) hides Settings and leaves Grape hidden, and a hidden
+/// app's Settings stays off screen when it's shown or built, so Grape is
+/// unhidden first (`grape_platform::macos::unhide_app`). Queued on the main
+/// thread ahead of the show or build: [`show_settings`] runs on a worker,
+/// and both reach the event loop in order.
+#[cfg(target_os = "macos")]
+fn unhide(app: &AppHandle) {
+    let queued = app.run_on_main_thread(|| match grape_platform::macos::unhide_app() {
+        Ok(true) => log::info!("Grape was hidden (Cmd+H); unhidden to show Settings"),
+        Ok(false) => {}
+        Err(err) => log::warn!("could not unhide Grape for Settings: {err}"),
+    });
+    if let Err(err) = queued {
+        log::warn!("could not unhide Grape for Settings: no main thread: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn unhide(_app: &AppHandle) {}
 
 /// Settings, the toast and the tool panel take no drops (nor does the
 /// float shelf, see [`refuse_drops_here`]). On Windows, wry's and tao's

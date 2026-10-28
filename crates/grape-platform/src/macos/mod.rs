@@ -17,7 +17,8 @@
 //!   wheel covers the toast and both cover the panel and the shelf),
 //!   [`frame_and_show`], the toast's [`show_toast`] (mouse events ignored
 //!   while it has nothing to reveal), [`hand_back_activation`] (after a
-//!   toast click that revealed nothing), [`describe_window`], the panel's
+//!   toast click that revealed nothing), [`unhide_app`] (before Settings
+//!   shows: Cmd+H hides only Settings), [`describe_window`], the panel's
 //!   [`show_panel`] (the one hardened window Grape makes key, asking to be
 //!   activated) and [`hide_panel`] (activation handed back), and the shelf's
 //!   [`show_shelf`] (never key, never activating), [`hide_shelf`]
@@ -70,7 +71,7 @@ pub use drag_out::{drag_out, DragStart};
 pub use login::set_relaunch_on_login;
 pub use window::{
     describe_window, frame_and_show, hand_back_activation, harden_window, hide_panel, hide_shelf,
-    show_panel, show_shelf, show_toast, window_frame, PanelShown, WindowRole,
+    show_panel, show_shelf, show_toast, unhide_app, window_frame, PanelShown, WindowRole,
 };
 
 pub(crate) use actions::{

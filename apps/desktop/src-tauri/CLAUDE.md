@@ -6,7 +6,7 @@ The Tauri 2 app: windows, tray, `WheelController` state machine, IPC and setting
 | Label | Purpose | Flags |
 |---|---|---|
 | `overlay` | full-display transparent wheel | transparent, no decorations, always on top, skip taskbar, unfocused, all workspaces, hidden at start |
-| `settings` | preferences | normal window, opened from the tray |
+| `settings` | preferences | normal window, opened from the tray; on macOS every show first unhides Grape (`ui_windows::show_settings` → `grape_platform::macos::unhide_app`), since Cmd+H hides only Settings |
 | `float` | file shelf (Windows and macOS) | built in code (`src/float.rs`), on first use on Windows and at launch on macOS: transparent, no decorations, always on top, skip taskbar, tool window (Windows), accept first mouse (macOS), activatable, hidden at start |
 | `toast` | progress and done messages | small, topmost, click → reveal |
 | `panel` | a tool's options before it runs (Compress, Audio Channels, Normalize, Merge PDFs) | declared hidden in `tauri.conf.json`: transparent, no decorations, always on top, skip taskbar, tool window, activatable, not focused when shown, hidden at start |

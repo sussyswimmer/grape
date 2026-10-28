@@ -51,7 +51,8 @@
 //! [`harden_window`] also turns `canHide` off, so `NSApp hide:` (the
 //! default menu's Hide, Cmd+H, which the app keeps for Close Window's
 //! Cmd+W) leaves these four windows on screen and they can still be
-//! ordered front while Grape is hidden. Only Settings hides. tao never
+//! ordered front while Grape is hidden. Only Settings hides, and
+//! [`unhide_app`] brings Grape back before Settings is shown. tao never
 //! turns `canHide` back on (it only turns it off, when it hides the Dock
 //! icon).
 
@@ -260,6 +261,26 @@ pub fn hand_back_activation() -> Result<bool, PlatformError> {
             None => false,
         }
     }))
+}
+
+/// Unhides Grape, without activating it, if Hide (Cmd+H, `NSApp hide:`)
+/// hid it. Settings is the one window Hide hides, and nothing else ever
+/// unhides an Accessory app: while Grape is hidden, ordering Settings front
+/// leaves it off screen, and tao's `set_focus` activates only a visible
+/// window. So this runs before Settings is shown or built, and that show
+/// then puts Settings back on screen and activates Grape. Returns whether
+/// Grape was hidden.
+///
+/// # Errors
+/// [`PlatformError::WrongThread`] off the main thread.
+pub fn unhide_app() -> Result<bool, PlatformError> {
+    let mtm = MainThreadMarker::new().ok_or(PlatformError::WrongThread)?;
+    let grape = NSApplication::sharedApplication(mtm);
+    if !grape.isHidden() {
+        return Ok(false);
+    }
+    grape.unhideWithoutActivation();
+    Ok(true)
 }
 
 /// Shows a tool panel at `frame` (Grape's top-left points) and asks for
@@ -638,6 +659,12 @@ mod tests {
     fn handing_activation_back_is_refused_off_the_main_thread() {
         // libtest runs every test on a thread of its own.
         assert_eq!(hand_back_activation(), Err(PlatformError::WrongThread));
+    }
+
+    #[test]
+    fn unhiding_is_refused_off_the_main_thread() {
+        // As above.
+        assert_eq!(unhide_app(), Err(PlatformError::WrongThread));
     }
 
     #[test]
