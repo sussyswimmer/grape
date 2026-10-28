@@ -79,13 +79,14 @@ pub(super) fn keep(args: &mut Vec<OsString>, to: Format, tags: &Tags) {
 /// Remove Audio (`muteVideo`) on MP4, MOV and MKV: a stream copy of every
 /// track but the audio.
 ///
-/// - MP4 and MOV keep every video stream (cover art included) and every
-///   `mov_text` subtitle, in the source's order. `-strict unofficial` lets
-///   the muxer write Dolby Vision (`dvcC`/`dvvC`), stereo and spherical
-///   boxes. The timecode track is rebuilt from the `timecode` tag, and the
-///   chapter track from the chapters.
-/// - MKV keeps every stream that isn't audio or data: video, subtitles and
-///   attachments.
+/// - MP4 and MOV keep every video stream and every `mov_text` subtitle, in
+///   the source's order, and cover art where it can be written
+///   ([`keeps_cover`]). `-strict unofficial` lets the muxer write Dolby
+///   Vision (`dvcC`/`dvvC`), stereo and spherical boxes. The timecode
+///   track is rebuilt from the `timecode` tag, and the chapter track from
+///   the chapters.
+/// - MKV keeps every stream that isn't audio, data or cover art: video,
+///   subtitles and attachments.
 ///
 /// Not `-an`, which leaves the rest to FFmpeg's default selection (one
 /// stream per kind), nor `-map 0 -map -0:a`, which copies MP4's chapter
@@ -98,7 +99,7 @@ pub(super) fn mute(
     out: &Path,
 ) -> Vec<OsString> {
     let mut args = prefix_at(src, &[], "error");
-    for stream in muted(to, probe) {
+    for stream in muted(to, probe, tags) {
         map(&mut args, stream.index);
     }
     push(&mut args, &["-c", "copy"]);
@@ -110,15 +111,31 @@ pub(super) fn mute(
 }
 
 /// The streams [`mute`] keeps.
-pub(super) fn muted(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamInfo> {
+pub(super) fn muted<'a>(
+    to: Format,
+    probe: &'a Probe,
+    tags: &Tags,
+) -> impl Iterator<Item = &'a StreamInfo> {
+    let cover = keeps_cover(to, tags);
     probe.streams.iter().filter(move |s| match to {
-        // An MKV's cover art is an image attachment, which the demuxer
-        // shows as cover art and a copy writes back as a one-frame video
-        // track (6.1 and 9.0.2 alike, whatever the disposition): it's left
-        // out.
-        Format::Mkv => !matches!(s.kind, StreamKind::Audio | StreamKind::Data) && !s.attached_pic,
+        _ if s.attached_pic => cover,
+        Format::Mkv => !matches!(s.kind, StreamKind::Audio | StreamKind::Data),
         _ => s.kind == StreamKind::Video || is_mov_text(s),
     })
+}
+
+/// Whether Remove Audio and Compress can keep a video's cover art in `to`:
+/// only in an MP4 without iPhone keys.
+///
+/// - The MP4 and MOV muxer writes cover art only into iTunes-style
+///   metadata (`covr`), which a MOV never gets and an MP4 with the keys
+///   gets in its place ([`keep`]'s `use_metadata_tags`): there it would
+///   be dropped without a word (6.1 and 9.0.2 alike).
+/// - An MKV's cover art is an image attachment, which the demuxer shows
+///   as cover art and a copy writes back as a one-frame video track (6.1
+///   and 9.0.2 alike, whatever the disposition).
+fn keeps_cover(to: Format, tags: &Tags) -> bool {
+    to == Format::Mp4 && !tags.apple_keys
 }
 
 /// Remove Metadata on MP3, M4A, WAV, FLAC, MP4, MOV and MKV: a stream
@@ -750,28 +767,36 @@ pub(super) fn picture(probe: &Probe) -> Option<&StreamInfo> {
 const STILL_CODECS: [&str; 5] = ["png", "mjpeg", "bmp", "webp", "gif"];
 
 /// The streams Compress on a video keeps, in the source's order: the
-/// first video that isn't cover art (encoded), every audio track, cover
-/// art, and what [`mute`] keeps besides (`mov_text` in MP4 and MOV;
-/// subtitles and attachments in MKV). Further videos and data tracks are
-/// dropped.
-pub(super) fn shrunk(to: Format, probe: &Probe) -> impl Iterator<Item = &StreamInfo> {
+/// first video that isn't cover art (encoded), every audio track, and what
+/// [`mute`] keeps besides (cover art where it can be written,
+/// [`keeps_cover`]; `mov_text` in MP4 and MOV; subtitles and attachments
+/// in MKV). Further videos and data tracks are dropped.
+pub(super) fn shrunk<'a>(
+    to: Format,
+    probe: &'a Probe,
+    tags: &Tags,
+) -> impl Iterator<Item = &'a StreamInfo> {
     let first = picture(probe).map(|s| s.index);
+    let muted: Vec<u32> = muted(to, probe, tags).map(|s| s.index).collect();
     probe.streams.iter().filter(move |s| match s.kind {
-        // MKV cover art can't be written back ([`muted`]).
-        StreamKind::Video if s.attached_pic => to != Format::Mkv,
-        StreamKind::Video => Some(s.index) == first,
+        StreamKind::Video if !s.attached_pic => Some(s.index) == first,
         StreamKind::Audio => true,
-        _ => muted(to, probe).any(|kept| kept.index == s.index),
+        _ => muted.contains(&s.index),
     })
 }
 
 /// Whether Small would make a video smaller than `preset` does: always
 /// with a picture to encode; for sound alone, when some audio track isn't
 /// already AAC within Small's bitrate, which Small would copy too.
-pub(super) fn small_does_more(to: Format, probe: &Probe, preset: CompressPreset) -> bool {
+pub(super) fn small_does_more(
+    to: Format,
+    probe: &Probe,
+    tags: &Tags,
+    preset: CompressPreset,
+) -> bool {
     preset != CompressPreset::Small
         && (picture(probe).is_some()
-            || shrunk(to, probe).any(|s| {
+            || shrunk(to, probe, tags).any(|s| {
                 let target = aac_rate(aac_per_channel(CompressPreset::Small), s.channels);
                 s.kind == StreamKind::Audio && !(s.codec == "aac" && within(s.bit_rate, target))
             }))
@@ -809,7 +834,7 @@ pub(super) fn shrink(
     out: &Path,
 ) -> Shrink {
     let mut args = prefix_at(src, &[], "error");
-    let kept: Vec<&StreamInfo> = shrunk(to, probe).collect();
+    let kept: Vec<&StreamInfo> = shrunk(to, probe, tags).collect();
     for stream in &kept {
         map(&mut args, stream.index);
     }
@@ -1986,13 +2011,23 @@ pub(super) mod tests {
 
     #[test]
     fn compress_keeps_the_first_picture_audio_cover_and_subtitles() {
-        let indexes =
-            |to, probe: &Probe| -> Vec<u32> { shrunk(to, probe).map(|s| s.index).collect() };
+        let indexes = |to, probe: &Probe| -> Vec<u32> {
+            shrunk(to, probe, &Tags::default())
+                .map(|s| s.index)
+                .collect()
+        };
         // MP4: the second video and data go; mov_text, not DVD subtitles.
         let mut two = movie();
         two.streams.push(stream(7, StreamKind::Video, "hevc"));
         assert_eq!(indexes(Format::Mp4, &two), [0, 1, 2, 3, 6]);
-        // MKV cover art is left out: a copy would make it a video track.
+        // Cover art only where the muxer writes it: not in a MOV, nor an
+        // MP4 with iPhone keys, nor an MKV, where a copy would make it a
+        // video track.
+        assert_eq!(indexes(Format::Mov, &two), [0, 1, 2, 3]);
+        let keyed: Vec<u32> = shrunk(Format::Mp4, &two, &dated(true))
+            .map(|s| s.index)
+            .collect();
+        assert_eq!(keyed, [0, 1, 2, 3]);
         assert_eq!(indexes(Format::Mkv, &mkv()), [0, 1, 2, 3]);
         // Cover art first doesn't count as the picture.
         let covered = probe_of(
@@ -2169,20 +2204,21 @@ pub(super) mod tests {
     #[test]
     fn small_does_more_unless_it_would_copy_every_track_too() {
         use CompressPreset::{Balanced, High, Small};
+        let none = Tags::default();
         // A picture: always, but at Small.
-        assert!(small_does_more(Format::Mp4, &movie(), Balanced));
-        assert!(!small_does_more(Format::Mp4, &movie(), Small));
+        assert!(small_does_more(Format::Mp4, &movie(), &none, Balanced));
+        assert!(!small_does_more(Format::Mp4, &movie(), &none, Small));
         // Sound alone: AAC at 90k stereo is within Small's 96k, so Small
         // copies it as Balanced does.
         let mut aac = stream(0, StreamKind::Audio, "aac");
         aac.bit_rate = Some(90_000);
         let song = probe_of("mov,mp4,m4a,3gp,3g2,mj2", vec![aac.clone()]);
-        assert!(!small_does_more(Format::Mp4, &song, High));
+        assert!(!small_does_more(Format::Mp4, &song, &none, High));
         aac.bit_rate = Some(160_000);
         let song = probe_of("mov,mp4,m4a,3gp,3g2,mj2", vec![aac]);
-        assert!(small_does_more(Format::Mp4, &song, Balanced));
+        assert!(small_does_more(Format::Mp4, &song, &none, Balanced));
         let flac = probe_of("matroska,webm", vec![stream(0, StreamKind::Audio, "flac")]);
-        assert!(small_does_more(Format::Mkv, &flac, High));
+        assert!(small_does_more(Format::Mkv, &flac, &none, High));
     }
 
     /// Whether `args` has `pair` one after the other.    /// Whether `args` has `pair` one after the other.
@@ -2281,32 +2317,33 @@ pub(super) mod tests {
 
     #[test]
     fn mute_maps_every_track_but_the_audio() {
-        for (to, muxer) in [(Format::Mp4, "mp4"), (Format::Mov, "mov")] {
+        // The cover art (0:6) only in an MP4: the MOV muxer drops it.
+        for (to, muxer, cover) in [
+            (Format::Mp4, "mp4", &["-map", "0:6"][..]),
+            (Format::Mov, "mov", &[]),
+        ] {
+            let mut middle = vec!["-map", "0:0", "-map", "0:3"];
+            middle.extend(cover);
+            middle.extend([
+                "-c",
+                "copy",
+                "-strict",
+                "unofficial",
+                "-metadata",
+                "creation_time=2024-05-01T10:20:30.000000Z",
+                "-movflags",
+                "+faststart",
+            ]);
             assert_eq!(
                 mute(&src(), to, &movie(), &dated(false), &out()),
-                expect(
-                    &[],
-                    &[
-                        "-map",
-                        "0:0",
-                        "-map",
-                        "0:3",
-                        "-map",
-                        "0:6",
-                        "-c",
-                        "copy",
-                        "-strict",
-                        "unofficial",
-                        "-metadata",
-                        "creation_time=2024-05-01T10:20:30.000000Z",
-                        "-movflags",
-                        "+faststart",
-                    ],
-                    muxer
-                ),
+                expect(&[], &middle, muxer),
                 "{to:?}"
             );
         }
+        // Nor in an MP4 with iPhone keys, whose metadata takes the place of
+        // the iTunes-style metadata a cover goes in.
+        let keyed = mute(&src(), Format::Mp4, &movie(), &dated(true), &out());
+        assert!(!keyed.iter().any(|a| a == "0:6"), "{keyed:?}");
         assert_eq!(
             mute(&src(), Format::Mkv, &mkv(), &Tags::default(), &out()),
             expect(

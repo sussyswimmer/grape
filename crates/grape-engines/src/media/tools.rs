@@ -159,21 +159,26 @@ impl Tool<'_> {
                 format!("no video stream but cover art in {}", src.display()),
             ));
         }
-        let subtitles = argv::muted(self.to, info)
+        let kept: Vec<&StreamInfo> = argv::muted(self.to, info, self.tags).collect();
+        let subtitles = kept
+            .iter()
             .filter(|s| s.kind == StreamKind::Subtitle)
             .count();
+        let cover_art = covers(kept.iter().copied());
         let written = self.write(bar, |out| {
             argv::mute(&self.begun.src_abs, self.to, info, self.tags, out)
         })?;
         let out = &written.probe;
         let (video, audio) = (count(out, StreamKind::Video), count(out, StreamKind::Audio));
-        if video == 0 || audio > 0 || count(out, StreamKind::Subtitle) != subtitles {
+        let (wrote_subtitles, wrote_cover_art) =
+            (count(out, StreamKind::Subtitle), covers(out.streams.iter()));
+        if video == 0 || audio > 0 || wrote_subtitles != subtitles || wrote_cover_art != cover_art {
             return Err(self.wrote_wrong(
                 &written.out,
                 format!(
-                    "{video} video, {audio} audio and {} subtitle streams, {subtitles} \
-                     subtitles planned",
-                    count(out, StreamKind::Subtitle)
+                    "{video} video, {audio} audio, {wrote_subtitles} subtitle and \
+                     {wrote_cover_art} cover art streams, {subtitles} subtitles planned and \
+                     {cover_art} cover art"
                 ),
             ));
         }
@@ -453,7 +458,7 @@ impl Tool<'_> {
             src_abs,
             ..
         } = self.begun;
-        let kept: Vec<&StreamInfo> = argv::shrunk(self.to, info).collect();
+        let kept: Vec<&StreamInfo> = argv::shrunk(self.to, info, self.tags).collect();
         if !kept
             .iter()
             .any(|s| !s.attached_pic && matches!(s.kind, StreamKind::Video | StreamKind::Audio))
@@ -516,7 +521,7 @@ impl Tool<'_> {
             probe,
             _slot: slot,
         };
-        let try_small = argv::small_does_more(self.to, info, preset);
+        let try_small = argv::small_does_more(self.to, info, self.tags, preset);
         self.publish_smaller(written, before, true, try_small, bar)
     }
 
@@ -791,12 +796,13 @@ fn nothing_in_it(names: &publish::Names, src: &Path) -> GrapeError {
     )
 }
 
-/// How many video (cover art not counted), audio, subtitle and attachment
-/// streams there are among `streams`.
-fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 4] {
-    let mut counts = [0; 4];
-    for s in streams.filter(|s| !s.attached_pic) {
+/// How many video (cover art not counted), audio, subtitle, attachment and
+/// cover art streams there are among `streams`.
+fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 5] {
+    let mut counts = [0; 5];
+    for s in streams {
         match s.kind {
+            _ if s.attached_pic => counts[4] += 1,
             StreamKind::Video => counts[0] += 1,
             StreamKind::Audio => counts[1] += 1,
             StreamKind::Subtitle => counts[2] += 1,
@@ -805,6 +811,11 @@ fn kinds<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> [usize; 4] {
         }
     }
     counts
+}
+
+/// How many cover art streams there are among `streams`.
+fn covers<'a>(streams: impl Iterator<Item = &'a StreamInfo>) -> usize {
+    streams.filter(|s| s.attached_pic).count()
 }
 
 /// How many streams of `kind` `probe` lists, cover art not counted as
@@ -1060,6 +1071,32 @@ mod tests {
         assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
         assert!(err.detail.contains("1 subtitles planned"), "{}", err.detail);
         assert!(!case.dest().exists());
+        case.assert_clean();
+
+        // Nor an MP4 whose cover art the muxer dropped.
+        let covered = format!("{}{mp4}", track(2, "video", "png", true));
+        let case = Case::new("clip.mp4", ToolKey::MuteVideo);
+        script([
+            Fake::Prints(covered.clone()),
+            no_tags(),
+            Fake::Child("write", "muted".to_owned()),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "")),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(err.detail.contains("0 cover art streams"), "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+        // A MOV's isn't even mapped: the MOV muxer has nowhere to put it.
+        let case = Case::new("clip.mov", ToolKey::MuteVideo);
+        script([
+            Fake::Prints(covered),
+            no_tags(),
+            Fake::Child("write", "muted".to_owned()),
+            Fake::Prints(flat("mov,mp4,m4a,3gp,3g2,mj2", true, "")),
+        ]);
+        case.run().0.unwrap();
+        assert!(!ran_args(2).iter().any(|a| a == "0:2"), "{:?}", ran_args(2));
         case.assert_clean();
     }
 
@@ -1931,6 +1968,22 @@ mod tests {
         ]);
         let err = case.run().0.unwrap_err();
         assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+
+        // Nor one that lost its cover art.
+        let case = compress_case("clip.mp4", CompressPreset::Balanced);
+        let mp4 = flat("mov,mp4,m4a,3gp,3g2,mj2", true, "aac");
+        script([
+            Fake::Prints(format!("{}{mp4}", track(2, "video", "png", true))),
+            no_tags(),
+            writes(100),
+            Fake::Prints(mp4),
+        ]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        let counts = "streams by kind [1, 1, 0, 0, 0], [1, 1, 0, 0, 1] planned";
+        assert!(err.detail.contains(counts), "{}", err.detail);
         assert!(!case.dest().exists());
         case.assert_clean();
     }

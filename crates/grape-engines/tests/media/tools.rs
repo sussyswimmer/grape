@@ -1877,6 +1877,65 @@ fn a_broadcast_wave_keeps_its_time_reference_through_the_audio_tools() {
     }
 }
 
+/// A 1 s H.264 and AAC clip with a PNG cover, written by the MP4 muxer:
+/// FFmpeg's MOV muxer can't write cover art, so named `.mov` it stands for
+/// another app's MOV holding one in its iTunes-style metadata.
+fn covered_clip(dir: &TestDir, name: &str) -> PathBuf {
+    let cover = cover_png(dir);
+    let path = dir.join(name);
+    let mut args = TESTSRC.to_vec();
+    args.extend(SINE);
+    args.extend(["-i", s(&cover), "-map", "0:v", "-map", "1:a", "-map", "2:v"]);
+    args.extend(["-c:v:0", "libx264", "-pix_fmt", "yuv420p", "-c:v:1", "png"]);
+    args.extend(["-disposition:v:1", "attached_pic", "-c:a", "aac"]);
+    args.extend(["-f", "mp4", s(&path)]);
+    ffmpeg(&args);
+    path
+}
+
+#[test]
+fn remove_audio_and_compress_keep_an_mp4s_cover_and_leave_out_a_movs() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("tools-cover");
+    let mut failures = Vec::new();
+    // (source, Remove Audio's streams, Compress's)
+    for (name, muted, compressed) in [
+        (
+            "clip.mp4",
+            &["video", "video"][..],
+            &["video", "audio", "video"][..],
+        ),
+        ("clip.mov", &["video"], &["video", "audio"]),
+    ] {
+        let src = covered_clip(&dir, name);
+        assert_eq!(kinds(&src), ["video", "audio", "video"], "{name}");
+        for (tool, params, want) in [
+            (ToolKey::MuteVideo, ToolParams::DEFAULT, muted),
+            (ToolKey::Compress, to_preset(Small), compressed),
+        ] {
+            let out = match run_tool(&dir, &src, tool, params) {
+                Ok(out) => out,
+                Err(e) => {
+                    failures.push(format!("{name} {tool:?}: {e} ({})", e.detail));
+                    continue;
+                }
+            };
+            let path = &out.outputs[0];
+            if kinds(path) != want {
+                failures.push(format!("{name} {tool:?}: kinds {:?}", kinds(path)));
+            }
+            // The MP4's cover stays cover art.
+            let last = format!("streams.stream.{}.disposition.attached_pic", want.len() - 1);
+            let cover = tags(path).get(&last).map(String::as_str) == Some("1");
+            if cover != (name == "clip.mp4") {
+                failures.push(format!("{name} {tool:?}: {last} {:?}", tags(path)));
+            }
+            fs::remove_file(path).unwrap();
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 #[test]
 fn compress_and_remove_audio_leave_out_an_mkvs_cover_image() {
     use grape_core::CompressPreset::Small;
