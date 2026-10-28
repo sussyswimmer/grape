@@ -1,8 +1,9 @@
 //! The pure rules under the Windows layer: which app Terminal starts, what
 //! Share leaves out, how it spells paths for the sheet, what the sheet's
-//! title says and where its anchor goes, what hiding the tool panel does
-//! with the foreground, when a window's frame is set again after a DPI
-//! change moved it, and what the `Run` keys say about launch at login.
+//! title says and where its anchor goes, where Move's picker's owner
+//! sits, what hiding the tool panel does with the foreground, when a
+//! window's frame is set again after a DPI change moved it, and what the
+//! `Run` keys say about launch at login.
 //!
 //! No Win32 here, so these build and are tested on every OS, not only on
 //! Windows. The `windows` module is the only caller outside the tests.
@@ -169,6 +170,16 @@ pub(crate) fn anchor_frame(x: i32, y: i32, scale: f64) -> Rect {
         width: side,
         height: side,
     }
+}
+
+/// Where the invisible owner of Move's folder picker goes: the middle of
+/// `work_area` (the one under the cursor), so a picker centered on its
+/// owner opens on the drop's monitor.
+pub(crate) fn middle(work_area: Rect) -> (i32, i32) {
+    (
+        work_area.x.saturating_add(work_area.width / 2),
+        work_area.y.saturating_add(work_area.height / 2),
+    )
 }
 
 /// What hiding the tool panel does with the foreground, before it hides.
@@ -509,6 +520,39 @@ mod tests {
             reframed += 1;
         }
         assert_eq!(reframed, OVERLAY_REFRAMES);
+    }
+
+    #[test]
+    fn the_pickers_owner_sits_in_the_middle_of_the_work_area() {
+        assert_eq!(
+            middle(Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1040,
+            }),
+            (960, 520)
+        );
+        // A monitor left of and above the primary one.
+        assert_eq!(
+            middle(Rect {
+                x: -2560,
+                y: -360,
+                width: 2560,
+                height: 1400,
+            }),
+            (-1280, 340)
+        );
+        assert_eq!(middle(Rect::default()), (0, 0));
+        assert_eq!(
+            middle(Rect {
+                x: i32::MAX,
+                y: i32::MAX,
+                width: 2,
+                height: 2,
+            }),
+            (i32::MAX, i32::MAX)
+        );
     }
 
     #[test]

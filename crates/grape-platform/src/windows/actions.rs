@@ -10,7 +10,9 @@
 //! - Move: `IFileOpenDialog` picks a folder, then `IFileOperation` moves the
 //!   items with undo. Moving to another drive is confirmed first. What
 //!   moved is read back from the disk, with the shell's own reports (a
-//!   progress sink) as hints for where things went.
+//!   progress sink) as hints for where things went. The picker is owned by
+//!   an invisible topmost window ([`TopmostOwner`]), so it opens in front
+//!   of Explorer although Grape can't take the foreground after a drop.
 //! - Pick a folder (Settings): the same `IFileOpenDialog` as Move's,
 //!   owned by the caller's window.
 //! - Reveal: `explorer.exe /select,"<path>"`.
@@ -37,7 +39,7 @@ use std::time::Duration;
 
 use ::windows::core::{implement, w, Error, Ref, HRESULT, HSTRING, PCWSTR};
 use ::windows::Win32::Foundation::{
-    GlobalFree, ERROR_CANCELLED, E_UNEXPECTED, HANDLE, HGLOBAL, HWND,
+    GlobalFree, ERROR_CANCELLED, E_UNEXPECTED, HANDLE, HGLOBAL, HWND, POINT,
 };
 use ::windows::Win32::Storage::FileSystem::{
     GetFileInformationByHandle, GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION,
@@ -60,12 +62,13 @@ use ::windows::Win32::UI::Shell::{
     SIGDN_FILESYSPATH,
 };
 use ::windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DestroyWindow, MessageBoxW, HWND_MESSAGE, IDYES, MB_DEFBUTTON2,
+    CreateWindowExW, DestroyWindow, GetCursorPos, MessageBoxW, HWND_MESSAGE, IDYES, MB_DEFBUTTON2,
     MB_ICONQUESTION, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::file_actions::{MoveOutcome, MovedItem, TerminalApp};
-use crate::win_rules::{terminal_plan, WinTerminal};
+use crate::win_rules::{middle, terminal_plan, WinTerminal};
 use crate::PlatformError;
 
 /// Tries at opening the clipboard, which another app may hold for a moment.
@@ -418,17 +421,80 @@ fn choose_and_move(sources: &[PathBuf]) -> Result<MoveOutcome, PlatformError> {
 
 /// Move's folder picker, starting next to the first item. `None` when the
 /// user closes it.
+///
+/// After a drop Grape has no right to the foreground (the drop was
+/// Explorer's input, not Grape's), so a picker with no owner can open
+/// behind Explorer with only a flashing taskbar button. A [`TopmostOwner`]
+/// makes it topmost: in front, inactive until clicked. Grape never calls
+/// `SetForegroundWindow` or makes up input for it. Without that owner the
+/// picker still opens, as before, and the log says why.
 fn pick_move_folder(sources: &[PathBuf]) -> Result<Option<PathBuf>, PlatformError> {
     let start = sources.first().and_then(|source| source.parent());
-    folder_dialog(None, &picker_title(sources), Some(w!("Move here")), start)
+    let owner = TopmostOwner::new();
+    if let Err(err) = &owner {
+        log::warn!(
+            "Move's folder picker has no topmost owner ({err}), so it may open behind other windows"
+        );
+    }
+    // `owner` lives until the picker has closed, whatever it returns.
+    let hwnd = owner.as_ref().ok().map(|owner| owner.0);
+    folder_dialog(hwnd, &picker_title(sources), Some(w!("Move here")), start)
+}
+
+/// An invisible window on this thread that owns Move's folder picker: a
+/// 1 × 1 topmost tool-window popup that's never shown, at the middle of
+/// the work area under the cursor (so a picker centered on its owner opens
+/// on the drop's monitor; the top-left of the primary one if that can't be
+/// read). A window owned by a topmost window is topmost too. Destroyed on
+/// drop, on every path.
+struct TopmostOwner(HWND);
+
+impl TopmostOwner {
+    fn new() -> Result<Self, PlatformError> {
+        let mut cursor = POINT::default();
+        // SAFETY: a writable POINT on this stack frame.
+        let (x, y) = match unsafe { GetCursorPos(&raw mut cursor) } {
+            Ok(()) => super::display::display_bounds_at(cursor.x, cursor.y)
+                .map_or((0, 0), |bounds| middle(bounds.work_area)),
+            Err(_) => (0, 0),
+        };
+        // SAFETY: a hidden popup of the system STATIC class with no
+        // parent, menu or creation data. It's never shown; `Drop` destroys
+        // it on this thread.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP,
+                x,
+                y,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .map_err(|err| os_err("CreateWindowExW", &err))?;
+        Ok(Self(hwnd))
+    }
+}
+
+impl Drop for TopmostOwner {
+    fn drop(&mut self) {
+        // SAFETY: destroys, once, the window this thread created in `new`.
+        let _ = unsafe { DestroyWindow(self.0) };
+    }
 }
 
 /// The shell's folder picker, titled `title`, with `ok` on its OK button
 /// (the shell's own label when `None`), opening at `start`. It runs its own
 /// message loop on this STA thread, modal to `owner` when there is one:
-/// that window, on another thread, is disabled until it closes, and its
-/// thread must keep pumping messages meanwhile. `None` when the user
-/// closes it.
+/// that window is disabled until it closes, and when it's on another
+/// thread (Settings'), that thread must keep pumping messages meanwhile.
+/// `None` when the user closes it.
 fn folder_dialog(
     owner: Option<HWND>,
     title: &str,
@@ -1119,6 +1185,28 @@ mod tests {
                 code: E_UNEXPECTED.0,
             })
         );
+    }
+
+    #[test]
+    fn the_move_pickers_owner_is_a_hidden_topmost_window_gone_on_drop() {
+        use ::windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, IsWindow, IsWindowVisible, GWL_EXSTYLE,
+        };
+        let owner = TopmostOwner::new().unwrap();
+        let hwnd = owner.0;
+        // SAFETY: plain queries of a live window this thread made.
+        let (visible, ex) = unsafe {
+            (
+                IsWindowVisible(hwnd).as_bool(),
+                GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+            )
+        };
+        assert!(!visible);
+        let wanted = WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0;
+        assert_eq!(ex & wanted, wanted, "{ex:#x}");
+        drop(owner);
+        // SAFETY: IsWindow accepts any handle value, a destroyed one too.
+        assert!(!unsafe { IsWindow(Some(hwnd)) }.as_bool());
     }
 
     #[test]
