@@ -4,9 +4,10 @@ name: Release
 # makes a DRAFT GitHub Release with them (D45), and with the complete source
 # of the GPL programs they carry: Grape's own FFmpeg, in both
 # (grape-ffmpeg-sources.tar, D24), and grape-heif.exe, the installer's image
-# helper for HEIC and AVIF (D33, D41). Every sidecar is built here, clean,
-# from the tag. Nothing is published here: Maxwell checks the draft, writes
-# "What's new" and publishes it by hand. The steps are in
+# helper for HEIC and AVIF (D33, D41). The draft also gets Grape's own FFmpeg
+# builds, zipped (D45). Every sidecar is built here, clean, from the tag.
+# Nothing is published here: Maxwell checks the draft, writes "What's new"
+# and publishes it by hand. The steps are in
 # docs/PLATFORM_WINDOWS.md → "Releasing".
 on:
   push:
