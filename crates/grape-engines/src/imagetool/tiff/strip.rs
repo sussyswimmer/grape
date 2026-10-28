@@ -14,7 +14,8 @@
 //!   color.
 //! - **Refused:** DNG and old-style JPEG (both tools); metadata inside
 //!   JPEG data (an APP1, APP13 or COM before a block's first scan, or in
-//!   its JPEGTables); ImageJ and OME files, whose layout is in their
+//!   its JPEGTables, or segments that run past the first [`MAX_SCAN`]
+//!   bytes read); ImageJ and OME files, whose layout is in their
 //!   description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
@@ -270,12 +271,12 @@ fn head(r: &mut dyn In, entry: &Entry, max: u64) -> Result<Option<(Vec<u8>, bool
     }
 }
 
-/// Whether the JPEG data of `ifd` (compression 7) holds metadata: in its
-/// JPEGTables, or in a block before its first scan.
+/// Whether the JPEG data of `ifd` (compression 7) holds metadata, or may:
+/// in its JPEGTables, or in a block before its first scan.
 fn jpeg_holds_metadata(r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
     if let Some(tables) = ifd.get(347) {
-        if let Some((tables, _)) = head(r, tables, MAX_SCAN)? {
-            if segments_hold_metadata(&tables) {
+        if let Some((tables, whole)) = head(r, tables, MAX_SCAN)? {
+            if segments_hold_metadata(&tables, whole) {
                 return Ok(true);
             }
         }
@@ -285,26 +286,31 @@ fn jpeg_holds_metadata(r: &mut dyn In, ifd: &Ifd) -> Result<bool, Error> {
         buf.resize(block.len.min(MAX_SCAN) as usize, 0);
         seek(r, block.offset)?;
         read_exact(r, &mut buf)?;
-        if segments_hold_metadata(&buf) {
+        if segments_hold_metadata(&buf, block.len <= MAX_SCAN) {
             return Ok(true);
         }
     }
     Ok(false)
 }
 
-/// Whether the JPEG stream `jpeg` (as far as it goes) has an APP1, APP13
-/// or COM segment before its first scan. Anything that isn't a stream of
-/// segments says no: it's copied as it is.
-fn segments_hold_metadata(jpeg: &[u8]) -> bool {
+/// Whether the JPEG stream `jpeg` has an APP1, APP13 or COM segment before
+/// its first scan, or may have: when `jpeg` is only the stream's first
+/// bytes (not `whole`) and they end before its first scan, what follows
+/// can't be seen. Anything that isn't a stream of segments says no: it's
+/// copied as it is.
+fn segments_hold_metadata(jpeg: &[u8], whole: bool) -> bool {
     let Some(mut rest) = jpeg.strip_prefix(&[0xFF, 0xD8]) else {
         return false;
     };
     loop {
         // A marker, after any fill bytes.
         let fill = rest.iter().take_while(|&&b| b == 0xFF).count();
-        let Some(&marker) = rest.get(fill).filter(|_| fill > 0) else {
-            return false;
+        let Some(&marker) = rest.get(fill) else {
+            return !whole;
         };
+        if fill == 0 {
+            return false;
+        }
         rest = &rest[fill + 1..];
         match marker {
             0xE1 | 0xED | 0xFE => return true,
@@ -312,11 +318,11 @@ fn segments_hold_metadata(jpeg: &[u8]) -> bool {
             0x01 | 0xD0..=0xD7 => {}
             _ => {
                 let Some(len) = rest.get(..2) else {
-                    return false;
+                    return !whole;
                 };
                 let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
                 let Some(next) = rest.get(len..) else {
-                    return false;
+                    return !whole;
                 };
                 rest = next;
             }
@@ -860,7 +866,33 @@ mod tests {
             }
         }
         // APP1 after the first scan isn't looked for.
-        assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1"));
+        assert!(!segments_hold_metadata(
+            b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1",
+            false
+        ));
+    }
+
+    #[test]
+    fn jpeg_data_whose_segments_pass_the_window_is_refused() {
+        // An APP2 of 65,535 bytes: the first 64 KiB end inside it, before
+        // the APP1 and the scan.
+        let app2 = [&b"\xFF\xE2\xFF\xFF"[..], &[7; 65_533]].concat();
+        let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
+        for segments in [[&app2[..], app1].concat(), app2.clone()] {
+            let file = jpeg_page(jpeg(&segments), None);
+            let Err(Error::Refused(why)) = plan(&file) else {
+                panic!("not refused")
+            };
+            assert_eq!(why, IN_DATA);
+        }
+        // Tables as long.
+        let tables = [&b"\xFF\xD8"[..], &app2, b"\xFF\xD9"].concat();
+        let file = jpeg_page(jpeg(b""), Some(tables));
+        assert!(matches!(plan(&file), Err(Error::Refused(_))));
+        // A stream that ends there, read whole, has nothing after it.
+        assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", true));
+        assert!(segments_hold_metadata(b"\xFF\xD8\xFF\xE2\0\x10ab", false));
+        assert!(!segments_hold_metadata(b"\xFF\xD8\xFF\xDA\0\x02", false));
     }
 
     #[test]
