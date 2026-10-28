@@ -396,7 +396,7 @@ while IFS=$'\t' read -r kind id url want_sha want_size type; do
   file="$tmp/dl/$id.$type"
   echo "Downloading $id ($want_size bytes) from $url"
   if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-    --silent --show-error --retry 3 --connect-timeout 30 \
+    --silent --show-error --retry 3 --retry-all-errors --connect-timeout 30 \
     --output "$file" "$url"; then
     rm -f "$file"
     fail "couldn't download $id from $url."

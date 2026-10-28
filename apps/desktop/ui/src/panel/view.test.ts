@@ -273,7 +273,7 @@ describe("Compress and Audio Channels", () => {
     expect(byClass(h.root, "is-checked")).toEqual([segmentOf(radio(h.root, "balanced"))]);
     const note = byId(h.root, "panel-note");
     expect(note.getAttribute("aria-live")).toBe("polite");
-    expect(note.textContent).toBe("Much smaller, and hard to tell apart.");
+    expect(note.textContent).toBe("Smaller, and hard to tell apart.");
   });
 
   it("Audio Channels offers Mono and Stereo, starting at Mono", () => {
@@ -291,7 +291,7 @@ describe("Compress and Audio Channels", () => {
     expect(byClass(h.root, "is-checked")).toEqual([segmentOf(radio(h.root, "high"))]);
     expect(byId(h.root, "panel-note").textContent).toBe("Best quality. Saves the least space.");
     check(h.root, "small");
-    expect(byId(h.root, "panel-note").textContent).toBe("Smallest file. Some quality is lost.");
+    expect(byId(h.root, "panel-note").textContent).toBe("Smallest file. Large photos and videos are scaled down.");
   });
 
   it("Enter runs with the chosen preset (panel-run-compress.json)", () => {
@@ -315,7 +315,7 @@ describe("Compress and Audio Channels", () => {
     check(h.root, "high");
     expect(radio(h.root, "balanced").checked).toBe(true);
     expect(radio(h.root, "high").checked).toBe(false);
-    expect(byId(h.root, "panel-note").textContent).toBe("Much smaller, and hard to tell apart.");
+    expect(byId(h.root, "panel-note").textContent).toBe("Smaller, and hard to tell apart.");
   });
 });
 

@@ -53,6 +53,30 @@ function declarations(text: string, selector: string): Map<string, string> {
 }
 
 describe("panel.css", () => {
+  it("gives Compress's note two lines and keeps the others to one", () => {
+    const note = declarations(topLevel(), ".panel-note");
+    expect(note.get("white-space")).toBe("nowrap");
+    expect(note.get("text-overflow")).toBe("ellipsis");
+    const compress = declarations(topLevel(), '#panel-root[data-tool="compress"] .panel-note');
+    expect(compress.get("display")).toBe("-webkit-box");
+    expect(compress.get("-webkit-box-orient")).toBe("vertical");
+    expect(compress.get("-webkit-line-clamp")).toBe("2");
+    expect(compress.get("white-space")).toBe("normal");
+    // Two lines fit the body Rust sizes Compress's window for (its
+    // COMPRESS_BODY, 118 px): the padding, the label, the segments and the note.
+    const px = (selector: string, name: string): number =>
+      Number.parseFloat(declarations(topLevel(), selector).get(name) ?? "NaN");
+    // `padding` and `margin` start with the top: "10px 14px 0", "8px 0 0".
+    const body =
+      px(".panel-body", "padding") +
+      px(".panel-label", "line-height") +
+      px(".panel-segments", "margin-top") +
+      px(".panel-segments", "height") +
+      px(".panel-note", "margin") +
+      2 * px(".panel-note", "line-height");
+    expect(body).toBeLessThanOrEqual(118);
+  });
+
   it("in a contrast theme, rings focus inside a Highlight fill in HighlightText", () => {
     const forced = media("(forced-colors: active)");
     // The checked segment and the selected row are Highlight already, so a

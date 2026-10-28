@@ -120,9 +120,13 @@ body {
  * be a scan."), and one line would cut off the reason. So an error's
  * title, when it has no detail, and an error's detail (under "1 of 3
  * done") take up to two lines each: three lines at most, which fit the pill.
+ * An info toast's detail too: it can be a tool's own sentence under
+ * "Nothing to change" ("song.mp3 is already compact. Try Small."), whose
+ * reason comes after the file's name.
  */
 .toast[data-tone="error"] .toast-title:only-child,
-.toast[data-tone="error"] .toast-detail {
+.toast[data-tone="error"] .toast-detail,
+.toast[data-tone="info"] .toast-detail {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
@@ -131,7 +135,8 @@ body {
 }
 
 /* Under a title, a little tighter, so the three lines clear the pill's edge. */
-.toast[data-tone="error"] .toast-detail {
+.toast[data-tone="error"] .toast-detail,
+.toast[data-tone="info"] .toast-detail {
   line-height: 1.2;
 }
 

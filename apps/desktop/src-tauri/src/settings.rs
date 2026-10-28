@@ -39,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use grape_core::{CompressPreset, OutputLocation, Platform, Settings};
+use grape_core::{CompressPreset, Features, OutputLocation, Platform, Settings, ToolParams};
 use grape_platform::file_actions;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -48,7 +48,7 @@ use tauri_plugin_autostart::AutoLaunchManager;
 use tauri_plugin_store::{Store, StoreExt};
 
 use crate::controller::{ControllerConfig, Input, Key, KeyMap, THIS_OS};
-use crate::panel::model::{lufs_ok, ToolChoice, ToolMemory};
+use crate::panel::model::{ToolChoice, ToolMemory};
 use crate::wheel::WheelInputs;
 
 /// The store's file, in the app data folder (the store plugin's default).
@@ -472,13 +472,18 @@ fn parse_compress(value: &Value) -> Result<CompressPreset, &'static str> {
     .ok_or("isn't small, balanced or high")
 }
 
+/// A Normalize target grape-core runs ([`ToolParams::lufs_ok`]). The
+/// warning's range is `ToolParams::LUFS_MIN` to `LUFS_MAX` (a test checks).
 fn parse_lufs(value: &Value) -> Result<i8, &'static str> {
     value
         .as_i64()
-        .filter(|&lufs| lufs_ok(lufs))
         .and_then(|lufs| i8::try_from(lufs).ok())
-        .ok_or("isn't a whole number from -24 to -10")
+        .filter(|&lufs| ToolParams::lufs_ok(lufs))
+        .ok_or(LUFS_WARNING)
 }
+
+/// What a stored `tools.normalize_lufs` off the range is told, after the key.
+const LUFS_WARNING: &str = "isn't a whole number from -24 to -10";
 
 fn parse_output(value: &Value) -> Result<OutputLocation, &'static str> {
     if value.as_str() == Some(NEXT_TO_SOURCE) {
@@ -580,19 +585,25 @@ const fn remembered(memory: ToolMemory, choice: ToolChoice) -> ToolMemory {
 pub fn core_settings(settings: &AppSettings, default_fallback: &Path) -> Settings {
     let fallback = match settings.fallback_dir.as_deref() {
         Some(chosen) if chosen.is_dir() || chosen == default_fallback => chosen.to_path_buf(),
-        Some(chosen) => {
-            log::warn!(
-                "settings: the fallback folder {} isn't there; using the default",
-                chosen.display()
-            );
+        // Never the folder itself: a log holds no path.
+        Some(_) => {
+            log::warn!("settings: the chosen fallback folder isn't there; using the default");
             default_fallback.to_path_buf()
         }
         None => default_fallback.to_path_buf(),
     };
     Settings {
         output: settings.output.clone(),
+        features: planning_features(),
         ..Settings::new(fallback)
     }
+}
+
+/// The features jobs are planned with: grape-core's defaults (v1 only), since
+/// no setting changes them. The panels' route asks for the same, so a panel
+/// opens only where the plan would offer its tool.
+pub fn planning_features() -> Features {
+    Settings::new(PathBuf::new()).features
 }
 
 /// What the Settings window shows (`ui/src/settings/model.ts`).
@@ -2764,6 +2775,40 @@ mod tests {
                 "tools.normalize_lufs isn't a whole number from -24 to -10; using the default"
             );
         }
+    }
+
+    #[test]
+    fn a_stored_target_loads_exactly_when_grape_core_runs_it() {
+        // Every whole number around the range, and the i8 edges.
+        for lufs in -300i64..=300 {
+            let map = HashMap::from([(TOOLS_NORMALIZE_LUFS, json!(lufs))]);
+            let (settings, report) = from_map(map, Platform::Windows);
+            let runs = i8::try_from(lufs).is_ok_and(ToolParams::lufs_ok);
+            if runs {
+                assert_eq!(i64::from(settings.tool_memory.normalize_lufs), lufs);
+                assert!(report.warnings.is_empty(), "{lufs}: {report:?}");
+            } else {
+                assert_eq!(settings.tool_memory.normalize_lufs, -16, "{lufs}");
+                assert_eq!(report.warnings.len(), 1, "{lufs}");
+            }
+        }
+        // The warning's range is grape-core's.
+        assert_eq!(
+            LUFS_WARNING,
+            format!(
+                "isn't a whole number from {} to {}",
+                ToolParams::LUFS_MIN,
+                ToolParams::LUFS_MAX
+            )
+        );
+    }
+
+    #[test]
+    fn jobs_are_planned_with_the_features_the_panels_route_with() {
+        let settings = AppSettings::defaults(Platform::Windows);
+        let core = core_settings(&settings, Path::new(r"C:\Users\max\Downloads\Grape"));
+        assert_eq!(core.features, planning_features());
+        assert_eq!(planning_features(), Features::V1_ONLY);
     }
 
     #[test]
