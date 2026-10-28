@@ -389,9 +389,10 @@ pub fn run_job(
             if tool_engine(tool, from, sidecars) == Some(Engine::Media) =>
         {
             // The planned name says what the output is: the source's
-            // format, or FLAC for Compress on a WAV.
+            // format, or FLAC for Compress on a WAV (by its content, which
+            // may be named otherwise).
             let to = format_of(dest).unwrap_or(from);
-            if to != from {
+            if to != from && !(tool == ToolKey::Compress && to == Format::Flac) {
                 return Err(not_yet_supported(job, Some(from)));
             }
             media::tools::run(job, src, dest, from, to, tool, &params, ctx, progress)

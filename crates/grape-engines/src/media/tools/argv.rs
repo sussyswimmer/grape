@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 use std::path::Path;
 
-use grape_core::{Channels, Format};
+use grape_core::{Channels, CompressPreset, Format};
 
 use crate::media::args::{finish, muxer, prefix_at, push};
 use crate::media::probe::{Probe, StreamInfo, StreamKind};
@@ -425,23 +425,31 @@ fn holds_cover(to: Format) -> bool {
     matches!(to, Format::Mp3 | Format::M4a | Format::Flac)
 }
 
-/// An audio tool's write pass (Audio Channels, Normalize Volume): the
-/// source's first audio track through `filter` (TPDF dither added for a
-/// 16-bit `codec`) into `codec`, its cover art copied (MP3, M4A, FLAC),
-/// ReplayGain blanked ([`REPLAYGAIN`]) and [`keep`]. `reading` goes before
-/// the source.
-#[allow(clippy::too_many_arguments)]
+/// How an audio tool's write pass encodes ([`reencode`]).
+pub(super) struct Encode<'a> {
+    /// Options for reading the source, before its `-i`.
+    pub(super) reading: &'a [&'a str],
+    /// The `-af` chain, if any. A 16-bit [`Codec::dither`] adds TPDF
+    /// dither to its end.
+    pub(super) filter: Option<&'a str>,
+    pub(super) codec: &'a Codec,
+    /// Blank ReplayGain, R128 and iTunNORM ([`REPLAYGAIN`]), which a
+    /// change of loudness or channels makes wrong (Normalize, Channels).
+    pub(super) blank_replaygain: bool,
+}
+
+/// An audio tool's write pass (Audio Channels, Normalize Volume, Compress
+/// on audio): the source's first audio track, filtered and encoded as
+/// `encode` says, its cover art copied (MP3, M4A, FLAC), and [`keep`].
 pub(super) fn reencode(
     src: &Path,
     to: Format,
     probe: &Probe,
     tags: &Tags,
-    reading: &[&str],
-    filter: &str,
-    codec: &Codec,
+    encode: &Encode,
     out: &Path,
 ) -> Vec<OsString> {
-    let mut args = prefix_at(src, reading, "error");
+    let mut args = prefix_at(src, encode.reading, "error");
     if let Some(audio) = probe.streams.iter().find(|s| s.kind == StreamKind::Audio) {
         map(&mut args, audio.index);
     }
@@ -457,16 +465,206 @@ pub(super) fn reencode(
     if !covers.is_empty() {
         push(&mut args, &["-c:v", "copy"]);
     }
-    let filter = if codec.dither {
-        format!("{filter},{DITHER}")
-    } else {
-        filter.to_owned()
+    let filter = match (encode.filter, encode.codec.dither) {
+        (Some(filter), true) => Some(format!("{filter},{DITHER}")),
+        (Some(filter), false) => Some(filter.to_owned()),
+        (None, true) => Some(DITHER.to_owned()),
+        (None, false) => None,
     };
-    push(&mut args, &["-af", &filter]);
-    args.extend(codec.args.iter().map(OsString::from));
-    push(&mut args, &REPLAYGAIN);
+    if let Some(filter) = &filter {
+        push(&mut args, &["-af", filter]);
+    }
+    args.extend(encode.codec.args.iter().map(OsString::from));
+    if encode.blank_replaygain {
+        push(&mut args, &REPLAYGAIN);
+    }
     keep(&mut args, to, tags);
     finish(args, muxer_of(to), out)
+}
+
+/// What Compress does with an audio file ([`squeeze`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Squeeze {
+    pub(super) codec: Codec,
+    /// The `-af` chain, if any: a lower rate, and for FLAC fewer bits
+    /// with TPDF dither.
+    pub(super) filter: Option<String>,
+    /// The output's sample rate.
+    pub(super) sample_rate: u32,
+    /// The output must be at most 90 % of the source's size (a lossy
+    /// one), else 95 % (an exact one) ([`small_enough`]).
+    pub(super) lossy: bool,
+    /// Whether Small would make it smaller still: for "Try Small".
+    pub(super) try_small: bool,
+    /// The source is already no bigger than the preset makes it, so
+    /// nothing is encoded.
+    pub(super) skip: bool,
+}
+
+/// Why Compress refuses an audio file before it runs ([`squeeze`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Refusal {
+    /// Float samples, or more than 24 bits: FFmpeg's FLAC encoder writes
+    /// at most 24-bit integers, so it would clip or cut them.
+    Deep,
+    /// More than the 8 channels FLAC holds.
+    Channels,
+}
+
+/// MP3's VBR quality for a preset, and the bitrate it averages for
+/// stereo (half that for mono).
+fn lame(preset: CompressPreset) -> (&'static str, u64) {
+    match preset {
+        CompressPreset::Small => ("7", 100_000),
+        CompressPreset::Balanced => ("5", 130_000),
+        CompressPreset::High => ("2", 190_000),
+    }
+}
+
+/// AAC's bitrate a channel for a preset.
+fn aac_per_channel(preset: CompressPreset) -> u64 {
+    match preset {
+        CompressPreset::Small => 48_000,
+        CompressPreset::Balanced => 64_000,
+        CompressPreset::High => 96_000,
+    }
+}
+
+/// Whether `bit_rate` is at most 1.1 × `nominal`: a source no bigger than
+/// that isn't worth another lossy generation. Unknown is never.
+fn within(bit_rate: Option<u64>, nominal: u64) -> bool {
+    bit_rate.is_some_and(|rate| u128::from(rate) * 10 <= u128::from(nominal) * 11)
+}
+
+/// `rate` brought down to at most 48 kHz: 88.2, 176.4 and 352.8 kHz
+/// become 44.1, any other rate over 48 kHz becomes 48.
+fn at_most_48k(rate: u32) -> u32 {
+    match rate {
+        0..=48_000 => rate,
+        _ if rate.is_multiple_of(44_100) => 44_100,
+        _ => 48_000,
+    }
+}
+
+/// Whether Compress's output of `after` bytes is enough smaller than its
+/// source's `before` to be worth saving (D26): at most 90 % for a lossy
+/// output, 95 % for an exact one.
+pub(super) fn small_enough(before: u64, after: u64, lossy: bool) -> bool {
+    let (after, before) = (u128::from(after), u128::from(before));
+    if lossy {
+        after * 10 <= before * 9
+    } else {
+        after * 20 <= before * 19
+    }
+}
+
+/// Compress on MP3, M4A, FLAC, and WAV into FLAC (D26), for `audio` at
+/// `bit_rate` (the stream's, or else the container's):
+///
+/// - MP3: LAME VBR V7, V5 or V2. Skipped when the source is within 1.1 ×
+///   the preset's average (about 100k, 130k or 190k for stereo, half that
+///   for mono).
+/// - M4A: AAC at 48k, 64k or 96k a channel ([`aac_rate`]), at most 48 kHz
+///   ([`at_most_48k`]; FFmpeg's AAC encoder takes at most 96 kHz). An AAC
+///   source within 1.1 × that bitrate is skipped.
+/// - FLAC: level 8 with exact Rice parameters. Small writes 16 bits (TPDF
+///   dither) at most 48 kHz, Balanced the source's depth at most 48 kHz,
+///   High the source as it is. Its size rule is the lossy one only when
+///   bits or rate were cut.
+///
+/// "Try Small" ([`Squeeze::try_small`]) when Small would do more: for MP3
+/// and M4A whenever the preset isn't Small (and Small wouldn't skip the
+/// file too), for FLAC when the source is over 16 bits or 48 kHz.
+pub(super) fn squeeze(
+    to: Format,
+    audio: &StreamInfo,
+    bit_rate: Option<u64>,
+    preset: CompressPreset,
+) -> Result<Squeeze, Refusal> {
+    let small = preset == CompressPreset::Small;
+    let rate = audio.sample_rate;
+    // A lossy output: skipped at `preset` when `skips` says so; "Try
+    // Small" unless Small would skip it too.
+    let lossy =
+        |args: Vec<String>, filter, sample_rate, skips: &dyn Fn(CompressPreset) -> bool| Squeeze {
+            codec: Codec {
+                args,
+                dither: false,
+                exact: false,
+            },
+            filter,
+            sample_rate,
+            lossy: true,
+            try_small: !small && !skips(CompressPreset::Small),
+            skip: skips(preset),
+        };
+    match to {
+        Format::Mp3 => {
+            let nominal = |preset| {
+                let (_, stereo) = lame(preset);
+                if audio.channels == 1 {
+                    stereo / 2
+                } else {
+                    stereo
+                }
+            };
+            let (quality, _) = lame(preset);
+            Ok(lossy(
+                owned(&["-c:a", "libmp3lame", "-q:a", quality]),
+                None,
+                rate,
+                &|preset| within(bit_rate, nominal(preset)),
+            ))
+        }
+        Format::M4a => {
+            let target = |preset| aac_rate(aac_per_channel(preset), audio.channels);
+            let aac = audio.codec == "aac";
+            let capped = at_most_48k(rate);
+            let bits = format!("{}k", target(preset) / 1000);
+            Ok(lossy(
+                owned(&["-c:a", "aac", "-b:a", &bits]),
+                (capped != rate).then(|| format!("aresample={capped}")),
+                capped,
+                &|preset| aac && within(bit_rate, target(preset)),
+            ))
+        }
+        _ => {
+            if audio.codec.starts_with("pcm_f") || audio.depth > 24 {
+                return Err(Refusal::Deep);
+            }
+            if audio.channels > 8 {
+                return Err(Refusal::Channels);
+            }
+            let capped = match preset {
+                CompressPreset::High => rate,
+                _ => at_most_48k(rate),
+            };
+            let deep = audio.depth > 16;
+            let fewer_bits = small && deep;
+            let slower = capped != rate;
+            let sixteen = small || !deep;
+            let mut options = Vec::new();
+            if slower {
+                options.push(capped.to_string());
+            }
+            if sixteen && (fewer_bits || slower) {
+                options.push("osf=s16:dither_method=triangular".to_owned());
+            }
+            let filter = (!options.is_empty()).then(|| format!("aresample={}", options.join(":")));
+            Ok(Squeeze {
+                codec: Codec {
+                    args: owned(&flac(if sixteen { "s16" } else { "s32" })),
+                    dither: false,
+                    exact: true,
+                },
+                filter,
+                sample_rate: capped,
+                lossy: fewer_bits || slower,
+                try_small: !small && (deep || rate > 48_000),
+                skip: false,
+            })
+        }
+    }
 }
 
 /// A measuring or check pass of Normalize Volume: the source's first
@@ -701,18 +899,37 @@ pub(super) mod tests {
         for to in [Format::Mp3, Format::M4a, Format::Wav, Format::Flac] {
             let probe = song("mp3", "mp3");
             let codec = same_quality(to, &probe.streams[0], None, 1).unwrap();
-            let unlabeled = ["-guess_layout_max", "0"];
-            let args = reencode(
-                &src(),
-                to,
-                &probe,
-                &dated(true),
-                &unlabeled,
-                "anull",
-                &codec,
-                &out(),
-            );
-            all.push(args);
+            let encode = Encode {
+                reading: &["-guess_layout_max", "0"],
+                filter: Some("anull"),
+                codec: &codec,
+                blank_replaygain: true,
+            };
+            all.push(reencode(&src(), to, &probe, &dated(true), &encode, &out()));
+        }
+        for (to, codec) in [
+            (Format::Mp3, "mp3"),
+            (Format::M4a, "alac"),
+            (Format::Flac, "flac"),
+            (Format::Flac, "pcm_s24le"),
+        ] {
+            for preset in [
+                CompressPreset::Small,
+                CompressPreset::Balanced,
+                CompressPreset::High,
+            ] {
+                let mut probe = song("mp3", codec);
+                probe.streams[0].depth = 24;
+                probe.streams[0].sample_rate = 96_000;
+                let squeeze = squeeze(to, &probe.streams[0], None, preset).unwrap();
+                let encode = Encode {
+                    reading: &[],
+                    filter: squeeze.filter.as_deref(),
+                    codec: &squeeze.codec,
+                    blank_replaygain: false,
+                };
+                all.push(reencode(&src(), to, &probe, &dated(true), &encode, &out()));
+            }
         }
         all.push(measure(&src(), &song("mp3", "mp3"), "ebur128=peak=true"));
         for (to, probe) in [
@@ -1009,17 +1226,38 @@ pub(super) mod tests {
         ];
         middle.append(&mut rg);
         middle.extend(["-id3v2_version", "3"]);
+        let encode = Encode {
+            reading: &[],
+            filter: Some("pan=mono|c0=0.5*c0+0.5*c1"),
+            codec: &codec,
+            blank_replaygain: true,
+        };
         assert_eq!(
-            reencode(
-                &src(),
-                Format::Mp3,
-                &mp3,
-                &Tags::default(),
-                &[],
-                "pan=mono|c0=0.5*c0+0.5*c1",
-                &codec,
-                &out()
-            ),
+            reencode(&src(), Format::Mp3, &mp3, &Tags::default(), &encode, &out()),
+            expect(&[], &middle, "mp3")
+        );
+        // Compress's: no filter, ReplayGain kept.
+        let encode = Encode {
+            filter: None,
+            blank_replaygain: false,
+            ..encode
+        };
+        let middle = [
+            "-map",
+            "0:0",
+            "-map",
+            "0:1",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "libmp3lame",
+            "-q:a",
+            "0",
+            "-id3v2_version",
+            "3",
+        ];
+        assert_eq!(
+            reencode(&src(), Format::Mp3, &mp3, &Tags::default(), &encode, &out()),
             expect(&[], &middle, "mp3")
         );
         // A 16-bit FLAC from an unlabeled WAV: dithered, read without a
@@ -1029,16 +1267,13 @@ pub(super) mod tests {
             vec![stream(0, StreamKind::Audio, "pcm_s16le"), cover(1)],
         );
         let codec = same_quality(Format::Flac, &wav.streams[0], None, 1).unwrap();
-        let args = reencode(
-            &src(),
-            Format::Wav,
-            &wav,
-            &Tags::default(),
-            &["-guess_layout_max", "0"],
-            "anull",
-            &codec,
-            &out(),
-        );
+        let encode = Encode {
+            reading: &["-guess_layout_max", "0"],
+            filter: Some("anull"),
+            codec: &codec,
+            blank_replaygain: true,
+        };
+        let args = reencode(&src(), Format::Wav, &wav, &Tags::default(), &encode, &out());
         let text: Vec<String> = args
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1046,6 +1281,12 @@ pub(super) mod tests {
         assert_eq!(text[10..12], ["-guess_layout_max", "0"]);
         assert!(!text.contains(&"0:1".to_owned()), "{text:?}");
         assert!(text.contains(&format!("anull,{DITHER}")), "{text:?}");
+        let encode = Encode {
+            filter: None,
+            ..encode
+        };
+        let args = reencode(&src(), Format::Wav, &wav, &Tags::default(), &encode, &out());
+        assert!(crate::media::tests::has(&args, ["-af", DITHER]), "{args:?}");
         assert!(text.ends_with(&[
             "-rf64".to_owned(),
             "auto".to_owned(),
@@ -1055,6 +1296,357 @@ pub(super) mod tests {
             "wav".to_owned(),
             file_url(&out()).to_string_lossy().into_owned(),
         ]));
+    }
+
+    /// `audio` at `rate` Hz with `channels` channels.
+    fn at(audio: StreamInfo, rate: u32, channels: u32) -> StreamInfo {
+        StreamInfo {
+            sample_rate: rate,
+            channels,
+            ..audio
+        }
+    }
+
+    /// [`squeeze`]'s plan, as (options, filter, rate, lossy, try small,
+    /// skip).
+    fn plan(
+        to: Format,
+        audio: &StreamInfo,
+        bit_rate: Option<u64>,
+        preset: CompressPreset,
+    ) -> (String, Option<String>, u32, bool, bool, bool) {
+        let s = squeeze(to, audio, bit_rate, preset).unwrap();
+        assert!(!s.codec.dither, "the filter dithers");
+        assert_eq!(s.codec.exact, !matches!(to, Format::Mp3 | Format::M4a));
+        (
+            s.codec.args.join(" "),
+            s.filter,
+            s.sample_rate,
+            s.lossy,
+            s.try_small,
+            s.skip,
+        )
+    }
+
+    #[test]
+    fn compress_on_mp3_picks_the_vbr_level_and_skips_a_small_source() {
+        use CompressPreset::{Balanced, High, Small};
+        let stereo = at(audio("mp3", 16), 44_100, 2);
+        let mono = at(audio("mp3", 16), 44_100, 1);
+        let lame = |q: &str| format!("-c:a libmp3lame -q:a {q}");
+        // (source, bit rate, preset, quality, try small, skip)
+        for (source, rate, preset, q, try_small, skip) in [
+            (&stereo, Some(320_000), Small, "7", false, false),
+            (&stereo, Some(320_000), Balanced, "5", true, false),
+            (&stereo, Some(320_000), High, "2", true, false),
+            // 1.1 × 190k is 209k: just over, encoded; at it, skipped.
+            (&stereo, Some(209_001), High, "2", true, false),
+            (&stereo, Some(209_000), High, "2", true, true),
+            // 143k at Balanced: skipped, and Small (110k) would still do more.
+            (&stereo, Some(143_000), Balanced, "5", true, true),
+            (&stereo, Some(143_001), Balanced, "5", true, false),
+            // 110k: Small skips it too, so there's nothing to suggest.
+            (&stereo, Some(110_000), Balanced, "5", false, true),
+            (&stereo, Some(110_000), Small, "7", false, true),
+            (&stereo, Some(110_001), Small, "7", false, false),
+            // Mono's averages are half stereo's.
+            (&mono, Some(55_000), Small, "7", false, true),
+            (&mono, Some(56_000), Small, "7", false, false),
+            (&mono, Some(104_500), High, "2", true, true),
+            // Unknown: encoded, the size rule decides.
+            (&stereo, None, Small, "7", false, false),
+            (&stereo, None, Balanced, "5", true, false),
+        ] {
+            assert_eq!(
+                plan(Format::Mp3, source, rate, preset),
+                (lame(q), None, 44_100, true, try_small, skip),
+                "{} channels at {rate:?}, {preset:?}",
+                source.channels
+            );
+        }
+    }
+
+    #[test]
+    fn compress_on_m4a_writes_aac_and_skips_only_a_small_aac() {
+        use CompressPreset::{Balanced, High, Small};
+        let aac = at(audio("aac", 16), 48_000, 2);
+        let alac = at(audio("alac", 24), 96_000, 2);
+        let surround = at(audio("aac", 16), 48_000, 6);
+        let opts = |k: u64| format!("-c:a aac -b:a {k}k");
+        // (source, bit rate, preset, kbit/s, filter, rate, try small, skip)
+        let cases = [
+            (&aac, Some(256_000), Small, 96, None, 48_000, false, false),
+            (
+                &aac,
+                Some(256_000),
+                Balanced,
+                128,
+                None,
+                48_000,
+                true,
+                false,
+            ),
+            (&aac, Some(256_000), High, 192, None, 48_000, true, false),
+            // 1.1 × 128k = 140.8k.
+            (&aac, Some(140_800), Balanced, 128, None, 48_000, true, true),
+            (
+                &aac,
+                Some(140_801),
+                Balanced,
+                128,
+                None,
+                48_000,
+                true,
+                false,
+            ),
+            // At 105.6k Small (96k) skips it too.
+            (
+                &aac,
+                Some(105_600),
+                Balanced,
+                128,
+                None,
+                48_000,
+                false,
+                true,
+            ),
+            // ALAC is never skipped, and AAC is at most 48 kHz.
+            (
+                &alac,
+                Some(50_000),
+                Small,
+                96,
+                Some("aresample=48000"),
+                48_000,
+                false,
+                false,
+            ),
+            (
+                &alac,
+                None,
+                High,
+                192,
+                Some("aresample=48000"),
+                48_000,
+                true,
+                false,
+            ),
+            // 5.1 at 64k a channel; at High, 512k at most.
+            (&surround, None, Balanced, 384, None, 48_000, true, false),
+            (&surround, None, High, 512, None, 48_000, true, false),
+        ];
+        for (source, rate, preset, k, filter, out_rate, try_small, skip) in cases {
+            assert_eq!(
+                plan(Format::M4a, source, rate, preset),
+                (
+                    opts(k),
+                    filter.map(str::to_owned),
+                    out_rate,
+                    true,
+                    try_small,
+                    skip
+                ),
+                "{} at {rate:?}, {preset:?}",
+                source.codec
+            );
+        }
+        let cd = at(audio("alac", 16), 88_200, 2);
+        assert_eq!(
+            plan(Format::M4a, &cd, None, Balanced).1.as_deref(),
+            Some("aresample=44100")
+        );
+    }
+
+    #[test]
+    fn compress_into_flac_cuts_bits_and_rate_by_preset() {
+        use CompressPreset::{Balanced, High, Small};
+        let flac = |format: &str| {
+            format!("-c:a flac -compression_level 8 -exact_rice_parameters 1 -sample_fmt {format}")
+        };
+        let dither = "osf=s16:dither_method=triangular";
+        // (codec, depth, rate, preset, sample format, filter, out rate,
+        // lossy, try small)
+        let cases = [
+            (
+                "pcm_s16le",
+                16,
+                44_100,
+                Small,
+                "s16",
+                None,
+                44_100,
+                false,
+                false,
+            ),
+            (
+                "pcm_s16le",
+                16,
+                44_100,
+                Balanced,
+                "s16",
+                None,
+                44_100,
+                false,
+                false,
+            ),
+            (
+                "pcm_s16le",
+                16,
+                44_100,
+                High,
+                "s16",
+                None,
+                44_100,
+                false,
+                false,
+            ),
+            (
+                "flac",
+                24,
+                48_000,
+                Small,
+                "s16",
+                Some(format!("aresample={dither}")),
+                48_000,
+                true,
+                false,
+            ),
+            (
+                "flac", 24, 48_000, Balanced, "s32", None, 48_000, false, true,
+            ),
+            ("flac", 24, 48_000, High, "s32", None, 48_000, false, true),
+            (
+                "pcm_s24le",
+                24,
+                96_000,
+                Small,
+                "s16",
+                Some(format!("aresample=48000:{dither}")),
+                48_000,
+                true,
+                false,
+            ),
+            (
+                "pcm_s24le",
+                24,
+                96_000,
+                Balanced,
+                "s32",
+                Some("aresample=48000".to_owned()),
+                48_000,
+                true,
+                true,
+            ),
+            (
+                "pcm_s24le",
+                24,
+                96_000,
+                High,
+                "s32",
+                None,
+                96_000,
+                false,
+                true,
+            ),
+            (
+                "pcm_s16le",
+                16,
+                88_200,
+                Balanced,
+                "s16",
+                Some(format!("aresample=44100:{dither}")),
+                44_100,
+                true,
+                true,
+            ),
+            (
+                "flac",
+                16,
+                192_000,
+                Small,
+                "s16",
+                Some(format!("aresample=48000:{dither}")),
+                48_000,
+                true,
+                false,
+            ),
+            (
+                "flac",
+                24,
+                352_800,
+                Balanced,
+                "s32",
+                Some("aresample=44100".to_owned()),
+                44_100,
+                true,
+                true,
+            ),
+            // An 8-bit WAV is 16 bits in FLAC, without dither.
+            (
+                "pcm_u8", 8, 22_050, Balanced, "s16", None, 22_050, false, false,
+            ),
+        ];
+        for (codec, depth, rate, preset, format, filter, out_rate, lossy, try_small) in cases {
+            assert_eq!(
+                plan(
+                    Format::Flac,
+                    &at(audio(codec, depth), rate, 2),
+                    None,
+                    preset
+                ),
+                (flac(format), filter, out_rate, lossy, try_small, false),
+                "{depth}-bit {codec} at {rate}, {preset:?}"
+            );
+        }
+        // Float, or deeper than FLAC's 24 bits, or more than 8 channels.
+        for (codec, depth, channels, refusal) in [
+            ("pcm_f32le", 32, 2, Refusal::Deep),
+            ("pcm_f64le", 64, 2, Refusal::Deep),
+            ("pcm_f16le", 16, 2, Refusal::Deep),
+            ("pcm_s32le", 32, 2, Refusal::Deep),
+            ("flac", 32, 2, Refusal::Deep),
+            ("pcm_s24le", 24, 10, Refusal::Channels),
+        ] {
+            let source = at(audio(codec, depth), 48_000, channels);
+            assert_eq!(
+                squeeze(Format::Flac, &source, None, High),
+                Err(refusal),
+                "{codec}"
+            );
+        }
+        let eight = at(audio("pcm_s24le", 24), 48_000, 8);
+        assert!(squeeze(Format::Flac, &eight, None, High).is_ok());
+    }
+
+    #[test]
+    fn the_size_rule_is_ninety_percent_for_lossy_and_ninety_five_for_exact() {
+        assert!(small_enough(1000, 900, true));
+        assert!(!small_enough(1000, 901, true));
+        assert!(small_enough(1000, 950, false));
+        assert!(!small_enough(1000, 951, false));
+        assert!(small_enough(0, 0, true));
+        assert!(!small_enough(0, 1, false));
+        assert!(small_enough(u64::MAX, u64::MAX / 10 * 9, true));
+        assert!(!small_enough(u64::MAX, u64::MAX, false));
+    }
+
+    #[test]
+    fn rates_over_48k_come_down_to_their_family() {
+        for (rate, capped) in [
+            (8_000, 8_000),
+            (44_100, 44_100),
+            (48_000, 48_000),
+            (48_001, 48_000),
+            (88_200, 44_100),
+            (96_000, 48_000),
+            (176_400, 44_100),
+            (192_000, 48_000),
+            (352_800, 44_100),
+            (384_000, 48_000),
+            (64_000, 48_000),
+        ] {
+            assert_eq!(at_most_48k(rate), capped, "{rate}");
+        }
     }
 
     #[test]

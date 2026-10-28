@@ -201,6 +201,18 @@ impl Names {
         let message = format!("{} {why}", self.source);
         GrapeError::new(ErrorKind::NoChange, message, detail)
     }
+
+    /// Compress that wouldn't make the file smaller enough (D26), saying
+    /// whether Small would: "`source` is already compact. Try Small." or
+    /// "`source` is already as small as Grape makes it."
+    pub(crate) fn not_smaller(&self, try_small: bool, detail: String) -> GrapeError {
+        let why = if try_small {
+            "is already compact. Try Small."
+        } else {
+            "is already as small as Grape makes it."
+        };
+        self.no_change(why, detail)
+    }
 }
 
 /// "image" for images and GIF, "video" for the other video formats, "file"

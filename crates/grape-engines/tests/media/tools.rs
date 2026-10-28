@@ -1386,3 +1386,203 @@ fn a_cancel_in_normalizes_second_pass_leaves_nothing() {
     assert!(!planned_file(&job).exists());
     assert_no_leftovers(&dir.path);
 }
+
+fn to_preset(compress: grape_core::CompressPreset) -> ToolParams {
+    ToolParams {
+        compress,
+        ..ToolParams::DEFAULT
+    }
+}
+
+/// Writes `seconds` of stereo white noise at 44.1 kHz, 16-bit: what
+/// codecs can't make much smaller.
+fn noise(path: &Path, seconds: f64) {
+    let mut state = 0x2545_f491_u32;
+    let mut next = move || {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        f64::from(state) / f64::from(u32::MAX) * 2.0 - 1.0
+    };
+    let mut samples = Vec::new();
+    let frames = (44_100.0 * seconds) as usize;
+    for _ in 0..frames * 2 {
+        samples.push(next() * 0.5);
+    }
+    let frame = |t: f64| (t * 44_100.0).round() as usize;
+    write_wave(path, 44_100, 2, seconds, None, Sample::I16, |t, c| {
+        samples.get(frame(t) * 2 + c).copied().unwrap_or(0.0)
+    });
+}
+
+/// The size of `path` in bytes.
+fn size(path: &Path) -> u64 {
+    fs::metadata(path).unwrap().len()
+}
+
+#[test]
+fn compress_shrinks_audio_and_keeps_its_cover_and_tags() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    use grape_engines::Note;
+    let dir = TestDir::new("tools-compress-audio");
+    let cover = cover_png(&dir);
+    // A 320k MP3 and a 24-bit 96 kHz ALAC, with a cover and tags.
+    let deep = dir.join("deep.wav");
+    steady(&deep, -20.0, 2, 96_000, Sample::I24);
+    let mut failures = Vec::new();
+    let mp3 = dir.join("song.mp3");
+    let alac = dir.join("song.m4a");
+    // MP3 goes to 48 kHz at most.
+    for (path, codec, muxer) in [
+        (
+            &mp3,
+            ["-c:a", "libmp3lame", "-b:a", "320k", "-ar", "48000"],
+            "mp3",
+        ),
+        (
+            &alac,
+            ["-c:a", "alac", "-sample_fmt", "s32p", "-ar", "96000"],
+            "ipod",
+        ),
+    ] {
+        let mut args = vec!["-i", s(&deep), "-i", s(&cover)];
+        args.extend(["-map", "0:a", "-map", "1:v", "-c:v", "png"]);
+        args.extend(["-disposition:v:0", "attached_pic"]);
+        args.extend(codec);
+        args.extend(["-metadata", "title=Song", "-metadata", "artist=Band"]);
+        args.extend(["-metadata", "REPLAYGAIN_TRACK_GAIN=-3.00 dB"]);
+        args.extend(["-f", muxer, s(path)]);
+        ffmpeg(&args);
+    }
+    // (source, preset, codec, rate): AAC is at most 48 kHz.
+    for (src, preset, codec, rate) in [
+        (&mp3, Balanced, "mp3", "48000"),
+        (&mp3, Small, "mp3", "48000"),
+        (&alac, Balanced, "aac", "48000"),
+        (&alac, High, "aac", "48000"),
+    ] {
+        let out = match run_tool(&dir, src, ToolKey::Compress, to_preset(preset)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{} {preset:?}: {e} ({})", s(src), e.detail));
+                continue;
+            }
+        };
+        let path = &out.outputs[0];
+        let note = Note::Compressed {
+            before: size(src),
+            after: size(path),
+        };
+        assert_eq!(out.notes, [note], "{}", s(src));
+        assert!(size(path) * 10 <= size(src) * 9);
+        let got = tags(path);
+        let want = [
+            ("streams.stream.0.codec_type", "audio"),
+            ("streams.stream.1.codec_type", "video"),
+            ("streams.stream.1.disposition.attached_pic", "1"),
+        ];
+        for (key, value) in want {
+            if got.get(key).map(String::as_str) != Some(value) {
+                failures.push(format!("{} {preset:?}: {key} {:?}", s(src), got.get(key)));
+            }
+        }
+        // The ipod muxer has no ReplayGain tag, so the M4A had none.
+        let values: Vec<&str> = got.values().map(String::as_str).collect();
+        let replaygain = if codec == "mp3" { "-3.00 dB" } else { "Band" };
+        for kept in ["Song", "Band", replaygain] {
+            if !values.contains(&kept) {
+                failures.push(format!("{} {preset:?}: lost {kept}: {got:?}", s(src)));
+            }
+        }
+        let stream = flat(path, "stream=codec_name,sample_rate");
+        if stream["streams.stream.0.codec_name"] != codec
+            || stream["streams.stream.0.sample_rate"] != rate
+        {
+            failures.push(format!("{} {preset:?}: {stream:?}", s(src)));
+        }
+        fs::remove_file(path).unwrap();
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn compress_makes_flac_of_a_wav_by_preset() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let dir = TestDir::new("tools-compress-flac");
+    let deep = dir.join("take.wav");
+    steady(&deep, -20.0, 2, 96_000, Sample::I24);
+    let mut failures = Vec::new();
+    // (preset, sample rate, bits)
+    for (preset, rate, bits) in [
+        (Small, "48000", "16"),
+        (Balanced, "48000", "24"),
+        (High, "96000", "24"),
+    ] {
+        let out = match run_tool(&dir, &deep, ToolKey::Compress, to_preset(preset)) {
+            Ok(out) => out,
+            Err(e) => {
+                failures.push(format!("{preset:?}: {e} ({})", e.detail));
+                continue;
+            }
+        };
+        let path = &out.outputs[0];
+        assert_eq!(path.file_name().unwrap(), "take Compressed.flac");
+        let got = flat(path, "stream=codec_name,sample_rate,bits_per_raw_sample");
+        let want = [
+            ("flac", "codec_name"),
+            (rate, "sample_rate"),
+            (bits, "bits_per_raw_sample"),
+        ];
+        for (value, key) in want {
+            if got[&format!("streams.stream.0.{key}")] != value {
+                failures.push(format!("{preset:?}: {key} {got:?}"));
+            }
+        }
+        fs::remove_file(path).unwrap();
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+
+    // Float, or more than FLAC's 24 bits: refused.
+    for sample in [Sample::F32, Sample::I32] {
+        let wav = dir.join("float.wav");
+        write_tones(&wav, 48_000, &[440.0, 660.0], 0.25, None, sample);
+        let err = run_tool(&dir, &wav, ToolKey::Compress, to_preset(Balanced)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "float.wav is a 32-bit recording. FLAC would clip or cut it, so nothing was saved."
+        );
+    }
+}
+
+#[test]
+fn compress_saves_nothing_when_it_cant_save_enough() {
+    use grape_core::CompressPreset::{Balanced, Small};
+    let dir = TestDir::new("tools-compress-none");
+    // A 96k stereo MP3 is no bigger than Balanced or Small makes it (a
+    // mono one would be: their averages are half for mono).
+    let mp3 = dir.join("small.mp3");
+    let mut args = SINE.to_vec();
+    args.extend(["-ac", "2", "-c:a", "libmp3lame", "-b:a", "96k"]);
+    args.extend(["-f", "mp3", s(&mp3)]);
+    ffmpeg(&args);
+    for preset in [Balanced, Small] {
+        let err = run_tool(&dir, &mp3, ToolKey::Compress, to_preset(preset)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "small.mp3 is already as small as Grape makes it."
+        );
+    }
+    // White noise as 16-bit FLAC: FLAC can't make it 5 % smaller again.
+    let wav = dir.join("noise.wav");
+    noise(&wav, 2.0);
+    let flac = dir.join("noise.flac");
+    ffmpeg(&["-i", s(&wav), "-c:a", "flac", "-f", "flac", s(&flac)]);
+    let err = run_tool(&dir, &flac, ToolKey::Compress, to_preset(Balanced)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "noise.flac is already as small as Grape makes it."
+    );
+}

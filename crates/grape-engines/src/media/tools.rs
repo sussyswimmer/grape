@@ -1,6 +1,6 @@
 //! The tools that run through FFmpeg (D26), one file in and one out:
-//! Remove Audio, Remove Metadata, Audio Channels and Normalize Volume so
-//! far.
+//! Remove Audio, Remove Metadata, Audio Channels, Normalize Volume, and
+//! Compress on audio so far.
 //!
 //! [`run`] goes through the steps a conversion does ([`super::convert`]),
 //! and every refusal, and every [`ErrorKind::NoChange`], comes before
@@ -51,7 +51,9 @@ pub(crate) fn runs_tool(tool: ToolKey, from: Format) -> bool {
     use Format::{Flac, M4a, Mkv, Mov, Mp3, Mp4, Wav};
     match tool {
         ToolKey::RemoveMetadata => matches!(from, Mp3 | M4a | Wav | Flac | Mp4 | Mov | Mkv),
-        ToolKey::AudioChannels | ToolKey::NormalizeAudio => matches!(from, Mp3 | M4a | Wav | Flac),
+        ToolKey::Compress | ToolKey::AudioChannels | ToolKey::NormalizeAudio => {
+            matches!(from, Mp3 | M4a | Wav | Flac)
+        }
         ToolKey::MuteVideo => matches!(from, Mp4 | Mov | Mkv),
         _ => false,
     }
@@ -93,6 +95,7 @@ pub(crate) fn run(
         ToolKey::RemoveMetadata => tool.strip(&mut bar),
         ToolKey::AudioChannels => tool.channels(&mut bar),
         ToolKey::NormalizeAudio => tool.normalize(&mut bar),
+        ToolKey::Compress => tool.compress_audio(&mut bar),
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
 }
@@ -273,16 +276,13 @@ impl Tool<'_> {
             &[]
         };
         let written = self.write(bar, |out| {
-            argv::reencode(
-                &self.begun.src_abs,
-                self.to,
-                info,
-                self.tags,
+            let encode = argv::Encode {
                 reading,
-                &filter,
-                &codec,
-                out,
-            )
+                filter: Some(&filter),
+                codec: &codec,
+                blank_replaygain: true,
+            };
+            argv::reencode(&self.begun.src_abs, self.to, info, self.tags, &encode, out)
         })?;
         let wrote = written
             .probe
@@ -363,17 +363,14 @@ impl Tool<'_> {
         };
 
         let (temp, out) = self.temp()?;
+        let encode = argv::Encode {
+            reading: &[],
+            filter: Some(&chain),
+            codec: &codec,
+            blank_replaygain: true,
+        };
         let pass = Pass {
-            args: argv::reencode(
-                &self.begun.src_abs,
-                self.to,
-                info,
-                self.tags,
-                &[],
-                &chain,
-                &codec,
-                &out,
-            ),
+            args: argv::reencode(&self.begun.src_abs, self.to, info, self.tags, &encode, &out),
             weight: 1.0,
         };
         let warnings = self.run(&[pass], bar, PASSES_SHARE)?;
@@ -396,6 +393,111 @@ impl Tool<'_> {
             _slot: slot,
         };
         self.publish(written, bar)
+    }
+
+    /// Compress on audio ([`argv::squeeze`]): the first audio track
+    /// encoded smaller, its cover art and tags kept, then the size rule
+    /// ([`argv::small_enough`]). A source already no bigger than the preset
+    /// makes it, or an output not enough smaller, saves nothing
+    /// ([`ErrorKind::NoChange`]).
+    fn compress_audio(&self, bar: &mut Bar) -> Result<JobOutcome, GrapeError> {
+        let (names, info) = (&self.begun.names, &self.begun.info);
+        let src = self.begun.src;
+        let audio = self.audio()?;
+        let bit_rate = audio.bit_rate.or(info.bit_rate);
+        let squeeze = argv::squeeze(self.to, audio, bit_rate, self.params.compress)
+            .map_err(|refusal| self.refused(audio, refusal))?;
+        if squeeze.skip {
+            let detail = format!("{} at {bit_rate:?} b/s in {}", audio.codec, src.display());
+            return Err(names.not_smaller(squeeze.try_small, detail));
+        }
+        let before = self.source_size()?;
+        let encode = argv::Encode {
+            reading: &[],
+            filter: squeeze.filter.as_deref(),
+            codec: &squeeze.codec,
+            blank_replaygain: false,
+        };
+        let written = self.write(bar, |out| {
+            argv::reencode(&self.begun.src_abs, self.to, info, self.tags, &encode, out)
+        })?;
+        let rates: Vec<u32> = written
+            .probe
+            .streams
+            .iter()
+            .filter(|s| s.kind == StreamKind::Audio)
+            .map(|s| s.sample_rate)
+            .collect();
+        if rates != [squeeze.sample_rate] {
+            return Err(self.wrote_wrong(
+                &written.out,
+                format!("audio at {rates:?} Hz, {} planned", squeeze.sample_rate),
+            ));
+        }
+        self.publish_smaller(written, before, squeeze.lossy, squeeze.try_small, bar)
+    }
+
+    /// The refusal of an audio file Compress can't make FLAC of.
+    fn refused(&self, audio: &StreamInfo, refusal: argv::Refusal) -> GrapeError {
+        let (names, src) = (&self.begun.names, self.begun.src);
+        let message = match refusal {
+            argv::Refusal::Deep => format!(
+                "{} is a {}-bit recording. FLAC would clip or cut it, so nothing was saved.",
+                names.source, audio.depth
+            ),
+            argv::Refusal::Channels => format!(
+                "{} has {} channels, more than the 8 FLAC holds.",
+                names.source, audio.channels
+            ),
+        };
+        let detail = format!(
+            "{}-bit {} with {} channels in {}",
+            audio.depth,
+            audio.codec,
+            audio.channels,
+            src.display()
+        );
+        GrapeError::new(ErrorKind::NotYetSupported, message, detail)
+    }
+
+    /// The source's size in bytes, for Compress's size rule.
+    fn source_size(&self) -> Result<u64, GrapeError> {
+        std::fs::metadata(&self.begun.src_abs)
+            .map(|meta| meta.len())
+            .map_err(|e| {
+                let detail = format!("size of {}: {e}", self.begun.src.display());
+                self.begun.names.read_failed(detail)
+            })
+    }
+
+    /// Publishes Compress's checked output if it is small enough next to
+    /// the source's `before` bytes ([`argv::small_enough`]), with
+    /// [`Note::Compressed`]; else nothing is saved, and the message says
+    /// whether Small would do more.
+    fn publish_smaller(
+        &self,
+        written: Written,
+        before: u64,
+        lossy: bool,
+        try_small: bool,
+        bar: &mut Bar,
+    ) -> Result<JobOutcome, GrapeError> {
+        let after = std::fs::metadata(&written.out)
+            .map(|meta| meta.len())
+            .map_err(|e| {
+                let detail = format!("size of {}: {e}", written.out.display());
+                self.begun.names.write_failed(detail)
+            })?;
+        if !argv::small_enough(before, after, lossy) {
+            let detail = format!(
+                "{after} bytes from {before} in {}",
+                self.begun.src.display()
+            );
+            return Err(self.begun.names.not_smaller(try_small, detail));
+        }
+        let mut outcome = self.publish(written, bar)?;
+        outcome.notes.push(Note::Compressed { before, after });
+        Ok(outcome)
     }
 
     /// Runs a measuring or check pass with `filter` ([`argv::measure`]),
@@ -626,7 +728,7 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
 
-    use grape_core::{tools_enabled, Features, JobOutput, Operation};
+    use grape_core::{tools_enabled, CompressPreset, Features, JobOutput, Operation};
 
     use super::*;
     use crate::media::run::tests::{one_at_a_time, ran, script, slots_held, Fake};
@@ -655,10 +757,12 @@ mod tests {
             let op = Operation::tool(tool);
             let planned = grape_core::output_name(&name, &op, &HashSet::new());
             let to = Format::from_file_name(&planned).unwrap();
-            assert_eq!(to, from, "{tool:?} on {from:?}: {planned}");
+            let wav_to_flac = tool == ToolKey::Compress && from == Format::Wav;
+            let want = if wav_to_flac { Format::Flac } else { from };
+            assert_eq!(to, want, "{tool:?} on {from:?}: {planned}");
             assert!(crate::media::args::muxer(to).is_some());
         }
-        assert_eq!(count, 18);
+        assert_eq!(count, 22);
     }
 
     /// A tool job on `name` (the bytes "source") in a fresh folder, with
@@ -666,13 +770,20 @@ mod tests {
     struct Case {
         dir: TestDir,
         job: Job,
+        /// The source's bytes.
+        source: Vec<u8>,
     }
 
     impl Case {
         fn new(name: &str, tool: ToolKey) -> Case {
+            Case::sized(name, tool, b"source".to_vec())
+        }
+
+        /// A tool job on `name` holding `source`.
+        fn sized(name: &str, tool: ToolKey, source: Vec<u8>) -> Case {
             let dir = TestDir::new();
             let src = dir.0.join(name);
-            fs::write(&src, b"source").unwrap();
+            fs::write(&src, &source).unwrap();
             let op = Operation::tool(tool);
             let planned = grape_core::output_name(name, &op, &HashSet::new());
             Case {
@@ -683,6 +794,7 @@ mod tests {
                     used_fallback: false,
                 },
                 dir,
+                source,
             }
         }
 
@@ -710,7 +822,7 @@ mod tests {
                     "{name:?} left"
                 );
             }
-            assert_eq!(fs::read(&self.job.inputs[0]).unwrap(), b"source");
+            assert_eq!(fs::read(&self.job.inputs[0]).unwrap(), self.source);
         }
     }
 
@@ -1332,6 +1444,231 @@ mod tests {
         assert_eq!(ran().len(), 3);
         assert_eq!(slots_held(), 0);
         assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    /// A Compress job at `preset` on `name`, a source of 1000 bytes.
+    fn compress_case(name: &str, preset: CompressPreset) -> Case {
+        let op = Operation::Tool {
+            tool: ToolKey::Compress,
+            params: ToolParams {
+                compress: preset,
+                ..ToolParams::default()
+            },
+        };
+        let mut case = Case::sized(name, ToolKey::Compress, vec![b'x'; 1000]);
+        let planned = grape_core::output_name(name, &op, &HashSet::new());
+        case.job.op = op;
+        case.job.output = JobOutput::File(case.dir.0.join(planned));
+        case
+    }
+
+    /// [`song`] at `rate` Hz, and `bit_rate` b/s if known.
+    fn tuned(song: Fake, rate: u32, bit_rate: Option<u64>) -> Fake {
+        let Fake::Prints(text) = song else {
+            panic!("not a probe")
+        };
+        let mut text = text.replace("sample_rate=\"48000\"", &format!("sample_rate=\"{rate}\""));
+        if let Some(bit_rate) = bit_rate {
+            text.push_str(&format!("streams.stream.0.bit_rate=\"{bit_rate}\"\n"));
+        }
+        Fake::Prints(text)
+    }
+
+    /// An FFmpeg run that writes `bytes` bytes.
+    fn writes(bytes: usize) -> Fake {
+        Fake::Child("write", "y".repeat(bytes))
+    }
+
+    #[test]
+    fn compress_writes_a_smaller_mp3_and_says_how_much() {
+        let case = compress_case("song.mp3", CompressPreset::Balanced);
+        let mp3 = || tuned(song("mp3", "mp3", 2, true, 16), 44_100, Some(320_000));
+        script([mp3(), no_tags(), writes(900), mp3()]);
+        let (result, seen) = case.run();
+        let outcome = result.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("song Compressed.mp3")]);
+        assert_eq!(
+            outcome.notes,
+            [Note::Compressed {
+                before: 1000,
+                after: 900
+            }]
+        );
+        assert_eq!(fs::read(case.dest()).unwrap().len(), 900);
+        let args = ran_args(2);
+        assert!(has(&args, ["-q:a", "5"]));
+        assert!(!args.iter().any(|a| a == "-af"), "{args:?}");
+        assert!(!has(&args, ["-metadata", "REPLAYGAIN_TRACK_GAIN="]));
+        assert_forward_to_done(&seen);
+        case.assert_clean();
+
+        // One byte more than 90 %: nothing is saved, and Small would do more.
+        let case = compress_case("song.mp3", CompressPreset::Balanced);
+        script([mp3(), no_tags(), writes(901), mp3()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        assert_eq!(err.user_message, "song.mp3 is already compact. Try Small.");
+        assert!(err.detail.contains("901 bytes from 1000"), "{}", err.detail);
+        assert!(!case.dest().exists());
+        assert_eq!(slots_held(), 0);
+        case.assert_clean();
+
+        // At Small there's nothing smaller to suggest.
+        let case = compress_case("song.mp3", CompressPreset::Small);
+        script([mp3(), no_tags(), writes(901), mp3()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(
+            err.user_message,
+            "song.mp3 is already as small as Grape makes it."
+        );
+        assert!(has(&ran_args(2), ["-q:a", "7"]));
+        case.assert_clean();
+    }
+
+    #[test]
+    fn compress_leaves_a_small_enough_source_alone_before_anything_runs() {
+        // (preset, bit rate, message)
+        for (preset, bit_rate, message) in [
+            (
+                CompressPreset::Balanced,
+                128_000,
+                "song.mp3 is already compact. Try Small.",
+            ),
+            (
+                CompressPreset::Balanced,
+                96_000,
+                "song.mp3 is already as small as Grape makes it.",
+            ),
+            (
+                CompressPreset::Small,
+                96_000,
+                "song.mp3 is already as small as Grape makes it.",
+            ),
+        ] {
+            let case = compress_case("song.mp3", preset);
+            let mp3 = tuned(song("mp3", "mp3", 2, true, 16), 44_100, Some(bit_rate));
+            script([mp3, no_tags()]);
+            let (result, seen) = case.run();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+            assert_eq!(err.user_message, message);
+            assert_eq!(ran().len(), 2);
+            assert!(seen.is_empty());
+            assert_eq!(slots_held(), 0);
+            case.assert_clean();
+        }
+        // The container's rate stands in for a stream without one.
+        let case = compress_case("song.m4a", CompressPreset::High);
+        let Fake::Prints(m4a) = song("mov,mp4,m4a,3gp,3g2,mj2", "aac", 2, true, 16) else {
+            unreachable!()
+        };
+        let m4a = m4a.replace(
+            "format.duration",
+            "format.bit_rate=\"200000\"\nformat.duration",
+        );
+        script([Fake::Prints(m4a), no_tags()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.user_message, "song.m4a is already compact. Try Small.");
+        assert_eq!(ran().len(), 2);
+        case.assert_clean();
+    }
+
+    #[test]
+    fn compress_makes_flac_of_a_wav_and_checks_its_rate() {
+        let case = compress_case("take.wav", CompressPreset::Balanced);
+        let wav = tuned(song("wav", "pcm_s24le", 2, true, 24), 96_000, None);
+        let flac = || tuned(song("flac", "flac", 2, true, 24), 48_000, None);
+        script([wav, no_tags(), writes(900), flac()]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(outcome.outputs, [case.dir.0.join("take Compressed.flac")]);
+        let args = ran_args(2);
+        assert!(has(&args, ["-af", "aresample=48000"]), "{args:?}");
+        assert!(has(&args, ["-sample_fmt", "s32"]), "{args:?}");
+        assert!(has(&args, ["-f", "flac"]), "{args:?}");
+        case.assert_clean();
+
+        // Bits and rate were cut, so 90 % is the rule.
+        let case = compress_case("take.wav", CompressPreset::Balanced);
+        let wav = tuned(song("wav", "pcm_s24le", 2, true, 24), 96_000, None);
+        script([wav, no_tags(), writes(901), flac()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.user_message, "take.wav is already compact. Try Small.");
+        case.assert_clean();
+
+        // Nothing was cut: 95 %.
+        let case = compress_case("take.wav", CompressPreset::High);
+        let wav = tuned(song("wav", "pcm_s16le", 2, true, 16), 44_100, None);
+        let cd = || tuned(song("flac", "flac", 2, true, 16), 44_100, None);
+        script([wav, no_tags(), writes(950), cd()]);
+        let outcome = case.run().0.unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::Compressed {
+                before: 1000,
+                after: 950
+            }]
+        );
+        case.assert_clean();
+        let case = compress_case("take.wav", CompressPreset::High);
+        let wav = tuned(song("wav", "pcm_s16le", 2, true, 16), 44_100, None);
+        script([wav, no_tags(), writes(951), cd()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(
+            err.user_message,
+            "take.wav is already as small as Grape makes it."
+        );
+        case.assert_clean();
+
+        // An output at the wrong rate isn't published.
+        let case = compress_case("take.wav", CompressPreset::Balanced);
+        let wav = tuned(song("wav", "pcm_s24le", 2, true, 24), 96_000, None);
+        let still = tuned(song("flac", "flac", 2, true, 24), 96_000, None);
+        script([wav, no_tags(), writes(500), still]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::EncodeFailed, "{}", err.detail);
+        assert!(!case.dest().exists());
+        case.assert_clean();
+    }
+
+    #[test]
+    fn compress_refuses_what_flac_cannot_hold() {
+        // (codec, depth, channels, message)
+        for (codec, depth, channels, message) in [
+            (
+                "pcm_f32le",
+                32,
+                2,
+                "take.wav is a 32-bit recording. FLAC would clip or cut it, so nothing was saved.",
+            ),
+            (
+                "pcm_s32le",
+                32,
+                2,
+                "take.wav is a 32-bit recording. FLAC would clip or cut it, so nothing was saved.",
+            ),
+            (
+                "pcm_s24le",
+                24,
+                10,
+                "take.wav has 10 channels, more than the 8 FLAC holds.",
+            ),
+        ] {
+            let case = compress_case("take.wav", CompressPreset::Balanced);
+            script([song("wav", codec, channels, false, depth), no_tags()]);
+            let (result, seen) = case.run();
+            let err = result.unwrap_err();
+            assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+            assert_eq!(err.user_message, message);
+            assert_eq!(ran().len(), 2);
+            assert!(seen.is_empty());
+            case.assert_clean();
+        }
+        // No sound at all.
+        let case = compress_case("song.flac", CompressPreset::Balanced);
+        script([Fake::Prints(flat("flac", false, "")), no_tags()]);
+        let err = case.run().0.unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
         case.assert_clean();
     }
 

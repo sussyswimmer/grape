@@ -457,9 +457,10 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **Compress:** Small, Balanced and High per ENGINES.md → Tools.
   - x264 CRF 28/23/20 at `medium`, short side ≤720/1080/2160, Small ≤30 fps; AAC 48/64/96 kb/s per channel; LAME V7/V5/V2.
   - FLAC: 16-bit ≤48 kHz / ≤24-bit ≤48 kHz / lossless.
+  - AAC at 48 kHz at most (FFmpeg's encoder takes at most 96 kHz); FLAC at most 8 channels, its limit.
   - JPEG: q70 ≤2048 px / q80 ≤4096 px / q85 with image's encoder, EXIF kept with the stored orientation.
   - PNG: lossless at every preset.
-  - HLG video becomes 8-bit H.264 with its HLG tags. PQ video, CMYK JPEG, APNG, and WAV/FLAC deeper than 24-bit or float are refused.
+  - HLG video becomes 8-bit H.264 with its HLG tags. PQ video, CMYK JPEG, APNG, WAV/FLAC deeper than 24-bit or float, and WAV of more than 8 channels are refused.
 - **API:**
   - grape-core: `ToolKey::has_v1_panel()` (D31's v1 rule) and `ToolParams::LUFS_MIN/MAX/STEP` with `lufs_ok` (D12 extension).
   - grape-engines: `ErrorKind::NoChange` (`ErrorKind` becomes `#[non_exhaustive]`), `Note::Compressed { before, after }`, and the ten `MetaField`s.
