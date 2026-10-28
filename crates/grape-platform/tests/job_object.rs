@@ -246,8 +246,9 @@ fn ui_limits_are_set_unless_the_helper_is_already_in_a_job() {
         match spawn_child_with("job_child", "sleep", CREATE_BREAKAWAY_FROM_JOB) {
             Ok(child) => (child, true),
             Err(err) => {
+                // On a line of its own, so GitHub shows it on the run.
                 println!(
-                    "::warning::GRAPE_TEST_JOB_UI=1, but this process's job lets no child break away ({err}), so the UI-limited job isn't tested here; the PC checks it (TESTING.md, HEIC, D33)"
+                    "\n::warning::GRAPE_TEST_JOB_UI=1, but this process's job lets no child break away ({err}), so the UI-limited job isn't tested here; the PC checks it (TESTING.md, HEIC, D33)"
                 );
                 (spawn_child("job_child", "sleep"), false)
             }
