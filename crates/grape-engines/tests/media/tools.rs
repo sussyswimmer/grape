@@ -955,6 +955,10 @@ fn remove_metadata_drops_a_cover_copied_as_a_video_track() {
         fs::remove_file(stripped).unwrap();
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+    // Remove Audio keeps a copied cover: a video track, as it came.
+    let out = run_tool(&dir, &covered, ToolKey::MuteVideo, ToolParams::DEFAULT).unwrap();
+    assert_eq!(kinds(&out.outputs[0]), ["video", "video"]);
+    assert_eq!(tags(&out.outputs[0])["streams.stream.1.codec_name"], "png");
 }
 
 /// How the samples of a test WAV are stored.

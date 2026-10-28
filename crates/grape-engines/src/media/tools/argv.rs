@@ -85,8 +85,10 @@ pub(super) fn keep(args: &mut Vec<OsString>, to: Format, tags: &Tags) {
 ///   Vision (`dvcC`/`dvvC`), stereo and spherical boxes. The timecode
 ///   track is rebuilt from the `timecode` tag, and the chapter track from
 ///   the chapters.
-/// - MKV keeps every stream that isn't audio, data or cover art: video,
-///   subtitles and attachments.
+/// - MKV keeps every stream that isn't audio, data or cover art (an image
+///   attachment, which a copy would turn into a video track): video,
+///   subtitles and attachments. A cover an earlier copy already turned
+///   into a video track is video here.
 ///
 /// Not `-an`, which leaves the rest to FFmpeg's default selection (one
 /// stream per kind), nor `-map 0 -map -0:a`, which copies MP4's chapter
