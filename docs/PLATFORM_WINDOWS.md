@@ -143,7 +143,7 @@ FFmpeg and ffprobe are separate programs that Grape runs (golden rule 6). They a
 
 ## PDFium
 
-PDFium is the library Grape reads PDFs with (DECISIONS D29). Unlike FFmpeg it ships now. It isn't in the repo either: the same script fetches it, as pinned in `scripts/sidecars.lock` → `libraries`. A plain run fetches it with the sidecars; `-Only pdfium` fetches just it (3.9 MB):
+PDFium is the library Grape reads PDFs with (DECISIONS D29). Every installer and DMG carries it, as they carry FFmpeg. It isn't in the repo either: the same script fetches it, as pinned in `scripts/sidecars.lock` → `libraries`. A plain run fetches it with the sidecars; `-Only pdfium` fetches just it (3.9 MB):
 
 ```powershell
 .\scripts\fetch-sidecars.ps1 -Only pdfium
