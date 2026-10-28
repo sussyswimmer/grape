@@ -548,6 +548,26 @@ fn compress_refuses_a_jpeg_over_the_limit_before_reading_it() {
 }
 
 #[test]
+fn compress_says_a_png_too_wide_to_read_is_too_large() {
+    let dir = TestDir::new("compress-wide");
+    // One gray row of 170 M pixels: more than the header read may hold.
+    // The image data needn't be whole: the size is refused before it.
+    let mut ihdr = 170_000_000u32.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&1u32.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    let mut src = b"\x89PNG\r\n\x1a\n".to_vec();
+    src.extend(chunk(b"IHDR", &ihdr));
+    src.extend(chunk(b"IDAT", &[0x78, 0x9C, 0x03, 0x00]));
+    src.extend(chunk(b"IEND", &[]));
+    let err = compress(&dir, "wide.png", &src, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(
+        err.user_message, "wide.png is too large to convert.",
+        "{}",
+        err.detail
+    );
+}
+
+#[test]
 fn compress_repacks_a_png_exactly_and_keeps_its_text() {
     let dir = TestDir::new("compress-png");
     // A screenshot-like picture written fast and as 16-bit RGBA, though

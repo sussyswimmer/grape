@@ -64,10 +64,13 @@ struct Chunks {
     /// The bytes of the text chunks before the image data, which the
     /// `png` crate's header read holds.
     text_bytes: u64,
+    /// More text after the image data than `limit`: the walk stopped there.
+    too_much: bool,
 }
 
-/// Walks the PNG's chunks, reading only the ones Compress carries itself.
-fn walk(r: &mut dyn BufRead) -> Result<Chunks, Error> {
+/// Walks the PNG's chunks, reading only the ones Compress carries itself,
+/// and at most `limit` bytes of text after the image data.
+fn walk(r: &mut dyn BufRead, limit: u64) -> Result<Chunks, Error> {
     let mut found = Chunks::default();
     let mut signature = [0; 8];
     read_exact(r, &mut signature)?;
@@ -86,8 +89,9 @@ fn walk(r: &mut dyn BufRead) -> Result<Chunks, Error> {
         if small || late {
             if late {
                 found.after_bytes = found.after_bytes.saturating_add(len as u64);
-                if found.after_bytes > PNG_METADATA_LIMIT {
-                    return Err(Error::Broken("too much text after the image data".into()));
+                if found.after_bytes > limit {
+                    found.too_much = true;
+                    return Ok(found);
                 }
             }
             let mut data = vec![0; len];
@@ -513,7 +517,18 @@ pub(crate) fn run(
         };
         publish::or_cancelled(cancel, src, e)
     };
-    let chunks = walk(&mut BufReader::new(Cancellable::new(file, cancel))).map_err(broken)?;
+    let chunks = walk(
+        &mut BufReader::new(Cancellable::new(file, cancel)),
+        PNG_METADATA_LIMIT,
+    )
+    .map_err(broken)?;
+    if chunks.too_much {
+        return Err(names.too_large(format!(
+            "{}: over {} MiB of text after the image data",
+            src.display(),
+            PNG_METADATA_LIMIT >> 20
+        )));
+    }
     if chunks.animated {
         return Err(GrapeError::new(
             ErrorKind::NotYetSupported,
@@ -531,7 +546,13 @@ pub(crate) fn run(
     let reader =
         png::Decoder::new_with_limits(BufReader::new(Cancellable::new(open()?, cancel)), limits)
             .read_info()
-            .map_err(|e| names.decode_failed(format!("read {}: {e}", src.display())))
+            .map_err(|e| {
+                let detail = format!("read {}: {e}", src.display());
+                match e {
+                    png::DecodingError::LimitsExceeded => names.too_large(detail),
+                    _ => names.decode_failed(detail),
+                }
+            })
             .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     let info = reader.info().clone();
     drop(reader);
@@ -857,7 +878,7 @@ mod tests {
             (b"IDAT", &[1]),
             (b"IEND", &[]),
         ]);
-        let found = walk(&mut Cursor::new(apng)).unwrap();
+        let found = walk(&mut Cursor::new(apng), 100).unwrap();
         assert!(found.animated && !found.color_bound);
         let hdr = png(&[
             (b"IHDR", ihdr),
@@ -870,7 +891,7 @@ mod tests {
             (b"eXIf", b"MM\0*"),
             (b"IEND", &[]),
         ]);
-        let found = walk(&mut Cursor::new(hdr)).unwrap();
+        let found = walk(&mut Cursor::new(hdr.clone()), 100).unwrap();
         assert!(!found.animated && found.color_bound);
         assert_eq!(found.raw.len(), 2);
         let after: Vec<&[u8; 4]> = found.after.iter().map(|(k, _)| k).collect();
@@ -878,7 +899,12 @@ mod tests {
         assert_eq!(found.after_bytes, 16);
         // "Title\0early": the text before the image data.
         assert_eq!(found.text_bytes, 11);
-        assert!(walk(&mut Cursor::new(b"\x89PNG\r\n\x1a\n\0\0".to_vec())).is_err());
+        assert!(!found.too_much);
+        // Over the limit, the walk stops at the text that passes it.
+        let found = walk(&mut Cursor::new(hdr), 15).unwrap();
+        assert!(found.too_much);
+        assert_eq!(found.after_bytes, 16);
+        assert!(walk(&mut Cursor::new(b"\x89PNG\r\n\x1a\n\0\0".to_vec()), 100).is_err());
     }
 
     #[test]
