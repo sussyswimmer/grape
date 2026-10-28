@@ -103,13 +103,13 @@ fn fit(w: u64, h: u64, cap: u64) -> (u64, u64) {
 /// - the picture Lanczos3 starts from, its intermediate (`image` keeps one
 ///   of 16 bytes a pixel, the source's width by the result's height) and
 ///   the result;
-/// - the picture encoded, an RGB copy unless it's gray or RGB, and about a
-///   byte a pixel of JPEG.
+/// - the picture encoded, an RGB copy unless it's gray or RGB, and up to 2
+///   bytes a pixel of JPEG (quality 85 at 4:4:4 on noise is about 1.6).
 fn peak(width: u32, height: u32, bpp: u64, preset: CompressPreset) -> u64 {
     let (w, h) = (u64::from(width), u64::from(height));
     let size = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp);
     let copy = if bpp == 1 || bpp == 3 { 0 } else { 3 };
-    let encode = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp + copy + 1);
+    let encode = |w: u64, h: u64| w.saturating_mul(h).saturating_mul(bpp + copy + 2);
     let long = w.max(h);
     let Some(cap) = plan(preset).1.map(u64::from).filter(|&cap| long > cap) else {
         return encode(w, h);
@@ -296,7 +296,7 @@ pub(crate) fn run(
         return Err(crate::cancelled(src));
     }
     progress(0.9);
-    let after = encoded.len() as u64;
+    let after = encoded.len();
     if after.saturating_mul(10) > before.saturating_mul(9) {
         let detail = format!("{after} bytes from {before} in {}", src.display());
         return Err(names.not_smaller(try_small, detail));
@@ -305,7 +305,8 @@ pub(crate) fn run(
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, mut out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
-    out.write_all(&encoded)
+    encoded
+        .write_to(&mut out)
         .and_then(|()| out.sync_all())
         .map_err(|e| names.write_failed(format!("write {}: {e}", temp.path().display())))?;
     drop(out);
@@ -322,13 +323,13 @@ pub(crate) fn run(
 /// pixel density and `icc` profile, and the segments `header` carries,
 /// after the encoder's own APPn segments. A cancel stops it at its next
 /// write.
-fn encode(
+fn encode<'h>(
     img: &DynamicImage,
     quality: u8,
-    header: &Header,
+    header: &'h Header,
     icc: Option<Vec<u8>>,
     cancel: &CancelToken,
-) -> Result<Vec<u8>, String> {
+) -> Result<Spliced<'h>, String> {
     let (width, height) = img.dimensions();
     let mut out = Vec::new();
     {
@@ -358,13 +359,13 @@ fn encode(
         }
         .map_err(|e| e.to_string())?;
     }
-    let carried: Vec<&[u8]> = header
+    let carried = header
         .carried
         .iter()
         .filter(|c| !(c.xmp && header.extras))
         .map(|c| c.segment.as_slice())
         .collect();
-    Ok(splice(out, &carried))
+    Ok(splice(out, carried))
 }
 
 /// A JFIF density (unit, x, y) as the encoder takes it; none for an
@@ -382,23 +383,40 @@ fn pixel_density((unit, x, y): (u8, u16, u16)) -> Option<PixelDensity> {
     })
 }
 
-/// `jpeg` with `segments` inserted after its leading APPn segments.
-fn splice(jpeg: Vec<u8>, segments: &[&[u8]]) -> Vec<u8> {
-    if segments.is_empty() {
-        return jpeg;
+/// A JPEG and the segments that go in it at `at`, written out in place
+/// rather than copied into a second JPEG.
+struct Spliced<'a> {
+    jpeg: Vec<u8>,
+    at: usize,
+    segments: Vec<&'a [u8]>,
+}
+
+impl Spliced<'_> {
+    /// The bytes [`Self::write_to`] writes.
+    fn len(&self) -> u64 {
+        self.segments
+            .iter()
+            .fold(self.jpeg.len() as u64, |n, s| n + s.len() as u64)
     }
+
+    fn write_to(&self, w: &mut impl Write) -> std::io::Result<()> {
+        w.write_all(&self.jpeg[..self.at])?;
+        for s in &self.segments {
+            w.write_all(s)?;
+        }
+        w.write_all(&self.jpeg[self.at..])
+    }
+}
+
+/// `jpeg` with `segments` to go after its leading APPn segments.
+fn splice(jpeg: Vec<u8>, segments: Vec<&[u8]>) -> Spliced<'_> {
     // SOI, then each APPn: FF En, a 2-byte length.
     let mut at = 2;
     while let Some(&[0xFF, 0xE0..=0xEF, hi, lo, ..]) = jpeg.get(at..) {
         at += 2 + usize::from(u16::from_be_bytes([hi, lo]));
     }
     let at = at.min(jpeg.len());
-    let mut out = jpeg[..at].to_vec();
-    for s in segments {
-        out.extend_from_slice(s);
-    }
-    out.extend_from_slice(&jpeg[at..]);
-    out
+    Spliced { jpeg, at, segments }
 }
 
 #[cfg(test)]
@@ -429,20 +447,27 @@ mod tests {
         }
     }
 
+    fn bytes(spliced: &Spliced) -> Vec<u8> {
+        let mut out = Vec::new();
+        spliced.write_to(&mut out).unwrap();
+        out
+    }
+
     #[test]
     fn carried_segments_go_after_the_encoders_app_segments() {
         let jpeg = vec![
             0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xDB, 0, 2,
         ];
-        let out = splice(jpeg.clone(), &[&[0xFF, 0xFE, 0, 3, b'!']]);
+        let spliced = splice(jpeg.clone(), vec![&[0xFF, 0xFE, 0, 3, b'!']]);
+        assert_eq!(spliced.len(), 21);
         assert_eq!(
-            out,
+            bytes(&spliced),
             [
                 0xFF, 0xD8, 0xFF, 0xE0, 0, 4, 1, 2, 0xFF, 0xE1, 0, 2, 0xFF, 0xFE, 0, 3, b'!', 0xFF,
                 0xDB, 0, 2
             ]
         );
-        assert_eq!(splice(jpeg.clone(), &[]), jpeg);
+        assert_eq!(bytes(&splice(jpeg.clone(), Vec::new())), jpeg);
     }
 
     #[test]
@@ -472,8 +497,8 @@ mod tests {
         assert_eq!(shrink_factor(12_000, 4096), 2);
         assert_eq!(shrink_factor(8192, 4096), 1);
         assert_eq!(shrink_factor(8193, 4096), 2);
-        // No scale: the picture, and about a byte a pixel of JPEG.
-        assert_eq!(peak(100, 10, 3, High), 4000);
+        // No scale: the picture, and up to 2 bytes a pixel of JPEG.
+        assert_eq!(peak(100, 10, 3, High), 5000);
         // A 4:1 picture just over the cap: 16 bytes a pixel of 4097 by
         // its new height, besides the picture and its result.
         let (nw, nh) = fit(4097, 1024, 4096);
@@ -524,7 +549,7 @@ mod tests {
             density: Some((1, 300, 300)),
             ..Header::default()
         };
-        let out = encode(&img, 80, &header, None, &CancelToken::default()).unwrap();
+        let out = bytes(&encode(&img, 80, &header, None, &CancelToken::default()).unwrap());
         // APP0 JFIF: version, then units 1 and 300×300.
         let at = out.windows(5).position(|w| w == b"JFIF\0").unwrap();
         assert_eq!(&out[at + 7..at + 12], &[1, 1, 44, 1, 44]);
