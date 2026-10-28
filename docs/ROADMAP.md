@@ -73,6 +73,8 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 
 *Status 2026-10-28:* images → PDF are built (D37): JPG, PNG, WEBP, TIFF and BMP → PDF, and HEIC → PDF with Grape's HEIC helper (6 pairs). Grape writes the PDF itself, in its own process, one page at a time: no PDFium and no worker. With every helper there, 157 of the 178 v1 pairs run. Left in M3: AVIF and SVG (21 pairs, their → PDF pairs among them). Not run on the PC or a Mac yet: `TESTING.md` → "Images to PDF and Create PDF, M3/M4".
 
+*Status 2026-10-28, later:* AVIF is built (D41): AVIF ⇄ JPG, PNG, WEBP, TIFF and BMP, HEIC ⇄ AVIF and AVIF → PDF (13 pairs), through the image helper HEIC uses, now speaking protocol 2. On Windows `grape-heif.exe` decodes with dav1d 1.5.4 and encodes with libaom 3.15.2; on macOS ImageIO decodes and rav1e (through ravif, compiled into Grape's Mac build) encodes. A file's content decides, not its name, so a `.heic` that holds AVIF converts. AVIF has no tools. Counted from grape-core's matrix and `supports_with` with every sidecar: the image helper adds 24 pairs to the 146 that run without it, so **170 of the 178 v1 pairs** run when every helper is there. Left in M3: SVG (8 pairs, D39). Built and checked on Linux (clippy for Windows and both Macs); the real Windows build, the AVIF `heif-it` jobs and the macOS probe run only in CI, and nothing has run on the PC or a Mac: `TESTING.md` → "AVIF, D41".
+
 **Accept:** every v1 pair (178) converts a fixture file on Windows (`engines-it` test run on the PC and in CI), and spot-checks by hand pass.
 
 ## M4: v1 tools (lane B engines, lane A panels)
@@ -120,7 +122,7 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [x] `grape-platform/macos`: drag pasteboard + modifier polling (`PLATFORM_MACOS.md`), display bounds in points, AppKit file actions (Share is AirDrop), haptics.
 - [x] The app on macOS: `ActivationPolicy::Accessory`, the overlay and toast shown without focus, drops through wry, and the two macOS controller rules (D18).
 - [ ] Overlay over full-screen apps confirmed on a Mac (`tauri-nspanel` if needed).
-- [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds. *(`fetch-sidecars.sh` is written (D25; M3's sidecar item) and runs in CI's Sidecars job; not run on a Mac by hand yet. ImageIO for HEIC is built too (D33): the HEIC worker is Grape itself, `Grape --grape-heif-worker`; CI's `heif-it-macos` decodes libheif's fixtures with it, and Mac encoding is manual QA. Not run on a Mac yet.)*
+- [ ] Engines: ImageIO for HEIC, `h264_videotoolbox` in FFmpeg args. `fetch-sidecars.sh` for macOS builds. *(`fetch-sidecars.sh` is written (D25; M3's sidecar item) and runs in CI's Sidecars job; not run on a Mac by hand yet. ImageIO for HEIC is built too (D33): the image helper worker is Grape itself, `Grape --grape-heif-worker`; CI's `heif-it-macos` decodes libheif's fixtures with it; it decodes AVIF too, and writes AVIF with rav1e under a 2 GiB heap bound (D41), and Mac encoding is manual QA. Not run on a Mac yet.)*
 - [ ] The full `TESTING.md` QA checklist passes on a Mac.
 
 ## M9: Ship Grape for Mac
