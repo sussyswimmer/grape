@@ -264,16 +264,17 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// among each other (6); RAR to ZIP, TAR or GZIP with `bsdtar` (3); PDF to
 /// JPG, PNG, TXT or MD with `pdfium` and `pdf_worker` (4); audio and video
 /// among each other (104) with `ffmpeg` and `ffprobe`; HEIC to and from JPG,
-/// PNG, WebP, TIFF and BMP with `heif` (10). Tools: Extract
-/// Archive on ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs
-/// and Remove Metadata on PDFs with `pdfium` and `pdf_worker`; with
-/// `ffmpeg` and `ffprobe` (D26), Remove Audio on MP4, MOV and MKV, Remove
-/// Metadata and Compress on MP3, M4A, WAV, FLAC, MP4, MOV and MKV, and
-/// Audio Channels and Normalize Volume on MP3, M4A, WAV and FLAC; with no
-/// sidecar (D26), Remove Metadata on JPG, PNG, WebP and GIF and Compress
-/// on JPG and PNG. Pure:
-/// it doesn't check that the sidecar files are there; [`run_job`] fails
-/// cleanly if one is missing.
+/// PNG, WebP, TIFF and BMP with `heif` (10); JPG, PNG, WebP, TIFF and BMP
+/// to PDF (5), and HEIC to PDF with `heif` (1). Tools: Extract Archive on
+/// ZIP, TAR, GZIP (and RAR with `bsdtar`); Split PDF, Merge PDFs and Remove
+/// Metadata on PDFs with `pdfium` and `pdf_worker`; Create PDF on JPG, PNG,
+/// WebP and TIFF (and HEIC with `heif`); with `ffmpeg` and `ffprobe` (D26),
+/// Remove Audio on MP4, MOV and MKV, Remove Metadata and Compress on MP3,
+/// M4A, WAV, FLAC, MP4, MOV and MKV, and Audio Channels and Normalize
+/// Volume on MP3, M4A, WAV and FLAC; with no sidecar (D26), Remove Metadata
+/// on JPG, PNG, WebP and GIF and Compress on JPG and PNG. Pure: it doesn't
+/// check that the sidecar files are there; [`run_job`] fails cleanly if one
+/// is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {
     !formats.is_empty()
         && formats.iter().all(|from| match (op, *from) {
@@ -300,6 +301,8 @@ enum Engine {
     Media,
     /// HEIC, in a helper process ([`heif`]).
     Heif,
+    /// Images → PDF in Grape's own process (`pdf::create`).
+    PdfCreate,
     /// Grape's own image tools ([`imagetool`]).
     ImageTool,
 }
@@ -316,6 +319,8 @@ fn engine_for(from: Format, to: Format, sidecars: &SidecarPaths) -> Option<Engin
         Some(Engine::Archive)
     } else if pdf::supports(from, to) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         Some(Engine::Pdf)
+    } else if to == Format::Pdf && pdf::create::reads(from, sidecars) {
+        Some(Engine::PdfCreate)
     } else if media::supports(from, to) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
     } else if heif::supports(from, to) && sidecars.heif.is_some() {
@@ -333,6 +338,8 @@ fn tool_engine(tool: ToolKey, from: Format, sidecars: &SidecarPaths) -> Option<E
     } else if pdf::runs_tool(tool, from) && pdf::PdfPaths::from_sidecars(sidecars).is_some() {
         // PDF Remove Metadata stays the PDF engine's.
         Some(Engine::Pdf)
+    } else if tool == ToolKey::CreatePdf && pdf::create::combines(from, sidecars) {
+        Some(Engine::PdfCreate)
     } else if media::tools::runs_tool(tool, from) && media::has_sidecars(sidecars) {
         Some(Engine::Media)
     } else if imagetool::runs_tool(tool, from) {
@@ -357,7 +364,8 @@ fn format_of(path: &Path) -> Option<Format> {
 /// `ctx.sidecars` (see [`supports_with`]), or whose inputs and output don't
 /// have the shape its operation plans (one input and a file for most
 /// conversions; pages for PDF → JPG or PNG; a folder for Extract Archive
-/// and Split PDF; every input for Merge PDFs), fails with
+/// and Split PDF; every input for Merge PDFs, and every input and a file
+/// for Create PDF), fails with
 /// [`ErrorKind::NotYetSupported`] before anything is read or written. The
 /// output usually lands at the planned path; if that name was taken after
 /// planning, the next free `" N"` name is used and [`JobOutcome::renamed`]
@@ -385,6 +393,9 @@ pub fn run_job(
                 Some(Engine::Pdf) => run_pdf(job, ctx, progress),
                 Some(Engine::Media) => media::convert(job, src, dest, from, to, ctx, progress),
                 Some(Engine::Heif) => heif::convert(job, src, dest, from, to, ctx, progress),
+                Some(Engine::PdfCreate) => {
+                    pdf::create::convert(job, src, dest, from, ctx, progress)
+                }
                 // The image tools convert nothing.
                 Some(Engine::ImageTool) | None => Err(not_yet_supported(job, Some(from))),
             }
@@ -424,6 +435,17 @@ pub fn run_job(
             if tool_engine(tool, from, sidecars) == Some(Engine::ImageTool) =>
         {
             imagetool::run(job, src, dest, from, tool, &params, ctx, progress)
+        }
+        // Create PDF: one page per input, every input an image this build
+        // reads (D37).
+        (Some(_), inputs, JobOutput::File(dest), Operation::Tool { tool, .. })
+            if tool == ToolKey::CreatePdf
+                && inputs.iter().all(|path| {
+                    format_of(path).and_then(|f| tool_engine(tool, f, sidecars))
+                        == Some(Engine::PdfCreate)
+                }) =>
+        {
+            pdf::create::combine(job, dest, ctx, progress)
         }
         // Split PDF and Remove Metadata (one input), Merge PDFs (all of
         // them): every input must be a PDF. The engine checks the shape.

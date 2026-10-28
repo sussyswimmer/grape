@@ -26,8 +26,8 @@ src/
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
                     tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
                     tools/argv.rs (the five FFmpeg tools, D26)
-  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement)
-  heif.rs           HEIC through a helper process (D33; lane A's module by agreement)
+  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
+  heif.rs           HEIC through a helper process (D33; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's pixels
   helper.rs         helper-process plumbing, WorkDir and the containment hook set_contain (lane A's)
   archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/pump/watchdog, tap) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
   docs.rs           v2, behind feature "v2"

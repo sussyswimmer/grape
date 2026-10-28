@@ -40,10 +40,11 @@ fn supports_the_raster_subtitle_and_archive_pairs() {
         (Format::Gz, Format::Zip),
         (Format::Gz, Format::Tar),
     ];
-    assert_eq!(supported.len(), 30);
+    assert_eq!(supported.len(), 35);
     for pair @ (from, to) in &supported {
         assert!(
             (RASTER.contains(from) && RASTER.contains(to) && from != to)
+                || (RASTER.contains(from) && *to == Format::Pdf)
                 || subtitles.contains(pair)
                 || archives.contains(pair),
             "{pair:?}"
@@ -56,7 +57,7 @@ fn supports_the_raster_subtitle_and_archive_pairs() {
         .into_iter()
         .filter(|&(from, to)| supports(&Operation::convert(to), Some(from)))
         .count();
-    assert_eq!(full, 30);
+    assert_eq!(full, 35);
     assert!(!supports(
         &Operation::convert(Format::Png),
         Some(Format::Png)
@@ -116,7 +117,7 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
         .into_iter()
         .filter(|&(from, to)| supports_with(&Operation::convert(to), &[Some(from)], &all))
         .collect();
-    assert_eq!(with.len(), 37 + 104);
+    assert_eq!(with.len(), 42 + 104);
     for to in [Format::Jpg, Format::Png, Format::Txt, Format::Md] {
         assert!(with.contains(&(Format::Pdf, to)), "{to:?}");
         assert!(
@@ -137,19 +138,20 @@ fn pdf_and_rar_pairs_need_their_sidecars() {
 #[test]
 fn nothing_runs_outside_the_v1_matrix_and_tools() {
     let all = all_sidecars();
-    // Over every pair of formats, only the 37 + 104 v1 pairs run.
+    // Over every pair of formats, only the 42 + 104 v1 pairs run.
     let v1 = pairs(Features::V1_ONLY);
     let runnable = runnable_pairs(&all);
-    assert_eq!(runnable.len(), 37 + 104);
+    assert_eq!(runnable.len(), 42 + 104);
     for pair in &runnable {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
-    // Over every tool and format, exactly these run, each offered on the
-    // wheel for one item or for several.
+    // Over every tool and format, exactly these seven, Create PDF on four
+    // image formats, and the D26 tools run, each offered on the wheel for
+    // one item or for several.
     let tools = runnable_tools(&all);
     assert_eq!(
         tools.len(),
-        7 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len(),
+        7 + 4 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len(),
         "{tools:?}"
     );
     for pair in [
@@ -197,7 +199,7 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
                 .all(|&(_, format)| format != Format::Pdf),
             "{without:?}"
         );
-        assert_eq!(runnable_pairs(&without).len(), 33 + 104, "{without:?}");
+        assert_eq!(runnable_pairs(&without).len(), 38 + 104, "{without:?}");
     }
     // RAR needs bsdtar.
     let no_bsdtar = SidecarPaths {
@@ -269,18 +271,20 @@ fn media_tools_run_only_with_both_ffmpeg_sidecars() {
         ),
     ] {
         let tools = runnable_tools(&without);
+        // The seven, Create PDF on four image formats, the image tools.
         assert_eq!(
             tools.len(),
-            7 + IMAGE_TOOLS.len(),
+            7 + 4 + IMAGE_TOOLS.len(),
             "without {name}: {tools:?}"
         );
         for pair in MEDIA_TOOLS {
             assert!(!tools.contains(&pair), "{pair:?} without {name}");
         }
     }
-    // Nothing but the archive and image tools runs with no sidecar at all.
+    // Nothing but the archive tools, Create PDF on four image formats and
+    // the image tools runs with no sidecar at all.
     let bare = runnable_tools(&SidecarPaths::default());
-    assert_eq!(bare.len(), 3 + IMAGE_TOOLS.len(), "{bare:?}");
+    assert_eq!(bare.len(), 3 + 4 + IMAGE_TOOLS.len(), "{bare:?}");
     for pair in IMAGE_TOOLS {
         assert!(bare.contains(&pair), "{pair:?}");
         assert!(supports(&Operation::tool(pair.0), Some(pair.1)));
@@ -313,19 +317,20 @@ fn audio_and_video_run_only_with_both_ffmpeg_sidecars() {
             .filter(|&(from, to)| supports_with(&Operation::convert(to), &[Some(from)], sidecars))
             .count()
     };
-    // The 30 that need no sidecar: raster, subtitle and archive pairs.
-    assert_eq!(count(&SidecarPaths::default()), 30);
-    assert_eq!(count(&both), 30 + 104);
+    // The 35 that need no sidecar: raster, images → PDF, subtitle and
+    // archive pairs.
+    assert_eq!(count(&SidecarPaths::default()), 35);
+    assert_eq!(count(&both), 35 + 104);
     let only_ffmpeg = SidecarPaths {
         ffprobe: None,
         ..both.clone()
     };
-    assert_eq!(count(&only_ffmpeg), 30);
+    assert_eq!(count(&only_ffmpeg), 35);
     let only_ffprobe = SidecarPaths {
         ffmpeg: None,
         ..both.clone()
     };
-    assert_eq!(count(&only_ffprobe), 30);
+    assert_eq!(count(&only_ffprobe), 35);
     // Every media pair in the matrix, and nothing else, is added.
     for from in [
         Format::Mp3,

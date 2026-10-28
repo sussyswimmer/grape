@@ -66,6 +66,11 @@ name = "pdf"
 required-features = ["pdf-it"]
 
 [[test]]
+# Images → PDF drawn by a real PDFium (D37): GRAPE_TEST_PDFIUM.
+name = "create_pdf_render"
+required-features = ["pdf-it"]
+
+[[test]]
 name = "heif"
 required-features = ["heif-it"]
 
