@@ -1,6 +1,7 @@
 //! Helper processes: the plumbing an engine shares when it runs one of
-//! Grape's own helper programs (the HEIC helper, DECISIONS D33). Lane A's
-//! module, taken from the PDF worker's runner (`pdf/run.rs`).
+//! Grape's own helper programs (the image helper for HEIC and AVIF,
+//! DECISIONS D33, D41). Lane A's module, taken from the PDF worker's
+//! runner (`pdf/run.rs`).
 //!
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
@@ -71,10 +72,10 @@ pub trait Contained: Send {
     fn peak_memory(&self) -> Option<u64>;
 }
 
-/// Removes the HEIC work folders (`grape-heif-{pid}-…`, J4) that a Grape
-/// that crashed, was killed or lost power left in the OS temp folder, with
-/// the raw pixels of someone's photo in them. The app calls it once at
-/// startup, off its main thread: Grape runs once per user, so no other
+/// Removes the image helper's work folders (`grape-heif-{pid}-…`, J4)
+/// that a Grape that crashed, was killed or lost power left in the OS temp
+/// folder, with the raw pixels of someone's photo in them. The app calls
+/// it once at startup, off its main thread: Grape runs once per user, so no other
 /// Grape's job can be using one then. This process's own folders are left
 /// alone. Returns how many were removed.
 pub fn remove_stale_work_dirs() -> usize {

@@ -179,10 +179,10 @@ jobs:
     name: grape-heif
     uses: ./.github/workflows/grape-heif.yml
 
-  # The HEIC engine and the Job Object against the grape-heif.exe just built
-  # (feature heif-it).
+  # The HEIC and AVIF engine and the Job Object against the grape-heif.exe
+  # just built (feature heif-it).
   heif-it-windows:
-    name: HEIC tests (Windows)
+    name: HEIC and AVIF tests (Windows)
     needs: grape-heif
     runs-on: windows-latest
     steps:
@@ -207,12 +207,14 @@ jobs:
       # The default clippy run doesn't enable heif-it.
       - name: Clippy (heif-it)
         run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
-      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF.
-      - name: HEIC engine tests (real grape-heif.exe)
+      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF. The log
+      # keeps what they print: the 35.6 MP AVIF encode's and decode's peaks
+      # in the Job Object, and what each damaged fixture was called (D41).
+      - name: HEIC and AVIF engine tests (real grape-heif.exe)
         env:
           GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}\heif-fixtures
-        run: cargo test -p grape-engines --features heif-it --locked
+        run: cargo test -p grape-engines --features heif-it --locked -- --nocapture
       # 35.6 MP under the 2 GiB Job cap; prints the peak (heic-spec J24).
       - name: Job Object tests (real grape-heif.exe)
         env:
@@ -237,12 +239,14 @@ jobs:
           & $bin --nocapture --test-threads=1 --skip grape_heif_encodes_the_largest_picture_under_the_cap
           exit $LASTEXITCODE
 
-  # ImageIO (Grape's HEIC worker on macOS) against the fixtures libheif wrote
-  # on Windows. Encoding needs a hardware HEVC encoder, which GitHub's macOS
-  # VMs lack: those tests accept "This Mac can't write HEIC files." here, and
-  # Mac encoding is manual QA (docs/TESTING.md).
+  # ImageIO (Grape's image helper worker on macOS) against the HEIC and AVIF
+  # fixtures libheif wrote on Windows. HEIC encoding needs a hardware HEVC
+  # encoder, which GitHub's macOS VMs lack: those tests accept "This Mac
+  # can't write HEIC files." here, and Mac HEIC encoding is manual QA
+  # (docs/TESTING.md). AVIF is written by rav1e in the worker (avif-encode,
+  # D41), so its round trips run here end to end.
   heif-it-macos:
-    name: HEIC tests (macOS)
+    name: HEIC and AVIF tests (macOS)
     needs: grape-heif
     runs-on: macos-latest
     steps:
@@ -271,12 +275,12 @@ jobs:
         run: cargo test -p grape-platform --features heif-it,avif-encode --locked --no-fail-fast -- --test-threads=1
       # Also after a failure above: the worker is a process of its own, so
       # its jobs say what ImageIO did even if a test process crashed.
-      - name: HEIC engine tests (the ImageIO worker)
+      - name: HEIC and AVIF engine tests (the ImageIO and rav1e worker)
         if: ${{ !cancelled() }}
         env:
           GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
           GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
-        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast
+        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast -- --nocapture
       # A crashed test or worker leaves a report naming the frame it died in.
       - name: Crash reports
         if: failure()
