@@ -399,6 +399,58 @@ jobs:
           cat "$bundle.sha256" >> SHA256SUMS.txt
           rm "$bundle.sha256"
           sha256sum -c SHA256SUMS.txt
+      # Grape's own FFmpeg as the installer and the DMG carry it (D24, D45),
+      # for building Grape from source: the run's two FFmpeg artifacts, each
+      # checked against its SHA256SUMS and against the hash the ffmpeg
+      # workflow reported, as the build jobs check them, then zipped as they
+      # are (the programs, BUILDINFO, SHA256SUMS and licenses/ffmpeg/).
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg-x86_64-pc-windows-msvc
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-apple-darwin
+          path: ${{ runner.temp }}/ffmpeg-apple-darwin
+      - name: Zip Grape's FFmpeg builds and add them to SHA256SUMS.txt
+        env:
+          WINDOWS_SUMS: ${{ needs.ffmpeg.outputs.windows-sums }}
+          MACOS_SUMS: ${{ needs.ffmpeg.outputs.macos-sums }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          # check_build <artifact> <its SHA256SUMS's hash> <files it must hold>...
+          check_build() {
+            artifact=$1 want=$2
+            shift 2
+            dir="$RUNNER_TEMP/$artifact"
+            got=$(sha256sum < "$dir/SHA256SUMS" | cut -d ' ' -f 1)
+            [ "$got" = "$want" ] || fail "The $artifact artifact's SHA256SUMS has SHA-256 $got, not the $want the ffmpeg workflow wrote."
+            (cd "$dir" && sha256sum -c SHA256SUMS) || fail "The $artifact artifact doesn't match its SHA256SUMS."
+            for f in "$@"; do
+              [ -f "$dir/$f" ] || fail "$f is missing from the $artifact artifact."
+            done
+            [ -n "$(find "$dir/licenses/ffmpeg" -type f 2> /dev/null)" ] || fail "The $artifact artifact has no licenses/ffmpeg/."
+          }
+          # zip_build <artifact> <zip>: the artifact's folder as it is.
+          zip_build() {
+            (cd "$RUNNER_TEMP/$1" && zip -q -r -X "$GITHUB_WORKSPACE/release/$2" .)
+            zip -T "release/$2"
+            zipinfo "release/$2"
+            (cd release && sha256sum "$2" >> SHA256SUMS.txt)
+          }
+          mac=(BUILDINFO-macos-arm64.txt BUILDINFO-macos-x86_64.txt)
+          for triple in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+            mac+=("ffmpeg-$triple" "ffprobe-$triple")
+          done
+          check_build ffmpeg-x86_64-pc-windows-msvc "$WINDOWS_SUMS" \
+            ffmpeg-x86_64-pc-windows-msvc.exe ffprobe-x86_64-pc-windows-msvc.exe BUILDINFO.txt
+          check_build ffmpeg-apple-darwin "$MACOS_SUMS" "${mac[@]}"
+          # Artifacts lose the executable bit; the zip keeps it.
+          chmod 755 "$RUNNER_TEMP"/ffmpeg-apple-darwin/ffmpeg-*-apple-darwin "$RUNNER_TEMP"/ffmpeg-apple-darwin/ffprobe-*-apple-darwin
+          zip_build ffmpeg-x86_64-pc-windows-msvc grape-ffmpeg-windows-x64.zip
+          zip_build ffmpeg-apple-darwin grape-ffmpeg-macos-universal.zip
+          cd release
+          sha256sum -c SHA256SUMS.txt
       - name: Fill in the release notes
         run: |
           sed -e "s/{{VERSION}}/${VERSION}/g" -e "s/{{HEIF_VERSION}}/${HEIF_VERSION}/g" .github/release-notes.md > "$RUNNER_TEMP/release-notes.md"
@@ -411,7 +463,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          files=(release/Grape-Setup-x64.exe release/Grape-macOS-universal.dmg release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz" release/grape-ffmpeg-sources.tar)
+          files=(release/Grape-Setup-x64.exe release/Grape-macOS-universal.dmg release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz" release/grape-ffmpeg-sources.tar
+            release/grape-ffmpeg-windows-x64.zip release/grape-ffmpeg-macos-universal.zip)
           if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
             if [ "$draft" != "true" ]; then
               echo "::error::$TAG is already published, so its files stay as they are. Release a new version instead."
