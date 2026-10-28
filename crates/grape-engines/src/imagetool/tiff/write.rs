@@ -205,7 +205,7 @@ pub(crate) fn write(
                 let at = out.at;
                 copy(r, &mut out, block.offset, block.len, &mut buf)?;
                 fits(layout, out.at)?;
-                taken += block.len;
+                taken = sum(taken, block.len)?;
                 if shared.contains(&block) {
                     placed.insert(block, at);
                 }
@@ -222,9 +222,9 @@ pub(crate) fn write(
     let mut copied: HashMap<Key, u64> = HashMap::new();
     let mut pos = out.at;
     for node in &mut nodes {
-        pos += pos % 2;
+        pos = sum(pos, pos % 2)?;
         node.at = pos;
-        pos += layout.ifd_len(node.entries.len() as u64);
+        pos = sum(pos, layout.ifd_len(node.entries.len() as u64))?;
         let mut values = Vec::with_capacity(node.entries.len());
         for (_, kind, count, made) in &node.entries {
             let field = match made {
@@ -242,15 +242,15 @@ pub(crate) fn write(
             } else if let Some(&at) = key.as_ref().and_then(|key| copied.get(key)) {
                 values.push(Place::There(at));
             } else {
-                pos += pos % 2;
+                pos = sum(pos, pos % 2)?;
                 values.push(Place::Here(pos));
                 if let Some(key) = key {
                     copied.insert(key, pos);
                 }
                 if field.is_some() {
-                    taken += len;
+                    taken = sum(taken, len)?;
                 }
-                pos += len;
+                pos = sum(pos, len)?;
             }
         }
         node.values = values;
@@ -299,6 +299,13 @@ pub(crate) fn write(
     out.w
         .write_all(&o.bytes(ats[first], word))
         .map_err(Error::Write)
+}
+
+/// `a + b`, or [`Error::TooLarge`] past any number: sizes that only a
+/// broken plan could add up to.
+fn sum(a: u64, b: u64) -> Result<u64, Error> {
+    a.checked_add(b)
+        .ok_or_else(|| Error::TooLarge("an output past any size".into()))
 }
 
 /// Fails when `at` is past what a classic file's offsets can say.
@@ -808,6 +815,34 @@ mod tests {
             assert!(matches!(result, Err(Error::TooLarge(_))), "{result:?}");
             // Nothing past the blocks was written.
             assert!(out.into_inner().len() < 64);
+        }
+    }
+
+    #[test]
+    fn an_output_past_any_size_is_too_large() {
+        // A value of almost 2^64 bytes: the layout's sums would wrap.
+        for big in [false, true] {
+            let file = Builder::new(b'I', big, vec![gray(1, 1, 1, vec![B::data(b"x")])]).build();
+            let tiff = read(&file);
+            let mut dir = everything(&tiff.pages[0]);
+            dir.fields.push(Field {
+                tag: 50000,
+                kind: 7,
+                count: u64::MAX - 4,
+                value: Data::Source {
+                    offset: 8,
+                    len: u64::MAX - 4,
+                },
+            });
+            let result = write(
+                &mut Cursor::new(&file),
+                &mut Cursor::new(Vec::new()),
+                tiff.layout,
+                &tiff.shared,
+                &[dir],
+                &CancelToken::new(),
+            );
+            assert!(matches!(result, Err(Error::TooLarge(_))), "{result:?}");
         }
     }
 
