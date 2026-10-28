@@ -33,7 +33,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::super::exif;
-use super::super::strip::{read_at, read_exact, Error, In};
+use super::super::strip::{read_at, Error, In};
 
 /// The most image IFDs (pages and SubIFDs) in a file.
 pub(crate) const MAX_IFDS: usize = 65_536;
@@ -258,8 +258,7 @@ impl Tiff {
     /// Reads the TIFF `r`, `len` bytes long ([module docs](self)).
     pub(crate) fn read(r: &mut dyn In, len: u64) -> Result<Tiff, Error> {
         let mut head = [0; 8];
-        seek(r, 0)?;
-        read_exact(r, &mut head)?;
+        read_at(r, 0, &mut head)?;
         let order = match &head[..2] {
             b"II" => Order::Little,
             b"MM" => Order::Big,
@@ -270,7 +269,7 @@ impl Tiff {
             // BigTIFF: the offsets' size (8), 0, then the first offset.
             43 if order.uint(&head[4..6]) == 8 && order.uint(&head[6..8]) == 0 => {
                 let mut first = [0; 8];
-                read_exact(r, &mut first)?;
+                read_at(r, 8, &mut first)?;
                 (true, order.uint(&first))
             }
             _ => return Err(Error::Broken("no TIFF header".into())),
@@ -498,14 +497,6 @@ pub(crate) fn read_value(
     }
 }
 
-/// Moves `r` to `at`, keeping what it has buffered when `at` is in it.
-pub(crate) fn seek(r: &mut dyn In, at: u64) -> Result<(), Error> {
-    let here = r.stream_position().map_err(Error::Read)?;
-    let by = i64::try_from(i128::from(at) - i128::from(here))
-        .map_err(|_| Error::Broken(format!("an offset of {at}")))?;
-    r.seek_relative(by).map_err(Error::Read)
-}
-
 fn usize_of(n: u64) -> Result<usize, Error> {
     usize::try_from(n).map_err(|_| Error::TooLarge(format!("a value of {n} bytes")))
 }
@@ -537,24 +528,24 @@ impl Walk<'_> {
         if at < l.header() || at.saturating_add(l.count_len()) > l.len {
             return Ok(None);
         }
-        let mut word = [0; 8];
-        let count_len = l.count_len() as usize;
-        seek(self.r, at)?;
-        read_exact(self.r, &mut word[..count_len])?;
-        let n = l.order.uint(&word[..count_len]);
+        let mut count = [0; 8];
+        let count = &mut count[..l.count_len() as usize];
+        read_at(self.r, at, count)?;
+        let n = l.order.uint(count);
         if n > MAX_ENTRIES {
             return Err(Error::Broken(format!("an IFD of {n} entries")));
         }
         self.count(n as usize)?;
-        let mut bytes = vec![0; (n * l.entry_len()) as usize];
-        read_exact(self.r, &mut bytes)?;
-        let end = at + l.count_len() + bytes.len() as u64;
-        let next = if end + l.word() <= l.len {
-            let word_len = l.word() as usize;
-            read_exact(self.r, &mut word[..word_len])?;
-            l.order.uint(&word[..word_len])
-        } else {
+        // The entries, then the next IFD's offset when the file holds it.
+        let end = at + l.count_len() + n * l.entry_len();
+        let next_len = if end + l.word() <= l.len { l.word() } else { 0 };
+        let mut bytes = vec![0; (n * l.entry_len() + next_len) as usize];
+        read_at(self.r, at + l.count_len(), &mut bytes)?;
+        let (bytes, next) = bytes.split_at((n * l.entry_len()) as usize);
+        let next = if next.is_empty() {
             0
+        } else {
+            l.order.uint(next)
         };
         let entries = bytes
             .chunks_exact(l.entry_len() as usize)
@@ -879,15 +870,14 @@ impl Walk<'_> {
             }
             Value::At { offset, len } => {
                 let mut step = vec![0; STEP.min(usize_of(len)?)];
-                let mut left = len;
-                seek(self.r, offset)?;
-                while left > 0 {
-                    let take = &mut step[..STEP.min(left as usize)];
-                    read_exact(self.r, take)?;
+                let mut done = 0;
+                while done < len {
+                    let take = &mut step[..STEP.min((len - done) as usize)];
+                    read_at(self.r, offset + done, take)?;
                     for b in take.chunks_exact(size) {
                         f(o.uint(b));
                     }
-                    left -= take.len() as u64;
+                    done += take.len() as u64;
                 }
                 Ok(())
             }

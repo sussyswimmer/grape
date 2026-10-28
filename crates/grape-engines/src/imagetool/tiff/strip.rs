@@ -1674,6 +1674,46 @@ mod tests {
     }
 
     #[test]
+    fn ifds_laid_out_last_first_read_only_their_own_bytes() {
+        // 4,096 pages of one strip, whose IFDs are laid out last first:
+        // refilling a 64 KiB buffer for each would read 256 MiB.
+        let pages = 4_096u32;
+        let ifd = 2 + 12 * 7 + 4;
+        let strips = 8 + pages * ifd;
+        let place = |n: u32| 8 + (pages - 1 - n) * ifd;
+        let mut file = b"II*\0".to_vec();
+        file.extend(place(0).to_le_bytes());
+        for n in (0..pages).rev() {
+            let entries: [(u16, u16, u32, u32); 7] = [
+                (256, 4, 1, 1),
+                (257, 4, 1, 1),
+                (258, 3, 1, 8),
+                (262, 3, 1, 1),
+                (273, 4, 1, strips + n),
+                (278, 4, 1, 1),
+                (279, 4, 1, 1),
+            ];
+            file.extend(7u16.to_le_bytes());
+            for (tag, kind, count, value) in entries {
+                file.extend(tag.to_le_bytes());
+                file.extend(kind.to_le_bytes());
+                file.extend(count.to_le_bytes());
+                file.extend(value.to_le_bytes());
+            }
+            let next = if n + 1 < pages { place(n + 1) } else { 0 };
+            file.extend(next.to_le_bytes());
+        }
+        file.extend((0..pages).map(|n| n as u8));
+        let (found, read) = tallied(&file);
+        assert!(found.is_empty(), "{found:?}");
+        assert!(
+            read < 2 * file.len() as u64,
+            "{read} bytes read of {}",
+            file.len()
+        );
+    }
+
+    #[test]
     fn descriptions_or_jpeg_tables_that_overlap_are_read_up_to_the_files_size() {
         // 40 JPEG pages whose descriptions, or JPEG tables, are 64 KiB of
         // one run of text, each 2 bytes further on: 2.5 MiB to read from
