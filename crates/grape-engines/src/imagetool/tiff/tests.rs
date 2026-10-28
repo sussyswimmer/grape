@@ -78,6 +78,27 @@ pub(crate) fn gray(w: u32, h: u32, rows: u32, strips: Vec<B>) -> Page {
     }
 }
 
+/// Sets the count and the value field (a number inline, or where the value
+/// is) of the entry for `tag` in the IFD at `at` of `file`, a TIFF the
+/// builder made: so entries can point where the builder wouldn't.
+pub(crate) fn set_entry(file: &mut [u8], at: u64, tag: u16, count: u64, value: u64) {
+    let o = if file[0] == b'M' {
+        Order::Big
+    } else {
+        Order::Little
+    };
+    let big = o.uint(&file[2..4]) == 43;
+    let (word, count_len, entry_len) = if big { (8, 8, 20) } else { (4, 2, 12) };
+    let at = at as usize;
+    let n = o.uint(&file[at..at + count_len]) as usize;
+    let e = (0..n)
+        .map(|i| at + count_len + i * entry_len)
+        .find(|&e| o.uint(&file[e..e + 2]) == u64::from(tag))
+        .unwrap();
+    file[e + 4..e + 4 + word].copy_from_slice(&o.bytes(count, word));
+    file[e + 4 + word..e + 4 + 2 * word].copy_from_slice(&o.bytes(value, word));
+}
+
 /// A TIFF to build.
 #[derive(Debug, Clone)]
 pub(crate) struct Builder {

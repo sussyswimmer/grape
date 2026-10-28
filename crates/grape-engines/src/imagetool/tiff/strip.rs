@@ -475,7 +475,7 @@ mod tests {
 
     use super::super::irb::tests::res;
     use super::super::read::Order;
-    use super::super::tests::{gray, Builder, Page, B, V};
+    use super::super::tests::{gray, set_entry, Builder, Page, B, V};
     use super::*;
     use MetaField::*;
 
@@ -658,6 +658,37 @@ mod tests {
                     "{secret:?} left"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_profile_every_page_points_at_is_kept_once() {
+        // A BigTIFF of 120 pages whose ICC profiles are all the first
+        // page's 64 KiB: the output holds it once, not 120 times.
+        let profile: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8 + 1).collect();
+        let pages = (0..120)
+            .map(|n| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                let icc = if n == 0 { profile.clone() } else { vec![0] };
+                page.tags.push((34675, V::Bytes(7, icc)));
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'I', true, pages).build();
+        let tiff = read(&file);
+        let Value::At { offset, len } = tiff.pages[0].get(34675).unwrap().value else {
+            panic!("an inline profile")
+        };
+        for page in &tiff.pages[1..] {
+            set_entry(&mut file, page.at, 34675, len, offset);
+        }
+        let (out, found) = strip(&file);
+        assert!(found.is_empty());
+        assert!(out.len() < 2 * profile.len(), "{}", out.len());
+        let back = read(&out);
+        assert_eq!(back.pages.len(), 120);
+        for page in &back.pages {
+            assert_eq!(value(&out, page, 34675).unwrap(), profile);
         }
     }
 

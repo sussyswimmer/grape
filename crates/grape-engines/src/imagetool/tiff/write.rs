@@ -8,14 +8,19 @@
 //! 3. Every IFD, each followed by its values that don't fit in their
 //!    entries, on even offsets: the entries sorted by tag, with the block
 //!    offsets and counts, the SubIFDs (330) and the pointers to the Exif,
-//!    GPS and Interop IFDs written fresh. The region is laid out before
-//!    it's written, so every pointer is known when it's written.
+//!    GPS and Interop IFDs written fresh. A value that entries copy from
+//!    the same place in the source is written once, as a block is. The
+//!    region is laid out before it's written, so every pointer is known
+//!    when it's written.
 //! 4. A seek back to the header for the first IFD's offset.
 //!
 //! Nothing else from the source reaches the output. A classic file that
-//! would need an offset past 4 GiB is [`Error::TooLarge`]. Reads and
-//! writes go through the caller's `Cancellable` source and temp file, and
-//! the token is checked before each block.
+//! would need an offset past 4 GiB is [`Error::TooLarge`], and so is one
+//! that would copy more bytes from the source than the source has (values
+//! that overlap): so an output outgrows its source only by the offsets,
+//! counts, IFDs and padding Grape writes. Reads and writes go through the
+//! caller's `Cancellable` source and temp file, and the token is checked
+//! before each block.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, SeekFrom, Write};
@@ -106,6 +111,16 @@ enum Made {
     Ifds(Vec<usize>),
 }
 
+/// Where an entry's value goes.
+enum Place {
+    /// In the entry.
+    Inline,
+    /// Here, after the IFD.
+    Here(u64),
+    /// Where an earlier entry's copy of the same source bytes went.
+    There(u64),
+}
+
 /// One IFD as it's laid out.
 struct Node<'d> {
     dir: &'d Dir,
@@ -115,8 +130,8 @@ struct Node<'d> {
     next: Option<usize>,
     /// Where it goes.
     at: u64,
-    /// Where each entry's value goes, when it doesn't fit in the entry.
-    values: Vec<Option<u64>>,
+    /// Where each entry's value goes.
+    values: Vec<Place>,
     /// Its blocks' places in the output.
     blocks: Vec<Block>,
 }
@@ -155,6 +170,8 @@ pub(crate) fn write(
 
     let mut buf = vec![0; COPY];
     let mut placed: HashMap<Block, u64> = HashMap::new();
+    // The bytes taken from the source: each block and value once.
+    let mut taken: u64 = 0;
     for node in &mut nodes {
         let Some(image) = &node.dir.image else {
             continue;
@@ -173,6 +190,7 @@ pub(crate) fn write(
                 let at = out.at;
                 copy(r, &mut out, block.offset, block.len, &mut buf)?;
                 fits(layout, out.at)?;
+                taken += block.len;
                 if shared.contains(&block) {
                     placed.insert(block, at);
                 }
@@ -186,7 +204,9 @@ pub(crate) fn write(
         node.blocks = blocks;
     }
 
-    // The IFDs, laid out before they're written.
+    // The IFDs, laid out before they're written. A value copied from the
+    // source is written once however many entries copy it, as blocks are.
+    let mut copied: HashMap<(u64, u64), u64> = HashMap::new();
     let mut pos = out.at;
     for node in &mut nodes {
         pos += pos % 2;
@@ -194,21 +214,42 @@ pub(crate) fn write(
         pos += layout.ifd_len(node.entries.len() as u64);
         let mut values = Vec::with_capacity(node.entries.len());
         for (_, kind, count, made) in &node.entries {
-            let len = match made {
-                Made::Field(n) => node.dir.fields[*n].len(),
-                _ => type_size(*kind).unwrap_or(8) * count,
+            let field = match made {
+                Made::Field(n) => Some(&node.dir.fields[*n]),
+                _ => None,
             };
-            if len > layout.word() {
-                pos += pos % 2;
-                values.push(Some(pos));
-                pos += len;
+            let len = field.map_or_else(|| type_size(*kind).unwrap_or(8) * count, Field::len);
+            let source = match field.map(|f| &f.value) {
+                Some(&Data::Source { offset, len }) => Some((offset, len)),
+                _ => None,
+            };
+            if len <= layout.word() {
+                values.push(Place::Inline);
+            } else if let Some(&at) = source.and_then(|key| copied.get(&key)) {
+                values.push(Place::There(at));
             } else {
-                values.push(None);
+                pos += pos % 2;
+                values.push(Place::Here(pos));
+                if let Some(key) = source {
+                    copied.insert(key, pos);
+                }
+                if field.is_some() {
+                    taken += len;
+                }
+                pos += len;
             }
         }
         node.values = values;
     }
     fits(layout, pos)?;
+    // Blocks never overlap, so only values that overlap each other or a
+    // block could take more than the source holds: a file made to grow.
+    if taken > layout.len {
+        return Err(Error::TooLarge(format!(
+            "values that copy {taken} bytes of a {}-byte file",
+            layout.len
+        )));
+    }
     let ats: Vec<u64> = nodes.iter().map(|node| node.at).collect();
     for node in &nodes {
         out.pad_to(node.at)?;
@@ -218,8 +259,8 @@ pub(crate) fn write(
             out.put(&o.bytes(u64::from(*kind), 2))?;
             out.put(&o.bytes(*count, word))?;
             match place {
-                Some(place) => out.put(&o.bytes(*place, word))?,
-                None => {
+                Place::Here(at) | Place::There(at) => out.put(&o.bytes(*at, word))?,
+                Place::Inline => {
                     let mut field = Vec::with_capacity(word);
                     value(r, &mut field, o, node, *kind, made, &ats, &mut buf)?;
                     field.resize(word, 0);
@@ -229,8 +270,8 @@ pub(crate) fn write(
         }
         out.put(&o.bytes(node.next.map_or(0, |n| ats[n]), word))?;
         for ((_, kind, _, made), place) in node.entries.iter().zip(&node.values) {
-            if let Some(place) = place {
-                out.pad_to(*place)?;
+            if let Place::Here(at) = place {
+                out.pad_to(*at)?;
                 value(r, &mut out, o, node, *kind, made, &ats, &mut buf)?;
             }
         }
@@ -418,7 +459,7 @@ mod tests {
     use std::io::Cursor;
 
     use super::super::read::{read_value, Ifd, Meta, Tiff};
-    use super::super::tests::{gray, Builder, Page, B, V};
+    use super::super::tests::{gray, set_entry, Builder, Page, B, V};
     use super::*;
 
     fn read(bytes: &[u8]) -> Tiff {
@@ -676,6 +717,78 @@ mod tests {
             let tiff = read(&out);
             let entry = tiff.pages[0].get(282).unwrap();
             assert_eq!(matches!(entry.value, Value::Inline { .. }), big);
+        }
+    }
+
+    /// Three pages whose ICC profiles are the first page's 4,000 bytes,
+    /// read from `step` bytes further on for each page after it.
+    fn one_profile(big: bool, step: u64) -> (Vec<u8>, Vec<u8>) {
+        let profile: Vec<u8> = (0..4000).map(|i| (i % 251) as u8 + 1).collect();
+        let mut first = gray(1, 1, 1, vec![B::data(b"x")]);
+        first.tags.push((34675, V::Bytes(7, profile.clone())));
+        let mut pages = vec![first];
+        for _ in 0..2 {
+            let mut page = gray(1, 1, 1, vec![B::data(b"y")]);
+            page.tags.push((34675, V::Bytes(7, vec![0])));
+            pages.push(page);
+        }
+        let builder = Builder {
+            tail: vec![0; 64],
+            ..Builder::new(b'I', big, pages)
+        };
+        let mut file = builder.build();
+        let tiff = read(&file);
+        let Value::At { offset, .. } = tiff.pages[0].get(34675).unwrap().value else {
+            panic!("an inline profile")
+        };
+        for (n, page) in (1..).zip(&tiff.pages[1..]) {
+            set_entry(&mut file, page.at, 34675, 4000, offset + n * step);
+        }
+        (file, profile)
+    }
+
+    #[test]
+    fn a_value_many_ifds_point_at_is_written_once() {
+        for big in [false, true] {
+            let (file, profile) = one_profile(big, 0);
+            let out = rewrite(&file);
+            let back = read(&out);
+            let places: Vec<Value> = back
+                .pages
+                .iter()
+                .map(|page| page.get(34675).unwrap().value)
+                .collect();
+            assert_eq!(places.len(), 3);
+            assert!(places.iter().all(|place| *place == places[0]), "{places:?}");
+            for page in &back.pages {
+                let entry = page.get(34675).unwrap();
+                let value = read_value(&mut Cursor::new(&out), entry, 1 << 20).unwrap();
+                assert_eq!(value.unwrap(), profile);
+            }
+            assert!(out.len() < profile.len() + 1024, "{}", out.len());
+        }
+    }
+
+    #[test]
+    fn an_output_that_would_copy_more_than_the_source_holds_is_too_large() {
+        // Each page's profile starts 8 bytes after the one before: three
+        // values, so 12,000 bytes to copy from a file of about 4,500.
+        for big in [false, true] {
+            let (file, _) = one_profile(big, 8);
+            let tiff = read(&file);
+            let pages: Vec<Dir> = tiff.pages.iter().map(everything).collect();
+            let mut out = Cursor::new(Vec::new());
+            let result = write(
+                &mut Cursor::new(&file),
+                &mut out,
+                tiff.layout,
+                &tiff.shared,
+                &pages,
+                &CancelToken::new(),
+            );
+            assert!(matches!(result, Err(Error::TooLarge(_))), "{result:?}");
+            // Nothing past the blocks was written.
+            assert!(out.into_inner().len() < 64);
         }
     }
 
