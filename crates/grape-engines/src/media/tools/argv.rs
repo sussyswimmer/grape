@@ -552,40 +552,37 @@ pub(super) fn reencode(
     finish(args, muxer_of(to), out)
 }
 
-/// The layout of each channel count, 1 to 8, that has no LFE ([`label`]).
-/// FFmpeg's AAC encoder (6.1 and 9.0.2) takes each and its decoder reads
-/// each back in the same order; 6.0 it reads back as hexagonal, its back
-/// centre moved last.
-const NO_LFE: [&str; 8] = [
-    "mono",
-    "stereo",
-    "3.0",
-    "quad",
-    "5.0",
-    "hexagonal",
-    "7.0",
-    "octagonal",
-];
+/// The layout of each channel count, 3 to 8, that has no LFE ([`label`]):
+/// AAC's own channel configurations for 3 to 5 (3.0, 4.0, 5.0), and for 6
+/// to 8, which have none without an LFE, layouts FFmpeg's AAC encoder
+/// writes with a program config element (hexagonal, 7.0, octagonal; 6.0
+/// would come back as hexagonal, its back centre moved last). 9.0.2's
+/// output of each decodes back in the same order in 6.1.1 and 9.0.2;
+/// 6.1.1's encoder writes the last three so that both read them back as
+/// unknown layouts.
+const NO_LFE: [&str; 6] = ["3.0", "4.0", "5.0", "hexagonal", "7.0", "octagonal"];
 
-/// Whether `audio` is 3 to 8 channels without a layout (a field
-/// recorder's polyphonic WAV, say), each a track of its own. FFmpeg would
-/// guess one for it, with an LFE for 3, 6, 7 and 8 (2.1, 5.1, 6.1, 7.1):
-/// AAC codes that channel band-limited, wiping its track, and FLAC says
-/// it's there.
-fn unlabeled(audio: &StreamInfo) -> bool {
-    !audio.has_layout && (3..=8).contains(&audio.channels)
+/// Whether `audio` says outright that its channels aren't speakers: Opus
+/// without a layout (channel mapping family 255). Any other track without
+/// one is read the way players read it, as the standard layout for its
+/// count (FFmpeg's guess: 2.1, 4.0, 5.0, 5.1, 6.1, 7.1), so a Blu-ray
+/// rip's 5.1 PCM, which Matroska stores without a layout, stays 5.1.
+fn not_speakers(audio: &StreamInfo) -> bool {
+    audio.codec == "opus" && !audio.has_layout
 }
 
-/// The `pan` that labels `audio`, a track without a layout, with the
-/// [`NO_LFE`] layout of its count, each channel kept in its own, for a
-/// source read with `-guess_layout_max 0`. `None` for a track with a
-/// layout, or more than 8 channels.
+/// The `pan` that labels `audio`, 3 to 8 channels that aren't speakers
+/// ([`not_speakers`]), with the [`NO_LFE`] layout of its count, each
+/// channel kept in its own: FFmpeg's guess has an LFE for 3, 6, 7 and 8
+/// (2.1, 5.1, 6.1, 7.1), which AAC codes band-limited, wiping that
+/// channel. `pan` maps the channels by number, whatever FFmpeg guessed.
+/// `None` for any other track.
 fn label(audio: &StreamInfo) -> Option<String> {
-    let channels = usize::try_from(audio.channels).ok()?;
-    let layout = NO_LFE.get(channels.checked_sub(1)?)?;
-    if audio.has_layout {
+    if !not_speakers(audio) {
         return None;
     }
+    let channels = usize::try_from(audio.channels).ok()?;
+    let layout = NO_LFE.get(channels.checked_sub(3)?)?;
     let mut pan = format!("pan={layout}");
     for c in 0..channels {
         pan.push_str(&format!("|c{c}=c{c}"));
@@ -597,11 +594,8 @@ fn label(audio: &StreamInfo) -> Option<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Squeeze {
     pub(super) codec: Codec,
-    /// Options for reading the source, before its `-i`: for FLAC,
-    /// `-guess_layout_max 0` for audio [`label`] labels.
-    pub(super) reading: &'static [&'static str],
-    /// The `-af` chain, if any: for FLAC, [`label`]'s `pan`; a lower
-    /// rate, and for FLAC fewer bits with TPDF dither.
+    /// The `-af` chain, if any: for M4A, [`label`]'s `pan`; a lower rate,
+    /// and for FLAC fewer bits with TPDF dither.
     pub(super) filter: Option<String>,
     /// The output's sample rate.
     pub(super) sample_rate: u32,
@@ -680,12 +674,12 @@ pub(super) fn small_enough(before: u64, after: u64, lossy: bool) -> bool {
 ///   for mono).
 /// - M4A: AAC at 48k, 64k or 96k a channel ([`aac_rate`]), at most 48 kHz
 ///   ([`at_most_48k`]; FFmpeg's AAC encoder takes at most 96 kHz). An AAC
-///   source within 1.1 × that bitrate is skipped.
+///   source within 1.1 × that bitrate is skipped. Opus whose channels
+///   aren't speakers is labelled without an LFE ([`label`]).
 /// - FLAC: level 8 with exact Rice parameters. Small writes 16 bits (TPDF
 ///   dither) at most 48 kHz, Balanced the source's depth at most 48 kHz,
 ///   High the source as it is. Its size rule is the lossy one only when
-///   bits or rate were cut. A WAV of 3 to 8 channels without a layout
-///   keeps them as they are, labelled without an LFE ([`label`]).
+///   bits or rate were cut.
 ///
 /// "Try Small" ([`Squeeze::try_small`]) when Small would do more: for MP3
 /// and M4A whenever the preset isn't Small (and Small wouldn't skip the
@@ -708,7 +702,6 @@ pub(super) fn squeeze(
                 dither: false,
                 exact: false,
             },
-            reading: &[],
             filter,
             sample_rate,
             lossy: true,
@@ -738,9 +731,14 @@ pub(super) fn squeeze(
             let aac = audio.codec == "aac";
             let capped = at_most_48k(rate);
             let bits = format!("{}k", target(preset) / 1000);
+            let resample = (capped != rate).then(|| format!("aresample={capped}"));
+            let filter = match (label(audio), resample) {
+                (Some(pan), Some(resample)) => Some(format!("{pan},{resample}")),
+                (pan, resample) => pan.or(resample),
+            };
             Ok(lossy(
                 owned(&["-c:a", "aac", "-b:a", &bits]),
-                (capped != rate).then(|| format!("aresample={capped}")),
+                filter,
                 capped,
                 &|preset| aac && within(bit_rate, target(preset)),
             ))
@@ -767,27 +765,13 @@ pub(super) fn squeeze(
             if sixteen && (fewer_bits || slower) {
                 options.push("osf=s16:dither_method=triangular".to_owned());
             }
-            let resample =
-                (!options.is_empty()).then(|| format!("aresample={}", options.join(":")));
-            // FFmpeg's guess for 3, 6, 7 or 8 channels without a layout
-            // has an LFE, which FLAC would say is there.
-            let pan = if unlabeled(audio) { label(audio) } else { None };
-            let reading: &'static [&'static str] = if pan.is_some() {
-                &["-guess_layout_max", "0"]
-            } else {
-                &[]
-            };
-            let filter = match (pan, resample) {
-                (Some(pan), Some(resample)) => Some(format!("{pan},{resample}")),
-                (pan, resample) => pan.or(resample),
-            };
+            let filter = (!options.is_empty()).then(|| format!("aresample={}", options.join(":")));
             Ok(Squeeze {
                 codec: Codec {
                     args: owned(&flac(if sixteen { "s16" } else { "s32" })),
                     dither: false,
                     exact: true,
                 },
-                reading,
                 filter,
                 sample_rate: capped,
                 lossy: fewer_bits || slower,
@@ -916,10 +900,8 @@ pub(super) struct Shrink {
 ///   tagged as HLG;
 /// - each audio track: AAC at 48k, 64k or 96k a channel ([`aac_rate`]),
 ///   at most 48 kHz, unless it is AAC already within 1.1 × that bitrate
-///   and `copy_audio`, when it is copied. When one it encodes has 3 to 8
-///   channels without a layout ([`unlabeled`]), the source is read with
-///   `-guess_layout_max 0` and each track without a layout is labelled
-///   with one that has no LFE ([`label`]).
+///   and `copy_audio`, when it is copied. Opus whose channels aren't
+///   speakers is labelled with a layout that has no LFE ([`label`]).
 ///
 /// Tags, chapters and dates stay ([`keep`]).
 #[allow(clippy::too_many_arguments)]
@@ -932,20 +914,8 @@ pub(super) fn shrink(
     copy_audio: bool,
     out: &Path,
 ) -> Shrink {
+    let mut args = prefix_at(src, &[], "error");
     let kept: Vec<&StreamInfo> = shrunk(to, probe, tags).collect();
-    let copied = |s: &StreamInfo| {
-        let target = aac_rate(aac_per_channel(preset), s.channels);
-        copy_audio && s.codec == "aac" && within(s.bit_rate, target)
-    };
-    let unguessed = kept
-        .iter()
-        .any(|s| s.kind == StreamKind::Audio && !copied(s) && unlabeled(s));
-    let reading: &[&str] = if unguessed {
-        &["-guess_layout_max", "0"]
-    } else {
-        &[]
-    };
-    let mut args = prefix_at(src, reading, "error");
     for stream in &kept {
         map(&mut args, stream.index);
     }
@@ -986,15 +956,14 @@ pub(super) fn shrink(
                 ],
             );
         } else if stream.kind == StreamKind::Audio {
-            if copied(stream) {
+            let target = aac_rate(aac_per_channel(preset), stream.channels);
+            if copy_audio && stream.codec == "aac" && within(stream.bit_rate, target) {
                 copies = true;
                 continue;
             }
-            let target = aac_rate(aac_per_channel(preset), stream.channels);
             let bits = format!("{}k", target / 1000);
             push(&mut args, &[&spec("c"), "aac", &spec("b"), &bits]);
-            // Read unguessed, every track without a layout needs one.
-            if let Some(pan) = label(stream).filter(|_| unguessed) {
+            if let Some(pan) = label(stream) {
                 push(&mut args, &[&spec("filter"), &pan]);
             }
             let capped = at_most_48k(stream.sample_rate);
@@ -2405,7 +2374,7 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn audio_without_a_layout_keeps_its_tracks_without_an_lfe() {
+    fn opus_that_isnt_speakers_is_labelled_without_an_lfe() {
         let unlabeled = |codec, channels| StreamInfo {
             has_layout: false,
             ..at(audio(codec, 16), 48_000, channels)
@@ -2415,94 +2384,73 @@ pub(super) mod tests {
             format!("pan={layout}{map}")
         };
         for (channels, layout) in [
-            (1, "mono"),
-            (2, "stereo"),
             (3, "3.0"),
-            (4, "quad"),
+            (4, "4.0"),
             (5, "5.0"),
             (6, "hexagonal"),
             (7, "7.0"),
             (8, "octagonal"),
         ] {
-            let track = unlabeled("pcm_s16le", channels);
-            assert_eq!(label(&track), Some(pan(layout, channels)));
-            assert_eq!(super::unlabeled(&track), channels >= 3);
+            let opus = unlabeled("opus", channels);
+            assert!(not_speakers(&opus));
+            assert_eq!(label(&opus), Some(pan(layout, channels)));
+            // Any other track without a layout is left to FFmpeg's guess.
+            assert_eq!(label(&unlabeled("pcm_s16le", channels)), None);
+            assert_eq!(label(&unlabeled("flac", channels)), None);
         }
-        assert_eq!(label(&unlabeled("pcm_s16le", 9)), None);
-        assert_eq!(label(&unlabeled("pcm_s16le", 0)), None);
-        assert_eq!(label(&at(audio("pcm_s16le", 16), 48_000, 6)), None);
+        for channels in [0, 1, 2, 9] {
+            assert_eq!(label(&unlabeled("opus", channels)), None);
+        }
+        let surround = at(audio("opus", 16), 48_000, 6);
+        assert!(!not_speakers(&surround));
+        assert_eq!(label(&surround), None);
 
-        // Compress on a video: 6 tracks without a layout, a small AAC that
-        // is copied, and a stereo pair without a layout, which the guess
-        // being off leaves to `pan` too.
+        // Compress on a video: 6 channels of Opus that aren't speakers, a
+        // small AAC that is copied, and 6 of PCM without a layout (a
+        // Blu-ray rip's 5.1), read as FFmpeg guesses.
         let mut aac = stream(2, StreamKind::Audio, "aac");
         aac.bit_rate = Some(120_000);
-        let six = StreamInfo {
+        let opus = StreamInfo {
             index: 1,
+            ..unlabeled("opus", 6)
+        };
+        let pcm = StreamInfo {
+            index: 3,
             ..unlabeled("pcm_s24le", 6)
         };
-        let pair = StreamInfo {
-            index: 3,
-            ..unlabeled("pcm_s16le", 2)
-        };
-        let streams = vec![stream(0, StreamKind::Video, "h264"), six, aac, pair];
-        let probe = probe_of("matroska,webm", streams.clone());
-        let shrink = |probe: &Probe| {
-            let tags = Tags::default();
-            super::shrink(
-                &src(),
-                Format::Mkv,
-                probe,
-                &tags,
-                CompressPreset::Balanced,
-                true,
-                &out(),
-            )
-            .args
-        };
-        let args = shrink(&probe);
-        let text: Vec<String> = args
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(text[10..12], ["-guess_layout_max", "0"]);
+        let streams = vec![stream(0, StreamKind::Video, "h264"), opus, aac, pcm];
+        let probe = probe_of("matroska,webm", streams);
+        let args = super::shrink(
+            &src(),
+            Format::Mkv,
+            &probe,
+            &Tags::default(),
+            CompressPreset::Balanced,
+            true,
+            &out(),
+        )
+        .args;
+        assert!(!args.iter().any(|a| a == "-guess_layout_max"), "{args:?}");
         assert!(has(&args, ["-b:1", "384k"]), "{args:?}");
         assert!(has(&args, ["-filter:1", &pan("hexagonal", 6)]), "{args:?}");
         assert!(!args.iter().any(|a| a == "-c:2"), "{args:?}");
-        assert!(has(&args, ["-filter:3", &pan("stereo", 2)]), "{args:?}");
-        // Without the six, the pair is left to FFmpeg's guess, as before.
-        let probe = probe_of(
-            "matroska,webm",
-            vec![streams[0].clone(), streams[2].clone(), streams[3].clone()],
-        );
-        let args = shrink(&probe);
-        assert!(!args.iter().any(|a| a == "-guess_layout_max"), "{args:?}");
-        assert!(!args.iter().any(|a| a == "-filter:2"), "{args:?}");
+        assert!(has(&args, ["-c:3", "aac"]), "{args:?}");
+        assert!(!args.iter().any(|a| a == "-filter:3"), "{args:?}");
 
-        // Compress into FLAC: the same labels, before any other filter.
-        let wav = StreamInfo {
-            depth: 24,
-            ..at(unlabeled("pcm_s24le", 6), 96_000, 6)
-        };
-        let squeeze = squeeze(Format::Flac, &wav, None, CompressPreset::Small).unwrap();
-        assert_eq!(squeeze.reading, ["-guess_layout_max", "0"]);
-        let dither = "aresample=48000:osf=s16:dither_method=triangular";
+        // Compress on an M4A: the label, before a lower rate.
+        let opus = unlabeled("opus", 6);
+        let squeeze = squeeze(Format::M4a, &opus, None, CompressPreset::Small).unwrap();
+        assert_eq!(squeeze.filter, Some(pan("hexagonal", 6)));
+        let fast = at(unlabeled("opus", 4), 96_000, 4);
+        let squeeze = super::squeeze(Format::M4a, &fast, None, CompressPreset::Small).unwrap();
         assert_eq!(
             squeeze.filter,
-            Some(format!("{},{dither}", pan("hexagonal", 6)))
+            Some(format!("{},aresample=48000", pan("4.0", 4)))
         );
-        let cd = unlabeled("pcm_s16le", 4);
-        let squeeze = super::squeeze(Format::Flac, &cd, None, CompressPreset::High).unwrap();
-        assert_eq!(squeeze.filter, Some(pan("quad", 4)));
-        // A stereo WAV keeps FFmpeg's guess, and one with a layout its own.
-        for wav in [
-            unlabeled("pcm_s16le", 2),
-            at(audio("pcm_s16le", 16), 48_000, 6),
-        ] {
-            let squeeze = super::squeeze(Format::Flac, &wav, None, CompressPreset::High).unwrap();
-            assert!(squeeze.reading.is_empty());
-            assert_eq!(squeeze.filter, None);
-        }
+        // A WAV without a layout into FLAC: FFmpeg's guess, no label.
+        let wav = at(unlabeled("pcm_s16le", 6), 48_000, 6);
+        let squeeze = super::squeeze(Format::Flac, &wav, None, CompressPreset::High).unwrap();
+        assert_eq!(squeeze.filter, None);
     }
 
     #[test]

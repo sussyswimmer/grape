@@ -2026,9 +2026,13 @@ fn compress_keeps_every_track_of_a_movie_and_an_iphones_keys() {
 /// half a second at 48 kHz.
 const TRACK_TONES: [f64; 8] = [440.0, 660.0, 880.0, 1100.0, 1320.0, 1540.0, 1760.0, 1980.0];
 
-/// The layout of 3 to 8 tracks without one that Compress writes: none
-/// has an LFE.
-const NO_LFE: [&str; 6] = ["3.0", "quad", "5.0", "hexagonal", "7.0", "octagonal"];
+/// The layout Compress gives 3 to 8 channels of Opus that aren't speakers
+/// (no layout: channel mapping family 255): none has an LFE.
+const NO_LFE: [&str; 6] = ["3.0", "4.0", "5.0", "hexagonal", "7.0", "octagonal"];
+
+/// FFmpeg's guess for 3 to 8 channels without a layout, as players read
+/// them.
+const GUESSED: [&str; 6] = ["2.1", "4.0", "5.0", "5.1", "6.1", "7.1"];
 
 /// The channel layout of `path`'s first audio track.
 fn audio_layout(path: &Path) -> String {
@@ -2058,20 +2062,51 @@ fn track_levels(samples: &[Vec<f64>], rate: f64, tones: &[f64]) -> Vec<Vec<f64>>
         .collect()
 }
 
+/// Whether each of `channels` tracks of `samples` holds its own tone of
+/// [`TRACK_TONES`], and only that.
+fn own_tones(samples: &[Vec<f64>], rate: f64, channels: usize) -> Result<(), String> {
+    let levels = track_levels(samples, rate, &TRACK_TONES[..channels]);
+    let kept = levels.len() == channels
+        && levels.iter().enumerate().all(|(c, track)| {
+            track
+                .iter()
+                .enumerate()
+                .all(|(t, &got)| if t == c { got > 0.9 } else { got < 0.05 })
+        });
+    if kept {
+        Ok(())
+    } else {
+        Err(format!("levels {levels:?}"))
+    }
+}
+
 #[test]
-fn compress_keeps_each_track_of_audio_without_a_layout() {
+fn compress_keeps_each_channel_of_opus_that_isnt_speakers() {
     use grape_core::CompressPreset::{Balanced, Small};
     let dir = TestDir::new("tools-compress-unlabeled");
     let mut failures = Vec::new();
     for channels in 3..=8 {
         let tones = &TRACK_TONES[..channels];
-        let layout = NO_LFE[channels - 3];
-        // A recorder's WAV without a channel mask, in a video (an MKV, or
-        // a MOV for 6) as AAC, and on its own as FLAC.
+        let (layout, guessed) = (NO_LFE[channels - 3], GUESSED[channels - 3]);
+        // A WAV without a channel mask, and it as Opus that says its
+        // channels aren't speakers (mapping family 255) in a video (an
+        // MKV, or an MP4 for 6), and for 6 in an M4A too.
         let wav = dir.join(&format!("take{channels}.wav"));
         write_tones(&wav, 48_000, tones, 0.25, None, Sample::I16);
+        // At 192k a channel, constant, so AAC at Small saves enough.
+        let rate = format!("{}k", 192 * channels);
+        let opus = [
+            "-c:a",
+            "libopus",
+            "-mapping_family",
+            "255",
+            "-b:a",
+            &rate,
+            "-vbr",
+            "off",
+        ];
         let (muxer, ext) = if channels == 6 {
-            ("mov", "mov")
+            ("mp4", "mp4")
         } else {
             ("matroska", "mkv")
         };
@@ -2079,12 +2114,23 @@ fn compress_keeps_each_track_of_audio_without_a_layout() {
         let mut args = TESTSRC.to_vec();
         args.extend(["-guess_layout_max", "0", "-i", s(&wav)]);
         args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264"]);
-        args.extend(["-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+        args.extend(["-pix_fmt", "yuv420p"]);
+        args.extend(&opus);
         args.extend(["-f", muxer, s(&video)]);
         ffmpeg(&args);
-        for (src, preset) in [(&video, Small), (&wav, Balanced)] {
+        let mut sources = vec![(video, Small)];
+        if channels == 6 {
+            let m4a = dir.join("take6.m4a");
+            let mut args = vec!["-guess_layout_max", "0", "-i", s(&wav)];
+            args.extend(&opus);
+            args.extend(["-f", "mp4", s(&m4a)]);
+            ffmpeg(&args);
+            sources.push((m4a, Small));
+        }
+        for (src, preset) in &sources {
             let what = format!("{channels} in {}", src.display());
-            let out = match run_tool(&dir, src, ToolKey::Compress, to_preset(preset)) {
+            assert_eq!(audio_layout(src), "unknown", "{what}");
+            let out = match run_tool(&dir, src, ToolKey::Compress, to_preset(*preset)) {
                 Ok(out) => out,
                 Err(e) => {
                     failures.push(format!("{what}: {e} ({})", e.detail));
@@ -2092,32 +2138,50 @@ fn compress_keeps_each_track_of_audio_without_a_layout() {
                 }
             };
             let path = &out.outputs[0];
-            // Each track keeps its own tone, and only its own: none was
+            // Each channel keeps its own tone, and only its own: none was
             // cut as an LFE.
             let (samples, rate) = decode(path);
-            let levels = track_levels(&samples, rate, tones);
-            let kept = levels.len() == channels
-                && levels.iter().enumerate().all(|(c, track)| {
-                    track
-                        .iter()
-                        .enumerate()
-                        .all(|(t, &got)| if t == c { got > 0.9 } else { got < 0.05 })
-                });
-            if !kept {
-                failures.push(format!("{what}: levels {levels:?}"));
+            if let Err(e) = own_tones(&samples, rate, channels) {
+                failures.push(format!("{what}: {e}"));
             }
-            // FFmpeg 6.1 reads AAC's own (PCE) layouts back as unknown.
+            // FFmpeg 6.1.1's encoder writes hexagonal, 7.0 and octagonal
+            // so that they read back as unknown.
             let got = audio_layout(path);
-            if got != layout && !(got == "unknown" && src == &video) {
+            if got != layout && !(got == "unknown" && channels >= 6) {
                 failures.push(format!("{what}: layout {got}"));
-            }
-            // FLAC keeps the samples exactly.
-            if src == &wav && samples != decode(&wav).0 {
-                failures.push(format!("{what}: samples differ"));
             }
             fs::remove_file(path).unwrap();
         }
+        // The WAV itself into FLAC: read as players read it, as FFmpeg
+        // guesses, and its samples kept exactly.
+        let what = format!("{channels} in {}", wav.display());
+        match run_tool(&dir, &wav, ToolKey::Compress, to_preset(Balanced)) {
+            Ok(out) => {
+                let path = &out.outputs[0];
+                if decode(path).0 != decode(&wav).0 {
+                    failures.push(format!("{what}: samples differ"));
+                }
+                if audio_layout(path) != guessed {
+                    failures.push(format!("{what}: layout {}", audio_layout(path)));
+                }
+                fs::remove_file(path).unwrap();
+            }
+            Err(e) => failures.push(format!("{what}: {e} ({})", e.detail)),
+        }
     }
+
+    // 6 channels of PCM in an MKV, which stores no layout for PCM (a
+    // Blu-ray rip's 5.1): read as 5.1, as players read it.
+    let (wav, mkv) = (dir.join("take6.wav"), dir.join("rip.mkv"));
+    let mut args = TESTSRC.to_vec();
+    args.extend(["-guess_layout_max", "0", "-i", s(&wav)]);
+    args.extend(["-map", "0:v", "-map", "1:a", "-c:v", "libx264"]);
+    args.extend(["-pix_fmt", "yuv420p", "-c:a", "pcm_s16le"]);
+    args.extend(["-f", "matroska", s(&mkv)]);
+    ffmpeg(&args);
+    assert_eq!(audio_layout(&mkv), "unknown");
+    let out = run_tool(&dir, &mkv, ToolKey::Compress, to_preset(Small)).unwrap();
+    assert_eq!(audio_layout(&out.outputs[0]), "5.1");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
