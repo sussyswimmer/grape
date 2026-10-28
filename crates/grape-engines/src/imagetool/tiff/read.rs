@@ -335,13 +335,15 @@ impl Tiff {
 
     /// Fails when two blocks overlap without being the same bytes, or a
     /// block or an IFD overlaps an IFD; otherwise gives the blocks that
-    /// appear more than once.
+    /// appear more than once. Blocks already in the file's order, as
+    /// writers lay them out, are checked where they are; others through a
+    /// sorted list of references to them, never a copy.
     fn check_overlaps(&self) -> Result<HashSet<Block>, Error> {
         let layout = self.layout;
-        let mut blocks: Vec<Block> = Vec::new();
+        let all = self.ifds();
         let mut ifds: Vec<(u64, u64)> = Vec::new();
         let span = |at: u64, n: usize| (at, at + layout.ifd_len(n as u64));
-        for ifd in self.ifds() {
+        for ifd in &all {
             ifds.push(span(ifd.at, ifd.entries.len()));
             for meta in [&ifd.exif, &ifd.gps].into_iter().flatten() {
                 let interop = meta.interop.as_deref();
@@ -351,37 +353,53 @@ impl Tiff {
                     }
                 }
             }
-            blocks.extend(ifd.blocks.iter().filter(|b| b.len > 0));
         }
-        let broken = || Err(Error::Broken("blocks or IFDs overlap".into()));
-        blocks.sort_unstable();
-        let shared = blocks
-            .windows(2)
-            .filter(|w| w[0] == w[1])
-            .map(|w| w[0])
-            .collect();
-        blocks.dedup();
         // An Exif, GPS or Interop IFD that IFDs share is listed for each.
         ifds.sort_unstable();
         ifds.dedup();
-        let apart = |w: &[(u64, u64)]| w[1].0 >= w[0].1;
-        let spans: Vec<(u64, u64)> = blocks
-            .iter()
-            .map(|b| (b.offset, b.offset + b.len))
-            .collect();
-        if !spans.windows(2).chain(ifds.windows(2)).all(apart) {
+        let broken = || Err(Error::Broken("blocks or IFDs overlap".into()));
+        if !ifds.windows(2).all(|w| w[1].0 >= w[0].1) {
             return broken();
         }
-        // Blocks are now apart and in order, so the last one to start
-        // before an IFD ends is the only one that can reach into it.
-        for &(start, end) in &ifds {
-            let before = spans.partition_point(|b| b.0 < end);
-            if before > 0 && spans[before - 1].1 > start {
-                return broken();
-            }
+        let blocks = || all.iter().flat_map(|ifd| &ifd.blocks).filter(|b| b.len > 0);
+        let apart = |a: &Block, b: &Block| b.offset >= a.offset + a.len;
+        if blocks().zip(blocks().skip(1)).all(|(a, b)| apart(a, b)) {
+            return if clear_of(blocks(), &ifds) {
+                Ok(HashSet::new())
+            } else {
+                broken()
+            };
+        }
+        let mut sorted: Vec<&Block> = blocks().collect();
+        sorted.sort_unstable();
+        let shared = sorted
+            .windows(2)
+            .filter(|w| w[0] == w[1])
+            .map(|w| *w[0])
+            .collect();
+        sorted.dedup();
+        if !sorted.windows(2).all(|w| apart(w[0], w[1])) || !clear_of(sorted.into_iter(), &ifds) {
+            return broken();
         }
         Ok(shared)
     }
+}
+
+/// Whether no block of `blocks` (in the file's order, apart) reaches into
+/// an IFD of `ifds` (in order, apart).
+fn clear_of<'a>(blocks: impl Iterator<Item = &'a Block>, ifds: &[(u64, u64)]) -> bool {
+    let mut ifds = ifds.iter().peekable();
+    for block in blocks {
+        // An IFD that ends before this block can't meet a later one.
+        while ifds.next_if(|ifd| ifd.1 <= block.offset).is_some() {}
+        if ifds
+            .peek()
+            .is_some_and(|ifd| ifd.0 < block.offset + block.len)
+        {
+            return false;
+        }
+    }
+    true
 }
 
 /// Why neither TIFF tool can change a file with the image IFD `ifd`, if
@@ -640,35 +658,46 @@ impl Walk<'_> {
                 "over {MAX_BLOCKS} strips or tiles"
             )));
         }
-        let offsets = self.uints(&offsets, room)?;
-        self.blocks += offsets.len();
-        let lens = match ifd.get(if tiled { 325 } else { 279 }).cloned() {
-            Some(lens) => self.uints(&lens, room)?,
-            None => self.estimate(ifd, offsets.len())?,
+        // The offsets and the counts go straight into the blocks.
+        let mut blocks = Vec::with_capacity(offsets.count as usize);
+        self.each_uint(&offsets, room, |offset| {
+            blocks.push(Block { offset, len: 0 });
+        })?;
+        self.blocks += blocks.len();
+        let counts = ifd.get(if tiled { 325 } else { 279 }).cloned();
+        let estimated = match counts {
+            Some(_) => Vec::new(),
+            None => self.estimate(ifd, blocks.len())?,
         };
-        if lens.len() != offsets.len() {
+        let mut lens = 0;
+        let set = |len| {
+            if let Some(block) = blocks.get_mut(lens) {
+                block.len = len;
+            }
+            lens += 1;
+        };
+        match counts {
+            Some(entry) => self.each_uint(&entry, room, set)?,
+            None => estimated.into_iter().for_each(set),
+        }
+        if lens != blocks.len() {
             return Err(Error::Broken(format!(
-                "{} offsets but {} byte counts",
-                offsets.len(),
-                lens.len()
+                "{} offsets but {lens} byte counts",
+                blocks.len()
             )));
         }
         let l = self.layout;
-        ifd.blocks = offsets
-            .into_iter()
-            .zip(lens)
-            .map(|(offset, len)| match len {
-                0 => Ok(Block { offset: 0, len: 0 }),
-                _ if offset >= l.header()
-                    && offset.checked_add(len).is_some_and(|e| e <= l.len) =>
-                {
-                    Ok(Block { offset, len })
-                }
-                _ => Err(Error::Broken(format!(
+        for block in &mut blocks {
+            let Block { offset, len } = *block;
+            if len == 0 {
+                block.offset = 0;
+            } else if offset < l.header() || offset.checked_add(len).is_none_or(|e| e > l.len) {
+                return Err(Error::Broken(format!(
                     "a block of {len} bytes at {offset}, outside the file"
-                ))),
-            })
-            .collect::<Result<_, _>>()?;
+                )));
+            }
+        }
+        ifd.blocks = blocks;
         Ok(())
     }
 
@@ -745,6 +774,19 @@ impl Walk<'_> {
     /// The unsigned numbers `entry` holds (SHORT, LONG, LONG8, IFD or IFD8),
     /// at most `cap` of them.
     fn uints(&mut self, entry: &Entry, cap: usize) -> Result<Vec<u64>, Error> {
+        let mut all = Vec::with_capacity(entry.count.min(cap as u64) as usize);
+        self.each_uint(entry, cap, |n| all.push(n))?;
+        Ok(all)
+    }
+
+    /// Gives `f` each unsigned number `entry` holds (SHORT, LONG, LONG8, IFD
+    /// or IFD8), in order; at most `cap` of them, or it's too large.
+    fn each_uint(
+        &mut self,
+        entry: &Entry,
+        cap: usize,
+        mut f: impl FnMut(u64),
+    ) -> Result<(), Error> {
         let size = match entry.kind {
             3 => 2,
             4 | 13 => 4,
@@ -764,22 +806,25 @@ impl Walk<'_> {
         }
         let o = self.layout.order;
         match entry.value {
-            Value::Inline { bytes, len } => Ok(bytes[..usize::from(len)]
-                .chunks_exact(size)
-                .map(|b| o.uint(b))
-                .collect()),
+            Value::Inline { bytes, len } => {
+                for b in bytes[..usize::from(len)].chunks_exact(size) {
+                    f(o.uint(b));
+                }
+                Ok(())
+            }
             Value::At { offset, len } => {
-                let mut all = Vec::with_capacity(entry.count as usize);
                 let mut step = vec![0; STEP.min(usize_of(len)?)];
                 let mut left = len;
                 seek(self.r, offset)?;
                 while left > 0 {
                     let take = &mut step[..STEP.min(left as usize)];
                     read_exact(self.r, take)?;
-                    all.extend(take.chunks_exact(size).map(|b| o.uint(b)));
+                    for b in take.chunks_exact(size) {
+                        f(o.uint(b));
+                    }
                     left -= take.len() as u64;
                 }
-                Ok(all)
+                Ok(())
             }
             Value::Unread => Err(Error::Broken(format!("tag {} can't be read", entry.tag))),
         }

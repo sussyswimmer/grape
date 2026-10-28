@@ -132,8 +132,8 @@ struct Node<'d> {
     at: u64,
     /// Where each entry's value goes.
     values: Vec<Place>,
-    /// Its blocks' places in the output.
-    blocks: Vec<Block>,
+    /// Where its blocks are in the output.
+    offsets: Vec<u64>,
 }
 
 /// Writes `pages`, the main chain, into `w` (a new, empty file) as a TIFF
@@ -176,7 +176,7 @@ pub(crate) fn write(
         let Some(image) = &node.dir.image else {
             continue;
         };
-        let mut blocks = Vec::with_capacity(image.blocks.len());
+        let mut offsets = Vec::with_capacity(image.blocks.len());
         for &block in &image.blocks {
             if cancel.is_cancelled() {
                 return Err(Error::Write(io::Error::other("cancelled")));
@@ -196,12 +196,9 @@ pub(crate) fn write(
                 }
                 at
             };
-            blocks.push(Block {
-                offset: at,
-                len: block.len,
-            });
+            offsets.push(at);
         }
-        node.blocks = blocks;
+        node.offsets = offsets;
     }
 
     // The IFDs, laid out before they're written. A value copied from the
@@ -322,7 +319,7 @@ fn add<'d>(dir: &'d Dir, nodes: &mut Vec<Node<'d>>, layout: Layout) -> usize {
         next: None,
         at: 0,
         values: Vec::new(),
-        blocks: Vec::new(),
+        offsets: Vec::new(),
     });
     // Offsets and counts are LONG in a classic file and LONG8 in a
     // BigTIFF; pointers LONG or IFD8, as libtiff writes them.
@@ -387,8 +384,11 @@ fn value(
             Data::Bytes(bytes) => w.write_all(bytes).map_err(Error::Write),
             Data::Source { offset, len } => copy(r, w, *offset, *len, buf),
         },
-        Made::Offsets => numbers(&mut node.blocks.iter().map(|b| b.offset)),
-        Made::Counts => numbers(&mut node.blocks.iter().map(|b| b.len)),
+        Made::Offsets => numbers(&mut node.offsets.iter().copied()),
+        Made::Counts => {
+            let blocks = node.dir.image.iter().flat_map(|image| &image.blocks);
+            numbers(&mut blocks.map(|b| b.len))
+        }
         Made::Ifds(ifds) => numbers(&mut ifds.iter().map(|&n| ats[n])),
     }
 }
