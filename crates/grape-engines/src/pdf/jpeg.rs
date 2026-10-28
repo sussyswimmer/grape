@@ -6,7 +6,7 @@
 //! progressive Huffman at 8 bits (SOF0, SOF1, SOF2) with 1 or 3 components,
 //! and for 3 components the color transform is known the same way by
 //! Grape's decoder (zune-jpeg) and by PDF readers:
-//! - an Adobe APP14: transform 0 is RGB (`/ColorTransform 0`), 1 YCbCr;
+//! - an Adobe APP14: transform 0 is RGB (DCTDecode's `/ColorTransform 0`), 1 YCbCr;
 //!   2 (YCCK) doesn't pass; nor does transform 0 beside a JFIF APP0
 //!   (libjpeg-style readers take JFIF for YCbCr), nor transform 1 with
 //!   component ids `R G B` (zune-jpeg reads those as RGB);
@@ -44,7 +44,7 @@ pub(crate) struct Passthrough {
     /// 1 (gray) or 3 (color).
     pub(crate) components: u8,
     /// True for RGB data (an Adobe APP14 with transform 0): the image
-    /// XObject gets `/ColorTransform 0`.
+    /// XObject gets `/DecodeParms << /ColorTransform 0 >>`.
     pub(crate) rgb: bool,
     /// The EXIF orientation, applied by the page's matrix.
     pub(crate) orientation: Orientation,

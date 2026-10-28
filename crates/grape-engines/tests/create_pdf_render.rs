@@ -187,6 +187,44 @@ fn a_jpeg_shows_upright_in_all_eight_orientations() {
     }
 }
 
+#[test]
+fn an_adobe_rgb_jpeg_draws_as_grape_decodes_it() {
+    // The encoder's JPEG with its JFIF APP0 replaced by an Adobe APP14
+    // saying transform 0: its samples are read as RGB, not YCbCr, by Grape's
+    // decoder and, through `/DecodeParms << /ColorTransform 0 >>` and the
+    // kept marker, by PDFium.
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 95)
+        .encode_image(&quadrants(48, 32))
+        .unwrap();
+    assert_eq!(&jpeg[2..4], [0xFF, 0xE0]);
+    let app0_end = 4 + usize::from(u16::from_be_bytes([jpeg[4], jpeg[5]]));
+    let adobe = [
+        0xFF, 0xEE, 0, 14, b'A', b'd', b'o', b'b', b'e', 0, 100, 0, 0, 0, 0, 0,
+    ];
+    jpeg.splice(2..app0_end, adobe);
+    let dir = TestDir::new("create-render-adobe");
+    let (src, job) = plan_one(&dir, "rgb.jpg", &jpeg, Operation::convert(Format::Pdf));
+    let before = SourceState::of(&src);
+    run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
+    let expected = upright(&src);
+    let bytes = fs::read(planned_file(&job)).unwrap();
+    let doc = lopdf::Document::load_mem(&bytes).unwrap();
+    let image = doc
+        .objects
+        .values()
+        .filter_map(|object| object.as_stream().ok())
+        .find(|stream| stream.dict.get(b"Subtype").and_then(|s| s.as_name()).ok() == Some(b"Image"))
+        .unwrap();
+    let parms = image.dict.get(b"DecodeParms").unwrap().as_dict().unwrap();
+    assert_eq!(parms.get(b"ColorTransform").unwrap().as_i64().unwrap(), 0);
+    let pages = draw(&planned_file(&job));
+    let error = mean_error(&pages[0].pixels, &expected);
+    assert!(error < 1.0, "{error}");
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
 fn png(img: &DynamicImage) -> Vec<u8> {
     let mut bytes = Cursor::new(Vec::new());
     img.write_to(&mut bytes, ImageFormat::Png).unwrap();

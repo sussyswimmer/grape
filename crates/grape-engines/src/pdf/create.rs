@@ -655,7 +655,9 @@ fn write_page<W: Write>(
                 color_space(gray, profile)
             );
             if pass.rgb {
-                entries.push_str(" /ColorTransform 0");
+                // DCTDecode's own parameter (ISO 32000-1, table 13). The
+                // Adobe marker that is kept says the same.
+                entries.push_str(" /DecodeParms << /ColorTransform 0 >>");
             }
             pdf.stream_parts(image, &entries, &pass.parts(&bytes))
                 .map_err(write)?;
@@ -1347,7 +1349,32 @@ mod tests {
         assert_eq!(name(&third.image, b"Filter"), "DCTDecode");
         assert_eq!(name(&third.image, b"ColorSpace"), "DeviceRGB");
         assert!(third.image.get(b"ColorTransform").is_err());
+        assert!(third.image.get(b"DecodeParms").is_err());
         assert!(third.data.starts_with(&[0xFF, 0xD8]));
+    }
+
+    #[test]
+    fn an_rgb_jpeg_passes_through_with_its_transform_in_the_filter_parameters() {
+        // The encoder's JPEG with its JFIF APP0 replaced by an Adobe APP14
+        // saying transform 0 (RGB).
+        let mut bytes = jpeg_bytes(&DynamicImage::ImageRgb8(gradient(16, 8)));
+        assert_eq!(&bytes[2..4], [0xFF, 0xE0]);
+        let app0_end = 4 + usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+        let adobe = [
+            0xFF, 0xEE, 0, 14, b'A', b'd', b'o', b'b', b'e', 0, 100, 0, 0, 0, 0, 0,
+        ];
+        bytes.splice(2..app0_end, adobe);
+        let pass = jpeg::passthrough(&bytes).unwrap();
+        assert!(pass.rgb);
+        let pdf = pdf_of(vec![passed(bytes)]);
+        let (_, pages) = pages(&pdf);
+        let image = &pages[0].image;
+        assert_eq!(name(image, b"Filter"), "DCTDecode");
+        assert!(image.get(b"ColorTransform").is_err());
+        let parms = image.get(b"DecodeParms").unwrap().as_dict().unwrap();
+        assert_eq!(int(parms, b"ColorTransform"), 0);
+        // The Adobe marker is kept too.
+        assert!(pages[0].data.windows(5).any(|w| w == b"Adobe"));
     }
 
     #[test]
