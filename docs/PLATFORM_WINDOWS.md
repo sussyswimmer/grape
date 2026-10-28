@@ -32,6 +32,8 @@ npm install -g pnpm@10
 
 To try Grape without the dev setup above, install the build CI makes on every run. It's a release build, unsigned until M7.
 
+Before uploading it, CI installs it silently on its Windows runner, runs the sidecars and Grape's SVG and PDF workers from the install folder, starts Grape, checks setup's log lines and that a second launch hands over to the first, then uninstalls it (`ci.yml` → `build-windows`). So a build that won't start fails CI instead of reaching you (since 2026-10-28; not yet run on GitHub).
+
 A released version comes from GitHub Releases instead, as `Grape-Setup-x64.exe` (README → "Install", and "Releasing" below). The steps are the same. A CI build is for a commit that isn't released yet.
 
 1. Open the run on GitHub (Actions → CI → the run for the commit). Under **Artifacts**, download `Grape-Windows-x64` and unzip it.
