@@ -28,6 +28,8 @@ pub mod pdf;
 mod publish;
 mod selection;
 mod subtitle;
+#[doc(hidden)] // Public only for the worker entry, `svg::worker_main` (D39).
+pub mod svg;
 
 pub use archive::LeftOut;
 pub use helper::{remove_stale_work_dirs, set_contain, Contain, Contained};

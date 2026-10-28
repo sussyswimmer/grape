@@ -22,8 +22,9 @@ private = { ignore = true }
 # Exactly the licenses the shipped crates use, in the order Grape picks them
 # when a crate offers a choice. MPL-2.0 is allowed per crate below, never here.
 # BSD-2-Clause is D23's amendment (D41, shared with D39): rav1e, v_frame and
-# av1-grain, in the macOS app only. It comes after MIT, Apache-2.0 and
-# BSD-3-Clause, so a crate that also offers one of those keeps it.
+# av1-grain, in the macOS app only, and arrayref (through resvg's tiny-skia,
+# D39) on every OS. It comes after MIT, Apache-2.0 and BSD-3-Clause, so a
+# crate that also offers one of those keeps it.
 accepted = [
     "MIT",
     "Apache-2.0",

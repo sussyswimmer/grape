@@ -4,8 +4,8 @@
 //!
 //! Like the app, it installs [`WorkerHeap`] as its global allocator, so the
 //! worker's heap bound (`grape_engines::pdf::heap`) holds here too. That is
-//! the only `unsafe` code, and it is the same as in the app's `main.rs`:
-//! change both together.
+//! the only `unsafe` code, and it is the same as in the app's `main.rs` and
+//! in `src/bin/grape-svg-worker.rs` (D39): change all three together.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 

@@ -48,6 +48,12 @@ serde.workspace = true
 serde_json.workspace = true
 # HEIC (D33): the protocol with Grape's HEIC helper, a separate process.
 grape-heif-proto.workspace = true
+# SVG (D39): parsed and drawn only inside the SVG worker process.
+# Never turn on `svgz` (unbounded gunzip) or resvg's default features.
+resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+# Embedded images' header size, inside the data-URI resolver (already in the
+# lock through usvg).
+imagesize = "=0.15.0"
 
 # tests/heif.rs runs the HEIC helper on Windows in the Job Object an
 # installed Grape puts it in (D33).
@@ -60,6 +66,13 @@ grape-platform.workspace = true
 name = "grape-pdf-worker"
 path = "src/bin/grape-pdf-worker.rs"
 required-features = ["pdf-it"]
+
+[[bin]]
+# The SVG worker on its own, for tests/svg.rs (no feature: it needs no
+# library). The app runs the same `grape_engines::svg::worker_main` as
+# `Grape --grape-svg-worker` (D39).
+name = "grape-svg-worker"
+path = "src/bin/grape-svg-worker.rs"
 
 [[test]]
 name = "pdf"
