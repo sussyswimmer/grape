@@ -261,6 +261,44 @@ fn lossless_pages_draw_as_their_images() {
 }
 
 #[test]
+fn a_picture_longer_than_an_image_may_be_draws_whole() {
+    // 8 × 140,000: PDFium draws nothing for an image with a side over
+    // 131,071, so Grape writes it as strips. A ramp from black at the top
+    // to white at the bottom shows any strip missing, misplaced or out of
+    // order.
+    let dir = TestDir::new("create-render-tall");
+    let height = 140_000u32;
+    let ramp = GrayImage::from_fn(8, height, |_, y| {
+        Luma([(u64::from(y) * 255 / u64::from(height - 1)) as u8])
+    });
+    let (src, job) = plan_one(
+        &dir,
+        "tall.png",
+        &png(&DynamicImage::ImageLuma8(ramp)),
+        Operation::convert(Format::Pdf),
+    );
+    let before = SourceState::of(&src);
+    run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap();
+    let pages = draw(&planned_file(&job));
+    assert_eq!(pages.len(), 1);
+    let page = &pages[0];
+    // 14,400 pt tall; the width, 0.82 pt, is held at 1 pt.
+    assert_eq!((page.width_pt, page.height_pt), (1.0, 14_400.0));
+    let mut worst = (0.0f64, 0u32);
+    for row in 0..page.pixels.height() {
+        let drawn = f64::from(page.pixels.get_pixel(0, row).0[0]);
+        let expected = (f64::from(row) + 0.5) / f64::from(page.pixels.height()) * 255.0;
+        let error = (drawn - expected).abs();
+        if error > worst.0 {
+            worst = (error, row);
+        }
+    }
+    assert!(worst.0 <= 3.0, "row {} is off by {}", worst.1, worst.0);
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
 fn a_page_over_200_inches_is_scaled_down_whole() {
     let dir = TestDir::new("create-render-wide");
     let wide = RgbImage::from_fn(20_000, 10, |x, _| Rgb([(x % 256) as u8, 0, 0]));

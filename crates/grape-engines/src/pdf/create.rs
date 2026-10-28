@@ -10,7 +10,10 @@
 //!   ([`combines`]). The page is the
 //!   upright image at one pixel a point (72 dpi), scaled down uniformly
 //!   when its longer side is over [`MAX_SIDE`] (Acrobat's 200 inches); the
-//!   pixels are never resampled ([`page_size`]).
+//!   pixels are never resampled ([`page_size`]). No image object has a side
+//!   over [`MAX_IMAGE_SIDE`] pixels: a longer picture (a long screenshot)
+//!   is stored losslessly as strips, each with its own soft mask, drawn
+//!   edge to edge on its one page ([`tiles`]).
 //! - **How each image is stored** (the writer takes "a JPEG to pass
 //!   through" or "upright pixels and an ICC profile" from any decoder):
 //!   1. a JPEG whose content is JPEG and whose frame and color transform
@@ -66,6 +69,7 @@
 
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::ops::Range;
 use std::path::Path;
 
 use ::image::codecs::jpeg::JpegEncoder;
@@ -87,6 +91,13 @@ const MIB: u64 = 1024 * 1024;
 
 /// The longest side a page may have, in points: Acrobat's 200 inches.
 pub(crate) const MAX_SIDE: f64 = 14_400.0;
+
+/// The longest side, in pixels, of an image object Grape writes: JPEG's
+/// own limit, so no reader meets a larger image from Grape than a JPEG can
+/// be. PDFium (Chrome's and Edge's PDF viewer) draws nothing for an image
+/// with a side over 131,071, so a longer picture is written as strips
+/// drawn edge to edge on its page ([`tiles`]).
+pub(crate) const MAX_IMAGE_SIDE: u32 = 65_535;
 
 /// The quality pictures are re-encoded at: the raster engine's JPEG
 /// quality.
@@ -546,6 +557,59 @@ pub(crate) fn placement(orientation: Orientation, page: (f64, f64)) -> [f64; 6] 
     }
 }
 
+/// A part of a picture written as one image object: its columns and rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Tile {
+    x: Range<u32>,
+    y: Range<u32>,
+}
+
+impl Tile {
+    fn width(&self) -> u32 {
+        self.x.end - self.x.start
+    }
+
+    fn height(&self) -> u32 {
+        self.y.end - self.y.start
+    }
+}
+
+/// `side` pixels split into the fewest near-equal spans of at most
+/// [`MAX_IMAGE_SIDE`].
+fn spans(side: u32) -> Vec<Range<u32>> {
+    let n = side.div_ceil(MAX_IMAGE_SIDE).max(1);
+    let at = |k: u32| u32::try_from(u64::from(side) * u64::from(k) / u64::from(n)).unwrap_or(side);
+    (0..n).map(|k| at(k)..at(k + 1)).collect()
+}
+
+/// The tiles a `width` × `height` picture is written as, from the top row
+/// of tiles down: the whole picture, unless a side is over
+/// [`MAX_IMAGE_SIDE`]. (Both sides can't be: that's over the working set.)
+fn tiles(width: u32, height: u32) -> Vec<Tile> {
+    let columns = spans(width);
+    spans(height)
+        .into_iter()
+        .flat_map(|y| {
+            columns.iter().map(move |x| Tile {
+                x: x.clone(),
+                y: y.clone(),
+            })
+        })
+        .collect()
+}
+
+/// The `cm` matrix that draws `tile` of an upright picture of `size`
+/// pixels whose whole covers `page`: edge to edge with its neighbors, the
+/// picture's first row at the page's top.
+fn tile_placement(tile: &Tile, size: (u32, u32), page: (f64, f64)) -> [f64; 6] {
+    let (width, height) = (f64::from(size.0), f64::from(size.1));
+    let left = page.0 * f64::from(tile.x.start) / width;
+    let right = page.0 * f64::from(tile.x.end) / width;
+    let top = page.1 * f64::from(size.1 - tile.y.start) / height;
+    let bottom = page.1 * f64::from(size.1 - tile.y.end) / height;
+    [right - left, 0.0, 0.0, top - bottom, left, bottom]
+}
+
 /// True for gray layouts (with or without alpha): the PDF gets
 /// `/DeviceGray`, as [`image::icc_fits`] decides for a profile.
 fn is_gray(color: ColorType) -> bool {
@@ -599,27 +663,44 @@ fn write_page<W: Write>(
             if let (Some(number), Some(icc)) = (profile, icc) {
                 write_icc(pdf, number, &icc, gray, input, out, cancel)?;
             }
-            finish_page(pdf, image, page, placement(pass.orientation, page)).map_err(write)
+            let drawn = [(image, placement(pass.orientation, page))];
+            finish_page(pdf, &drawn, page).map_err(write)
         }
         Picture::Pixels { img, icc, storage } => {
-            let (width, height) = img.dimensions();
+            let size = img.dimensions();
             let gray = is_gray(img.color());
             let scan = scan(&img, storage == Storage::Lossless, cancel)?;
-            let image = pdf.reserve();
+            let page = page_size(size.0, size.1);
             let profile = icc.as_ref().map(|_| pdf.reserve());
-            let mask = scan.alpha.then(|| pdf.reserve());
             let space = color_space(gray, profile);
-            let mut entries = format!(
-                "/Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace {space}"
-            );
             let lossy = match storage {
                 Storage::Lossy => jpeg_stream(&img, gray, cancel)?,
                 Storage::Lossless => None,
             };
-            let data = match lossy {
+            // Each image object drawn, and its matrix.
+            let mut drawn = Vec::new();
+            match lossy {
                 Some(data) => {
-                    entries.push_str(" /BitsPerComponent 8 /Filter /DCTDecode");
-                    data
+                    // One JPEG: `jpeg_stream` takes no side over
+                    // MAX_IMAGE_SIDE.
+                    let whole = Tile {
+                        x: 0..size.0,
+                        y: 0..size.1,
+                    };
+                    let image = pdf.reserve();
+                    let mask = scan.alpha.then(|| pdf.reserve());
+                    let entries = image_entries(
+                        &whole,
+                        &space,
+                        "/BitsPerComponent 8 /Filter /DCTDecode",
+                        mask,
+                    );
+                    pdf.stream(image, &entries, &data).map_err(write)?;
+                    drop(data);
+                    if let Some(mask) = mask {
+                        write_mask(pdf, mask, &img, &whole, input, out, cancel)?;
+                    }
+                    drawn.push((image, placement(Orientation::NoTransforms, page)));
                 }
                 None => {
                     let bw = scan.black_and_white && storage == Storage::Lossless;
@@ -628,37 +709,70 @@ fn write_page<W: Write>(
                         (true, false) => (1, 8),
                         _ => (3, 8),
                     };
-                    entries.push_str(&format!(
-                        " /BitsPerComponent {bits} /Filter /FlateDecode /DecodeParms \
-                         << /Predictor 15 /Colors {channels} /BitsPerComponent {bits} \
-                         /Columns {width} >>"
-                    ));
-                    color_stream(&img, gray, bw, cancel).map_err(|e| flate_error(e, input, out))?
+                    for tile in tiles(size.0, size.1) {
+                        let image = pdf.reserve();
+                        let mask = scan.alpha.then(|| pdf.reserve());
+                        let coding = format!(
+                            "/BitsPerComponent {bits} /Filter /FlateDecode /DecodeParms \
+                             << /Predictor 15 /Colors {channels} /BitsPerComponent {bits} \
+                             /Columns {} >>",
+                            tile.width()
+                        );
+                        let entries = image_entries(&tile, &space, &coding, mask);
+                        let data = color_stream(&img, &tile, gray, bw, cancel)
+                            .map_err(|e| flate_error(e, input, out))?;
+                        pdf.stream(image, &entries, &data).map_err(write)?;
+                        drop(data);
+                        if let Some(mask) = mask {
+                            write_mask(pdf, mask, &img, &tile, input, out, cancel)?;
+                        }
+                        drawn.push((image, tile_placement(&tile, size, page)));
+                    }
                 }
-            };
-            if let Some(mask) = mask {
-                entries.push_str(&format!(" /SMask {mask} 0 R"));
             }
-            pdf.stream(image, &entries, &data).map_err(write)?;
-            drop(data);
             if let (Some(number), Some(icc)) = (profile, icc) {
                 write_icc(pdf, number, &icc, gray, input, out, cancel)?;
             }
-            if let Some(mask) = mask {
-                let data = alpha_stream(&img, cancel).map_err(|e| flate_error(e, input, out))?;
-                let entries = format!(
-                    "/Type /XObject /Subtype /Image /Width {width} /Height {height} \
-                     /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode \
-                     /DecodeParms << /Predictor 15 /Colors 1 /BitsPerComponent 8 \
-                     /Columns {width} >>"
-                );
-                pdf.stream(mask, &entries, &data).map_err(write)?;
-            }
             drop(img);
-            let page = page_size(width, height);
-            finish_page(pdf, image, page, placement(Orientation::NoTransforms, page)).map_err(write)
+            finish_page(pdf, &drawn, page).map_err(write)
         }
     }
+}
+
+/// An image object's dictionary entries for `tile`: its size, color space
+/// `space`, the `coding` entries (bits, filter and its parameters) and its
+/// soft mask, if any.
+fn image_entries(tile: &Tile, space: &str, coding: &str, mask: Option<u32>) -> String {
+    let mut entries = format!(
+        "/Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace {space} {coding}",
+        tile.width(),
+        tile.height()
+    );
+    if let Some(mask) = mask {
+        entries.push_str(&format!(" /SMask {mask} 0 R"));
+    }
+    entries
+}
+
+/// `tile` of `img`'s alpha as soft mask object `mask`.
+fn write_mask<W: Write>(
+    pdf: &mut Writer<W>,
+    mask: u32,
+    img: &DynamicImage,
+    tile: &Tile,
+    input: &Names,
+    out: &Names,
+    cancel: &CancelToken,
+) -> Result<(), GrapeError> {
+    let data = alpha_stream(img, tile, cancel).map_err(|e| flate_error(e, input, out))?;
+    let coding = format!(
+        "/BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 1 \
+         /BitsPerComponent 8 /Columns {} >>",
+        tile.width()
+    );
+    let entries = image_entries(tile, "/DeviceGray", &coding, None);
+    pdf.stream(mask, &entries, &data)
+        .map_err(|e| write_error(out, cancel, &e))
 }
 
 /// `/DeviceGray`, `/DeviceRGB`, or the ICC profile object `profile`.
@@ -690,24 +804,26 @@ fn write_icc<W: Write>(
         .map_err(|e| write_error(out, cancel, &e))
 }
 
-/// The page's content stream and the page itself, added to the tree.
+/// The page's content stream and the page itself, added to the tree:
+/// each image object in `drawn` (`/Im0`, `/Im1`, …) drawn with its matrix.
 fn finish_page<W: Write>(
     pdf: &mut Writer<W>,
-    image: u32,
+    drawn: &[(u32, [f64; 6])],
     page: (f64, f64),
-    matrix: [f64; 6],
 ) -> io::Result<()> {
     let content = pdf.reserve();
     let number = pdf.reserve();
-    let cm: Vec<String> = matrix.iter().map(|&v| num(v)).collect();
-    pdf.stream(
-        content,
-        "",
-        format!("q {} cm /Im0 Do Q", cm.join(" ")).as_bytes(),
-    )?;
+    let mut ops = Vec::with_capacity(drawn.len());
+    let mut resources = String::new();
+    for (k, (image, matrix)) in drawn.iter().enumerate() {
+        let cm: Vec<String> = matrix.iter().map(|&v| num(v)).collect();
+        ops.push(format!("q {} cm /Im{k} Do Q", cm.join(" ")));
+        resources.push_str(&format!(" /Im{k} {image} 0 R"));
+    }
+    pdf.stream(content, "", ops.join("\n").as_bytes())?;
     let dict = format!(
         "<< /Type /Page /Parent {PAGES} 0 R /MediaBox [0 0 {} {}] \
-         /Resources << /XObject << /Im0 {image} 0 R >> >> /Contents {content} 0 R >>",
+         /Resources << /XObject <<{resources} >> >> /Contents {content} 0 R >>",
         num(page.0),
         num(page.1)
     );
@@ -803,46 +919,55 @@ fn jpeg_stream(
     }
 }
 
-/// `img`'s gray or RGB samples, 8-bit (or 1-bit when `bw`), as a Flate
-/// stream with PNG predictors.
+/// `tile` of `img`'s gray or RGB samples, 8-bit (or 1-bit when `bw`), as a
+/// Flate stream with PNG predictors.
 fn color_stream(
     img: &DynamicImage,
+    tile: &Tile,
     gray: bool,
     bw: bool,
     cancel: &CancelToken,
 ) -> Result<Vec<u8>, FlateError> {
-    let (width, height) = img.dimensions();
+    let width = tile.width();
     let channels = if gray { 1 } else { 3 };
     let bits = if bw { 1 } else { 8 };
     let row_len =
         usize::try_from(flate::row_bytes(width, channels, bits)).map_err(|_| FlateError::Memory)?;
     let shape = Rows {
-        height,
+        height: tile.height(),
         row_len,
         bpp: if bw { 1 } else { usize::from(channels) },
     };
+    let columns = tile.x.start as usize..tile.x.end as usize;
     let mut rows = RowReader::new(img);
     let mut samples = vec![0u8; if bw { width as usize } else { 0 }];
     flate::deflate_rows(shape, cancel, |y, out| {
+        let y = tile.y.start + y;
         if bw {
-            rows.color(y, gray, &mut samples);
+            rows.color(y, gray, columns.clone(), &mut samples);
             flate::pack_bits(&samples, out);
         } else {
-            rows.color(y, gray, out);
+            rows.color(y, gray, columns.clone(), out);
         }
     })
 }
 
-/// `img`'s 8-bit alpha as a Flate stream with PNG predictors.
-fn alpha_stream(img: &DynamicImage, cancel: &CancelToken) -> Result<Vec<u8>, FlateError> {
-    let (width, height) = img.dimensions();
+/// `tile` of `img`'s 8-bit alpha as a Flate stream with PNG predictors.
+fn alpha_stream(
+    img: &DynamicImage,
+    tile: &Tile,
+    cancel: &CancelToken,
+) -> Result<Vec<u8>, FlateError> {
     let shape = Rows {
-        height,
-        row_len: usize::try_from(width).map_err(|_| FlateError::Memory)?,
+        height: tile.height(),
+        row_len: usize::try_from(tile.width()).map_err(|_| FlateError::Memory)?,
         bpp: 1,
     };
+    let columns = tile.x.start as usize..tile.x.end as usize;
     let mut rows = RowReader::new(img);
-    flate::deflate_rows(shape, cancel, |y, out| rows.alpha(y, out))
+    flate::deflate_rows(shape, cancel, |y, out| {
+        rows.alpha(tile.y.start + y, columns.clone(), out);
+    })
 }
 
 /// A decoded image's rows as 8-bit samples (gray or RGB, then alpha if it
@@ -896,10 +1021,12 @@ impl<'a> RowReader<'a> {
         (&rows[at..at + width * step], step)
     }
 
-    /// Row `y`'s gray (`gray`) or RGB samples into `out`.
-    fn color(&mut self, y: u32, gray: bool, out: &mut [u8]) {
+    /// The gray (`gray`) or RGB samples of row `y`'s pixels in `columns`
+    /// into `out`.
+    fn color(&mut self, y: u32, gray: bool, columns: Range<usize>, out: &mut [u8]) {
         let channels = if gray { 1 } else { 3 };
         let (row, step) = self.row(y);
+        let row = &row[columns.start * step..columns.end * step];
         if step == channels {
             out.copy_from_slice(row);
         } else {
@@ -909,14 +1036,16 @@ impl<'a> RowReader<'a> {
         }
     }
 
-    /// Row `y`'s alpha into `out` (255 for an image without alpha).
-    fn alpha(&mut self, y: u32, out: &mut [u8]) {
+    /// The alpha of row `y`'s pixels in `columns` into `out` (255 for an
+    /// image without alpha).
+    fn alpha(&mut self, y: u32, columns: Range<usize>, out: &mut [u8]) {
         let has_alpha = self.img.color().has_alpha();
         let (row, step) = self.row(y);
         if !has_alpha {
             out.fill(255);
             return;
         }
+        let row = &row[columns.start * step..columns.end * step];
         for (pixel, to) in row.chunks_exact(step).zip(out.iter_mut()) {
             *to = pixel[step - 1];
         }
@@ -1337,6 +1466,123 @@ mod tests {
         assert_eq!(page_size(14_401, 1), (14_400.0, 1.0));
         assert_eq!(page_size(1_000_000, 3), (14_400.0, 1.0));
         assert_eq!(page_size(1, 1), (1.0, 1.0));
+    }
+
+    #[test]
+    fn a_long_side_is_split_into_the_fewest_near_equal_spans() {
+        assert_eq!(spans(1), vec![0..1]);
+        assert_eq!(spans(MAX_IMAGE_SIDE), vec![0..MAX_IMAGE_SIDE]);
+        assert_eq!(spans(MAX_IMAGE_SIDE + 1), [0..32_768, 32_768..65_536]);
+        let parts = spans(140_000);
+        assert_eq!(parts, [0..46_666, 46_666..93_333, 93_333..140_000]);
+        assert_eq!(tiles(5, 3), [Tile { x: 0..5, y: 0..3 }]);
+        assert_eq!(
+            tiles(70_000, 2),
+            [
+                Tile {
+                    x: 0..35_000,
+                    y: 0..2
+                },
+                Tile {
+                    x: 35_000..70_000,
+                    y: 0..2
+                }
+            ]
+        );
+    }
+
+    /// Every image object a page draws, by its resource name (`Im0`, …),
+    /// with its soft mask, and the page's content.
+    #[allow(clippy::type_complexity)]
+    fn images_of(
+        bytes: &[u8],
+    ) -> (
+        Vec<(Dictionary, Vec<u8>, Option<(Dictionary, Vec<u8>)>)>,
+        String,
+    ) {
+        let doc = Document::load_mem(bytes).unwrap();
+        let pages = doc.get_pages();
+        assert_eq!(pages.len(), 1);
+        let page = doc.get_object(pages[&1]).unwrap().as_dict().unwrap();
+        let resources = page.get(b"Resources").unwrap().as_dict().unwrap();
+        let xobjects = resources.get(b"XObject").unwrap().as_dict().unwrap();
+        let mut images = Vec::new();
+        for k in 0..xobjects.len() {
+            let id = xobjects
+                .get(format!("Im{k}").as_bytes())
+                .unwrap()
+                .as_reference()
+                .unwrap();
+            let image = doc.get_object(id).unwrap().as_stream().unwrap();
+            let mask = image.dict.get(b"SMask").ok().map(|mask| {
+                let mask = doc
+                    .get_object(mask.as_reference().unwrap())
+                    .unwrap()
+                    .as_stream()
+                    .unwrap();
+                (mask.dict.clone(), mask.content.clone())
+            });
+            images.push((image.dict.clone(), image.content.clone(), mask));
+        }
+        let content_id = page.get(b"Contents").unwrap().as_reference().unwrap();
+        let content = doc.get_object(content_id).unwrap().as_stream().unwrap();
+        (images, String::from_utf8(content.content.clone()).unwrap())
+    }
+
+    #[test]
+    fn a_picture_longer_than_an_image_may_be_is_written_as_strips() {
+        // 3 × 70,000 gray with alpha: two strips of 35,000 rows, each with
+        // its soft mask, top strip first, drawn edge to edge on a page
+        // scaled to 14,400 pt (the width held at 1 pt).
+        let tall = GrayAlphaImage::from_fn(3, 70_000, |x, y| {
+            LumaA([(y % 251) as u8, if x == 1 { 9 } else { 255 }])
+        });
+        let bytes = pdf_of(vec![lossless(DynamicImage::ImageLumaA8(tall.clone()))]);
+        let (images, content) = images_of(&bytes);
+        assert_eq!(
+            content,
+            "q 1 0 0 7200 0 7200 cm /Im0 Do Q\nq 1 0 0 7200 0 0 cm /Im1 Do Q"
+        );
+        assert_eq!(images.len(), 2);
+        let mut gray = Vec::new();
+        let mut alpha = Vec::new();
+        for (dict, data, mask) in &images {
+            assert_eq!((int(dict, b"Width"), int(dict, b"Height")), (3, 35_000));
+            assert_eq!(name(dict, b"ColorSpace"), "DeviceGray");
+            let parms = dict.get(b"DecodeParms").unwrap().as_dict().unwrap();
+            assert_eq!(int(parms, b"Columns"), 3);
+            gray.extend(rows_of(data, 3, 1));
+            let (mask, mask_data) = mask.as_ref().unwrap();
+            assert_eq!((int(mask, b"Width"), int(mask, b"Height")), (3, 35_000));
+            alpha.extend(rows_of(mask_data, 3, 1));
+        }
+        assert_eq!(gray, tall.pixels().map(|p| p.0[0]).collect::<Vec<_>>());
+        assert_eq!(alpha, tall.pixels().map(|p| p.0[1]).collect::<Vec<_>>());
+
+        // 70,000 × 2 RGB, lossy: no JPEG takes it, so two lossless strips of
+        // 35,000 columns, left one first.
+        let wide = RgbImage::from_fn(70_000, 2, |x, y| {
+            Rgb([(x % 256) as u8, (x / 256 % 256) as u8, y as u8])
+        });
+        let bytes = pdf_of(vec![lossy(DynamicImage::ImageRgb8(wide.clone()))]);
+        let (images, content) = images_of(&bytes);
+        assert_eq!(
+            content,
+            "q 7200 0 0 1 0 0 cm /Im0 Do Q\nq 7200 0 0 1 7200 0 cm /Im1 Do Q"
+        );
+        assert_eq!(images.len(), 2);
+        for (k, (dict, data, mask)) in images.iter().enumerate() {
+            assert_eq!((int(dict, b"Width"), int(dict, b"Height")), (35_000, 2));
+            assert_eq!(name(dict, b"Filter"), "FlateDecode");
+            assert!(mask.is_none());
+            let left = u32::try_from(k).unwrap() * 35_000;
+            let part = DynamicImage::ImageRgb8(wide.clone()).crop_imm(left, 0, 35_000, 2);
+            assert_eq!(
+                rows_of(data, 105_000, 3),
+                part.to_rgb8().into_raw(),
+                "strip {k}"
+            );
+        }
     }
 
     #[test]
