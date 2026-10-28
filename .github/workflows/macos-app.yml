@@ -234,6 +234,7 @@ jobs:
       # memory"). rav1e runs as many threads as the runner has cores (3), not
       # the 8 of a bigger Mac; D41 has the 8-thread peaks, measured on Linux.
       - name: Encode an AVIF at the cap with the image helper worker
+        id: avif-cap
         run: |
           app=target/universal-apple-darwin/release/bundle/macos/Grape.app
           name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
@@ -510,7 +511,12 @@ jobs:
           done <<< "$(new_log | grep -F '][ERROR] ' || true)"
           [ "$bad" -eq 0 ] || exit 1
           echo "Grape ran through its first launch, and a second one handed over to it."
-      - if: ${{ !inputs.release }}
+      # CI's DMG is uploaded whenever the build and every check before the
+      # launch test passed, even when the workers or the launch failed: the
+      # job is still red, and a check that trips on the runner rather than
+      # on Grape shouldn't leave nothing to try. A release keeps every check
+      # strict: its steps below run only when all of them passed.
+      - if: ${{ !cancelled() && !inputs.release && steps.avif-cap.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           name: Grape-macOS-universal

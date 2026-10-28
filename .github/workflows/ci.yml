@@ -916,7 +916,12 @@ jobs:
             try { Remove-ItemProperty -LiteralPath $key -Name $conf.productName } catch { Write-Output "  Couldn't remove it: $($_.Exception.Message)" }
           }
           exit 0
-      - uses: actions/upload-artifact@v7
+      # Uploaded whenever the build and its content checks passed (the
+      # install needs both), even when a launch check above failed: the job
+      # is still red, and a check that trips on the runner rather than on
+      # Grape shouldn't leave nothing to try.
+      - if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
         with:
           name: Grape-Windows-x64
           path: target/release/bundle/nsis/*.exe
