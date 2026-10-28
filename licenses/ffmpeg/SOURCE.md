@@ -9,7 +9,7 @@ Grape runs `ffmpeg` and `ffprobe` as separate programs. Grape builds them itself
 | License | GNU General Public License, version 2 or later (GPL-2.0-or-later): FFmpeg with `--enable-gpl`, for x264. Not `--enable-version3`, not `--enable-nonfree`. On Windows, the few `libgcc` helpers in the exe come under the GCC Runtime Library Exception, which leaves that license as it is |
 | Built by | `scripts/ffmpeg/build.sh <target>` in Grape's repository, from the tarballs pinned in `scripts/ffmpeg/sources.json`, each checked by size and SHA-256 before it's unpacked |
 | Targets | `windows-x86_64`: cross-compiled on Linux with mingw-w64 (GCC, win32 threads), static, only Windows' own DLLs. `macos-arm64` and `macos-x86_64`: Xcode's clang, macOS 11.0 or later, joined into one universal file |
-| Source | `grape-ffmpeg-sources.tar`, on the same GitHub Release as Grape's installers. See "The source" below |
+| Source | `grape-ffmpeg-sources.tar`, on the same GitHub Release as Grape's installers; for an installer or DMG from a CI run (not a release), in that run's `ffmpeg-source` artifact. See "The source" below |
 
 FFmpeg itself is LGPL-2.1-or-later with optional GPL parts (`ffmpeg-LICENSE.md`). This build turns on the GPL parts and links x264, so the programs as a whole are under the GPL, version 2 or later: `LICENSE.txt`.
 
@@ -108,7 +108,7 @@ macOS (`macos-arm64` and `macos-x86_64`; not built yet, so this is what the scri
 
 ## The source
 
-`grape-ffmpeg-sources.tar` is the complete corresponding source of these programs, as the GPL asks. It goes on the same GitHub Release as the installers that carry them, so it's always next to the binaries it belongs to. It holds:
+`grape-ffmpeg-sources.tar` is the complete corresponding source of these programs, as the GPL asks. It goes on the same GitHub Release as the installers that carry them, so it's always next to the binaries it belongs to. An installer or DMG that a CI run built, and no release carries, has its bundle in that run's `ffmpeg-source` artifact (with its SHA-256), from the same build jobs. It holds:
 
 - `tarballs/`: every tarball in the table above, exactly as downloaded and checked, with mingw-w64's;
 - `scripts/ffmpeg/`: the build script, the pins and their README;
