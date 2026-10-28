@@ -48,7 +48,8 @@ pub enum Format {
     Heic,
     /// TIFF image (`tiff`, alias `tif`).
     Tiff,
-    /// SVG vector image. Input-only within images.
+    /// SVG vector image (`svg`, alias `svgz` for gzip-compressed SVG).
+    /// Input-only within images.
     Svg,
     /// AVIF image.
     Avif,
@@ -380,8 +381,8 @@ impl Format {
     }
 
     /// Resolve a file extension (with or without a leading dot, any ASCII
-    /// case) to a format. Handles the aliases `jpeg tif heif hif aif htm
-    /// markdown tgz`
+    /// case) to a format. Handles the aliases `jpeg tif heif hif svgz aif
+    /// htm markdown tgz`
     /// and the compound `tar.gz`. Unknown extensions give `None`.
     pub fn from_extension(ext: &str) -> Option<Format> {
         let ext = ext.strip_prefix('.').unwrap_or(ext);
@@ -392,7 +393,7 @@ impl Format {
             "webp" => Format::Webp,
             "heic" | "heif" | "hif" => Format::Heic,
             "tiff" | "tif" => Format::Tiff,
-            "svg" => Format::Svg,
+            "svg" | "svgz" => Format::Svg,
             "avif" => Format::Avif,
             "bmp" => Format::Bmp,
             "mp3" => Format::Mp3,

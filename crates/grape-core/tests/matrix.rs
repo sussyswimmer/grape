@@ -325,6 +325,8 @@ fn aliases_resolve() {
     // Camera HEIF (Canon, Fujifilm, Sony) is HEIC to Grape (lane A's D33).
     assert_eq!(Format::from_extension("heif"), Some(Heic));
     assert_eq!(Format::from_extension("HIF"), Some(Heic));
+    // Gzip-compressed SVG; the SVG engine reads gzip content (lane A's D39).
+    assert_eq!(Format::from_extension("SVGZ"), Some(Svg));
     assert_eq!(Format::from_extension("aif"), Some(Aiff));
     assert_eq!(Format::from_extension("htm"), Some(Html));
     assert_eq!(Format::from_extension("markdown"), Some(Md));
@@ -345,6 +347,8 @@ fn extension_lookup_ignores_case_and_leading_dot() {
 #[test]
 fn unknown_extension_is_none() {
     assert_eq!(Format::from_extension("exe"), None);
+    // An HEIF image sequence, not a photo (D33).
+    assert_eq!(Format::from_extension("heics"), None);
     assert_eq!(Format::from_extension(""), None);
     assert_eq!(Format::from_extension("."), None);
     assert_eq!(Format::from_extension("jpg "), None);
