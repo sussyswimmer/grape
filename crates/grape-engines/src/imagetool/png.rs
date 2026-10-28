@@ -80,6 +80,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
     let mut held_bytes = 0;
     let mut first_exif: Option<exif::Exif> = None;
     let mut budget = INFLATE_BUDGET;
+    let mut exif_budget = MAX_READ as u64;
     let mut color_chunk = false;
     let mut chunks = 0;
     loop {
@@ -145,7 +146,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
         let whole = take == len;
         match &kind {
             b"tEXt" | b"zTXt" | b"iTXt" => {
-                let (field, exif_blob) = text(&kind, &data, whole, &mut budget);
+                let (field, exif_blob) = text(&kind, &data, whole, &mut budget, &mut exif_budget);
                 found.fields.extend(field);
                 if let Some(blob) = exif_blob {
                     note_exif(&mut found, &mut first_exif, held.as_mut(), &blob);
@@ -195,12 +196,15 @@ fn note_exif(
 /// What a text chunk of `kind` holding `data` (all of it if `whole`)
 /// says: its field, if its text isn't empty, and an EXIF blob for
 /// ImageMagick's "Raw profile type exif" (or "APP1"). Inflates no more
-/// than is left of `budget`, and takes what it inflates from it.
+/// than is left of `budget`, and takes what it inflates from it; a raw
+/// EXIF profile takes from `exif_budget` first, so the text before it
+/// can't cost the picture its Orientation.
 fn text(
     kind: &[u8; 4],
     data: &[u8],
     whole: bool,
     budget: &mut u64,
+    exif_budget: &mut u64,
 ) -> (Option<MetaField>, Option<Vec<u8>>) {
     let Some(nul) = data.iter().take(80).position(|&b| b == 0) else {
         return (Some(MetaField::Other), None);
@@ -215,6 +219,11 @@ fn text(
     };
     let field = text_field(keyword);
     if matches!(keyword, b"Raw profile type exif" | b"Raw profile type APP1") {
+        let budget = if *exif_budget > 0 {
+            exif_budget
+        } else {
+            budget
+        };
         let body = body.and_then(|(compressed, text)| {
             if compressed {
                 inflate(text, whole, budget)
@@ -313,10 +322,9 @@ fn unhex_profile(body: &[u8]) -> Option<Vec<u8>> {
         .copied()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if !digits.len().is_multiple_of(2) {
-        return None;
-    }
-    digits
+    // A profile cut short can end in half a byte, which goes.
+    let bytes = digits.len() & !1;
+    digits[..bytes]
         .chunks(2)
         .map(|pair| {
             let text = std::str::from_utf8(pair).ok()?;
@@ -573,9 +581,45 @@ mod tests {
         );
     }
 
-    /// [`text`] with a whole budget.
+    /// [`text`] with whole budgets.
     fn text_of(kind: &[u8; 4], data: &[u8], whole: bool) -> (Option<MetaField>, Option<Vec<u8>>) {
-        text(kind, data, whole, &mut INFLATE_BUDGET.clone())
+        text(
+            kind,
+            data,
+            whole,
+            &mut INFLATE_BUDGET.clone(),
+            &mut (MAX_READ as u64),
+        )
+    }
+
+    #[test]
+    fn a_raw_exif_profile_is_read_when_the_text_budget_is_spent() {
+        let t = tiff(
+            b'I',
+            &[&[(0x0112, V::Short(6)), (0x010F, V::Ascii("Canon"))]],
+            None,
+        );
+        let mut raw = b"\nexif\n      40\n".to_vec();
+        for b in [b"Exif\0\0".as_slice(), &t].concat() {
+            raw.extend_from_slice(format!("{b:02x}").as_bytes());
+        }
+        let ztxt = [b"Raw profile type exif\0\0".as_slice(), &zlib(&raw)].concat();
+        let orientation = |blob: Option<Vec<u8>>| {
+            let blob = blob.unwrap();
+            exif::walk(blob.strip_prefix(b"Exif\0\0").unwrap_or(&blob)).orientation
+        };
+        // No text budget left: the profile has its own.
+        let (mut budget, mut own) = (0, MAX_READ as u64);
+        let (field, blob) = text(b"zTXt", &ztxt, true, &mut budget, &mut own);
+        assert_eq!((field, orientation(blob)), (None, Some(6)));
+        assert!(own < MAX_READ as u64);
+        // Cut short mid-byte, past its first IFD: that IFD is still read.
+        let header = b"\nexif\n      40\n".len();
+        let cut = raw.len() - 7;
+        assert_eq!((cut - header) % 2, 1, "an odd number of digits");
+        let cut = cut as u64;
+        let (field, blob) = text(b"zTXt", &ztxt, true, &mut 0, &mut { cut });
+        assert_eq!((field, orientation(blob)), (None, Some(6)));
     }
 
     #[test]
@@ -628,12 +672,15 @@ mod tests {
         // keyword is all that's said.
         let mut budget = INFLATE_STEP as u64;
         assert_eq!(
-            text(b"zTXt", &ztxt(b"   "), true, &mut budget),
+            text(b"zTXt", &ztxt(b"   "), true, &mut budget, &mut 0),
             (None, None)
         );
         assert_eq!(budget, INFLATE_STEP as u64 - 3);
         budget = 0;
-        assert_eq!(text(b"zTXt", &ztxt(b"   "), true, &mut budget), author);
+        assert_eq!(
+            text(b"zTXt", &ztxt(b"   "), true, &mut budget, &mut 0),
+            author
+        );
     }
 
     #[test]
