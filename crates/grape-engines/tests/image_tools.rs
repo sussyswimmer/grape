@@ -1338,6 +1338,47 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
     );
 }
 
+#[test]
+fn compress_says_why_it_copied_a_tiff_page_when_it_cant_make_its_output() {
+    use grape_core::JobOutput;
+    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::tags::Tag;
+    // A page of JPEG data, which the plan copies as it is, and one it
+    // recodes.
+    let mut out = Cursor::new(Vec::new());
+    let mut e = TiffEncoder::new(&mut out).unwrap();
+    let mut jpeg = e.new_image::<colortype::Gray8>(8, 8).unwrap();
+    jpeg.encoder().write_tag(Tag::Compression, 7u16).unwrap();
+    jpeg.write_data(&[7; 64]).unwrap();
+    e.write_image::<colortype::Gray8>(64, 64, &[9; 64 * 64])
+        .unwrap();
+    let bytes = out.into_inner();
+    let dir = TestDir::new("compress-tiff-log-made");
+    fs::write(dir.join("file"), b"not a folder").unwrap();
+    // A folder gone since planning, where the temp file can't be made; and
+    // a fallback folder that can't be, under a file.
+    for (folder, fallback) in [("gone", false), ("file", true)] {
+        let (src, mut job) = plan_one(
+            &dir,
+            "two.tif",
+            &bytes,
+            compress_op(grape_core::CompressPreset::High),
+        );
+        job.output = JobOutput::File(dir.join(folder).join("sub").join("two.tif"));
+        job.used_fallback = fallback;
+        let before = SourceState::of(&src);
+        let err = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+        before.assert_unchanged();
+        assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+        assert!(
+            err.detail
+                .contains("IFD 0 copied as it is: its compression is 7"),
+            "{folder}: {}",
+            err.detail
+        );
+    }
+}
+
 /// `samples` as bytes in native order, as image's encoder takes 16-bit
 /// pixels.
 fn bytemuck_u16(samples: &[u16]) -> Vec<u8> {

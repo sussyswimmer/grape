@@ -1005,9 +1005,13 @@ pub(crate) fn run(
     };
     progress(0.02);
 
-    publish::ensure_dir(job, ctx, dir, &names)?;
-    let (temp, out) = TempFile::create(dir, from.output_ext())
-        .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
+    // From here on, every error says why IFDs were copied as they are: the
+    // plan knows already for those it doesn't recode.
+    let planned = |e| logged(e, &plan.log);
+    publish::ensure_dir(job, ctx, dir, &names).map_err(planned)?;
+    let (temp, out) = TempFile::create(dir, from.output_ext()).map_err(|e| {
+        planned(names.write_failed(format!("create temp in {}: {e}", dir.display())))
+    })?;
     let path = temp.path();
     let reopen = || {
         let file = File::open(path)
@@ -1017,7 +1021,7 @@ pub(crate) fn run(
             Cancellable::new(file, cancel),
         ))
     };
-    let mut back = reopen()?;
+    let mut back = reopen().map_err(planned)?;
     let mut writer = BufWriter::with_capacity(64 * 1024, Cancellable::new(out, cancel));
     // 95 % of the source (D26's exact rule).
     let most = before.saturating_mul(19) / 20;
@@ -1039,7 +1043,7 @@ pub(crate) fn run(
         };
         logged(e, &log)
     })?;
-    // From here on, every error says why IFDs were copied as they are.
+    // The writer's log holds the plan's, and what it took back.
     let log = std::mem::take(&mut wrote.log);
     let logged = |e| logged(e, &log);
     // Cut what an IFD taken back left past the end.
