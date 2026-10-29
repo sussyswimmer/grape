@@ -66,9 +66,12 @@
 //! - **Memory:** the source's `meta` (within
 //!   [`MAX_META`](super::isobmff::boxes::MAX_META)) and its model, and the
 //!   rebuilt `meta`, written straight into one buffer of the source's
-//!   size: twice a `meta` of data, and 4.74 times one packed at every cap
-//!   of the model, whose model is 2.4 times its size (`tests/heic_heap.rs`).
-//!   The kept ranges (16 bytes each) are held until the copy, which zeroes
+//!   size, measured by `tests/heic_heap.rs`: 32.06 MiB for a 16 MiB `meta`
+//!   of data, 73.25 MiB for one as large packed at every cap of the model,
+//!   and 55.88 MiB for a 9.75 MiB one packed as densely as the model lets
+//!   it (a model is several times the bytes it's read from, more so the
+//!   denser they are, so the peak, not a ratio, is what's bounded). The
+//!   kept ranges (16 bytes each) are held until the copy, which zeroes
 //!   what they don't cover as it goes: 22.94 MiB for a 3.8 MiB `meta` of
 //!   262,132 extents a byte apart. What's written is let go of before the
 //!   check, which holds the output's `meta` and its model. Besides, one

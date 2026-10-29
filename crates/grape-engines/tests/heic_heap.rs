@@ -1,11 +1,14 @@
-//! The heap Remove Metadata on HEIC holds at its peak (D28): a `meta` just
-//! under its 16 MiB cap, and one packed at every cap of the model, through
-//! `run_job`, under an allocator that counts. The tests take turns, so
-//! nothing else allocates meanwhile.
+//! The heap Remove Metadata on HEIC holds at its peak (D28), in MiB: a
+//! `meta` of data just under its 16 MiB cap, one as large packed at every
+//! cap of the model, one packed at every cap as densely as the model lets
+//! it, and one whose extents leave a gap after each, through `run_job`,
+//! under an allocator that counts. The tests take turns, so nothing else
+//! allocates meanwhile.
 //!
 //! The plan holds the source's `meta` and its model while it writes the
 //! rebuilt one, and the check the output's and its model, once what was
-//! written is gone.
+//! written is gone. A model is several times the bytes it's read from,
+//! more so the denser they are, so what's bounded is the peak itself.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -236,24 +239,25 @@ fn meta_len(file: &[u8]) -> usize {
     u32::from_be_bytes(file[24..28].try_into().unwrap()) as usize
 }
 
-/// Runs Remove Metadata on `file` and gives its peak heap in metas.
-fn metas(dir: &TestDir, name: &str, file: &[u8]) -> f64 {
+/// Runs Remove Metadata on `file` and gives its peak heap in MiB.
+fn peak_mib(dir: &TestDir, name: &str, file: &[u8]) -> f64 {
     let (_, job) = plan_one(dir, name, file, Operation::tool(ToolKey::RemoveMetadata));
     let (peak, result) = peak_of(&job);
     result.unwrap();
-    let metas = peak as f64 / meta_len(file) as f64;
+    let mib = |n: usize| n as f64 / f64::from(1 << 20);
     eprintln!(
-        "{name}: meta {:.2} MiB, peak {:.2} MiB, {metas:.2} metas",
-        meta_len(file) as f64 / f64::from(1 << 20),
-        peak as f64 / f64::from(1 << 20)
+        "{name}: meta {:.2} MiB, peak {:.2} MiB, {:.2} metas",
+        mib(meta_len(file)),
+        mib(peak),
+        peak as f64 / meta_len(file) as f64
     );
-    metas
+    mib(peak)
 }
 
 #[test]
 fn a_meta_of_data_just_under_its_cap_is_held_twice() {
     // An idat of 16 MiB, the Exif at its start: the source's meta and the
-    // rebuilt one, and a model of a few items.
+    // rebuilt one, and a model of a few items (32.06 MiB measured).
     let _turn = turn();
     let dir = TestDir::new("heic-heap-meta");
     let file = heif(&Meta {
@@ -269,18 +273,18 @@ fn a_meta_of_data_just_under_its_cap_is_held_twice() {
         spread: false,
     });
     assert!(meta_len(&file) > (16 << 20) - 256);
-    let metas = metas(&dir, "big.heic", &file);
-    assert!(metas < 2.25, "{metas:.2} metas");
+    let mib = peak_mib(&dir, "big.heic", &file);
+    assert!(mib < 36.0, "{mib:.2} MiB");
 }
 
-#[test]
-fn a_meta_packed_at_every_cap_is_held_twice_beside_its_model() {
-    // 65,535 items, 262,134 extents, 65,534 iref boxes of 1,048,529 ids,
-    // 65,536 properties, 65,535 ipma entries of 1,048,560 associations in
-    // 65,535 ipma boxes (65,536 boxes in iprp), 1,048,576 group entities
-    // and 65,536 boxes in meta: its model is about 2.4 times its 15 MiB.
-    let _turn = turn();
-    let dir = TestDir::new("heic-heap-caps");
+/// A HEIF file whose `meta` is packed at every cap of the model: 65,535
+/// items, 262,134 extents, 65,534 iref boxes of 1,048,529 ids, 65,536
+/// properties, 65,535 ipma entries of 1,048,560 associations in 65,535
+/// ipma boxes (65,536 boxes in iprp) and 65,536 boxes in meta. `dense`:
+/// 7-bit property indices and no groups, so each byte read makes the
+/// most of the model; otherwise 15-bit indices, 1,048,576 group entities
+/// and `pad` bytes more in a box of its own.
+fn packed(dense: bool, pad: usize) -> Vec<u8> {
     let items = 65_535u16;
     let mut infe = Vec::new();
     let mut iref = Vec::new();
@@ -304,26 +308,36 @@ fn a_meta_packed_at_every_cap_is_held_twice_beside_its_model() {
         entries.extend_from_slice(&id.to_be_bytes());
         entries.push(16);
         for k in 0..16 {
-            let index = 1 + (u32::from(id) + k) % 1000;
-            entries.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
+            if dense {
+                entries.push(1 + ((u32::from(id) + k) % 127) as u8);
+            } else {
+                let index = 1 + (u32::from(id) + k) % 1000;
+                entries.extend_from_slice(&u16::try_from(index).unwrap().to_be_bytes());
+            }
         }
     }
-    let mut ipma = full(b"ipma", 0, 1, &entries);
+    let flags = u32::from(!dense);
+    let mut ipma = full(b"ipma", 0, flags, &entries);
     for _ in 1..65_535 {
-        ipma.extend_from_slice(&full(b"ipma", 0, 1, &[0; 4]));
+        ipma.extend_from_slice(&full(b"ipma", 0, flags, &[0; 4]));
     }
-    let mut grpl = Vec::new();
-    for g in 0..16_384u32 {
-        let mut c = (100_000 + g).to_be_bytes().to_vec();
-        c.extend_from_slice(&64u32.to_be_bytes());
-        for e in 0..64u32 {
-            c.extend_from_slice(&(3 + (g * 64 + e) % 65_000).to_be_bytes());
+    let grpl = (!dense).then(|| {
+        let mut grpl = Vec::new();
+        for g in 0..16_384u32 {
+            let mut c = (100_000 + g).to_be_bytes().to_vec();
+            c.extend_from_slice(&64u32.to_be_bytes());
+            for e in 0..64u32 {
+                c.extend_from_slice(&(3 + (g * 64 + e) % 65_000).to_be_bytes());
+            }
+            grpl.extend_from_slice(&full(b"altr", 0, 0, &c));
         }
-        grpl.extend_from_slice(&full(b"altr", 0, 0, &c));
-    }
-    // hdlr, pitm, iinf, iloc, iref, iprp and grpl, then the rest.
-    let extra = bx(b"abcd", b"").repeat(65_536 - 7);
-    let file = heif(&Meta {
+        grpl
+    });
+    // hdlr, pitm, iinf, iloc, iref, iprp and grpl, if any, then the rest.
+    let named = if dense { 6 } else { 7 };
+    let mut extra = bx(b"abcd", &vec![0; pad]);
+    extra.extend_from_slice(&bx(b"abcd", b"").repeat(65_536 - named - 1));
+    heif(&Meta {
         infe,
         count: usize::from(items),
         idat: None,
@@ -331,12 +345,36 @@ fn a_meta_packed_at_every_cap_is_held_twice_beside_its_model() {
         iref,
         ipco,
         ipma,
-        grpl: Some(grpl),
+        grpl,
         extra,
         spread: false,
-    });
-    let metas = metas(&dir, "caps.heic", &file);
-    assert!(metas < 5.0, "{metas:.2} metas");
+    })
+}
+
+#[test]
+fn a_meta_packed_at_every_cap_and_just_under_its_size_cap_peaks_under_80_mib() {
+    // A model of about 36 MiB beside the source's meta and the one rebuilt
+    // from it: 73.25 MiB measured, 4.58 metas (4.74 for 15 MiB, before the
+    // pad: the ratio falls as a meta holds more that isn't a model, and
+    // grows as it packs the model denser, so the peak is what's bounded).
+    let _turn = turn();
+    let dir = TestDir::new("heic-heap-caps");
+    let pad = (16 << 20) - 256 - meta_len(&packed(false, 0));
+    let file = packed(false, pad);
+    assert!(meta_len(&file) > (16 << 20) - 512);
+    let mib = peak_mib(&dir, "caps.heic", &file);
+    assert!(mib < 80.0, "{mib:.2} MiB");
+}
+
+#[test]
+fn a_meta_packed_densely_at_every_cap_peaks_under_64_mib() {
+    // The same model but for the groups' 4 MiB, from 9.75 MiB: 55.88 MiB
+    // measured, 5.73 metas.
+    let _turn = turn();
+    let dir = TestDir::new("heic-heap-dense");
+    let file = packed(true, 0);
+    let mib = peak_mib(&dir, "dense.heic", &file);
+    assert!(mib < 64.0, "{mib:.2} MiB");
 }
 
 #[test]
