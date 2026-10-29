@@ -75,6 +75,11 @@ const MAX_PENDING_BYTES: u64 = 4 << 20;
 /// The most reasons the log keeps.
 const MAX_LOG: usize = 16;
 
+/// The most places kept of shared blocks written in a way other than the
+/// one they were first written in (another recipe's, or copied as they
+/// are): past them, such a block is written again each time it's listed.
+const MAX_MORE: usize = 65_536;
+
 /// Why a file with an entry that points where Compress can't follow is
 /// refused.
 pub(crate) const UNMOVABLE: &str = "has data Compress can't move yet.";
@@ -476,7 +481,7 @@ fn add_shape(shape: &mut crc32fast::Hasher, blocks: impl Iterator<Item = (u64, u
 
 /// Where a block listed more than once went (at 0 until it's written), and
 /// how: 0 for copied as it is, or the number of the [`Recipe`] it was
-/// recoded by.
+/// recoded by (a strip shorter than the others is recoded by another).
 #[derive(Debug, Clone, Copy, Default)]
 struct Place {
     at: u64,
@@ -544,10 +549,15 @@ struct Recoder<'a> {
     /// what the source's decoded to.
     pending: Vec<(Block, Recipe, u32)>,
     pending_bytes: u64,
-    /// The blocks listed more than once, sorted, and where each went (at 0
-    /// until it's written).
+    /// The blocks listed more than once, sorted; where each was first
+    /// written, and how (at 0 until it's written), which is when it's
+    /// counted against the source's size, once; and where it went written
+    /// in other ways, up to [`MAX_MORE`] of them, those of the IFD being
+    /// written noted to forget if it's taken back.
     shared: Vec<Block>,
     placed: Vec<Place>,
+    more: HashMap<(usize, u32), Place>,
+    more_now: Vec<(usize, u32)>,
     /// The recipes of shared blocks written, numbered from 1.
     recipes: HashMap<Recipe, u32>,
     most: u64,
@@ -587,6 +597,8 @@ impl<'a> Recoder<'a> {
             pending_bytes: 0,
             placed: vec![Place::default(); shared.len()],
             shared,
+            more: HashMap::new(),
+            more_now: Vec::new(),
             recipes: HashMap::new(),
             most,
             buf: vec![0; 64 * 1024],
@@ -615,8 +627,31 @@ impl<'a> Recoder<'a> {
         let Ok(k) = self.shared.binary_search(&block) else {
             return (None, None);
         };
-        let place = self.placed[k];
-        ((place.at > 0 && place.how == how).then_some(place), Some(k))
+        let first = self.placed[k];
+        let place = if first.at > 0 && first.how == how {
+            Some(first)
+        } else {
+            self.more.get(&(k, how)).copied()
+        };
+        (place, Some(k))
+    }
+
+    /// Notes that a block, the shared one `k` if it is one, went to
+    /// `place`: whether that's the first time it's written in any way, the
+    /// one time it's counted against the source's size.
+    fn put(&mut self, k: Option<usize>, place: Place) -> bool {
+        let Some(first) = k.and_then(|k| self.placed.get_mut(k)) else {
+            return true;
+        };
+        if first.at == 0 {
+            *first = place;
+            return true;
+        }
+        if let Some(k) = k.filter(|_| self.more.len() < MAX_MORE) {
+            self.more.insert((k, place.how), place);
+            self.more_now.push((k, place.how));
+        }
+        false
     }
 
     /// The number a shared block written as `recipe` is noted with.
@@ -654,13 +689,13 @@ impl<'a> Recoder<'a> {
             }
             copied?;
             self.ticker.tick(block.len)?;
-            written.taken = written.taken.saturating_add(block.len);
-            if let Some(k) = k {
-                self.placed[k] = Place {
-                    at,
-                    len: block.len,
-                    how: 0,
-                };
+            let place = Place {
+                at,
+                len: block.len,
+                how: 0,
+            };
+            if self.put(k, place) {
+                written.taken = written.taken.saturating_add(block.len);
             }
             written.offsets.push(at);
         }
@@ -723,13 +758,13 @@ impl<'a> Recoder<'a> {
             }
             let crc = crc?;
             let len = out.at() - at;
-            taken = taken.saturating_add(block.len);
-            if let Some(k) = k {
-                self.placed[k] = Place {
-                    at,
-                    len,
-                    how: number,
-                };
+            let place = Place {
+                at,
+                len,
+                how: number,
+            };
+            if self.put(k, place) {
+                taken = taken.saturating_add(block.len);
             }
             let written = Block { offset: at, len };
             offsets.push(at);
@@ -776,15 +811,29 @@ impl<'a> Recoder<'a> {
         Ok(())
     }
 
-    /// Takes back what was written of an IFD from `start` on, for `why`.
-    fn take_back(&mut self, out: &mut Sink, start: u64, n: usize, why: &str) -> Result<(), Error> {
+    /// Takes back what was written of `image`, IFD `n`, from `start` on,
+    /// for `why`: the places its blocks went are forgotten.
+    fn take_back(
+        &mut self,
+        out: &mut Sink,
+        image: &Image,
+        start: u64,
+        n: usize,
+        why: &str,
+    ) -> Result<(), Error> {
         out.rewind(start)?;
         self.pending.retain(|(block, ..)| block.offset < start);
         self.pending_bytes = self.pending.iter().map(|(block, ..)| block.len).sum();
-        for place in &mut self.placed {
-            if place.at >= start {
-                *place = Place::default();
+        for block in &image.blocks {
+            let k = self.shared.binary_search(block).ok();
+            if let Some(first) = k.and_then(|k| self.placed.get_mut(k)) {
+                if first.at >= start {
+                    *first = Place::default();
+                }
             }
+        }
+        for key in self.more_now.drain(..) {
+            self.more.remove(&key);
         }
         self.log.add(format!("IFD {n} copied as it is: {why}"));
         Ok(())
@@ -802,6 +851,7 @@ impl Blocks for Recoder<'_> {
         let Some(how) = self.hows.get(n) else {
             return Err(Error::Broken(format!("no plan for IFD {n}")));
         };
+        self.more_now.clear();
         let written = match how {
             How::Copy(_) => self.copy(r, out, image)?,
             How::Recode { .. } => {
@@ -812,7 +862,7 @@ impl Blocks for Recoder<'_> {
                         written
                     }
                     Err(Fail::Undecodable(why)) => {
-                        self.take_back(out, start, n, &why)?;
+                        self.take_back(out, image, start, n, &why)?;
                         self.copy(r, out, image)?
                     }
                     Err(Fail::Job(e)) => return Err(e),
@@ -944,7 +994,9 @@ mod tests {
     use std::path::PathBuf;
 
     use super::super::read::{read_value, MISSIZED};
-    use super::super::tests::{gray, miscounted, picture, set_entry, Builder, Page, B, V};
+    use super::super::tests::{
+        gray, miscounted, picture, set_block, set_entry, Builder, Page, B, V,
+    };
     use super::*;
 
     /// A file the test removes when it's done with it.
@@ -1494,6 +1546,109 @@ mod tests {
             "{}",
             wrote.log
         );
+    }
+
+    /// LZW of `bytes`, as TIFF writes it.
+    fn lzw(bytes: &[u8]) -> Vec<u8> {
+        weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
+            .encode(bytes)
+            .unwrap()
+    }
+
+    /// Samples no codec shrinks much, `n` bytes of them.
+    fn noise(n: usize) -> Vec<u8> {
+        let mut x: u32 = 0x1234_5678;
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// `file` with block `n` of page `to` pointing at block `m` of page
+    /// `from`.
+    fn shared(mut file: Vec<u8>, (from, m): (usize, usize), (to, n): (usize, usize)) -> Vec<u8> {
+        let tiff = read(&file);
+        let block = tiff.pages[from].blocks[m];
+        set_block(&mut file, tiff.pages[to].at, n, block.offset, block.len);
+        file
+    }
+
+    #[test]
+    fn a_block_shared_by_strips_of_other_sizes_is_counted_once() {
+        // 200 × 950 in strips of 100 rows, all ten listing one block of
+        // 20,000 bytes: the last strip, of 50 rows, is recoded from it
+        // too, and it was counted twice against a file of 20,190 bytes.
+        let strips = [vec![B::Data(smooth(20_000))], vec![B::Same(0); 9]].concat();
+        let file = Builder::new(b'I', false, vec![gray(200, 950, 100, strips)]).build();
+        assert!(file.len() < 2 * 20_000);
+        let out = compressed(&file);
+        let want: Vec<u8> = [smooth(20_000).repeat(9), smooth(10_000)].concat();
+        assert_eq!(decoded_at(&out, read(&out).pages[0].at).1, want);
+        // An LZW strip shared by a 500 × 400 page and two 500 × 200 ones:
+        // written once for each height.
+        let rows = noise(500 * 400);
+        let page = |h: u32, data: Vec<u8>| {
+            let mut page = gray(500, h, h, vec![B::Data(data)]);
+            page.tags.push((259, V::Short(vec![5])));
+            page
+        };
+        let pages = vec![
+            page(400, lzw(&rows)),
+            page(200, vec![0]),
+            page(200, vec![0]),
+        ];
+        let file = Builder::new(b'I', false, pages).build();
+        let file = shared(shared(file, (0, 0), (1, 0)), (0, 0), (2, 0));
+        let out = compressed(&file);
+        let back = read(&out);
+        let at = |n: usize| back.pages[n].blocks[0];
+        assert_eq!(at(1), at(2));
+        assert_ne!(at(0), at(1));
+        assert_eq!(decoded_at(&out, back.pages[0].at).1, rows);
+        assert_eq!(decoded_at(&out, back.pages[2].at).1, rows[..500 * 200]);
+    }
+
+    #[test]
+    fn a_shared_block_of_an_ifd_taken_back_is_counted_once() {
+        // Page A lists X and a broken strip, page B X and a good one; X is
+        // most of the file. Either way round, A is copied as it is and B
+        // recoded.
+        let x = noise(64 * 100);
+        let good = noise(64 * 100);
+        for a_first in [true, false] {
+            let page = |first: Vec<u8>, second: Vec<u8>| {
+                let mut page = gray(64, 200, 100, vec![B::Data(first), B::Data(second)]);
+                page.tags.push((259, V::Short(vec![5])));
+                page
+            };
+            // B's first strip is A's X, pointed at once the file is built.
+            let (a, b) = (page(lzw(&x), vec![0xFF; 40]), page(vec![0], lzw(&good)));
+            let (pages, a_at) = if a_first {
+                (vec![a, b], 0)
+            } else {
+                (vec![b, a], 1)
+            };
+            let file = Builder::new(b'I', false, pages).build();
+            let file = shared(file, (a_at, 0), (1 - a_at, 0));
+            let plan = plan(&file);
+            let (out, wrote) =
+                written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+            let back = read(&out);
+            let o = back.layout.order;
+            assert_eq!(back.pages[a_at].uint(259, o), Some(5));
+            assert_eq!(back.pages[1 - a_at].uint(259, o), Some(8));
+            let b_page = decoded_at(&out, back.pages[1 - a_at].at).1;
+            assert_eq!(b_page, [&x[..], &good].concat());
+            let log = wrote.log.to_string();
+            assert!(
+                log.contains(&format!("IFD {a_at} copied as it is")),
+                "{log}"
+            );
+        }
     }
 
     #[test]

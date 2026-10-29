@@ -127,6 +127,37 @@ pub(crate) fn set_entry(file: &mut [u8], at: u64, tag: u16, count: u64, value: u
     file[e + 4 + word..e + 4 + 2 * word].copy_from_slice(&field);
 }
 
+/// Points block `n` of the image IFD at `at` of `file`, a TIFF the builder
+/// made, at `len` bytes at `offset`, in its offsets and counts, inline or
+/// not: so that IFDs can share a block.
+pub(crate) fn set_block(file: &mut [u8], at: u64, n: usize, offset: u64, len: u64) {
+    let o = if file[0] == b'M' {
+        Order::Big
+    } else {
+        Order::Little
+    };
+    let big = o.uint(&file[2..4]) == 43;
+    let (word, count_len, entry_len) = if big { (8, 8, 20) } else { (4, 2, 12) };
+    let at = at as usize;
+    let entries = o.uint(&file[at..at + count_len]) as usize;
+    for (tags, value) in [([273, 324], offset), ([279, 325], len)] {
+        let e = (0..entries)
+            .map(|i| at + count_len + i * entry_len)
+            .find(|&e| tags.contains(&(o.uint(&file[e..e + 2]) as u16)))
+            .unwrap();
+        let size = super::read::type_size(o.uint(&file[e + 2..e + 4]) as u16).unwrap() as usize;
+        let count = o.uint(&file[e + 4..e + 4 + word]) as usize;
+        let field = e + 4 + word;
+        let base = if size * count <= word {
+            field
+        } else {
+            o.uint(&file[field..field + word]) as usize
+        };
+        let pos = base + n * size;
+        file[pos..pos + size].copy_from_slice(&o.bytes(value, size));
+    }
+}
+
 /// Two pages, the second's Exif and GPS pointers set to the first's Exif
 /// and GPS IFDs. The Exif IFD says Adobe RGB the DCF way (ColorSpace
 /// 0xFFFF, Interop `R03`) and holds a date.
