@@ -163,7 +163,8 @@ pub(crate) struct Span {
 }
 
 impl Span {
-    /// Where it ends, in a space of `size` bytes.
+    /// Where it ends, in a space of `size` bytes ([`Meta::spans`] checks
+    /// that it ends before any number does).
     pub(crate) fn end(self, size: u64) -> u64 {
         self.len.map_or(size, |len| self.start + len)
     }

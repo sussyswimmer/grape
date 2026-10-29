@@ -272,9 +272,24 @@ impl Survey {
         else {
             return Ok(());
         };
+        // Its extents, judged before a byte of it is read, as place_data
+        // judges dropped data: one that runs to the end is refused, and
+        // one past its file or idat is broken.
+        let spans = m.spans(loc)?;
+        let size = match loc.method {
+            0 => self.top.len,
+            _ => m.idat().map_or(0, |r| r.len() as u64),
+        };
+        for span in &spans {
+            if span.len.is_none() {
+                return Err(Error::Refused(LAYOUT.into()));
+            }
+            if span.end(size) > size {
+                return Err(Error::Broken(format!("item {id}'s data runs past its end")));
+            }
+        }
         let mut left = self.left;
         let walked = self.exif(r, loc, &mut left)?;
-        let spans = m.spans(loc)?;
         self.left = left;
         self.walked = Some(id);
         self.found.fields.extend(walked.fields);
@@ -510,7 +525,17 @@ impl Survey {
     fn exif(&self, r: &mut dyn In, loc: &Location, left: &mut u64) -> Result<Walked, Error> {
         let mut walked = Walked::default();
         let pieces = self.pieces(loc)?;
-        let total: u64 = pieces.iter().map(|p| p.end - p.start).sum();
+        // Each piece lies in its file or idat; many that share bytes may
+        // add up past any number all the same.
+        let Some(total) = pieces
+            .iter()
+            .try_fold(0u64, |total, p| total.checked_add(p.end - p.start))
+        else {
+            return Err(Error::Broken(format!(
+                "item {}'s data runs past any number",
+                loc.id
+            )));
+        };
         if total == 0 {
             return Ok(walked);
         }
@@ -544,9 +569,10 @@ impl Survey {
         Ok(walked)
     }
 
-    /// A dropped item's extents, in the file or in `idat`'s content.
+    /// An Exif item's extents, in the file or in `idat`'s content.
     fn pieces(&self, loc: &Location) -> Result<Vec<Range<u64>>, Error> {
-        // Dropped data has lengths (checked), and lies within its space.
+        // Each has a length, and lies within its space: orient checks the
+        // primary's, and place_data the dropped ones.
         Ok(self
             .meta
             .spans(loc)?
@@ -567,11 +593,16 @@ impl Survey {
     ) -> Result<Vec<u8>, Error> {
         let idat = self.meta.idat().unwrap_or(0..0);
         let mut out = Vec::new();
+        let end = skip.saturating_add(take);
+        // Where `piece` starts in the item's data.
         let mut at = 0u64;
         for piece in pieces {
+            if at >= end {
+                break;
+            }
             let len = piece.end - piece.start;
             let from = skip.max(at);
-            let to = (skip + take).min(at + len);
+            let to = end.min(at.saturating_add(len));
             if from < to {
                 let start = piece.start + (from - at);
                 let n = (to - from) as usize;
@@ -580,7 +611,7 @@ impl Survey {
                     read_at(r, start, &mut buf)?;
                     out.extend_from_slice(&buf);
                 } else {
-                    // Read before place_data checks it, for the primary's.
+                    // Within idat (checked), but checked again here.
                     let piece = usize::try_from(start)
                         .ok()
                         .and_then(|start| idat.start.checked_add(start))
@@ -596,7 +627,7 @@ impl Survey {
                     out.extend_from_slice(piece);
                 }
             }
-            at += len;
+            at = at.saturating_add(len);
         }
         Ok(out)
     }
@@ -1676,6 +1707,44 @@ mod tests {
         b.refs[0] = (*b"cdsc", EXIF, vec![THUMB]);
         let (out, _) = strip(&b.build().0);
         assert!(meta(&out).item(EXIF).is_none());
+    }
+
+    #[test]
+    fn a_portrait_exifs_extents_are_judged_before_its_read() {
+        // 64-bit offsets and lengths: iloc v1's id, construction method,
+        // data reference and extent count, then each extent's offset and
+        // length.
+        let mut b = turned(simple());
+        b.sizes = [8, 8, 0, 0];
+        b.items[1].extents = 2;
+        let (src, _) = b.build();
+        let first = entry_at(&src, EXIF) + 8;
+        let extent = |file: &mut [u8], at: usize, offset: u64, len: u64| {
+            file[at..at + 8].copy_from_slice(&offset.to_be_bytes());
+            file[at + 8..at + 16].copy_from_slice(&len.to_be_bytes());
+        };
+        // Two halves of every number: their sum is past any.
+        let mut file = src.clone();
+        extent(&mut file, first, 0, 1 << 63);
+        extent(&mut file, first + 16, 0, 1 << 63);
+        assert!(matches!(plan(&file), Err(Error::Broken(_))));
+        // Far past the file, read from a file, which can't seek there: 5
+        // bytes 10 before the end of every number, and the rest after.
+        let mut file = src.clone();
+        extent(&mut file, first, u64::MAX - 9, 5);
+        let path = std::env::temp_dir().join(format!(
+            "grape-heic-unit-{}.heic",
+            crate::output::unique_suffix()
+        ));
+        std::fs::write(&path, &file).unwrap();
+        let mut r = std::io::BufReader::new(std::fs::File::open(&path).unwrap());
+        let planned = Plan::new(&mut r, file.len() as u64);
+        std::fs::remove_file(&path).unwrap();
+        assert!(matches!(planned, Err(Error::Broken(_))), "{planned:?}");
+        // One that runs to the end is refused, as dropped data is.
+        let mut file = src.clone();
+        extent(&mut file, first + 16, 1, 0);
+        assert_eq!(refused(&file), LAYOUT);
     }
 
     #[test]
