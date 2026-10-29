@@ -28,6 +28,8 @@
 //!   - `meta`'s own `uuid` boxes (XMP, or Other: a Canon HIF's encoder
 //!     version), and its `xml ` (XMP) and `bxml` (Other) boxes: left out
 //!     of the rebuilt `meta`, the empty ones unreported;
+//!   - every `iloc` entry with no item (no `infe`), which no reader
+//!     follows: what it points to is no item's (below);
 //!   - every byte of `mdat` and `idat` that no kept item points to (still
 //!     pictures reach their data only through `iloc`): zeroed, as the copy
 //!     goes, and reported as Other when what no item at all points to
@@ -54,7 +56,8 @@
 //!   `mdat` and `idat`; the primary's Exif kept for its orientation in
 //!   several extents, or in too few bytes for it, or as dropped data may
 //!   not be, or that a kept item refers to by anything but a `cdsc` (a
-//!   picture made of it, data in it); kept data inside `meta`, or inside
+//!   picture made of it, data in it); an `iloc` entry with no item that a
+//!   kept item refers to that way; kept data inside `meta`, or inside
 //!   a box that's dropped or zeroed; a picture made of a dropped item
 //!   (`dimg`), or whose data is in one; a primary item that is metadata.
 //!   A sequence is refused too ([`SEQUENCE`]). Kept data that names
@@ -171,8 +174,11 @@ struct Survey {
     /// The file-level `meta` box.
     meta_box: Header,
     meta: Meta,
-    /// The items dropped.
+    /// The items dropped, and the ids of `orphans`.
     dropped: HashSet<u32>,
+    /// The ids of `iloc` entries with no item (no `infe`): no reader
+    /// follows one, so it goes, and the bytes it points to are no item's.
+    orphans: HashSet<u32>,
     /// The primary's Exif, kept for its orientation.
     oriented: Option<Oriented>,
     /// The Exif item walked to find it, reported already.
@@ -222,7 +228,7 @@ impl Survey {
             .filter(|r| &r.kind == b"cdsc")
             .map(|r| r.from)
             .collect();
-        let dropped: HashSet<u32> = meta
+        let mut dropped: HashSet<u32> = meta
             .items
             .iter()
             .filter(|item| {
@@ -234,12 +240,21 @@ impl Survey {
         if dropped.contains(&meta.primary) {
             return Err(Error::Refused(LAYOUT.into()));
         }
+        let items: HashSet<u32> = meta.items.iter().map(|item| item.id).collect();
+        let orphans: HashSet<u32> = meta
+            .locations
+            .iter()
+            .map(|l| l.id)
+            .filter(|id| !items.contains(id))
+            .collect();
+        dropped.extend(&orphans);
         let mut s = Survey {
             pass,
             left: top.len,
             top,
             meta_box,
             dropped,
+            orphans,
             oriented: None,
             walked: None,
             removed: meta
@@ -378,7 +393,9 @@ impl Survey {
     }
 
     /// Finds where kept and dropped data is, and refuses what can't be
-    /// rewritten safely.
+    /// rewritten safely. What an `iloc` entry with no item points to isn't
+    /// any item's data: zeroed with the rest no kept item points to, and
+    /// read by report_gaps.
     fn place_data(&mut self) -> Result<(), Error> {
         let len = self.top.len;
         let idat = self.meta.idat().map_or(0, |r| r.len() as u64);
@@ -389,7 +406,7 @@ impl Survey {
             .meta
             .locations
             .iter()
-            .filter(|l| Some(l.id) != oriented)
+            .filter(|l| Some(l.id) != oriented && !self.orphans.contains(&l.id))
         {
             let dropped = self.dropped.contains(&loc.id);
             if dropped && (loc.method == 2 || loc.data_ref != 0) {
@@ -474,17 +491,19 @@ impl Survey {
 
     /// Refuses a kept picture made of a dropped item (`dimg`), or whose
     /// data is in one (`iloc` references, for construction method 2), and
-    /// the Exif kept for the orientation when a kept item refers to it by
-    /// anything but a `cdsc`: a picture made of it, data in it, or what
-    /// else might lean on bytes that are written over.
+    /// the Exif kept for the orientation, or an `iloc` entry with no item,
+    /// when a kept item refers to it by anything but a `cdsc`: a picture
+    /// made of it, data in it, or what else might lean on bytes that are
+    /// written over or zeroed.
     fn check_pictures(&self) -> Result<(), Error> {
         let oriented = self.oriented.as_ref().map(|o| o.id);
+        let leant_on = |id: &u32| Some(*id) == oriented || self.orphans.contains(id);
         let leans = self.meta.refs.iter().any(|r| {
             let to = self.meta.to(r);
             !self.dropped.contains(&r.from)
                 && ((matches!(&r.kind, b"dimg" | b"iloc")
                     && to.iter().any(|id| self.dropped.contains(id)))
-                    || (&r.kind != b"cdsc" && oriented.is_some_and(|id| to.contains(&id))))
+                    || (&r.kind != b"cdsc" && to.iter().any(leant_on)))
         });
         if leans {
             return Err(Error::Refused(LAYOUT.into()));
@@ -2393,6 +2412,92 @@ mod tests {
             ),
             Err(Error::Broken(_))
         ));
+    }
+
+    /// `file` with item `id`'s `infe` (v2) naming item `to` instead, so
+    /// that `id`'s `iloc` entry has no item.
+    fn renamed(mut file: Vec<u8>, id: u32, to: u16) -> Vec<u8> {
+        // After its header, version and flags.
+        let at = meta_at(&file) + meta(&file).item(id).unwrap().range.start + 12;
+        file[at..at + 2].copy_from_slice(&to.to_be_bytes());
+        file
+    }
+
+    #[test]
+    fn an_iloc_entry_with_no_item_goes_and_its_bytes_are_no_items() {
+        // The Exif's infe renamed 99: its iloc entry is left with no item,
+        // its data in mdat or in idat, the camera's or zeros.
+        for place in [Place::Mdat, Place::Idat] {
+            for blank in [false, true] {
+                let mut b = simple();
+                b.items.truncate(2);
+                b.refs.truncate(1);
+                b.items[1].place = place;
+                if blank {
+                    b.items[1].data.fill(0);
+                }
+                let (src, layout) = b.build();
+                let src = renamed(src, EXIF, 99);
+                let (out, found) = strip(&src);
+                let said = match blank {
+                    true => BTreeSet::new(),
+                    false => [Other].into(),
+                };
+                assert_eq!(found, said, "{place:?} {blank}");
+                let m = meta(&out);
+                assert!(m.location(EXIF).is_none() && m.item(99).is_none());
+                assert!(m.iref.is_none() && !has(&out, b"Secret"));
+                if place == Place::Mdat {
+                    let r = layout.file_ranges(EXIF)[0].clone();
+                    assert!(out[r.start as usize..r.end as usize]
+                        .iter()
+                        .all(|&b| b == 0));
+                }
+                assert_eq!(read(&out, &m, 1), layout.data(1));
+                // A second pass finds nothing, and copies it as it is.
+                let (again, found) = strip(&out);
+                assert_eq!(again, out, "{place:?} {blank}");
+                assert!(found.is_empty(), "{place:?} {blank}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_kept_item_that_leans_on_an_iloc_entry_with_no_item_is_refused() {
+        // Item 8, its data in the Exif's (construction method 2: 20 bytes
+        // from its byte 10) by an iloc reference, and the Exif's infe
+        // renamed: the entry its data is in has no item.
+        let mut b = simple();
+        let mut item = Item::new(8, *b"jpeg", Place::Mdat, vec![0xB8; 20]);
+        item.hidden = true;
+        b.items.push(item);
+        b.refs.push((*b"iloc", 8, vec![EXIF]));
+        let (mut file, _) = b.build();
+        // iloc v1: id, construction method, data reference, extent count,
+        // then the extent's offset and length.
+        let at = entry_at(&file, 8);
+        file[at + 2..at + 4].copy_from_slice(&[0, 2]);
+        file[at + 8..at + 12].copy_from_slice(&10u32.to_be_bytes());
+        file[at + 12..at + 16].copy_from_slice(&20u32.to_be_bytes());
+        assert_eq!(refused(&renamed(file, EXIF, 99)), LAYOUT);
+        // A grid made of it, and a picture that refers to it otherwise.
+        for kind in [b"dimg", b"thmb", b"auxl", b"prem", b"base", b"abcd"] {
+            let mut b = simple();
+            b.items.push(match kind {
+                b"dimg" => Item::new(16, *b"grid", Place::Idat, vec![0, 0, 0, 0, 0, 64, 0, 48]),
+                _ => Item::picture(16, 0xC6, 20),
+            });
+            b.refs.push((*kind, 16, vec![EXIF]));
+            assert_eq!(refused(&renamed(b.build().0, EXIF, 99)), LAYOUT, "{kind:?}");
+        }
+        // A cdsc to it is no reason: the reference loses it.
+        let mut b = simple();
+        b.items.push(Item::picture(16, 0xC6, 20));
+        b.refs.push((*b"cdsc", 16, vec![EXIF]));
+        let (out, _) = strip(&renamed(b.build().0, EXIF, 99));
+        let m = meta(&out);
+        assert!(m.item(16).is_some() && m.location(EXIF).is_none());
+        assert!(m.iref.is_none());
     }
 
     #[test]
