@@ -10,9 +10,9 @@
 //!   for a run the plan would refuse) and that this build can run opens a
 //!   panel ([`route_for`], [`model::route`] with `jobs::check_runnable`);
 //!   everything else goes straight to `jobs::submit`. Merge PDFs opens when
-//!   Grape's PDF library is found, Compress on JPG and PNG always, and
-//!   Compress, Audio Channels and Normalize Volume on audio and video when
-//!   FFmpeg is (D26). `GRAPE_PREVIEW_PANELS=1` (QA) also opens the four
+//!   Grape's PDF library is found, Compress on JPG, PNG and TIFF always,
+//!   and Compress, Audio Channels and Normalize Volume on audio and video
+//!   when FFmpeg is (D26, D28). `GRAPE_PREVIEW_PANELS=1` (QA) also opens the four
 //!   where they're offered but can't run (Compress on MP3s without
 //!   FFmpeg), and their Run meets the same check and shows the same info
 //!   toast.
