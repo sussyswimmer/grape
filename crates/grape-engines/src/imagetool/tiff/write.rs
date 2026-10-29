@@ -616,6 +616,15 @@ impl Sink<'_> {
         self.pad_to(to)
     }
 
+    /// Goes back to `to`, before where the next byte goes: what's written
+    /// from there takes the place of what was, and the caller cuts the file
+    /// at the size [`write_with`] gives.
+    pub(crate) fn rewind(&mut self, to: u64) -> Result<(), Error> {
+        self.w.seek(SeekFrom::Start(to)).map_err(Error::Write)?;
+        self.at = to;
+        Ok(())
+    }
+
     /// Pads with zeros up to `to`.
     fn pad_to(&mut self, to: u64) -> Result<(), Error> {
         while self.at < to {
