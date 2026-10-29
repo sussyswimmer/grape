@@ -24,6 +24,9 @@
 //!     unless all zero: a Samsung `sefd` trailer, with the capture time
 //!     and mobile country code); existing `free` and `skip` boxes are zeroed,
 //!     unreported (old editors leave metadata there);
+//!   - `meta`'s own `uuid` boxes (XMP, or Other: a Canon HIF's encoder
+//!     version), and its `xml ` (XMP) and `bxml` (Other) boxes: left out
+//!     of the rebuilt `meta`, the empty ones unreported;
 //!   - every byte of `mdat` and `idat` that no kept item points to (still
 //!     pictures reach their data only through `iloc`): zeroed, as the copy
 //!     goes, and reported as Other when what no item at all points to
@@ -33,8 +36,9 @@
 //!   tiles, thumbnails, alpha, depth, Portrait mattes, gain maps, `tmap`),
 //!   every other property (`colr`, `irot`, `imir`, `clap`, `pixi`,
 //!   `hvcC`, `ispe`, `auxC`, `pasp`, …), `ftyp`, `etyp`, `hdlr`, `pitm`,
-//!   `dinf`, `grpl` (less the dropped ids), `idat` (all but kept data zeroed)
-//!   and each kept `iloc` entry, copied as it was; `colr` holds the color.
+//!   `dinf`, `grpl` (less the dropped ids), `idat` (all but kept data zeroed),
+//!   each kept `iloc` entry and every other box in `meta`, copied as it
+//!   was; `colr` holds the color.
 //! - **Kept for the orientation** (D26, as JPEG's minimal Exif): the
 //!   primary's Exif when its Orientation is 2 to 8, whether or not `irot`
 //!   and `imir` turn the picture too, since readers that follow Exif don't
@@ -172,6 +176,8 @@ struct Survey {
     left: u64,
     /// For each of `ipco`'s properties, whether it's removed.
     removed: Vec<bool>,
+    /// The places of `meta`'s boxes left out of it, in order.
+    gone: Vec<usize>,
     /// Each top-level box's fate.
     fates: Vec<Fate>,
     /// Where the output ends: past it, boxes and bytes are cut.
@@ -236,6 +242,7 @@ impl Survey {
                 .iter()
                 .map(|p| METADATA_PROPERTIES.contains(&&p.kind))
                 .collect(),
+            gone: Vec::new(),
             meta,
             fates: Vec::new(),
             end: 0,
@@ -249,6 +256,7 @@ impl Survey {
         s.orient(r)?;
         s.place_data()?;
         s.check_pictures()?;
+        s.judge_meta_boxes()?;
         s.judge_boxes(r)?;
         s.report_items(r)?;
         s.report_properties();
@@ -474,6 +482,37 @@ impl Survey {
         });
         if leans {
             return Err(Error::Refused(LAYOUT.into()));
+        }
+        Ok(())
+    }
+
+    /// Leaves out of `meta` the boxes in it that hold metadata, and
+    /// reports the ones that aren't empty: each `uuid` (XMP, or other
+    /// fields: a Canon HIF's encoder version), `xml ` (XMP) and `bxml`
+    /// (other fields). Kept data in one is refused, though `meta` holds
+    /// none (place_data), and construction method 1 points into `idat`
+    /// only.
+    fn judge_meta_boxes(&mut self) -> Result<(), Error> {
+        let at = self.meta_box.content().start;
+        for (i, child) in self.meta.children.iter().enumerate() {
+            let content = child.content();
+            let field = match &child.kind {
+                b"uuid" => match self.meta.bytes[content.clone()].get(..16) {
+                    Some(user) if user == XMP_UUID => MetaField::Xmp,
+                    _ => MetaField::Other,
+                },
+                b"xml " => MetaField::Xmp,
+                b"bxml" => MetaField::Other,
+                _ => continue,
+            };
+            let range = at + child.range.start as u64..at + child.range.end as u64;
+            if overlaps(&self.kept_file, &range) {
+                return Err(Error::Refused(LAYOUT.into()));
+            }
+            if !content.is_empty() {
+                self.found.fields.insert(field);
+            }
+            self.gone.push(i);
         }
         Ok(())
     }
@@ -735,9 +774,9 @@ impl Survey {
         Ok(())
     }
 
-    /// Whether `meta` loses an item or a property.
+    /// Whether `meta` loses an item, a property or a box.
     fn meta_changes(&self) -> bool {
-        !self.dropped.is_empty() || self.removed.contains(&true)
+        !self.dropped.is_empty() || self.removed.contains(&true) || !self.gone.is_empty()
     }
 
     /// Whether `meta` is written again: it changes, bytes in `idat` are
@@ -894,7 +933,8 @@ fn rebuild(s: &Survey, out: &mut Vec<u8>) {
             }
         } else if m.grpl == Some(i) {
             rebuild_grpl(s, child, out);
-        } else {
+        } else if s.gone.binary_search(&i).is_err() {
+            // But a box of metadata, which is left out.
             out.extend_from_slice(&m.bytes[child.range.clone()]);
         }
     }
@@ -1334,7 +1374,7 @@ impl Plan {
             return wrong(format!("still holds {:?}", s.found.fields));
         }
         if s.meta_changes() {
-            return wrong("still holds metadata items or properties".into());
+            return wrong("still holds metadata items, properties or boxes".into());
         }
         let m = &s.meta;
         if m.primary != self.primary {
@@ -1446,7 +1486,7 @@ mod tests {
 
     use super::super::isobmff::boxes::load;
     use super::super::isobmff::tests::{
-        bx, described, iphone, layouts, meta_at, portrait, read, simple, uuid, Builder, Item,
+        bx, described, full, iphone, layouts, meta_at, portrait, read, simple, uuid, Builder, Item,
         Place, C2PA, EXIF, GAIN, SECRET_XMP, THUMB, TMAP, XMP, XMP_UUID as XMP_USER_TYPE,
     };
     use super::*;
@@ -2105,6 +2145,76 @@ mod tests {
         let mdat = src_top.all(b"mdat").next().unwrap();
         assert_eq!(out.len() as u64, mdat.end());
         assert_eq!(t.tail, out.len() as u64);
+    }
+
+    #[test]
+    fn metas_own_uuid_xml_and_bxml_boxes_go() {
+        // A Canon HIF's uuid box, which names its encoder.
+        const CANON: [u8; 16] = [
+            0x85, 0xC0, 0xB6, 0x87, 0x82, 0x0F, 0x11, 0xE0, 0x81, 0x11, 0xF4, 0xCE, 0x46, 0x2B,
+            0x6A, 0x48,
+        ];
+        let canon = uuid(CANON, b"\0\0\0\x26CNCVSecretHEIF001/10.00.01/00.00.00");
+        let xmp = uuid(XMP_USER_TYPE, SECRET_XMP.as_bytes());
+        let xml = full(b"xml ", 0, 0, SECRET_XMP.as_bytes());
+        let bxml = full(b"bxml", 0, 0, b"SecretBinaryXml");
+        let file = |boxes: &[&Vec<u8>]| {
+            let mut b = simple();
+            b.items.truncate(1);
+            b.refs.clear();
+            b.extra_meta = boxes.iter().map(|b| b.to_vec()).collect();
+            b.extra_meta.push(bx(b"abcd", b"kept"));
+            b.build().0
+        };
+        let kinds = |f: &[u8]| meta(f).children.iter().map(|c| c.kind).collect::<Vec<_>>();
+        let src = file(&[&canon, &xmp, &xml, &bxml]);
+        let (out, found) = strip(&src);
+        assert_eq!(found, [Xmp, Other].into());
+        assert!(!has(&out, b"Secret") && !has(&out, b"CNCV"));
+        // The rest of meta stays, a box Grape doesn't know among it.
+        let mut left = kinds(&src);
+        left.retain(|k| !matches!(k, b"uuid" | b"xml " | b"bxml"));
+        assert_eq!(kinds(&out), left);
+        assert!(has(&out, b"kept"));
+        // A second pass finds nothing, and copies it as it is.
+        let (again, found) = strip(&out);
+        assert_eq!(again, out);
+        assert!(found.is_empty());
+        // Each alone says what it held, and an empty one nothing.
+        let empty = bx(b"uuid", b"");
+        for (b, said) in [
+            (&canon, vec![Other]),
+            (&xmp, vec![Xmp]),
+            (&xml, vec![Xmp]),
+            (&bxml, vec![Other]),
+            (&empty, vec![]),
+        ] {
+            let src = file(&[b]);
+            let (out, found) = strip(&src);
+            assert_eq!(
+                found,
+                said.into_iter().collect::<BTreeSet<_>>(),
+                "{:?}",
+                &b[4..8]
+            );
+            assert!(out != src && !kinds(&out).contains(&b[4..8].try_into().unwrap()));
+        }
+        // Kept data in one is refused: the primary's extent pointed into
+        // Canon's (whose content starts 24 bytes into it).
+        let mut src = file(&[&canon]);
+        let m = meta(&src);
+        let at = meta_at(&src)
+            + m.children
+                .iter()
+                .find(|c| &c.kind == b"uuid")
+                .unwrap()
+                .range
+                .start
+            + 24;
+        let primary = entry_at(&src, 1) + 8;
+        src[primary..primary + 4].copy_from_slice(&(at as u32).to_be_bytes());
+        src[primary + 4..primary + 8].copy_from_slice(&8u32.to_be_bytes());
+        assert_eq!(refused(&src), LAYOUT);
     }
 
     #[test]
