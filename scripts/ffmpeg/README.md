@@ -3,7 +3,7 @@
 Grape builds its own FFmpeg (DECISIONS D24): `ffmpeg` and `ffprobe` with only what Grape uses, static, with networking compiled out, under GPL-2.0-or-later.
 
 - `sources.json` pins every source tarball: URL, size, SHA-256, license. Change a pin here, never in the script. Its `runtime_sources` pin the source of the mingw-w64 runtime that the Windows programs link: checked and carried in the source bundle, not built.
-- `build.sh <target>` downloads and checks the tarballs, builds the libraries and FFmpeg, checks the result and writes `dist/`.
+- `build.sh <target>` downloads and checks the tarballs, builds the libraries and FFmpeg, checks the result and writes `dist/`. A download of the wrong size (a server's error page sent as a success) is fetched again twice, 10 s apart, before the run fails.
 - `notices.py` reads every file the build compiled for license notices and checks them against `licenses/ffmpeg/ffmpeg-notices.txt` (below). `build.sh` runs it.
 
 ## Targets
