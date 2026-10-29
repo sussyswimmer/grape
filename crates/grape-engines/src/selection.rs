@@ -22,9 +22,12 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 ///   for an unknown extension). A path that can't be read is kept as a
 ///   file, so the job reports it ("Grape couldn't read …") instead of it
 ///   silently disappearing.
-/// - **Directory snapshots** for every folder a plan may write to: each
-///   item's parent, the `OutputLocation::Folder` path if set, and
-///   `settings.fallback_dir`. `names` are the folder's current entries
+/// - **Directory snapshots** for every folder a plan may write to: the
+///   `OutputLocation::Folder` path if set, otherwise each item's parent,
+///   and `settings.fallback_dir`. With a chosen folder, the sources'
+///   folders aren't read at all: the planner never looks at them then, and
+///   on macOS listing one in Desktop or Documents would ask the user for
+///   it. `names` are the folder's current entries
 ///   (lossy UTF-8; unreadable entries skipped). `writable` comes from a
 ///   probe: create a uniquely named `.grape-probe-{pid}-{nanos}-{n}` file
 ///   with `create_new`, then delete it (on Windows, the OS deletes it as
@@ -36,30 +39,46 @@ const PROBE_PREFIX: &str = ".grape-probe-";
 ///   that passes the probe. The engine creates it only when a job writes
 ///   into it (by falling back, or because `OutputLocation::Folder` names
 ///   it). No folder is ever created here.
+/// - **The fallback is read only when a plan may write there**: a folder
+///   the planner tries first (those above) is the fallback or isn't
+///   writable. Otherwise it
+///   gets `DirSnapshot::default()`, as an empty fallback path always does,
+///   without touching the disk: the planner never looks at it then, so the
+///   plan is the same. On macOS, Grape's first read in `~/Downloads` asks
+///   the user for the Downloads folder (TCC's Files and Folders; a drop
+///   covers only the dropped items), and a drop that can't fall back must
+///   not ask.
 ///
 /// Never panics; problems show up as `writable = false` and the planner
 /// then falls back or reports `NoWritableDestination`.
 pub fn build_selection(paths: &[PathBuf], settings: &Settings) -> Selection {
     let items: Vec<SelectionItem> = paths.iter().map(|path| item(path)).collect();
 
-    let mut dirs: BTreeSet<PathBuf> = items
-        .iter()
-        .filter_map(|item| item.path.parent())
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .collect();
-    if let OutputLocation::Folder(dir) = &settings.output {
-        dirs.insert(dir.clone());
-    }
+    // The folders the planner tries first.
+    let dirs: BTreeSet<PathBuf> = match &settings.output {
+        OutputLocation::Folder(dir) => BTreeSet::from([dir.clone()]),
+        OutputLocation::NextToSource => items
+            .iter()
+            .filter_map(|item| item.path.parent())
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf)
+            .collect(),
+    };
     let fallback = &settings.fallback_dir;
 
     let mut selection = Selection::new(items);
     for dir in dirs.iter().filter(|dir| *dir != fallback) {
         selection = selection.with_dir(dir.clone(), snapshot(dir));
     }
+    // The planner looks at the fallback's snapshot (writable, then names)
+    // only when one of them is the fallback or isn't writable.
+    let may_fall_back = dirs
+        .iter()
+        .any(|dir| dir == fallback || !selection.dirs.get(dir).is_some_and(|known| known.writable));
     // An empty fallback path gets a snapshot nobody can write to, so the
-    // planner reports `NoWritableDestination`, not a missing snapshot.
-    let fallback_snapshot = if fallback.as_os_str().is_empty() {
+    // planner reports `NoWritableDestination`, not a missing snapshot. So
+    // does a fallback no plan reaches, unread.
+    let fallback_snapshot = if fallback.as_os_str().is_empty() || !may_fall_back {
         DirSnapshot::default()
     } else {
         fallback_snapshot(fallback)
