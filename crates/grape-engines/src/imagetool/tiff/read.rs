@@ -485,6 +485,48 @@ fn refusal(ifd: &Ifd, order: Order) -> Option<&'static str> {
     }
 }
 
+/// How many strips or tiles libtiff 4.5 reads an image IFD as having
+/// (`TIFFNumberOfStrips`, `TIFFNumberOfTiles`), and whether tiles, which it
+/// tells by a TileWidth or TileLength rather than by the tags the blocks
+/// are listed under: ImageLength over RowsPerStrip (one strip without it),
+/// or the tiles across and down, times the samples when the planes are
+/// apart. `None` where libtiff can't read the IFD's layout (no size, a
+/// RowsPerStrip or tile size of 0, numbers past 32 bits, an ImageDepth) or
+/// Grape can't read a number of it.
+fn libtiff_count(ifd: &Ifd, o: Order) -> Option<(u64, bool)> {
+    // A tag's one number, or `default` when it's absent.
+    let number = |tag, default: u64| match ifd.get(tag) {
+        None => Some(default),
+        Some(entry) => entry.uint(o).filter(|&n| n <= u64::from(u32::MAX)),
+    };
+    let (width, height) = (number(256, 0)?, number(257, 0)?);
+    if width == 0 || height == 0 || ifd.get(32997).is_some() {
+        return None;
+    }
+    let planes = match number(284, 1)? {
+        1 => 1,
+        2 => number(277, 1)?,
+        _ => return None,
+    };
+    let tiled = ifd.get(322).is_some() || ifd.get(323).is_some();
+    let per_plane = if tiled {
+        let (across, down) = (number(322, 0)?, number(323, 0)?);
+        if across == 0 || down == 0 {
+            return None;
+        }
+        width.div_ceil(across) * height.div_ceil(down)
+    } else {
+        match number(278, u64::from(u32::MAX))? {
+            0 => return None,
+            rows => height.div_ceil(rows),
+        }
+    };
+    let count = per_plane.checked_mul(planes)?;
+    (1..=u64::from(u32::MAX))
+        .contains(&count)
+        .then_some((count, tiled))
+}
+
 /// Why a file whose byte counts libtiff takes at their word, and readers
 /// that size data themselves don't, is refused ([`Walk::recount`]).
 pub(crate) const MISSIZED: &str =
@@ -822,48 +864,66 @@ impl Walk<'_> {
 
     /// Checks the byte counts an IFD's `blocks` were given (uncompressed
     /// data when `plain`) as libtiff 4.5 reads them (`TIFFReadDirectory`),
-    /// so that both tools copy what readers read ([module docs](self)):
+    /// so that both tools copy what readers read ([module docs](self)).
+    /// libtiff reads as many entries as its own count of strips or tiles
+    /// ([`libtiff_count`]), 0 for those missing, and checks those:
     ///
     /// - **Worked out from the picture** ([`Walk::sizes`]) where libtiff
     ///   ignores them ("Bogus" and "Wrong" StripByteCounts): a lone strip
     ///   at a nonzero offset whose count is 0, or, uncompressed, that runs
     ///   past the file's end or is short of the picture; and uncompressed
     ///   strips or tiles, more than 2 in one plane, whose first two counts
-    ///   differ and aren't 0. Compressed data, or a layout Grape can't
-    ///   size, is refused instead ([`MISSIZED`]).
+    ///   differ and aren't 0. Compressed data, a layout Grape can't size,
+    ///   or blocks listed that aren't libtiff's (more or fewer of them), is
+    ///   refused instead ([`MISSIZED`]): what Grape copies and what libtiff
+    ///   reads would differ.
     /// - **Refused** ([`MISSIZED`]): a block of 0 bytes at a nonzero offset
     ///   (one at 0 is empty, GDAL's sparse tiles), and an uncompressed
-    ///   block shorter than the picture says, which libtiff fails on and
-    ///   Pillow and ImageMagick read past.
+    ///   block libtiff reads that's shorter than the picture says, which
+    ///   libtiff fails on and Pillow and ImageMagick read past.
     fn recount(&mut self, ifd: &Ifd, blocks: &mut [Block], plain: bool) -> Result<(), Error> {
         let l = self.layout;
-        let sizes = if plain {
-            self.sizes(ifd, blocks.len())?.ok()
-        } else {
-            None
+        let listed = blocks.len() as u64;
+        let (count, tiled) = libtiff_count(ifd, l.order).unwrap_or((listed, ifd.tiled));
+        // Sized as libtiff sizes them, which Grape can do only when it
+        // writes them under the tags libtiff reads them by.
+        let sizes = match usize::try_from(count) {
+            Ok(want) if plain && tiled == ifd.tiled => self.sizes(ifd, want)?.ok(),
+            _ => None,
         };
         let short = |n: u64, block: &Block| sizes.as_ref().is_some_and(|s| block.len < s.of(n));
         let apart = ifd.uint(284, l.order) == Some(2);
-        let ignored = match &*blocks {
-            [one] if !ifd.tiled && one.offset != 0 => {
-                let past = one.offset <= l.len && one.len > l.len - one.offset;
-                one.len == 0 || (plain && (past || short(0, one)))
-            }
-            [first, second, _, ..] => {
-                plain && !apart && first.len != second.len && first.len != 0 && second.len != 0
-            }
-            _ => false,
+        // The entries libtiff reads: 0 for those it counts and isn't given.
+        let entry = |n: usize| {
+            blocks
+                .get(n)
+                .copied()
+                .unwrap_or(Block { offset: 0, len: 0 })
+        };
+        let ignored = if count == 1 && !tiled {
+            let one = entry(0);
+            let past = one.offset <= l.len && one.len > l.len - one.offset;
+            one.offset != 0 && (one.len == 0 || (plain && (past || short(0, &one))))
+        } else {
+            let (first, second) = (entry(0), entry(1));
+            plain
+                && !apart
+                && count > 2
+                && first.len != second.len
+                && first.len != 0
+                && second.len != 0
         };
         if ignored {
-            let Some(sizes) = &sizes else {
+            let Some(sizes) = sizes.as_ref().filter(|_| count == listed) else {
                 return Err(Error::Refused(MISSIZED.into()));
             };
             for (n, block) in (0..).zip(blocks.iter_mut()) {
                 block.len = sizes.of(n);
             }
         }
+        // Those libtiff doesn't read are copied as they are.
         let wrong = |(n, block): (u64, &Block)| {
-            (block.len == 0 && block.offset != 0) || (block.len > 0 && short(n, block))
+            (block.len == 0 && block.offset != 0) || (block.len > 0 && n < count && short(n, block))
         };
         if (0..).zip(blocks.iter()).any(wrong) {
             return Err(Error::Refused(MISSIZED.into()));
@@ -1036,7 +1096,9 @@ mod tests {
 
     use std::io::Cursor;
 
-    use super::super::tests::{gray, miscounted, set_entry, shared_meta, Builder, Page, B, V};
+    use super::super::tests::{
+        gray, miscounted, picture, set_entry, shared_meta, Builder, Page, B, V,
+    };
     use super::*;
 
     fn read(bytes: &[u8]) -> Result<Tiff, Error> {
@@ -1475,6 +1537,46 @@ mod tests {
             let tiff = read(&Builder::new(b'I', false, vec![sparse]).build()).unwrap();
             assert_eq!(tiff.pages[0].blocks, [Block { offset: 0, len: 0 }]);
         }
+    }
+
+    #[test]
+    fn byte_counts_are_checked_on_the_strips_libtiff_counts() {
+        let refused =
+            |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
+        // 300 × 100, uncompressed, the first `n` of its ten 3,000-byte
+        // strips listed with `counts`, and RowsPerStrip `rows` or none.
+        let listed = |n: usize, rows: Option<u32>, counts: Vec<u64>| {
+            let strips = picture().chunks(3_000).take(n).map(B::data).collect();
+            let mut page = gray(300, 100, 10, strips);
+            page.tags.retain(|t| t.0 != 278);
+            page.tags
+                .extend(rows.map(|rows| (278, V::Long(vec![rows]))));
+            page.counts = Some(counts);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let full = vec![3_000; 10];
+        // More than libtiff's: with no RowsPerStrip it reads one strip,
+        // the first, whose count it ignores as short of the picture
+        // ("Bogus") and reads the whole picture from there.
+        let mut short = full.clone();
+        short[3] = 10;
+        assert!(refused(&listed(10, None, short)));
+        let mut last = full.clone();
+        last[9] = 1_500;
+        assert!(refused(&listed(10, None, last)));
+        // In strips of 34 rows it reads three, the first short of its rows.
+        assert!(refused(&listed(10, Some(34), full.clone())));
+        // Fewer: in strips of 10 rows it reads ten, the eight missing at 0,
+        // and ignores counts whose first two differ ("Wrong").
+        assert!(refused(&listed(2, Some(10), vec![3_000, 1_500])));
+        // Taken at their word, they're copied as they are: five of ten, or
+        // the whole picture as the strip libtiff reads, and a block after.
+        let five = read(&listed(5, Some(10), vec![3_000; 5])).unwrap();
+        assert_eq!(lens(&five), [3_000; 5]);
+        let mut page = gray(300, 100, 100, vec![B::Data(picture()), B::data(&[9; 100])]);
+        page.tags.retain(|t| t.0 != 278);
+        let file = Builder::new(b'I', false, vec![page]).build();
+        assert_eq!(lens(&read(&file).unwrap()), [30_000, 100]);
     }
 
     #[test]

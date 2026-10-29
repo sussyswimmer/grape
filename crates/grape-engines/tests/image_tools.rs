@@ -491,6 +491,80 @@ fn miscounted_tiff() -> Vec<u8> {
     file
 }
 
+/// A classic gray 300 × 100 TIFF, uncompressed, every byte of its picture
+/// at 8, that lists strips 3,000 bytes apart with `counts`, in strips of
+/// `rows` rows or with no RowsPerStrip: libtiff reads as many strips as its
+/// rows make (one with none), whatever's listed, and checks their counts.
+fn listed_tiff(rows: Option<u32>, counts: &[u32]) -> Vec<u8> {
+    let n = u32::try_from(counts.len()).unwrap();
+    let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+        (256, 4, 1, 300),
+        (257, 4, 1, 100),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (273, 4, n, 0),
+    ];
+    entries.extend(rows.map(|rows| (278, 4, 1, rows)));
+    entries.push((279, 4, n, 0));
+    let ifd = 8 + 30_000;
+    let offsets = ifd + 2 + 12 * u32::try_from(entries.len()).unwrap() + 4;
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..30_000).map(|i| (i % 251) as u8));
+    file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        let value = match tag {
+            273 => offsets,
+            279 => offsets + 4 * n,
+            _ => value,
+        };
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    file.extend((0..n).flat_map(|i| (8 + 3_000 * i).to_le_bytes()));
+    file.extend(counts.iter().flat_map(|c| c.to_le_bytes()));
+    file
+}
+
+#[test]
+fn both_tiff_tools_refuse_counts_libtiff_reads_for_other_strips() {
+    // Ten listed where libtiff, with no RowsPerStrip, reads one strip, and
+    // reads the whole picture from it, its count short ("Bogus"); and two
+    // listed where it reads ten of 10 rows, the eight missing at 0, and
+    // ignores counts whose first two differ ("Wrong").
+    let mut more = [3_000; 10];
+    more[3] = 10;
+    let dir = TestDir::new("tiff-listed");
+    for (name, bytes) in [
+        ("more.tif", listed_tiff(None, &more)),
+        ("fewer.tif", listed_tiff(Some(10), &[3_000, 1_500])),
+    ] {
+        let ops = [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ];
+        for op in ops {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
 #[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
