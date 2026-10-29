@@ -528,6 +528,296 @@ fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     }
 }
 
+/// An ISOBMFF box.
+fn bmff(kind: &[u8; 4], content: &[u8]) -> Vec<u8> {
+    let mut b = u32::try_from(8 + content.len())
+        .unwrap()
+        .to_be_bytes()
+        .to_vec();
+    b.extend_from_slice(kind);
+    b.extend_from_slice(content);
+    b
+}
+
+/// An ISOBMFF full box.
+fn full_box(kind: &[u8; 4], version: u8, flags: u32, content: &[u8]) -> Vec<u8> {
+    let mut c = (u32::from(version) << 24 | flags).to_be_bytes().to_vec();
+    c.extend_from_slice(content);
+    bmff(kind, &c)
+}
+
+/// The meta boxes of [`heif`] in libheif's order, and in an iPhone's.
+const LIBHEIF: [&[u8; 4]; 6] = [b"hdlr", b"iloc", b"iinf", b"pitm", b"iprp", b"iref"];
+const IPHONE: [&[u8; 4]; 7] = [
+    b"hdlr", b"dinf", b"pitm", b"iinf", b"iref", b"iprp", b"iloc",
+];
+
+/// A HEIF file of `brand` with `meta`'s boxes in `order`: a primary
+/// picture (item 1, `primary` in mdat), its thumbnail (item 4, 0xC4s), its
+/// Exif (item 2: a make, a GPS position, a secret) and its XMP (item 3),
+/// then `after`. The pictures' bytes aren't HEVC: nothing here decodes
+/// them. Gives the file and where items 1 to 4 are in it.
+fn heif(
+    brand: &[u8; 4],
+    order: &[&[u8; 4]],
+    primary: &[u8],
+    after: &[u8],
+) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
+    turned_heif(1, brand, order, primary, after)
+}
+
+/// [`heif`] with its Exif's Orientation `orientation`.
+fn turned_heif(
+    orientation: u16,
+    brand: &[u8; 4],
+    order: &[&[u8; 4]],
+    primary: &[u8],
+    after: &[u8],
+) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
+    let mut payload = 6u32.to_be_bytes().to_vec();
+    payload.extend_from_slice(&exif(orientation)[4..]);
+    payload.extend_from_slice(b"SecretSerial");
+    let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'>SecretPlace</x:xmpmeta>".to_vec();
+    let thumb = vec![0xC4; 40];
+    let datas = [primary.to_vec(), payload, xmp, thumb];
+    let ftyp = bmff(b"ftyp", &[&brand[..], b"\0\0\0\0mif1", brand].concat());
+    let meta = |mdat_at: usize| -> Vec<u8> {
+        let mut at = mdat_at + 8;
+        let mut iloc = vec![0x44, 0x00];
+        iloc.extend_from_slice(&4u16.to_be_bytes());
+        for (id, data) in (1u16..).zip(&datas) {
+            iloc.extend_from_slice(&id.to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 1]);
+            iloc.extend_from_slice(&u32::try_from(at).unwrap().to_be_bytes());
+            iloc.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+            at += data.len();
+        }
+        let mut iinf = 4u16.to_be_bytes().to_vec();
+        for (id, kind, hidden, text) in [
+            (1u16, b"hvc1", 0, ""),
+            (2, b"Exif", 1, ""),
+            (3, b"mime", 1, "application/rdf+xml\0"),
+            (4, b"hvc1", 0, ""),
+        ] {
+            let mut c = id.to_be_bytes().to_vec();
+            c.extend_from_slice(&[0, 0]);
+            c.extend_from_slice(kind);
+            c.push(0);
+            c.extend_from_slice(text.as_bytes());
+            iinf.extend_from_slice(&full_box(b"infe", 2, hidden, &c));
+        }
+        let mut iref = Vec::new();
+        for (kind, from) in [(b"cdsc", 2u16), (b"cdsc", 3), (b"thmb", 4)] {
+            iref.extend_from_slice(&bmff(kind, &[from.to_be_bytes(), [0, 1], [0, 1]].concat()));
+        }
+        let ipco = [
+            bmff(b"hvcC", &[1; 23]),
+            full_box(b"ispe", 0, 0, &[0, 0, 0, 64, 0, 0, 0, 48]),
+            bmff(b"colr", b"nclx\0\x01\0\x0d\0\x06\x80"),
+            bmff(b"irot", &[1]),
+        ]
+        .concat();
+        let ipma = full_box(
+            b"ipma",
+            0,
+            0,
+            &[
+                &[0, 0, 0, 2, 0, 1, 4, 0x81, 2, 3, 0x84][..],
+                &[0, 4, 2, 0x81, 2],
+            ]
+            .concat(),
+        );
+        let url = full_box(b"url ", 0, 1, b"");
+        let boxes: Vec<(&[u8; 4], Vec<u8>)> = vec![
+            (
+                b"hdlr",
+                full_box(b"hdlr", 0, 0, &[&[0; 4][..], b"pict", &[0; 13]].concat()),
+            ),
+            (
+                b"dinf",
+                bmff(
+                    b"dinf",
+                    &full_box(b"dref", 0, 0, &[&1u32.to_be_bytes()[..], &url].concat()),
+                ),
+            ),
+            (b"pitm", full_box(b"pitm", 0, 0, &[0, 1])),
+            (b"iinf", full_box(b"iinf", 0, 0, &iinf)),
+            (b"iref", full_box(b"iref", 0, 0, &iref)),
+            (
+                b"iprp",
+                bmff(b"iprp", &[bmff(b"ipco", &ipco), ipma].concat()),
+            ),
+            (b"iloc", full_box(b"iloc", 0, 0, &iloc)),
+        ];
+        let mut content = vec![0; 4];
+        for kind in order {
+            content.extend_from_slice(&boxes.iter().find(|(k, _)| k == kind).unwrap().1);
+        }
+        bmff(b"meta", &content)
+    };
+    let mdat_at = ftyp.len() + meta(0).len();
+    let mut file = ftyp;
+    file.extend_from_slice(&meta(mdat_at));
+    file.extend_from_slice(&bmff(b"mdat", &datas.concat()));
+    file.extend_from_slice(after);
+    let mut at = mdat_at + 8;
+    let ranges = datas
+        .iter()
+        .map(|d| {
+            at += d.len();
+            at - d.len()..at
+        })
+        .collect();
+    (file, ranges)
+}
+
+#[test]
+fn remove_metadata_strips_a_heic_in_place_and_keeps_its_pictures() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-heic");
+    let primary: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+    for (name, order, brand) in [
+        ("photo.heic", &LIBHEIF[..], b"heic"),
+        ("IMG_0001.HEIC", &IPHONE[..], b"heic"),
+        ("pic.heif", &LIBHEIF[..], b"mif1"),
+        ("camera.hif", &IPHONE[..], b"heix"),
+        // AVIF content named .heic: nothing is decoded, so it's stripped.
+        ("avif.heic", &LIBHEIF[..], b"avif"),
+    ] {
+        let (src, at) = heif(brand, order, &primary, b"");
+        let outcome = strip(&dir, name, &src).unwrap();
+        let (stem, ext) = name.split_once('.').unwrap();
+        assert_eq!(
+            outcome.outputs,
+            [dir.join(&format!("{stem} No Metadata.{ext}"))]
+        );
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![Location, Camera, Xmp])],
+            "{name}"
+        );
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        // The same size; the pictures where they were, byte for byte; the
+        // Exif and the XMP zeroed.
+        assert_eq!(out.len(), src.len(), "{name}");
+        assert_eq!(out[at[0].clone()], src[at[0].clone()]);
+        assert_eq!(out[at[3].clone()], src[at[3].clone()]);
+        assert!(out[at[1].start..at[2].end].iter().all(|&b| b == 0));
+        assert!(!out.windows(6).any(|w| w == b"Secret"), "{name}");
+        assert!(
+            !out.windows(4).any(|w| w == b"Exif" || w == b"cdsc"),
+            "{name}"
+        );
+        // meta shrank behind a free box; ftyp and mdat are as they were.
+        let meta_end = 8
+            + u32::from_be_bytes(src[..4].try_into().unwrap()) as usize
+            + u32::from_be_bytes(src[24..28].try_into().unwrap()) as usize
+            - 8;
+        assert_eq!(out[..24], src[..24]);
+        assert_eq!(out[meta_end..at[0].start], src[meta_end..at[0].start]);
+        assert!(out.windows(4).any(|w| w == b"free"));
+        assert!(out.windows(4).any(|w| w == b"thmb"));
+    }
+}
+
+#[test]
+fn remove_metadata_on_a_portrait_heic_keeps_its_orientation_in_its_exif() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-heic-portrait");
+    let (src, at) = turned_heif(6, b"heic", &IPHONE, &[0xA1; 100], b"");
+    let outcome = strip(&dir, "portrait.heic", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out.len(), src.len());
+    // The Exif item stays, where it was: its header offset, `Exif\0\0`
+    // and a big-endian TIFF of Orientation 6 alone, then zeros.
+    let data = &out[at[1].clone()];
+    let mut payload = b"\0\0\0\x06Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
+    payload.extend_from_slice(&[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(data[..payload.len()], payload[..]);
+    assert!(data[payload.len()..].iter().all(|&b| b == 0));
+    assert!(out.windows(4).any(|w| w == b"Exif" || w == b"cdsc"));
+    assert!(!out.windows(6).any(|w| w == b"Secret"));
+    assert!(!out.windows(5).any(|w| w == b"Canon"));
+}
+
+#[test]
+fn remove_metadata_cuts_a_motion_photo_and_says_so() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-heic-motion");
+    let mut after = bmff(b"mpvd", b"SecretVideo");
+    after.extend_from_slice(b"\0\0\0");
+    let (src, at) = heif(b"heic", &IPHONE, &[0xA1; 100], &after);
+    let outcome = strip(&dir, "motion.heic", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp, Embedded])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out.len(), src.len() - after.len());
+    assert_eq!(out[at[0].clone()], src[at[0].clone()]);
+}
+
+#[test]
+fn remove_metadata_on_a_heic_with_none_copies_it() {
+    let dir = TestDir::new("strip-heic-none");
+    let (mut src, _) = heif(b"heic", &LIBHEIF, &[0xA1; 100], b"");
+    // Items 2 and 3 become pictures: nothing is metadata. Their types
+    // are the first two of these in the file, in meta.
+    let types: Vec<usize> = src
+        .windows(4)
+        .enumerate()
+        .filter(|(_, w)| *w == b"Exif" || *w == b"mime")
+        .map(|(i, _)| i)
+        .take(2)
+        .collect();
+    for i in types {
+        src[i..i + 4].copy_from_slice(b"hvc1");
+    }
+    let outcome = strip(&dir, "plain.heic", &src).unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(Vec::new())]);
+    assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), src);
+}
+
+#[test]
+fn remove_metadata_refuses_a_heic_it_cant_strip_and_writes_nothing() {
+    let dir = TestDir::new("strip-heic-refused");
+    let (src, _) = heif(b"heic", &LIBHEIF, &[0xA1; 100], b"");
+    let sequence = [src.clone(), bmff(b"moov", b"")].concat();
+    // The primary item is the Exif.
+    let mut exif_primary = src.clone();
+    let pitm = exif_primary.windows(4).position(|w| w == b"pitm").unwrap();
+    exif_primary[pitm + 8..pitm + 10].copy_from_slice(&[0, 2]);
+    for (name, bytes, kind, message) in [
+        (
+            "burst.heic",
+            sequence,
+            ErrorKind::NotYetSupported,
+            "burst.heic is an image sequence. Remove Metadata works on still HEIC photos for now.",
+        ),
+        (
+            "odd.heic",
+            exif_primary,
+            ErrorKind::NotYetSupported,
+            "odd.heic is laid out in a way Remove Metadata can't handle yet.",
+        ),
+        (
+            "cut.heic",
+            src[..src.len() - 50].to_vec(),
+            ErrorKind::DecodeFailed,
+            "cut.heic isn't a readable HEIC image.",
+        ),
+    ] {
+        let err = strip(&dir, name, &bytes).unwrap_err();
+        assert_eq!(err.kind, kind, "{name}: {}", err.detail);
+        assert_eq!(err.user_message, message);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
 /// A `w`×`h` photo-like picture: a gradient with fine texture, which a
 /// lower quality makes smaller.
 fn photo(w: u32, h: u32) -> RgbImage {
@@ -895,6 +1185,16 @@ fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
             nth,
         );
     }
+    // A HEIC: before it's read, and while its mdat is copied.
+    let (heic, _) = heif(b"heic", &LIBHEIF, &vec![0xA1; 600_000], b"");
+    for nth in [1, 4] {
+        cancelled_at(
+            "photo.heic",
+            &heic,
+            Operation::tool(ToolKey::RemoveMetadata),
+            nth,
+        );
+    }
 }
 
 #[test]
@@ -921,6 +1221,18 @@ fn the_content_decides_what_each_tool_reads() {
     let out = strip(&dir, "scan.jpg", &tagged_tiff(false)).unwrap();
     assert!(out.outputs[0].to_string_lossy().ends_with(".jpg"));
     assert_eq!(tiff_pages(&fs::read(&out.outputs[0]).unwrap()).len(), 2);
+    // A HEIC named .jpg is stripped as a HEIC, and a JPEG named .heic as
+    // a JPEG.
+    let (heic, _) = heif(b"heic", &LIBHEIF, &[0xA1; 100], b"");
+    let out = strip(&dir, "phone.jpg", &heic).unwrap();
+    assert!(out.outputs[0].to_string_lossy().ends_with(".jpg"));
+    let bytes = fs::read(&out.outputs[0]).unwrap();
+    assert_eq!(bytes.len(), heic.len());
+    assert_eq!(bytes[4..8], *b"ftyp");
+    let out = strip(&dir, "photo.heic", &jpeg).unwrap();
+    assert!(fs::read(&out.outputs[0])
+        .unwrap()
+        .starts_with(&[0xFF, 0xD8]));
     // Compress reads only JPEG and PNG: a GIF named .jpg can't be read.
     let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
     let err = compress(&dir, "anim.jpg", gif, grape_core::CompressPreset::Small).unwrap_err();

@@ -158,8 +158,8 @@ fn nothing_runs_outside_the_v1_matrix_and_tools() {
         assert!(v1.contains(pair), "{pair:?} isn't a v1 pair");
     }
     // Over every tool and format, exactly these seven, Create PDF on four
-    // image formats and SVG, and the D26 tools run, each offered on the
-    // wheel for one item or for several.
+    // image formats and SVG, and the D26 and D28 tools run, each offered
+    // on the wheel for one item or for several.
     let tools = runnable_tools(&all);
     assert_eq!(
         tools.len(),
@@ -261,7 +261,7 @@ fn every_v1_pair_runs_with_every_sidecar() {
 }
 
 /// Grape's own image tools (D26, D28), which need no sidecar.
-const IMAGE_TOOLS: [(ToolKey, Format); 7] = [
+const IMAGE_TOOLS: [(ToolKey, Format); 8] = [
     (ToolKey::Compress, Format::Jpg),
     (ToolKey::Compress, Format::Png),
     (ToolKey::RemoveMetadata, Format::Jpg),
@@ -269,6 +269,7 @@ const IMAGE_TOOLS: [(ToolKey, Format); 7] = [
     (ToolKey::RemoveMetadata, Format::Webp),
     (ToolKey::RemoveMetadata, Format::Gif),
     (ToolKey::RemoveMetadata, Format::Tiff),
+    (ToolKey::RemoveMetadata, Format::Heic),
 ];
 
 /// The tools that run with `ffmpeg` and `ffprobe` (D26).

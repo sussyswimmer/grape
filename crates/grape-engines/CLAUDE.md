@@ -22,7 +22,9 @@ src/
                     strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
                     and png_compress.rs (PNG, lossless), scale.rs (Compress's scaling and its peak); mod.rs sniffs the
                     content, which decides the code that runs. tiff/ (D28): read.rs (a TIFF's model, by seeking),
-                    write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF)
+                    write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF).
+                    isobmff/ (D28): boxes.rs (top-level boxes by seeking, boxes in memory), items.rs (the file-level meta:
+                    items, locations, references, properties); heic.rs (Remove Metadata on HEIC, meta rebuilt in place)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
