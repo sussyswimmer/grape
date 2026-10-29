@@ -31,7 +31,7 @@ src/
     drag_out.rs       drag out of the shelf: SHDoDragDrop of Grape's own data object (CF_HDROP + Preferred DropEffect, never a shell ID list, only what callers stored besides), COPY | LINK never MOVE, button-up guard before and after the path check, Esc watchdog
     share.rs          the share sheet: files looked up as StorageFiles (MTA, 10 s), then the "grape-share" STA thread's invisible anchor window owns the sheet (30 s for DataRequested, Chromium's handler rules)
     actions.rs        CF_HDROP and text clipboard, IFileOpenDialog on an STA thread of its own (Move and pick_folder), IFileOperation move, wt/PowerShell, explorer /select
-    job.rs            JobGuard: the Job Object around one helper process (D33): memory cap, kill on close, die on unhandled exception, one active process, UI limits unless the helper is already in a job (then nested, without them: has_ui_limits); peak_memory
+    job.rs            JobGuard: the Job Object around one helper process (D33: the image helper, the SVG and PDF workers, bsdtar): memory cap, kill on close, die on unhandled exception, one active process, UI limits unless the helper is already in a job (then nested, without them: has_ui_limits); peak_memory
     run_key.rs        run_value: whether HKCU's or HKLM's Run key still has the value launch at login wrote (and whether it names this exe), and Task Manager's StartupApproved "off", read with RegGetValueW, never written; the app registers launch at login again only for RunValue::Missing (D19)
   mock.rs             scripted DragSignal sequences for app-level tests
   unsupported.rs      every entry point returns Unsupported (Linux and other hosts)

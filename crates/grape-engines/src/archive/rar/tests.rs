@@ -11,6 +11,9 @@ use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
+use std::process::Child;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -30,6 +33,7 @@ use super::header::{preflight, Expect, Plan, Skipped};
 use super::tap::RarTap;
 use super::writer::{self, *};
 use super::*;
+use crate::helper::{Contain, Contained};
 use crate::{CancelToken, ErrorKind, GrapeError};
 
 // ---- The preflight ---------------------------------------------------------
@@ -1097,6 +1101,9 @@ const FAKE: &str = "GRAPE_BSDTAR_FAKE";
 /// any test body runs.
 const MARK: &[u8] = b"GRAPE-FAKE-BSDTAR\n";
 
+/// Where the `linger` fake writes, if it's still running then.
+const LATE: &str = "GRAPE_BSDTAR_FAKE_LATE";
+
 /// `entries` cut after `n` bytes.
 fn cut(entries: &[Vec<u8>], n: usize) -> Vec<u8> {
     entries.concat()[..n].to_vec()
@@ -1149,6 +1156,14 @@ fn fake_bsdtar() {
             0
         }
         "exit-early" => 1,
+        "linger" => {
+            // Never reads its input: only a kill stops it writing.
+            thread::sleep(Duration::from_millis(1500));
+            if let Some(late) = std::env::var_os(LATE) {
+                fs::write(late, b"still running").unwrap();
+            }
+            0
+        }
         "crash" => std::process::abort(),
         "exit-3" => 3,
         "stall" => {
@@ -1271,6 +1286,7 @@ fn fake(mode: &str) -> Launch {
         envs: vec![(OsString::from(FAKE), OsString::from(mode))],
         stall: STALL,
         preamble: Some(MARK),
+        contain: None,
     }
 }
 
@@ -1686,6 +1702,178 @@ fn stderr_is_classified_by_libarchives_own_text() {
     }
 }
 
+// ---- The container ---------------------------------------------------------------
+
+/// A container that can refuse, reports a peak, and notes how far the
+/// pump had read the source (`source`, a clone of its handle) by the end
+/// of its call.
+#[derive(Debug)]
+struct FakeContain {
+    fail: bool,
+    peak: Option<u64>,
+    calls: AtomicUsize,
+    max_memory: Mutex<Option<Option<u64>>>,
+    source: Mutex<Option<File>>,
+    read_before: Mutex<Option<u64>>,
+}
+
+impl FakeContain {
+    fn new(fail: bool, peak: Option<u64>) -> Arc<FakeContain> {
+        Arc::new(FakeContain {
+            fail,
+            peak,
+            calls: AtomicUsize::new(0),
+            max_memory: Mutex::new(None),
+            source: Mutex::new(None),
+            read_before: Mutex::new(None),
+        })
+    }
+}
+
+struct FakeContained(Option<u64>);
+
+impl Contained for FakeContained {
+    fn peak_memory(&self) -> Option<u64> {
+        self.0
+    }
+}
+
+impl Contain for FakeContain {
+    fn contain(&self, _: &Child, max_memory: Option<u64>) -> Result<Box<dyn Contained>, String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        *self.max_memory.lock().unwrap() = Some(max_memory);
+        if let Some(source) = self.source.lock().unwrap().as_mut() {
+            // A moment first, so a pump that had started would have read.
+            // A clone shares the handle's position with the pump's.
+            thread::sleep(Duration::from_millis(200));
+            *self.read_before.lock().unwrap() = Some(source.stream_position().unwrap());
+        }
+        if self.fail {
+            return Err("fake: no container".to_string());
+        }
+        Ok(Box::new(FakeContained(self.peak)))
+    }
+}
+
+/// [`fake`] in `mode`, contained by `hook`.
+fn contained(mode: &str, hook: &Arc<FakeContain>) -> Launch {
+    Launch {
+        contain: Some(Arc::clone(hook) as Arc<dyn Contain>),
+        ..fake(mode)
+    }
+}
+
+#[test]
+fn bsdtar_is_contained_once_before_a_byte_is_pumped() {
+    let dir = TestDir::new();
+    let path = dir.join("src.rar");
+    let source = super::super::tests::noise(256 * 1024, 9);
+    fs::write(&path, &source).unwrap();
+    let file = File::open(&path).unwrap();
+    let hook = FakeContain::new(false, None);
+    *hook.source.lock().unwrap() = Some(file.try_clone().unwrap());
+    let cancel = CancelToken::new();
+    let mut progress = |_: f32| {};
+    let run = Run::new(
+        &cancel,
+        Limits::default(),
+        source.len() as u64,
+        &mut progress,
+    );
+    bsdtar::take_work_dir();
+    let mut child = Running::spawn(&contained("echo", &hook), file, cancel.clone()).unwrap();
+    let mut out = Vec::new();
+    child.stdout(&run).read_to_end(&mut out).unwrap();
+    let (result, seen) = child.end(Ok(()), &cancel);
+    result.unwrap();
+    assert!(out == source, "the echo differs");
+    assert_eq!(seen.pumped, source.len() as u64);
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*hook.read_before.lock().unwrap(), Some(0));
+    assert_eq!(*hook.max_memory.lock().unwrap(), Some(Some(1 << 30)));
+    let work = bsdtar::take_work_dir().unwrap();
+    assert!(!work.exists(), "{} is still there", work.display());
+}
+
+#[test]
+fn a_bsdtar_that_cant_be_contained_is_killed_and_leaves_no_folder() {
+    let dir = TestDir::new();
+    let late = dir.join("late");
+    let hook = FakeContain::new(true, None);
+    let mut launch = contained("linger", &hook);
+    launch
+        .envs
+        .push((OsString::from(LATE), late.clone().into_os_string()));
+    bsdtar::take_work_dir();
+    let ran = run_fake(&launch, b"x", false);
+    assert!(
+        matches!(&ran.result, Err(Failure::Rar(RarFailure::Contain(why))) if why == "fake: no container"),
+        "{:?}",
+        ran.result
+    );
+    assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+    // Killed at once: the fake writes `late` after 1.5 s, and a reap
+    // without the kill would have waited for that.
+    assert!(ran.took < Duration::from_secs(2), "{:?}", ran.took);
+    let work = bsdtar::take_work_dir().expect("a folder was made");
+    assert!(!work.exists(), "{} is still there", work.display());
+    thread::sleep(Duration::from_millis(2500));
+    assert!(!late.exists(), "bsdtar outlived its failed container");
+
+    // As the job says it.
+    let case = new_case("x.rar", &a4(), Operation::convert(Format::Zip));
+    let error = failing_case(&case, &contained("tar-a", &FakeContain::new(true, None)));
+    assert_eq!(error.kind, ErrorKind::NotYetSupported);
+    assert_eq!(error.user_message, "Grape's RAR helper couldn't start.");
+    assert_eq!(error.detail, "containing bsdtar: fake: no container");
+}
+
+#[test]
+fn a_bsdtar_that_fails_near_its_memory_cap_needs_too_much_memory() {
+    let cap = bsdtar::MAX_MEMORY;
+    let at = (cap * 9).div_ceil(10);
+    let too_much = "x.rar needs too much memory, so Grape stopped.";
+    let unreadable = "x.rar isn't a readable RAR file.";
+    let stopped = "Grape's RAR helper stopped unexpectedly.";
+    for (mode, peak, message) in [
+        ("crash", Some(cap), too_much),
+        ("crash", Some(at), too_much),
+        ("crash", Some(at - 1), stopped),
+        ("crash", None, stopped),
+        // libarchive's own "out of memory": exit 1, with or without a word.
+        ("exit-early", Some(at), too_much),
+        ("exit-early", Some(at - 1), unreadable),
+        ("tar-a-exit1-crc", Some(at), too_much),
+        ("tar-a-exit1-crc", Some(at - 1), unreadable),
+    ] {
+        let case = new_case("x.rar", &a4(), Operation::convert(Format::Zip));
+        let error = failing_case(&case, &contained(mode, &FakeContain::new(false, peak)));
+        assert_eq!(error.user_message, message, "{mode} {peak:?}");
+        if message == too_much {
+            assert_eq!(error.kind, ErrorKind::DecodeFailed);
+            assert_eq!(error.detail, "bsdtar ended near its 1024 MiB memory cap");
+        }
+    }
+    // A clean run is a success whatever its peak, and Grape's own reasons
+    // to kill it stay its reasons.
+    let case = new_case("x.rar", &a4(), Operation::convert(Format::Zip));
+    ok_case(
+        &case,
+        &contained("tar-a", &FakeContain::new(false, Some(cap))),
+    );
+    let ran = run_fake(
+        &contained("sleep", &FakeContain::new(false, Some(cap))),
+        &[3u8; 1 << 16],
+        true,
+    );
+    assert!(
+        matches!(ran.result, Err(Failure::Cancelled)),
+        "{:?}",
+        ran.result
+    );
+    ran.assert_clean();
+}
+
 // ---- The engine, with the fake ------------------------------------------------------
 
 /// A RAR case run against the fake in `mode`, as the job runs it; checks
@@ -1978,6 +2166,20 @@ fn rar_failures_are_worded_and_never_name_a_file_in_the_log() {
     let error = names(RarFailure::NoStart(io::ErrorKind::NotFound));
     assert_eq!(error.user_message, "Grape's RAR helper couldn't start.");
     assert_eq!(error.kind, ErrorKind::NotYetSupported);
+    let error = names(RarFailure::Contain("no job".into()));
+    assert_eq!(error.user_message, "Grape's RAR helper couldn't start.");
+    assert_eq!(error.kind, ErrorKind::NotYetSupported);
+    let error = names(RarFailure::OverMemory(1 << 30));
+    assert_eq!(
+        error.user_message,
+        "x.rar needs too much memory, so Grape stopped."
+    );
+    assert_eq!(error.kind, ErrorKind::DecodeFailed);
+    assert_eq!(
+        Failure::Rar(RarFailure::OverMemory(1 << 30)).to_string(),
+        "bsdtar ended near its 1024 MiB memory cap"
+    );
+    assert!(!Failure::Rar(RarFailure::OverMemory(1 << 30)).is_policy());
     assert_eq!(
         Failure::Rar(RarFailure::Dictionary(128 << 20)).to_string(),
         "RAR dictionary 134217728 bytes over 64 MiB"

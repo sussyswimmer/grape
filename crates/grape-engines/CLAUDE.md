@@ -36,8 +36,10 @@ src/
   svg/              SVG in a worker process: resvg (D39; lane A's module by agreement): protocol.rs (the worker's own JSON), worker.rs
                     (`Grape --grape-svg-worker`: read, gunzip, parse, draw), resolve.rs (data: references only, a job-wide budget),
                     size.rs (the size rule, pure), run.rs (the parent: start, watch, read the pixels)
-  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader and the containment hook set_contain (lane A's)
-  archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/pump/watchdog, tap) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
+  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader, the containment hook set_contain and its 90% memory rule (lane A's):
+                    the image helper, the SVG and PDF workers and bsdtar are contained by it, failing closed; FFmpeg too, failing open
+  archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/contain/pump/watchdog, tap; a 1 GiB
+                    Job Object on Windows) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
   docs.rs           v2, behind feature "v2"
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar

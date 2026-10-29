@@ -135,6 +135,7 @@ RAR, M3 (D27; win; the CI installer carries Grape's bsdtar, or for `tauri dev` s
 - [ ] win: WinRAR with "store identical files as references" (`-oi`) and an NTFS junction (`-ol`) → converts; the toast says what was left out.
 - [ ] win: a password-protected RAR (`-hp` and `-p`) → "is password-protected."; `.part1.rar` of a split set → the multi-part toast; a solid RAR4 → the solid toast; a 128 MiB dictionary (`-md128m`) → the dictionary toast; an SFX `.exe` renamed `.rar` → the self-extracting toast.
 - [ ] win: a several-GB RAR → progress moves smoothly to the end; tray → Quit mid-way → nothing left in the folder, and no `bsdtar.exe` left in Task Manager. (Tray → Pause mid-way only stops new wheels: the running conversion finishes and the zip appears.)
+- [ ] win: during a several-GB RAR → ZIP, end `Grape.exe` in Task Manager (Details → End task) → `bsdtar.exe` is gone at once (it was in Grape's Job Object, D27), the RAR is unchanged (`Get-FileHash`), and at most a hidden `.grape-tmp-…` in the folder and an empty `%TEMP%\grape-bsdtar-…` are left.
 - [ ] win: a RAR downloaded with a browser → the converted zip and the extracted files carry the Mark of the Web (file Properties → "Unblock").
 - [ ] win: Defender: no detection of `bsdtar.exe`, and the first conversion isn't noticeably slow.
 

@@ -2,7 +2,9 @@
 //! Grape's own helper programs (the image helper for HEIC and AVIF,
 //! DECISIONS D33, D41, the SVG worker, D39, and the PDF worker, D29).
 //! Lane A's module, first taken from the PDF worker's runner
-//! (`pdf/run.rs`), which runs on it too now.
+//! (`pdf/run.rs`), which runs on it too now. bsdtar (D27) has a spawn and
+//! a pump of its own (`archive/rar/bsdtar.rs`), but the same hook,
+//! [`DETACHED_PROCESS`] and memory rule.
 //!
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
@@ -53,8 +55,9 @@ use crate::CancelToken;
 /// so Windows starts no `conhost.exe` for it. Its stdio are pipes, so it
 /// needs none, and a console host would be a second process in a job that
 /// allows one (D33). `CREATE_NO_WINDOW` would still make a hidden console.
+/// bsdtar is started so too.
 #[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+pub(crate) const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// How many fresh names [`WorkDir::create`] tries.
 const UNIQUE_ATTEMPTS: usize = 8;
@@ -69,13 +72,15 @@ const OVER_MEMORY_PERCENT: u64 = 90;
 
 /// Puts a process Grape just started into an OS container (D33): a Job
 /// Object on Windows, set by the app ([`set_contain`]). The image helper,
-/// the SVG worker and the PDF worker, and `ffmpeg` and `ffprobe` (D22).
+/// the SVG worker and the PDF worker, bsdtar (D27), and `ffmpeg` and
+/// `ffprobe` (D22).
 pub trait Contain: Send + Sync + fmt::Debug {
     /// Contains `child` right after its start: before a helper's request is
-    /// written, and before FFmpeg's output is read. `max_memory` caps its
-    /// committed memory, where the OS can. An `Err` says why, for the log.
-    /// A helper is then killed and its job fails (the container is its
-    /// memory cap); FFmpeg runs on uncontained (`media/run.rs`, D22).
+    /// written, before bsdtar is given a byte of the RAR, and before
+    /// FFmpeg's output is read. `max_memory` caps its committed memory,
+    /// where the OS can. An `Err` says why, for the log. A helper or bsdtar
+    /// is then killed and its job fails (the container is its memory cap);
+    /// FFmpeg runs on uncontained (`media/run.rs`, D22).
     fn contain(&self, child: &Child, max_memory: Option<u64>)
         -> Result<Box<dyn Contained>, String>;
 }

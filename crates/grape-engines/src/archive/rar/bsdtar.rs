@@ -1,7 +1,10 @@
 //! Starting bsdtar and watching it (DECISIONS D27).
 //!
 //! `bsdtar -c -P -f - --format pax @-` runs in a new, empty, private
-//! folder with a cleared environment. Three threads serve it while the
+//! folder with a cleared environment, detached on Windows, and goes into
+//! the app's container right after its start (a Job Object on Windows,
+//! capped at [`MAX_MEMORY`]), before it has read a byte. One that can't be
+//! contained is killed and the job fails. Three threads serve it while the
 //! job's thread reads its stdout ([`ChildOut`]):
 //!
 //! - the pump writes the RAR into its stdin, 64 KiB at a time, and never
@@ -12,8 +15,9 @@
 //!   waited on it for [`STALL`] while it took no input and wrote no output.
 //!
 //! [`Running::finish`] reaps it, joins the threads, removes the folder and
-//! judges the run. Nothing here logs bsdtar's stderr: it holds entry
-//! names. The log gets the pattern it matched and a byte count.
+//! judges the run: a bsdtar that failed by itself after committing 90% of
+//! its cap needs too much memory. Nothing here logs bsdtar's stderr: it
+//! holds entry names. The log gets the pattern it matched and a byte count.
 
 use std::ffi::OsString;
 use std::fs::{self, File};
@@ -29,6 +33,7 @@ use super::super::folder::remove_tree;
 use super::super::stream::Run;
 use super::super::Failure;
 use super::{RarFailure, RarPaths};
+use crate::helper::{self, Contain, Contained};
 use crate::output::unique_suffix;
 use crate::CancelToken;
 
@@ -65,9 +70,14 @@ const STDERR_STEP: usize = 4 * 1024;
 /// How far into stdout a test preamble is looked for.
 const PREAMBLE_MAX: usize = 4 * 1024;
 
-/// `CREATE_NO_WINDOW`: bsdtar is a console program; no window opens.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// bsdtar's memory cap, where the app's container can set one (the Job
+/// Object on Windows). libarchive 3.8.10's RAR readers hold at most about
+/// 300 MiB for one archive: RAR 4's PPMd model (up to 256 MiB, as the
+/// archive asks) beside its 4 MiB window, or RAR 5's 64 MiB window and a
+/// filter buffer of the same size; their read-ahead buffer grows to about
+/// 20 MiB. RAR 4's filter list has no bound of its own, so a crafted file
+/// can make it grow with its size: the cap stops that.
+pub(crate) const MAX_MEMORY: u64 = 1 << 30;
 
 /// How bsdtar is started.
 #[derive(Debug, Clone)]
@@ -83,10 +93,14 @@ pub(crate) struct Launch {
     /// Tests only: stdout's tar starts after this marker (the fake bsdtar
     /// is the test binary, which prints a banner first).
     pub(crate) preamble: Option<&'static [u8]>,
+    /// Where it's contained: the app's hook ([`helper::contain_hook`]) for
+    /// a real job, a fake in tests, `None` for no container.
+    pub(crate) contain: Option<Arc<dyn Contain>>,
 }
 
 impl Launch {
-    /// bsdtar at `paths.bsdtar`, as Grape runs it.
+    /// bsdtar at `paths.bsdtar`, as Grape runs it, contained by the app's
+    /// hook.
     pub(crate) fn bsdtar(paths: &RarPaths) -> Launch {
         Launch {
             program: paths.bsdtar.clone(),
@@ -94,6 +108,7 @@ impl Launch {
             envs: Vec::new(),
             stall: STALL,
             preamble: None,
+            contain: helper::contain_hook(),
         }
     }
 }
@@ -172,6 +187,9 @@ pub(crate) struct Running {
     /// The exit status, once reaped.
     status: Option<Result<ExitStatus, io::ErrorKind>>,
     stderr_seen: Option<Stderr>,
+    /// Its container, if it's contained; dropped after bsdtar is reaped
+    /// (fields drop after [`Running`]'s own drop).
+    contained: Option<Box<dyn Contained>>,
 }
 
 impl Running {
@@ -206,10 +224,12 @@ impl Running {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // bsdtar is a console program, but its three stdio are pipes: no
+        // console at all, so no console host in its one-process job.
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(helper::DETACHED_PROCESS);
         }
         let mut child = command.spawn().map_err(no_start)?;
         let (stdin, stdout, stderr) =
@@ -237,7 +257,17 @@ impl Running {
             work: Some(work),
             status: None,
             stderr_seen: None,
+            contained: None,
         };
+        if let Some(hook) = &launch.contain {
+            // Before the pump starts: bsdtar waits for its input, so it
+            // has read nothing yet. A bsdtar that can't be contained is
+            // killed, reaped and its folder removed by `running`'s drop.
+            let contained = hook
+                .contain(&lock(&running.shared.child), Some(MAX_MEMORY))
+                .map_err(|why| Failure::Rar(RarFailure::Contain(why)))?;
+            running.contained = Some(contained);
+        }
         let (Some(stdin), Some(stderr), true) = (stdin, stderr, running.stdout.is_some()) else {
             return Err(stopped("no pipe"));
         };
@@ -333,7 +363,9 @@ impl Running {
         self.cleanup();
         let status = self.status.take().unwrap_or(Err(io::ErrorKind::Other));
         let stderr = self.stderr_seen.take().unwrap_or_default();
-        let verdict = judge(walk, status, &stderr, &shared, token);
+        // Reaped, so the peak is final.
+        let peak = self.contained.as_ref().and_then(|c| c.peak_memory());
+        let verdict = judge(walk, status, &stderr, &shared, token, peak);
         let seen = Seen {
             stderr,
             pumped: shared.pumped.load(Ordering::SeqCst),
@@ -396,14 +428,16 @@ fn stopped(detail: &str) -> Failure {
 }
 
 /// The judgement, the first that applies: a cancel, a stall, the source
-/// failing, Grape's own refusal, bsdtar failing by itself (abnormally, then
-/// with exit 1 or anything on stderr), a broken stream, a kill.
+/// failing, Grape's own refusal, bsdtar failing by itself (near its memory
+/// cap, by its container's `peak`, then abnormally, then with exit 1 or
+/// anything on stderr), a broken stream, a kill.
 fn judge(
     walk: Result<(), Failure>,
     status: Result<ExitStatus, io::ErrorKind>,
     stderr: &Stderr,
     shared: &Shared,
     token: &CancelToken,
+    peak: Option<u64>,
 ) -> Result<(), Failure> {
     if token.is_cancelled() {
         return Err(Failure::Cancelled);
@@ -425,6 +459,12 @@ fn judge(
     let killed = shared.killed.load(Ordering::SeqCst);
     if !killed {
         let code = status.code();
+        // libarchive reports an allocation that failed as an error of its
+        // own (exit 1, a message on stderr), and a crash is the same.
+        let clean = code == Some(0) && stderr.total == 0;
+        if !clean && helper::near_memory_cap(peak, MAX_MEMORY) {
+            return Err(Failure::Rar(RarFailure::OverMemory(MAX_MEMORY)));
+        }
         // A signal (Unix), or an exit code bsdtar never uses (a Windows
         // access violation and the like).
         if !matches!(code, Some(0 | 1)) {
