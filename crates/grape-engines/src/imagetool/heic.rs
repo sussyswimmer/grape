@@ -27,7 +27,8 @@
 //!     unreported (old editors leave metadata there);
 //!   - `meta`'s own `uuid` boxes (XMP, or Other: a Canon HIF's encoder
 //!     version), and its `xml ` (XMP) and `bxml` (Other) boxes: left out
-//!     of the rebuilt `meta`, the empty ones unreported;
+//!     of the rebuilt `meta`, unreported when they hold nothing past their
+//!     user type, or their version and flags;
 //!   - every `iloc` entry with no item (no `infe`), which no reader
 //!     follows: what it points to is no item's (below);
 //!   - every byte of `mdat` and `idat` that no kept item points to (still
@@ -512,29 +513,30 @@ impl Survey {
     }
 
     /// Leaves out of `meta` the boxes in it that hold metadata, and
-    /// reports the ones that aren't empty: each `uuid` (XMP, or other
-    /// fields: a Canon HIF's encoder version), `xml ` (XMP) and `bxml`
-    /// (other fields). Kept data in one is refused, though `meta` holds
-    /// none (place_data), and construction method 1 points into `idat`
-    /// only.
+    /// reports the ones that hold anything past their user type, or their
+    /// version and flags: each `uuid` (XMP, or other fields: a Canon HIF's
+    /// encoder version), `xml ` (XMP) and `bxml` (other fields). Kept data
+    /// in one is refused, though `meta` holds none (place_data), and
+    /// construction method 1 points into `idat` only.
     fn judge_meta_boxes(&mut self) -> Result<(), Error> {
         let at = self.meta_box.content().start;
         for (i, child) in self.meta.children.iter().enumerate() {
             let content = child.content();
-            let field = match &child.kind {
+            // What it says, and where what it holds starts.
+            let (field, head) = match &child.kind {
                 b"uuid" => match self.meta.bytes[content.clone()].get(..16) {
-                    Some(user) if user == XMP_UUID => MetaField::Xmp,
-                    _ => MetaField::Other,
+                    Some(user) if user == XMP_UUID => (MetaField::Xmp, 16),
+                    _ => (MetaField::Other, 16),
                 },
-                b"xml " => MetaField::Xmp,
-                b"bxml" => MetaField::Other,
+                b"xml " => (MetaField::Xmp, 4),
+                b"bxml" => (MetaField::Other, 4),
                 _ => continue,
             };
             let range = at + child.range.start as u64..at + child.range.end as u64;
             if overlaps(&self.kept_file, &range) {
                 return Err(Error::Refused(LAYOUT.into()));
             }
-            if !content.is_empty() {
+            if content.len() > head {
                 self.found.fields.insert(field);
             }
             self.gone.push(i);
@@ -2322,15 +2324,22 @@ mod tests {
         let (again, found) = strip(&out);
         assert_eq!(again, out);
         assert!(found.is_empty());
-        // Each alone says what it held, and an empty one nothing.
-        let empty = bx(b"uuid", b"");
-        for (b, said) in [
+        // Each alone says what it held, and one that holds nothing past
+        // its user type, or its version and flags, nothing.
+        let empty = [
+            bx(b"uuid", b""),
+            uuid(XMP_USER_TYPE, b""),
+            uuid(CANON, b""),
+            full(b"xml ", 0, 0, b""),
+            full(b"bxml", 0, 0, b""),
+        ];
+        let held = [
             (&canon, vec![Other]),
             (&xmp, vec![Xmp]),
             (&xml, vec![Xmp]),
             (&bxml, vec![Other]),
-            (&empty, vec![]),
-        ] {
+        ];
+        for (b, said) in held.into_iter().chain(empty.iter().map(|b| (b, vec![]))) {
             let src = file(&[b]);
             let (out, found) = strip(&src);
             assert_eq!(
