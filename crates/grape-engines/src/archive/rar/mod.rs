@@ -6,9 +6,10 @@
 //!    (encryption, multi-part sets, solid RAR 4, big dictionaries, damage,
 //!    a missing end block) before anything starts.
 //! 2. [`bsdtar::Running`] starts `bsdtar -c -P -f - --format pax @-` in an
-//!    empty private folder with a cleared environment, pumps the RAR into
-//!    its stdin from a thread, keeps the first 8 KiB of its stderr, and
-//!    kills it on cancel or after a stall.
+//!    empty private folder with a cleared environment, puts it in the
+//!    app's container (a Job Object on Windows) before it reads anything,
+//!    pumps the RAR into its stdin from a thread, keeps the first 8 KiB of
+//!    its stderr, and kills it on cancel or after a stall.
 //! 3. Its stdout, a pax tar, goes through the same walk, name check,
 //!    bounds and writers as any tar, always re-packed, never kept. The
 //!    [`tap::RarTap`] holds every entry to the preflight's headers, one to
@@ -95,6 +96,13 @@ pub(crate) enum RarFailure {
     /// bsdtar couldn't be started.
     #[error("starting bsdtar: {0:?}")]
     NoStart(io::ErrorKind),
+    /// bsdtar couldn't be contained, so it was killed (the hook's reason).
+    #[error("containing bsdtar: {0}")]
+    Contain(String),
+    /// bsdtar failed by itself after committing nearly all of its memory
+    /// cap (the cap, in bytes).
+    #[error("bsdtar ended near its {} MiB memory cap", .0 >> 20)]
+    OverMemory(u64),
     /// The file is a RAR, but this install has no bsdtar.
     #[error("a RAR file, but no bsdtar")]
     NoHelper,
@@ -139,9 +147,13 @@ impl RarFailure {
                 ErrorKind::DecodeFailed,
                 "Grape's RAR helper stopped unexpectedly.".to_string(),
             ),
-            RarFailure::NoStart(_) => (
+            RarFailure::NoStart(_) | RarFailure::Contain(_) => (
                 ErrorKind::NotYetSupported,
                 "Grape's RAR helper couldn't start.".to_string(),
+            ),
+            RarFailure::OverMemory(_) => (
+                ErrorKind::DecodeFailed,
+                format!("{source} needs too much memory, so Grape stopped."),
             ),
             RarFailure::NoHelper => (
                 ErrorKind::NotYetSupported,

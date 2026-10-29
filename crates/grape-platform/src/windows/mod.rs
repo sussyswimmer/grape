@@ -14,7 +14,8 @@
 //!   shows them without activating them and hides them ([`show_shelf`],
 //!   [`hide_shelf`], [`show_panel`], [`hide_panel`], which hands the
 //!   foreground back to [`other_app_foreground`]'s window); lifts the
-//!   overlay over both on every show ([`raise_topmost`]).
+//!   overlay over both on every show ([`raise_topmost`]) and puts it back
+//!   on its monitor's frame if a DPI change moved it ([`reframe_overlay`]).
 //! - `drag_out`: dragging files out of the shelf ([`drag_out`]): an OLE
 //!   drag of a `CF_HDROP`-only data object that offers copy or link, never
 //!   move.
@@ -27,6 +28,9 @@
 //! - `job`: the Job Object a helper process runs in ([`job::JobGuard`],
 //!   D33): it ends the helper with Grape, caps its memory and keeps it to
 //!   one process.
+//! - `run_key`: whether the `Run` keys still start Grape at sign-in
+//!   ([`run_value`]), read directly, for launch at login after a
+//!   reinstall (D19).
 //!
 //! Inside this crate, write the Win32 bindings as `::windows::…`: a bare
 //! `windows::…` can be confused with this module.
@@ -39,14 +43,19 @@ mod drop_target;
 mod hook;
 pub mod job;
 mod overlay;
+mod run_key;
 mod share;
 
 pub use drag_out::{drag_out, DragOut};
 pub use drop_target::{install_drop_target, refuse_drops, DropTargetCoverage};
 pub use overlay::{
     describe_ex_style, ex_style, harden_overlay, harden_panel, harden_shelf, hide_panel,
-    hide_shelf, other_app_foreground, raise_topmost, show_panel, show_shelf, HandBack,
+    hide_shelf, other_app_foreground, raise_topmost, reframe_overlay, show_panel, show_shelf,
+    HandBack, Reframed,
 };
+
+pub use crate::win_rules::RunValue;
+pub use run_key::run_value;
 
 pub(crate) use actions::{
     copy_files, copy_paths, move_to_chosen_folder, open_terminal, pick_folder, reveal,

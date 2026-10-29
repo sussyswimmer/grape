@@ -2,8 +2,10 @@
 //! `grape_core`, run with `run_job`, check the output with `ffprobe` and
 //! that the source never changed. Needs `--features engines-it` and
 //! `GRAPE_TEST_FFMPEG` / `GRAPE_TEST_FFPROBE` set to absolute paths; the
-//! tests fail, not skip, without them. CI only compiles and lints them so
-//! far; running them there waits on CI building Grape's own FFmpeg (D24).
+//! tests fail, not skip, without them. CI's `engines-it` jobs run them on
+//! Windows and macOS with the FFmpeg the same run built (D24). On Windows
+//! every job here runs contained as the app runs it ([`contain_like_the_app`]:
+//! started detached, in a Job Object of its own that allows one process).
 #![cfg(feature = "engines-it")]
 #![allow(clippy::unwrap_used)]
 
@@ -37,10 +39,65 @@ fn tool(var: &str) -> PathBuf {
 }
 
 fn sidecars() -> SidecarPaths {
+    contain_like_the_app();
     SidecarPaths {
         ffmpeg: Some(tool("GRAPE_TEST_FFMPEG")),
         ffprobe: Some(tool("GRAPE_TEST_FFPROBE")),
         ..SidecarPaths::default()
+    }
+}
+
+#[cfg(windows)]
+thread_local! {
+    /// How many runs [`contain_like_the_app`]'s hook put in a job on this
+    /// thread: the hook runs on the thread that runs the job, so a test
+    /// counts only its own.
+    static CONTAINED_HERE: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Why it couldn't put others in one, on this thread.
+    static REFUSED_HERE: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// On Windows, sets the hook the app's `contain.rs` sets: a Job Object of
+/// its own for every `ffmpeg` and `ffprobe` run (`grape_platform::windows::job`;
+/// the engine asks for no memory cap), once for this test binary. Every job
+/// here gets its sidecars from [`sidecars`], which calls this, so all of
+/// them run contained, as in the app. Under cargo the job is nested in
+/// cargo's, so it has every limit but the UI ones. Elsewhere there's
+/// nothing to set.
+fn contain_like_the_app() {
+    #[cfg(windows)]
+    {
+        use std::process::Child;
+        use std::sync::{Arc, Once};
+
+        use grape_engines::{set_contain, Contain, Contained};
+        use grape_platform::windows::job::JobGuard;
+
+        #[derive(Debug)]
+        struct Jobs;
+        struct Job(JobGuard);
+        impl Contained for Job {
+            fn peak_memory(&self) -> Option<u64> {
+                self.0.peak_memory()
+            }
+        }
+        impl Contain for Jobs {
+            fn contain(
+                &self,
+                child: &Child,
+                max_memory: Option<u64>,
+            ) -> Result<Box<dyn Contained>, String> {
+                let assigned = JobGuard::assign(child, max_memory).map_err(|e| e.to_string());
+                match &assigned {
+                    Ok(_) => CONTAINED_HERE.with(|n| n.set(n.get() + 1)),
+                    Err(why) => REFUSED_HERE.with(|r| r.borrow_mut().push(why.clone())),
+                }
+                Ok(Box::new(Job(assigned?)))
+            }
+        }
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| assert!(set_contain(Arc::new(Jobs)), "the hook was set already"));
     }
 }
 
@@ -456,6 +513,30 @@ fn convert_file(
     before.assert_unchanged();
     assert_no_leftovers(&dir.path);
     result.map(|outcome| (outcome, seen))
+}
+
+/// FFmpeg as the app runs it on Windows (D22): started detached (no
+/// console, so no console host), each run in a Job Object that allows one
+/// process. The engine fails open, so a run the hook couldn't contain would
+/// still convert: the hook's own notes say whether every run was contained.
+#[cfg(windows)]
+#[test]
+fn a_contained_conversion_runs() {
+    let dir = TestDir::new("media-contained");
+    let src = make_source(&dir.path, "clip.mp4", Format::Mp4);
+    // libtest may run tests one after another on one thread.
+    CONTAINED_HERE.with(|n| n.set(0));
+    REFUSED_HERE.with(|r| r.borrow_mut().clear());
+    let converted = convert_file(&dir, &src, Format::Webm);
+    let (outcome, _) = converted.unwrap_or_else(|e| panic!("{e} ({})", e.detail));
+    // At least the source's probe, the encode and the output's check.
+    let contained = CONTAINED_HERE.with(std::cell::Cell::get);
+    assert!(contained >= 3, "{contained} runs contained");
+    let refused = REFUSED_HERE.with(|r| r.borrow().clone());
+    assert!(refused.is_empty(), "runs not contained: {refused:?}");
+    let info = probe(&outcome.outputs[0]);
+    assert_eq!(field(&info, "video", "codec_name").as_deref(), Some("vp9"));
+    assert_eq!(field(&info, "audio", "codec_name").as_deref(), Some("opus"));
 }
 
 #[test]

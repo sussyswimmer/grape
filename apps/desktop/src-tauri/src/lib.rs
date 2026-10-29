@@ -55,8 +55,14 @@ pub fn run() -> anyhow::Result<()> {
     )]
     let mut app = tauri::Builder::default()
         // Registered first so a second launch is caught before anything else
-        // starts: it opens Settings in the running instance and exits.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // starts: it opens Settings in the running instance and exits. A
+        // second launch from launch at login (Grape already runs) opens
+        // nothing, as a first one doesn't.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if settings::at_login(&args) {
+                log::info!("second launch at login: Grape already runs; nothing to open");
+                return;
+            }
             log::info!("second launch: opening Settings in the running instance");
             ui_windows::request_settings(app);
         }))

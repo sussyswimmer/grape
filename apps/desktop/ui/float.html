@@ -3,6 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- An empty icon, so WebView2 never asks for /favicon.ico, which
+         Grape doesn't ship, and Tauri doesn't log a missing asset. -->
+    <link rel="icon" href="data:," />
     <title>Grape Shelf</title>
   </head>
   <body>

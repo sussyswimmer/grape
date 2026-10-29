@@ -178,6 +178,26 @@ impl Modifiers {
     }
 }
 
+/// The keys held in both sets.
+impl std::ops::BitAnd for Modifiers {
+    type Output = Self;
+
+    fn bitand(self, other: Self) -> Self {
+        Self {
+            shift: self.shift && other.shift,
+            ctrl: self.ctrl && other.ctrl,
+            alt: self.alt && other.alt,
+            meta: self.meta && other.meta,
+        }
+    }
+}
+
+impl std::ops::BitAndAssign for Modifiers {
+    fn bitand_assign(&mut self, other: Self) {
+        *self = *self & other;
+    }
+}
+
 /// A rectangle in global, top-left origin coordinates: physical pixels on
 /// Windows, points on macOS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -339,6 +359,30 @@ mod tests {
         };
         assert_eq!(all.count(), 4);
         assert_eq!(Modifiers::default(), Modifiers::NONE);
+    }
+
+    #[test]
+    fn and_keeps_the_keys_held_in_both() {
+        let ctrl_shift = Modifiers {
+            shift: true,
+            ctrl: true,
+            ..Modifiers::NONE
+        };
+        let all = Modifiers {
+            shift: true,
+            ctrl: true,
+            alt: true,
+            meta: true,
+        };
+        assert_eq!(ctrl_shift & Modifiers::SHIFT, Modifiers::SHIFT);
+        assert_eq!(ctrl_shift & Modifiers::ALT, Modifiers::NONE);
+        assert_eq!(ctrl_shift & all, ctrl_shift);
+        assert_eq!(all & Modifiers::META, Modifiers::META);
+        let mut baseline = ctrl_shift;
+        baseline &= Modifiers::CTRL;
+        assert_eq!(baseline, Modifiers::CTRL);
+        baseline &= Modifiers::NONE;
+        assert_eq!(baseline, Modifiers::NONE);
     }
 
     #[test]

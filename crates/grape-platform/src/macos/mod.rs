@@ -15,9 +15,12 @@
 //!   [`WindowRole::Overlay`], 100 for [`WindowRole::Toast`], 99 for
 //!   [`WindowRole::Panel`] and 3 for [`WindowRole::Shelf`], so an open
 //!   wheel covers the toast and both cover the panel and the shelf),
-//!   [`frame_and_show`], [`describe_window`], the panel's [`show_panel`]
-//!   (the one hardened window Grape makes key, asking to be activated) and
-//!   [`hide_panel`] (activation handed back), and the shelf's
+//!   [`frame_and_show`], the toast's [`show_toast`] (mouse events ignored
+//!   while it has nothing to reveal), [`hand_back_activation`] (after a
+//!   toast click that revealed nothing), [`unhide_app`] (before Settings
+//!   shows: Cmd+H hides only Settings), [`describe_window`], the panel's
+//!   [`show_panel`] (the one hardened window Grape makes key, asking to be
+//!   activated) and [`hide_panel`] (activation handed back), and the shelf's
 //!   [`show_shelf`] (never key, never activating), [`hide_shelf`]
 //!   (activation handed back if a click made it key) and [`window_frame`]
 //!   (its frame in points).
@@ -33,6 +36,9 @@
 //!   volume's root never moves, and each item is judged right after its own
 //!   move); the same panel for Settings' folders; and the haptic tick behind
 //!   [`crate::haptic_tick`].
+//! - `login`: [`set_relaunch_on_login`], which keeps macOS's own relaunch
+//!   at login off while Grape's launch at login is on (its LaunchAgent
+//!   starts Grape then), with the AppKit calls paired.
 //! - `heif`: the image helper worker's codec, [`heif::ImageIo`] (DECISIONS
 //!   D33, D41): ImageIO behind `grape_heif_proto::Codec` for HEIC and AVIF
 //!   (AVIF written by [`crate::avif`]), run only in the worker process
@@ -56,14 +62,16 @@ mod display;
 mod drag;
 mod drag_out;
 pub mod heif;
+mod login;
 mod window;
 
 pub use activations::follow_app_activations;
 pub use display::refresh_screens;
 pub use drag_out::{drag_out, DragStart};
+pub use login::set_relaunch_on_login;
 pub use window::{
-    describe_window, frame_and_show, harden_window, hide_panel, hide_shelf, show_panel, show_shelf,
-    window_frame, PanelShown, WindowRole,
+    describe_window, frame_and_show, hand_back_activation, harden_window, hide_panel, hide_shelf,
+    show_panel, show_shelf, show_toast, unhide_app, window_frame, PanelShown, WindowRole,
 };
 
 pub(crate) use actions::{

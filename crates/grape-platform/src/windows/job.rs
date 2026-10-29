@@ -1,8 +1,9 @@
 //! The Job Object a helper process runs in (DECISIONS D33, heic-spec §6).
 //!
-//! Grape starts `grape-heif.exe` and puts it in a job of its own right
-//! away, before it writes the helper's request (the helper waits for it, so
-//! nothing runs outside the job). The job:
+//! Grape starts a helper (`grape-heif.exe`, the SVG worker, D39, the PDF
+//! worker, D29, or bsdtar, D27) and puts it in a job of its own right away,
+//! before it writes the helper's request or the first byte of its input
+//! (the helper waits for it, so nothing runs outside the job). The job:
 //! - ends the helper when it closes: when the [`JobGuard`] drops, and when
 //!   Grape itself exits or crashes, because Grape holds its only handle;
 //! - ends it on an unhandled exception instead of showing an error dialog;
@@ -69,13 +70,13 @@ impl JobGuard {
     /// `child` is already in a job, the new one is nested under it and sets
     /// no UI limits, which nested jobs can't have.
     ///
-    /// Call it right after the spawn and before the helper is given any
-    /// work.
+    /// Call it right after the spawn: before a helper is given any work,
+    /// and before FFmpeg's output is read (the media engine, D22).
     ///
     /// # Errors
     /// [`PlatformError::Os`] if the job can't be made, configured or given
-    /// the process. The caller should then kill the helper: it isn't
-    /// contained (heic-spec J6).
+    /// the process. A helper's caller then kills it: it isn't contained
+    /// (heic-spec J6). FFmpeg's runs on without one (D22).
     pub fn assign(child: &Child, max_memory: Option<u64>) -> Result<JobGuard, PlatformError> {
         let process = HANDLE(child.as_raw_handle());
         let nested = in_a_job(process)?;

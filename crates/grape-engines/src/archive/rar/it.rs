@@ -5,12 +5,27 @@
 //! and GZIP and extracted, and the outputs are read back.
 //!
 //! `cargo test -p grape-engines --features rar-it --lib archive::rar`
+//!
+//! On Windows each bsdtar of one test goes into a Job Object of its own as
+//! the app makes it; under cargo that job is nested in cargo's, so it has
+//! no UI limits. CI also runs this test binary outside cargo with
+//! `GRAPE_TEST_JOB_UI=1`: then one test starts it again as a child that
+//! breaks away from the runner's job, where each bsdtar's job must have
+//! the UI limits. GitHub's runner allows no breakaway, so there that test
+//! only warns, and the PC checks the UI-limited job.
 
 #![allow(clippy::unwrap_used)]
 
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(windows)]
+use std::sync::Arc;
+
+#[cfg(windows)]
+use grape_platform::windows::job::JobGuard;
 
 use grape_core::{Format, JobOutput, Operation, ToolKey};
 
@@ -19,10 +34,14 @@ use super::super::tests::{
     case as new_case, gunzip, tar_items, tree_items, zip_items, Case, Item, Node, TestDir,
 };
 use super::super::{convert_with, extract_with, ArchiveOutcome, Failure, LeftOut, Limits};
+#[cfg(windows)]
+use super::bsdtar::MAX_MEMORY;
 use super::header::{preflight, Expect, Plan};
 use super::vectors;
 use super::writer::{self, File4, File5, A, UNIX_2020};
 use super::{Launch, RarPaths};
+#[cfg(windows)]
+use crate::helper::{Contain, Contained};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError};
 
 /// Grape's bsdtar, as `GRAPE_TEST_BSDTAR` names it.
@@ -839,4 +858,179 @@ fn run_job_reaches_bsdtar_through_the_sidecars() {
     assert_eq!(error.kind, ErrorKind::NotYetSupported);
     assert!(!dest.exists());
     case.source.assert_unchanged();
+}
+
+// ---- In a Job Object (Windows) ----------------------------------------------
+
+/// The hook the app's `contain.rs` sets: a Job Object of its own for each
+/// bsdtar (`grape_platform::windows::job`). It counts what it did.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct Jobs {
+    /// bsdtars put in a job.
+    contained: AtomicUsize,
+    /// Of those, the ones whose job has the UI limits.
+    ui_limited: AtomicUsize,
+    /// Calls that asked for bsdtar's cap.
+    capped: AtomicUsize,
+    /// The highest peak a job reported when its bsdtar's run ended.
+    peak: Arc<AtomicU64>,
+}
+
+/// One bsdtar's job; its peak goes to [`Jobs::peak`] when it's dropped.
+#[cfg(windows)]
+struct Job(JobGuard, Arc<AtomicU64>);
+
+#[cfg(windows)]
+impl Contained for Job {
+    fn peak_memory(&self) -> Option<u64> {
+        self.0.peak_memory()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        let peak = self.0.peak_memory().unwrap_or(0);
+        self.1.fetch_max(peak, Ordering::SeqCst);
+    }
+}
+
+#[cfg(windows)]
+impl Contain for Jobs {
+    fn contain(
+        &self,
+        child: &std::process::Child,
+        max_memory: Option<u64>,
+    ) -> Result<Box<dyn Contained>, String> {
+        let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
+        self.contained.fetch_add(1, Ordering::SeqCst);
+        if guard.has_ui_limits() {
+            self.ui_limited.fetch_add(1, Ordering::SeqCst);
+        }
+        if max_memory == Some(MAX_MEMORY) {
+            self.capped.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(Box::new(Job(guard, Arc::clone(&self.peak))))
+    }
+}
+
+/// A RAR 5 and a RAR 4 converted to ZIP and extracted by the real bsdtar,
+/// each bsdtar contained by `jobs`; the outputs are read back.
+#[cfg(windows)]
+fn convert_and_extract_in(jobs: &Arc<Jobs>) {
+    let launch = Launch {
+        contain: Some(Arc::clone(jobs) as Arc<dyn Contain>),
+        ..bsdtar()
+    };
+    let a = vec![("a.txt".to_string(), Node::File(A.to_vec()))];
+    for (name, bytes) in [
+        ("x.rar", writer::rar5(0, &[File5::new(b"a.txt", A)])),
+        ("y.rar", writer::rar4(0, &[File4::new(b"a.txt", A)])),
+    ] {
+        let case = new_case(name, &bytes, Operation::convert(Format::Zip));
+        case.run_rar(Limits::default(), None, Some(&launch))
+            .unwrap_or_else(|e| panic!("{name} → ZIP: {e:?}"));
+        let items: Vec<(String, Node)> = zip_items(&case.output_bytes())
+            .into_iter()
+            .map(|item| (item.name, item.node))
+            .collect();
+        assert_eq!(items, a, "{name} → ZIP");
+        let case = new_case(name, &bytes, Operation::tool(ToolKey::ExtractArchive));
+        case.run_rar(Limits::default(), None, Some(&launch))
+            .unwrap_or_else(|e| panic!("{name} extracted: {e:?}"));
+        assert_eq!(fs::read(case.planned().join("a.txt")).unwrap(), A, "{name}");
+        case.source.assert_unchanged();
+    }
+}
+
+/// Each bsdtar in a Job Object of its own, as the app makes it: the
+/// 1 GiB cap, one process, started with `DETACHED_PROCESS`. Under cargo
+/// the job is nested in cargo's, so it has no UI limits; the child below
+/// checks those.
+#[cfg(windows)]
+#[test]
+fn bsdtar_runs_in_a_job_object_as_the_app_makes_it() {
+    let jobs = Arc::new(Jobs::default());
+    convert_and_extract_in(&jobs);
+    let peak = jobs.peak.load(Ordering::SeqCst);
+    println!(
+        "bsdtar in its job: peak {} KiB (cap {} MiB)",
+        peak >> 10,
+        MAX_MEMORY >> 20
+    );
+    assert_eq!(jobs.contained.load(Ordering::SeqCst), 4);
+    assert_eq!(jobs.capped.load(Ordering::SeqCst), 4);
+    assert!(peak > 0, "no job reported a peak");
+}
+
+/// What tells this test binary it was started as the UI-limited child: the
+/// file it writes once its checks pass, so its parent knows it ran (a name
+/// that matches no test runs none and still exits 0).
+#[cfg(windows)]
+const UI_CHILD: &str = "GRAPE_TEST_JOB_UI_CHILD";
+
+/// With `GRAPE_TEST_JOB_UI=1` (CI runs this binary outside cargo so),
+/// starts this binary again, breaking away from the jobs this process is
+/// in, to run [`ui_limited_bsdtar_child`]: its bsdtar is then in no other
+/// job, as an installed Grape's is, so its own job must have the UI
+/// limits. If this process's job allows no breakaway, it warns and the PC
+/// checks it. Without the variable it does nothing.
+#[cfg(windows)]
+#[test]
+fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
+    use std::os::windows::process::CommandExt;
+
+    /// `CREATE_BREAKAWAY_FROM_JOB`.
+    const BREAKAWAY: u32 = 0x0100_0000;
+
+    if std::env::var_os("GRAPE_TEST_JOB_UI").is_none_or(|v| v != "1") {
+        return;
+    }
+    let dir = TestDir::new();
+    let ran = dir.join("ran");
+    let started = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "archive::rar::it::ui_limited_bsdtar_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(UI_CHILD, &ran)
+        .creation_flags(BREAKAWAY)
+        .spawn();
+    let mut child = match started {
+        Ok(child) => child,
+        Err(err) => {
+            // On a line of its own, so GitHub shows it on the run.
+            println!(
+                "\n::warning::GRAPE_TEST_JOB_UI=1, but this process's job lets no child break away ({err}), so bsdtar's UI-limited job isn't tested here; the PC checks it (TESTING.md, RAR, D27)"
+            );
+            return;
+        }
+    };
+    let status = child.wait().unwrap();
+    assert!(status.success(), "the UI-limited child failed: {status}");
+    assert!(ran.is_file(), "the UI-limited child ran no test");
+}
+
+/// The child: [`convert_and_extract_in`] with every bsdtar's job made as
+/// the app makes it, which must have the UI limits. Only for its parent
+/// above.
+#[cfg(windows)]
+#[test]
+#[ignore = "the child of bsdtar_runs_in_the_ui_limited_job_outside_cargo"]
+fn ui_limited_bsdtar_child() {
+    let Some(ran) = std::env::var_os(UI_CHILD) else {
+        return;
+    };
+    let jobs = Arc::new(Jobs::default());
+    convert_and_extract_in(&jobs);
+    let contained = jobs.contained.load(Ordering::SeqCst);
+    let ui_limited = jobs.ui_limited.load(Ordering::SeqCst);
+    println!("UI-limited child: {ui_limited} of {contained} bsdtar jobs had the UI limits");
+    assert_eq!(contained, 4);
+    assert_eq!(ui_limited, 4, "a bsdtar's job had no UI limits");
+    fs::write(ran, b"").unwrap();
 }

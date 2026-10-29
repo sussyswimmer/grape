@@ -872,16 +872,25 @@ mod tests {
                 "{tool:?}"
             );
         }
-        // Formats still coming (D26's later slices): no panel.
+        // Lane B's D28 pairs (Compress on TIFF, WebP and HEIC) are offered
+        // and open the panel only once the engine runs them: until then
+        // the drop goes the direct way, to its "coming" toast. HEIC needs
+        // the image helper too, which `installed` leaves out.
         for items in [
             files(&["/a/scan.tiff"]),
             files(&["/a/photo.webp", "/a/other.webp"]),
             files(&["/a/IMG_0001.heic"]),
             files(&["/a/photo.jpg", "/a/scan.tiff"]),
         ] {
+            assert!(offered(ToolKey::Compress, &items, V1));
+            let runs = real(&Operation::tool(ToolKey::Compress), &items).is_ok();
             assert_eq!(
                 route(WheelEntry::Tool(ToolKey::Compress), &items, V1, real),
-                Route::Direct
+                if runs {
+                    Route::Panel(ToolKey::Compress)
+                } else {
+                    Route::Direct
+                }
             );
         }
     }

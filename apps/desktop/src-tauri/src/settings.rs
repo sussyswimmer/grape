@@ -20,9 +20,14 @@
 //!   shows. The window never sends a path: folders are picked here, with
 //!   the OS's folder picker.
 //! - Launch at login is tauri-plugin-autostart. A release build turns it on
-//!   at its first launch ([`first_launch_rule`]); a debug build never
-//!   touches it on its own, so `pnpm tauri dev` doesn't register a dev
-//!   binary at login.
+//!   at its first launch ([`first_launch_rule`]), on Windows registers it
+//!   again when "on" is stored but an uninstall took the `Run` value, and
+//!   on macOS points it here when "on" is stored but its LaunchAgent names
+//!   a program that's gone (a disk image, a translocated copy, a copy since
+//!   moved); a debug build never touches it on its own, so `pnpm tauri
+//!   dev` doesn't register a dev binary at login. On macOS the switch
+//!   can't turn it on from a disk image or a translocated copy
+//!   ([`launch_toggle_rule`]).
 //! - Until the welcome card is dismissed, setup opens Settings at launch
 //!   to show it ([`SettingsState::welcome_at_launch`]).
 //! - The tool panels start from the last Compress preset and Normalize
@@ -82,6 +87,7 @@ const SAVE_FAILED: &str = "Couldn't save your settings.";
 const KEY_NOT_OFFERED: &str = "That key can't open a wheel here.";
 const NO_HAPTICS: &str = "Haptics are a Mac setting.";
 const LAUNCH_FAILED: &str = "Couldn't change launch at login.";
+const MOVE_TO_APPLICATIONS: &str = "Move Grape to Applications first, then turn this on.";
 const PICKER_FAILED: &str = "Couldn't open the folder picker.";
 const NOT_A_FOLDER: &str = "Grape can't use that folder.";
 const TERMINAL_NOT_OFFERED: &str = "That app isn't offered here.";
@@ -817,10 +823,18 @@ impl SettingsState {
             );
         }
         let exe = std::env::current_exe();
+        let release = !cfg!(debug_assertions);
+        let stored_on = settings.launch_at_login == Some(true);
         let facts = LaunchFacts {
-            release: !cfg!(debug_assertions),
+            release,
             platform: THIS_OS,
             missing: report.missing.contains(&LAUNCH_AT_LOGIN),
+            stored_on,
+            run_value_missing: release && stored_on && run_value_missing(app, exe.as_deref().ok()),
+            agent_program_gone: release
+                && stored_on
+                && cfg!(target_os = "macos")
+                && agent_program_gone(app, exe.as_deref().ok()),
             has_store: store.is_some(),
             unreadable: file.was_unreadable(),
             exe: exe.as_deref().ok(),
@@ -833,6 +847,12 @@ impl SettingsState {
             picking: AtomicBool::new(false),
         };
         state.first_launch_at_login(app, &facts);
+        // Once launch at login is on, macOS mustn't also relaunch Grape at
+        // login (macOS relaunches every app by default). Only a Mac asks
+        // the plugin here: elsewhere nothing would use the answer.
+        if cfg!(target_os = "macos") && launch_state(app) == Some(true) {
+            relaunch_on_login(app, true);
+        }
         state
     }
 
@@ -941,14 +961,40 @@ impl SettingsState {
     /// ARCHITECTURE's default for launch at login is on: when
     /// [`first_launch_rule`] says so, this turns it on and stores `true`.
     /// If that fails, nothing is stored and the next launch tries again.
-    /// Otherwise autostart is left as it is, and the log says why.
+    /// When "on" is stored but the `Run` value is gone (Windows) or the
+    /// LaunchAgent names a program that's gone (macOS), it registers this
+    /// Grape again. Otherwise autostart is left as it is, and the log says
+    /// why.
     fn first_launch_at_login(&self, app: &AppHandle, facts: &LaunchFacts<'_>) {
-        if let FirstLaunch::Leave(why) = first_launch_rule(facts) {
-            log::info!("settings: leaving launch at login as it is: {why}");
-            if facts.unreadable && facts.has_store {
-                self.keep_launch_state(app);
+        match first_launch_rule(facts) {
+            FirstLaunch::Leave(why) => {
+                log::info!("settings: leaving launch at login as it is: {why}");
+                if facts.unreadable && facts.has_store {
+                    self.keep_launch_state(app);
+                }
+                return;
             }
-            return;
+            FirstLaunch::RegisterAgain => {
+                log::info!(
+                    "settings: launch at login: the Run value was gone (an uninstall?); registering again"
+                );
+                // `true` is already stored; a failure leaves it so, and the
+                // next launch tries again.
+                if let Err(err) = set_autostart(app, true) {
+                    log::warn!("settings: could not register launch at login again: {err}");
+                }
+                return;
+            }
+            FirstLaunch::PointHere => {
+                log::info!("settings: launch at login named a path that's gone; pointing it here");
+                // As above: `true` stays stored, and a failure is tried
+                // again at the next launch.
+                if let Err(err) = set_autostart(app, true) {
+                    log::warn!("settings: could not point launch at login here: {err}");
+                }
+                return;
+            }
+            FirstLaunch::TurnOn => {}
         }
         let mut settings = self.lock();
         if let Err(err) = set_autostart(app, true) {
@@ -1047,7 +1093,16 @@ pub const LOGIN_ARG: &str = "--at-login";
 
 /// `true` when this process was started by launch at login.
 pub fn launched_at_login() -> bool {
-    std::env::args().skip(1).any(|arg| arg == LOGIN_ARG)
+    at_login(std::env::args())
+}
+
+/// `true` when `args` (a process's arguments, its program first) are a
+/// launch at login's: [`LOGIN_ARG`] after the program. The single-instance
+/// handover passes a second launch's arguments so.
+pub fn at_login<S: AsRef<str>>(args: impl IntoIterator<Item = S>) -> bool {
+    args.into_iter()
+        .skip(1)
+        .any(|arg| arg.as_ref() == LOGIN_ARG)
 }
 
 /// What [`settle_settings_file`] found at `settings.json`, before the store
@@ -1170,6 +1225,18 @@ struct LaunchFacts<'a> {
     /// Nothing at all is stored for `launch_at_login`. An unusable value
     /// doesn't count: the user may have turned it off.
     missing: bool,
+    /// `true` is stored for `launch_at_login`.
+    stored_on: bool,
+    /// Windows only: neither the current user's nor the machine's `Run`
+    /// key has a value named after Grape, and Task Manager has no "off"
+    /// for it, as after an uninstall that kept `settings.json`. Looked up
+    /// only in a release build with `true` stored ([`run_value_missing`]).
+    run_value_missing: bool,
+    /// macOS only: the LaunchAgent launch at login wrote names a program
+    /// that no longer exists (a copy since moved) or is on a disk image or
+    /// translocated, mounted or not. Looked up only in a release build
+    /// with `true` stored ([`agent_program_gone`]).
+    agent_program_gone: bool,
     /// There's a store to remember the choice in.
     has_store: bool,
     /// `settings.json` was there at this launch but couldn't be read or
@@ -1185,6 +1252,12 @@ struct LaunchFacts<'a> {
 enum FirstLaunch {
     /// Turn launch at login on and store `true`.
     TurnOn,
+    /// `true` is stored, but Windows lost the `Run` value: register Grape
+    /// again.
+    RegisterAgain,
+    /// `true` is stored, but the Mac's LaunchAgent names a program that's
+    /// gone: write it again for this Grape.
+    PointHere,
     /// Leave autostart alone and store nothing, for this reason.
     Leave(&'static str),
 }
@@ -1196,8 +1269,29 @@ enum FirstLaunch {
 /// (`/Volumes/…`), a translocated copy (`…/AppTranslocation/…`) or an
 /// unknown path: the login item would name a path that goes away. The
 /// next launch, from Applications, tries again.
+///
+/// On Windows, with `true` stored and the `Run` value gone (an uninstall
+/// deletes it and keeps `settings.json`), the same release build, store
+/// and readable file register Grape again, so a reinstall keeps the
+/// user's "on". A value removed any other way (regedit, Autoruns) looks
+/// the same and is registered again too: Settings and Task Manager are how
+/// to turn it off. A value that's there, on or off in Task Manager, is
+/// never touched.
+///
+/// On macOS, with `true` stored and the LaunchAgent naming a program
+/// that's gone (launch at login turned on from a disk image, a translocated
+/// copy, or a copy since moved to Applications), the same release build,
+/// store and readable file point it here, but only from a place that
+/// lasts: not a disk image, a translocated copy or an unknown path. A
+/// LaunchAgent that names another copy that's still there is left alone,
+/// as Windows leaves a value naming another program.
 fn first_launch_rule(facts: &LaunchFacts<'_>) -> FirstLaunch {
-    if !facts.missing {
+    let again = facts.stored_on
+        && match facts.platform {
+            Platform::Windows => facts.run_value_missing,
+            Platform::MacOs => facts.agent_program_gone,
+        };
+    if !facts.missing && !again {
         return FirstLaunch::Leave("a value is stored for it");
     }
     if !facts.release {
@@ -1220,7 +1314,31 @@ fn first_launch_rule(facts: &LaunchFacts<'_>) -> FirstLaunch {
             Some(_) => {}
         }
     }
-    FirstLaunch::TurnOn
+    match (again, facts.platform) {
+        (false, _) => FirstLaunch::TurnOn,
+        (true, Platform::Windows) => FirstLaunch::RegisterAgain,
+        (true, Platform::MacOs) => FirstLaunch::PointHere,
+    }
+}
+
+/// Whether the Settings switch may turn launch at login on now. On macOS
+/// it can't from a disk image, a translocated copy or an unknown path: the
+/// LaunchAgent would name a program that's gone by the next login, so the
+/// switch is refused with a sentence the window shows, and nothing is
+/// registered or stored. Turning it off is always allowed, and Windows
+/// never looks at the path.
+fn launch_toggle_rule(
+    platform: Platform,
+    on: bool,
+    exe: Option<&Path>,
+) -> Result<(), &'static str> {
+    if !on || matches!(platform, Platform::Windows) {
+        return Ok(());
+    }
+    match exe {
+        Some(exe) if !transient_mac_location(exe) => Ok(()),
+        _ => Err(MOVE_TO_APPLICATIONS),
+    }
 }
 
 /// `true` for a Mac app path that goes away: a mounted disk image
@@ -1231,6 +1349,211 @@ fn transient_mac_location(exe: &Path) -> bool {
         || exe
             .components()
             .any(|part| part.as_os_str() == "AppTranslocation")
+}
+
+/// What the LaunchAgent launch at login wrote on macOS says about its
+/// program.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LaunchAgent {
+    /// There's no LaunchAgent file: nothing is registered.
+    Missing,
+    /// Its program is this Grape.
+    ThisExe,
+    /// Its program is another path that exists and lasts: another copy of
+    /// Grape.
+    OtherExe,
+    /// Its program is an absolute path that no longer exists, or one on a
+    /// disk image or translocated, which is gone by the next login.
+    ProgramGone,
+    /// The file or its program couldn't be read, or the program's path
+    /// can't be checked: leave it alone.
+    Unreadable,
+}
+
+/// What the LaunchAgent at `~/Library/LaunchAgents/<name>.plist` says,
+/// from the file's text (`plist`), this Grape's executable as the plugin
+/// names it (`this_exe`: `current_exe` made canonical, if that worked) and
+/// a way to ask whether a path exists (`exists`, `Path::try_exists`).
+/// Only a program that's an absolute path the disk says is gone counts as
+/// gone, and so does one in a place that goes away
+/// ([`transient_mac_location`]) without asking the disk: a DMG still
+/// mounted at the same `/Volumes` path is ejected by the next login all
+/// the same. Anything unclear is [`LaunchAgent::Unreadable`].
+fn launch_agent_state(
+    plist: io::Result<String>,
+    this_exe: Option<&Path>,
+    exists: impl FnOnce(&Path) -> io::Result<bool>,
+) -> LaunchAgent {
+    let text = match plist {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return LaunchAgent::Missing,
+        Err(_) => return LaunchAgent::Unreadable,
+    };
+    let Some(program) = launch_agent_program(&text) else {
+        return LaunchAgent::Unreadable;
+    };
+    // A Mac path: absolute when it starts at the root (`Path::is_absolute`
+    // would want a drive on Windows, where the tests run too).
+    if !program.starts_with('/') {
+        return LaunchAgent::Unreadable;
+    }
+    let program = Path::new(&program);
+    if transient_mac_location(program) {
+        return LaunchAgent::ProgramGone;
+    }
+    match exists(program) {
+        Ok(true) if this_exe == Some(program) => LaunchAgent::ThisExe,
+        Ok(true) => LaunchAgent::OtherExe,
+        Ok(false) => LaunchAgent::ProgramGone,
+        Err(_) => LaunchAgent::Unreadable,
+    }
+}
+
+/// The program a LaunchAgent starts: the first `<string>` of the
+/// `<array>` right after `<key>ProgramArguments</key>`, with XML's escapes
+/// undone. That's the fixed layout auto-launch 0.6 writes (no parser
+/// needed for it, so no new dependency); whitespace between the tags is
+/// allowed. `None` when the file isn't laid out so (a binary plist, say)
+/// or the array has no string first.
+fn launch_agent_program(plist: &str) -> Option<String> {
+    const KEY: &str = "<key>ProgramArguments</key>";
+    let (_, rest) = plist.split_once(KEY)?;
+    let rest = rest.trim_start().strip_prefix("<array>")?;
+    let rest = rest.trim_start().strip_prefix("<string>")?;
+    let (raw, _) = rest.split_once("</string>")?;
+    if raw.is_empty() || raw.contains('<') {
+        return None;
+    }
+    Some(unescape_xml(raw))
+}
+
+/// `text` with XML's character references undone: the five named ones
+/// and numeric ones (`&#38;`, `&#x26;`). An `&` that starts none of them
+/// stays as it is: auto-launch writes paths unescaped, so a folder named
+/// `A&B` arrives raw.
+fn unescape_xml(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('&') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        let decoded = rest.find(';').and_then(|end| {
+            let name = &rest[1..end];
+            let ch = match name {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                _ => name.strip_prefix('#').and_then(|number| {
+                    let code = match number.strip_prefix(['x', 'X']) {
+                        Some(hex) => u32::from_str_radix(hex, 16).ok(),
+                        None => number.parse::<u32>().ok(),
+                    };
+                    code.and_then(char::from_u32)
+                }),
+            };
+            ch.map(|ch| (ch, end + 1))
+        });
+        match decoded {
+            Some((ch, len)) => {
+                out.push(ch);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// macOS: whether the LaunchAgent the autostart plugin writes
+/// (`~/Library/LaunchAgents/<product name>.plist`, named as the plugin
+/// names it, with `current_exe` made canonical as its program) names a
+/// program that no longer exists, or one on a disk image or translocated
+/// ([`launch_agent_state`]). Never auto-launch's `is_enabled`, which only
+/// checks that the file is there. A file that's missing, names this Grape
+/// or another lasting copy that's there, or can't be read counts as not
+/// gone, and the log says so for the last two. Never logs a path. Called
+/// only on macOS, in setup: the `stat` of an old path in Desktop,
+/// Documents or Downloads may raise that folder's prompt then
+/// (`docs/PLATFORM_MACOS.md` → "Launch at login").
+fn agent_program_gone(app: &AppHandle, exe: Option<&Path>) -> bool {
+    let Ok(home) = app.path().home_dir() else {
+        log::warn!("settings: launch at login: can't find the home folder; leaving it");
+        return false;
+    };
+    let file = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{}.plist", app.package_info().name));
+    let this_exe = exe.and_then(|exe| exe.canonicalize().ok());
+    match launch_agent_state(
+        fs::read_to_string(&file),
+        this_exe.as_deref(),
+        Path::try_exists,
+    ) {
+        LaunchAgent::ProgramGone => true,
+        LaunchAgent::Missing | LaunchAgent::ThisExe => false,
+        LaunchAgent::OtherExe => {
+            log::info!(
+                "settings: launch at login: the LaunchAgent names another program (another copy of Grape?); leaving it"
+            );
+            false
+        }
+        LaunchAgent::Unreadable => {
+            log::warn!(
+                "settings: launch at login: can't read the LaunchAgent's program; leaving it as it is"
+            );
+            false
+        }
+    }
+}
+
+/// Windows: whether the `Run` value the autostart plugin writes (named
+/// after the product, as the plugin names it) is gone from both hives with
+/// no "off" left in Task Manager ([`grape_platform::windows::run_value`]).
+/// Never auto-launch's `is_enabled`, which is also false while Task Manager
+/// has Grape off. A value naming another program, one Task Manager turned
+/// off, or keys that can't be read count as not missing, and the log says
+/// so. An unknown executable path counts as not missing too.
+#[cfg(target_os = "windows")]
+fn run_value_missing(app: &AppHandle, exe: Option<&Path>) -> bool {
+    use grape_platform::windows::RunValue;
+    let Some(exe) = exe else {
+        return false;
+    };
+    match grape_platform::windows::run_value(&app.package_info().name, exe) {
+        RunValue::Missing => true,
+        RunValue::ThisExe => false,
+        RunValue::MissingTurnedOff => {
+            log::info!(
+                "settings: launch at login: the Run value is gone, but Task Manager had Grape turned off; leaving it off"
+            );
+            false
+        }
+        RunValue::OtherExe => {
+            log::info!(
+                "settings: launch at login: the Run value names another program (another copy of Grape?); leaving it"
+            );
+            false
+        }
+        RunValue::Unreadable => {
+            log::warn!(
+                "settings: launch at login: can't read the Run keys; leaving them as they are"
+            );
+            false
+        }
+    }
+}
+
+/// Elsewhere there's no `Run` value to lose.
+#[cfg(not(target_os = "windows"))]
+fn run_value_missing(_app: &AppHandle, _exe: Option<&Path>) -> bool {
+    false
 }
 
 /// Whether Grape is registered to launch at login, or `None` if the
@@ -1246,6 +1569,40 @@ fn launch_state(app: &AppHandle) -> Option<bool> {
         }
     }
 }
+
+/// macOS: keeps the system's own relaunch at login ("Reopen windows when
+/// logging back in") off while Grape's launch at login is on
+/// (`launch_at_login`), since the LaunchAgent starts Grape then, and lets
+/// it relaunch Grape again once that's off
+/// (`grape_platform::macos::set_relaunch_on_login`, which keeps AppKit's
+/// calls paired). Queued on the main thread. Elsewhere nothing relaunches
+/// Grape at login on its own.
+#[cfg(target_os = "macos")]
+fn relaunch_on_login(app: &AppHandle, launch_at_login: bool) {
+    let queued =
+        app.run_on_main_thread(move || {
+            match grape_platform::macos::set_relaunch_on_login(!launch_at_login) {
+                Ok(true) if launch_at_login => {
+                    log::info!(
+                        "settings: launch at login is on; macOS won't also relaunch Grape at login"
+                    )
+                }
+                Ok(true) => log::info!(
+                    "settings: launch at login is off; macOS may relaunch Grape at login again"
+                ),
+                Ok(false) => {}
+                Err(err) => {
+                    log::warn!("settings: could not change macOS's relaunch at login: {err}")
+                }
+            }
+        });
+    if let Err(err) = queued {
+        log::warn!("settings: could not change macOS's relaunch at login: no main thread: {err}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn relaunch_on_login(_app: &AppHandle, _launch_at_login: bool) {}
 
 /// Registers Grape to launch at login, or removes it.
 fn set_autostart(app: &AppHandle, on: bool) -> Result<(), String> {
@@ -1355,7 +1712,8 @@ pub async fn settings_use_default_fallback(
 }
 
 /// Turns a switch on or off. Launch at login registers or removes Grape
-/// first, and changes nothing if that fails.
+/// first, and changes nothing if that fails or [`launch_toggle_rule`]
+/// refuses it.
 #[tauri::command]
 pub async fn settings_set_toggle(
     app: AppHandle,
@@ -1371,10 +1729,18 @@ pub async fn settings_set_toggle(
             Toggle::Haptics if matches!(THIS_OS, Platform::Windows) => return Err(NO_HAPTICS),
             Toggle::Haptics => new.haptics = on,
             Toggle::LaunchAtLogin => {
+                let exe = std::env::current_exe();
+                if let Err(why) = launch_toggle_rule(THIS_OS, on, exe.as_deref().ok()) {
+                    log::info!(
+                        "settings: not turning launch at login on: Grape runs from a disk image, a translocated copy or an unknown place"
+                    );
+                    return Err(why);
+                }
                 if let Err(err) = set_autostart(&app, on) {
                     log::error!("settings: could not turn launch at login {words}: {err}");
                     return Err(LAUNCH_FAILED);
                 }
+                relaunch_on_login(&app, on);
                 new.launch_at_login = Some(on);
             }
         }
@@ -2241,6 +2607,23 @@ mod tests {
     }
 
     #[test]
+    fn a_launch_at_login_is_told_by_its_arguments() {
+        let exe = "/Applications/Grape.app/Contents/MacOS/Grape";
+        assert!(at_login([exe, LOGIN_ARG]));
+        assert!(at_login(vec![
+            exe.to_owned(),
+            "-x".to_owned(),
+            LOGIN_ARG.to_owned()
+        ]));
+        assert!(!at_login([exe]));
+        assert!(!at_login(Vec::<String>::new()));
+        // The program's own name never counts, and nor does a near miss.
+        assert!(!at_login([LOGIN_ARG]));
+        assert!(!at_login([exe, "--at-login=1"]));
+        assert!(!at_login([exe, "--AT-LOGIN"]));
+    }
+
+    #[test]
     fn haptics_show_on_macos_only() {
         let settings = AppSettings {
             haptics: false,
@@ -2613,9 +2996,41 @@ mod tests {
             release: true,
             platform,
             missing: true,
+            stored_on: false,
+            run_value_missing: false,
+            agent_program_gone: false,
             has_store: true,
             unreadable: false,
             exe,
+        }
+    }
+
+    /// A release build's launch from Applications on a Mac after launch at
+    /// login was turned on from a disk image (or a copy since moved): `true`
+    /// is stored and the LaunchAgent names a program that's gone.
+    fn moved_to_applications() -> LaunchFacts<'static> {
+        LaunchFacts {
+            missing: false,
+            stored_on: true,
+            agent_program_gone: true,
+            ..first_launch(
+                Platform::MacOs,
+                Some(Path::new("/Applications/Grape.app/Contents/MacOS/Grape")),
+            )
+        }
+    }
+
+    /// A release build's launch on Windows after an uninstall that kept
+    /// `settings.json` with launch at login on: the `Run` value is gone.
+    fn reinstalled() -> LaunchFacts<'static> {
+        LaunchFacts {
+            missing: false,
+            stored_on: true,
+            run_value_missing: true,
+            ..first_launch(
+                Platform::Windows,
+                Some(Path::new(r"C:\Users\Max\AppData\Local\Grape\Grape.exe")),
+            )
         }
     }
 
@@ -2669,6 +3084,87 @@ mod tests {
     }
 
     #[test]
+    fn a_reinstall_that_kept_launch_at_login_on_registers_it_again() {
+        assert_eq!(
+            first_launch_rule(&reinstalled()),
+            FirstLaunch::RegisterAgain
+        );
+    }
+
+    #[test]
+    fn launch_at_login_is_registered_again_only_in_a_release_build_with_a_readable_store() {
+        let base = reinstalled();
+        for facts in [
+            LaunchFacts {
+                release: false,
+                ..base
+            },
+            LaunchFacts {
+                has_store: false,
+                ..base
+            },
+            LaunchFacts {
+                unreadable: true,
+                ..base
+            },
+        ] {
+            assert!(left(first_launch_rule(&facts)), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn launch_at_login_is_registered_again_only_when_on_is_stored_and_the_value_is_gone() {
+        let base = reinstalled();
+        // The value is there (on or off in Task Manager), names another
+        // program, or couldn't be read.
+        let present = LaunchFacts {
+            run_value_missing: false,
+            ..base
+        };
+        // The user turned it off in Settings.
+        let off = LaunchFacts {
+            stored_on: false,
+            ..base
+        };
+        // An unusable stored value: neither stored nor on.
+        let unusable = LaunchFacts {
+            stored_on: false,
+            run_value_missing: false,
+            ..base
+        };
+        for facts in [present, off, unusable] {
+            assert_eq!(
+                first_launch_rule(&facts),
+                FirstLaunch::Leave("a value is stored for it"),
+                "{facts:?}"
+            );
+        }
+        // Nothing stored is a first launch, whatever the Run keys hold.
+        for run_value_missing in [false, true] {
+            let facts = LaunchFacts {
+                missing: true,
+                stored_on: false,
+                run_value_missing,
+                ..base
+            };
+            assert_eq!(first_launch_rule(&facts), FirstLaunch::TurnOn);
+        }
+    }
+
+    #[test]
+    fn a_mac_never_registers_launch_at_login_again() {
+        let facts = LaunchFacts {
+            platform: Platform::MacOs,
+            exe: Some(Path::new("/Applications/Grape.app/Contents/MacOS/Grape")),
+            ..reinstalled()
+        };
+        assert_eq!(
+            first_launch_rule(&facts),
+            FirstLaunch::Leave("a value is stored for it")
+        );
+    }
+
+    #[test]
     fn an_unusable_stored_value_is_not_a_first_launch() {
         let map = HashMap::from([(LAUNCH_AT_LOGIN, json!("off"))]);
         let (settings, report) = from_map(map, Platform::Windows);
@@ -2703,6 +3199,254 @@ mod tests {
         }
         let facts = first_launch(Platform::MacOs, None);
         assert!(left(first_launch_rule(&facts)));
+    }
+
+    #[test]
+    fn a_mac_points_a_launch_agent_whose_program_is_gone_here() {
+        assert_eq!(
+            first_launch_rule(&moved_to_applications()),
+            FirstLaunch::PointHere
+        );
+        // From anywhere that lasts, not only Applications.
+        let desktop = LaunchFacts {
+            exe: Some(Path::new(
+                "/Users/max/Desktop/Grape.app/Contents/MacOS/Grape",
+            )),
+            ..moved_to_applications()
+        };
+        assert_eq!(first_launch_rule(&desktop), FirstLaunch::PointHere);
+    }
+
+    #[test]
+    fn a_mac_points_it_here_only_from_a_lasting_place_in_a_release_build_with_a_readable_store() {
+        let base = moved_to_applications();
+        for facts in [
+            LaunchFacts {
+                release: false,
+                ..base
+            },
+            LaunchFacts {
+                has_store: false,
+                ..base
+            },
+            LaunchFacts {
+                unreadable: true,
+                ..base
+            },
+            LaunchFacts { exe: None, ..base },
+            LaunchFacts {
+                exe: Some(Path::new("/Volumes/Grape/Grape.app/Contents/MacOS/Grape")),
+                ..base
+            },
+            LaunchFacts {
+                exe: Some(Path::new(
+                    "/private/var/folders/xy/abc/T/AppTranslocation/1A2B/d/Grape.app/Contents/MacOS/Grape",
+                )),
+                ..base
+            },
+        ] {
+            assert!(left(first_launch_rule(&facts)), "{facts:?}");
+        }
+    }
+
+    #[test]
+    fn a_mac_leaves_a_launch_agent_alone_unless_on_is_stored_and_its_program_is_gone() {
+        let base = moved_to_applications();
+        // The program is there (this copy or another), the file is missing
+        // or unreadable.
+        let there = LaunchFacts {
+            agent_program_gone: false,
+            ..base
+        };
+        // The user turned it off in Settings.
+        let off = LaunchFacts {
+            stored_on: false,
+            ..base
+        };
+        for facts in [there, off] {
+            assert_eq!(
+                first_launch_rule(&facts),
+                FirstLaunch::Leave("a value is stored for it"),
+                "{facts:?}"
+            );
+        }
+        // Windows never looks at a LaunchAgent.
+        let windows = LaunchFacts {
+            platform: Platform::Windows,
+            exe: Some(Path::new(r"C:\Program Files\Grape\Grape.exe")),
+            ..base
+        };
+        assert_eq!(
+            first_launch_rule(&windows),
+            FirstLaunch::Leave("a value is stored for it")
+        );
+        // Nothing stored is a first launch, whatever the LaunchAgent says.
+        let fresh = LaunchFacts {
+            missing: true,
+            stored_on: false,
+            ..base
+        };
+        assert_eq!(first_launch_rule(&fresh), FirstLaunch::TurnOn);
+    }
+
+    #[test]
+    fn the_switch_turns_launch_at_login_on_only_from_a_lasting_place_on_a_mac() {
+        for exe in [
+            "/Applications/Grape.app/Contents/MacOS/Grape",
+            "/Users/max/Applications/Grape.app/Contents/MacOS/Grape",
+            "/Users/max/Desktop/Grape.app/Contents/MacOS/Grape",
+        ] {
+            let exe = Some(Path::new(exe));
+            assert_eq!(launch_toggle_rule(Platform::MacOs, true, exe), Ok(()));
+        }
+        for exe in [
+            Some("/Volumes/Grape/Grape.app/Contents/MacOS/Grape"),
+            Some("/private/var/folders/xy/abc/T/AppTranslocation/1A2B/d/Grape.app/Contents/MacOS/Grape"),
+            None,
+        ] {
+            let exe = exe.map(Path::new);
+            assert_eq!(
+                launch_toggle_rule(Platform::MacOs, true, exe),
+                Err(MOVE_TO_APPLICATIONS),
+                "{exe:?}"
+            );
+            // Turning it off is always allowed.
+            assert_eq!(launch_toggle_rule(Platform::MacOs, false, exe), Ok(()));
+            // Windows never looks at the path.
+            for on in [false, true] {
+                assert_eq!(launch_toggle_rule(Platform::Windows, on, exe), Ok(()));
+            }
+        }
+        assert!(MOVE_TO_APPLICATIONS.ends_with('.'));
+    }
+
+    /// A LaunchAgent laid out exactly as auto-launch 0.6 writes it, for
+    /// `program` started with `--at-login`.
+    fn auto_launch_plist(program: &str) -> String {
+        format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+             <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+             <plist version=\"1.0\">\n  <dict>\n  <key>Label</key>\n  <string>Grape</string>\n  \
+             <key>AssociatedBundleIdentifiers</key>\n  <array></array>\n  \
+             <key>ProgramArguments</key>\n  <array><string>{program}</string><string>--at-login</string></array>\n  \
+             <key>RunAtLoad</key>\n  <true/>\n  </dict>\n</plist>"
+        )
+    }
+
+    #[test]
+    fn the_launch_agents_program_is_its_first_program_argument() {
+        let exe = "/Volumes/Grape/Grape.app/Contents/MacOS/Grape";
+        assert_eq!(
+            launch_agent_program(&auto_launch_plist(exe)).as_deref(),
+            Some(exe)
+        );
+        // Laid out again with tabs and new lines (plutil, an editor).
+        let tidy = "<plist version=\"1.0\">\n<dict>\n\t<key>Label</key>\n\t<string>Grape</string>\n\
+                    \t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/Applications/Grape.app/Contents/MacOS/Grape</string>\n\
+                    \t\t<string>--at-login</string>\n\t</array>\n</dict>\n</plist>\n";
+        assert_eq!(
+            launch_agent_program(tidy).as_deref(),
+            Some("/Applications/Grape.app/Contents/MacOS/Grape")
+        );
+    }
+
+    #[test]
+    fn the_launch_agents_program_has_its_escapes_undone() {
+        let escaped = "/Users/max/Tom &amp; Jerry/&lt;new&gt; &quot;apps&quot; &apos;x&apos; &#38;&#x26;/Grape.app/Contents/MacOS/Grape";
+        assert_eq!(
+            launch_agent_program(&auto_launch_plist(escaped)).as_deref(),
+            Some("/Users/max/Tom & Jerry/<new> \"apps\" 'x' &&/Grape.app/Contents/MacOS/Grape")
+        );
+        // auto-launch writes an `&` raw; it stays as it is.
+        let raw = "/Users/max/A&B; C&D/Grape.app/Contents/MacOS/Grape";
+        assert_eq!(
+            launch_agent_program(&auto_launch_plist(raw)).as_deref(),
+            Some(raw)
+        );
+        assert_eq!(unescape_xml("a&b"), "a&b");
+        assert_eq!(unescape_xml("a&#xZZ;b&#1114112;&"), "a&#xZZ;b&#1114112;&");
+        assert_eq!(unescape_xml("é&amp;ü"), "é&ü");
+    }
+
+    #[test]
+    fn a_launch_agent_in_another_layout_has_no_program() {
+        for plist in [
+            "",
+            "bplist00\u{d4}\u{1}\u{2}",
+            "<plist><dict><key>Label</key><string>Grape</string></dict></plist>",
+            "<key>ProgramArguments</key><array></array>",
+            "<key>ProgramArguments</key><array><true/></array>",
+            "<key>ProgramArguments</key><array><string></string></array>",
+            "<key>ProgramArguments</key><array><string/></array>",
+            "<key>ProgramArguments</key><string>/Applications/Grape.app/Contents/MacOS/Grape</string>",
+            "<key>ProgramArguments</key><array><string>/Applications/Grape",
+        ] {
+            assert_eq!(launch_agent_program(plist), None, "{plist:?}");
+        }
+    }
+
+    #[test]
+    fn a_launch_agent_is_judged_by_its_program() {
+        let here = Path::new("/Applications/Grape.app/Contents/MacOS/Grape");
+        let desktop = "/Users/max/Desktop/Grape.app/Contents/MacOS/Grape";
+        let read = |program: &str| Ok(auto_launch_plist(program));
+        let gone = |_: &Path| Ok(false);
+        let there = |_: &Path| Ok(true);
+        assert_eq!(
+            launch_agent_state(read(desktop), Some(here), gone),
+            LaunchAgent::ProgramGone
+        );
+        assert_eq!(
+            launch_agent_state(read(here.to_str().unwrap()), Some(here), there),
+            LaunchAgent::ThisExe
+        );
+        assert_eq!(
+            launch_agent_state(read(desktop), Some(here), there),
+            LaunchAgent::OtherExe
+        );
+        assert_eq!(
+            launch_agent_state(read(desktop), None, there),
+            LaunchAgent::OtherExe
+        );
+        // A disk image (mounted again at the same path, say) or a
+        // translocated copy is gone by the next login: the disk isn't asked.
+        let ask = |_: &Path| -> io::Result<bool> { panic!("asked the disk") };
+        for program in [
+            "/Volumes/Grape/Grape.app/Contents/MacOS/Grape",
+            "/private/var/folders/xy/abc/T/AppTranslocation/1A2B/d/Grape.app/Contents/MacOS/Grape",
+        ] {
+            for this_exe in [Some(here), Some(Path::new(program)), None] {
+                assert_eq!(
+                    launch_agent_state(read(program), this_exe, ask),
+                    LaunchAgent::ProgramGone,
+                    "{program} {this_exe:?}"
+                );
+            }
+        }
+        // Only what the disk answers is believed.
+        let unsure = |_: &Path| Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            launch_agent_state(read(desktop), Some(here), unsure),
+            LaunchAgent::Unreadable
+        );
+        assert_eq!(
+            launch_agent_state(read("Grape.app/Contents/MacOS/Grape"), Some(here), gone),
+            LaunchAgent::Unreadable
+        );
+        assert_eq!(
+            launch_agent_state(Ok("bplist00".to_owned()), Some(here), gone),
+            LaunchAgent::Unreadable
+        );
+        let missing = Err(io::Error::from(io::ErrorKind::NotFound));
+        assert_eq!(
+            launch_agent_state(missing, Some(here), gone),
+            LaunchAgent::Missing
+        );
+        let denied = Err(io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(
+            launch_agent_state(denied, Some(here), gone),
+            LaunchAgent::Unreadable
+        );
     }
 
     #[test]

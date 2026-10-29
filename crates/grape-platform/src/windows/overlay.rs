@@ -40,7 +40,8 @@
 //! ([`other_app_foreground`]): Grape may still set the foreground while
 //! its own window is the active one. [`raise_topmost`] lifts the overlay
 //! to the top of the topmost band on every show, so an open panel or
-//! shelf (topmost too) never covers a wheel.
+//! shelf (topmost too) never covers a wheel, and [`reframe_overlay`] then
+//! checks that a DPI change on the way left it on its monitor's frame.
 
 use core::ffi::c_void;
 
@@ -61,7 +62,7 @@ use ::windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TRANSPARENT, WS_EX_WINDOWEDGE,
 };
 
-use crate::win_rules::{hand_back_plan, HandBackPlan};
+use crate::win_rules::{hand_back_plan, reframe, HandBackPlan, Reframe, OVERLAY_REFRAMES};
 use crate::{PlatformError, Rect};
 
 /// Identifies Grape's subclass on the window ("GRAP").
@@ -361,6 +362,38 @@ pub fn raise_topmost(hwnd: isize) -> Result<(), PlatformError> {
     })
 }
 
+/// Where [`reframe_overlay`] left the overlay. For the log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reframed {
+    /// The window's rect as last read back (global physical pixels), or
+    /// `None` if it couldn't be read.
+    pub rect: Option<Rect>,
+    /// How many times its frame was set again.
+    pub reframed: u32,
+}
+
+/// Reads back where the shown overlay is and, while that isn't `frame`,
+/// sets the frame again, at most three times:
+/// `SetWindowPos(HWND_TOPMOST, frame, SWP_NOACTIVATE)`, never
+/// `SWP_SHOWWINDOW` (tao's show and hide own its visibility). Moving or
+/// resizing it onto a monitor with another scale makes tao rescale the
+/// window in its `WM_DPICHANGED` handler, which can leave it smaller or
+/// larger than the monitor, and that can happen at the show too. The
+/// decision is [`reframe`]'s, tested on every OS.
+///
+/// `hwnd` is the raw handle value. Call this on the window's thread, after
+/// the show.
+///
+/// # Errors
+/// - [`PlatformError::WrongThread`] if the calling thread doesn't own the
+///   window.
+/// - [`PlatformError::Os`] if `hwnd` isn't a window or `SetWindowPos`
+///   fails.
+pub fn reframe_overlay(hwnd: isize, frame: Rect) -> Result<Reframed, PlatformError> {
+    let hwnd = owned_window(hwnd)?;
+    settle(hwnd, frame, SWP_NOACTIVATE, OVERLAY_REFRAMES)
+}
+
 /// `true` if `hwnd` is a live window of another process.
 pub(crate) fn is_window_of_another_app(hwnd: HWND) -> bool {
     // SAFETY: IsWindow accepts any handle value and only reads state.
@@ -376,8 +409,9 @@ pub(crate) fn is_window_of_another_app(hwnd: HWND) -> bool {
 
 /// [`show_shelf`] and [`show_panel`]: shows `raw` topmost at `frame`
 /// without activating it, restoring a minimized window first and setting
-/// the frame again when a DPI change resized it on the way.
+/// the frame once more when a DPI change resized it on the way.
 fn show_topmost(raw: isize, frame: Rect) -> Result<(), PlatformError> {
+    const SHOW: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_SHOWWINDOW.0);
     let hwnd = owned_window(raw)?;
     // SAFETY: `hwnd` is a live window owned by this thread (checked above).
     // IsIconic only reads its state; ShowWindow's return value is only
@@ -387,11 +421,34 @@ fn show_topmost(raw: isize, frame: Rect) -> Result<(), PlatformError> {
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
     }
-    place(hwnd, frame)?;
-    if window_rect(hwnd).is_some_and(|now| now != frame) {
-        place(hwnd, frame)?;
+    place(hwnd, frame, SHOW)?;
+    settle(hwnd, frame, SHOW, 1).map(|_| ())
+}
+
+/// Reads back where `hwnd` is and, while that isn't `frame`, sets the frame
+/// again with `flags`, at most `most` times ([`reframe`]).
+fn settle(
+    hwnd: HWND,
+    frame: Rect,
+    flags: SET_WINDOW_POS_FLAGS,
+    most: u32,
+) -> Result<Reframed, PlatformError> {
+    let mut reframed = 0;
+    loop {
+        let now = window_rect(hwnd);
+        match reframe(now, frame, reframed, most) {
+            Reframe::Again => {
+                place(hwnd, frame, flags)?;
+                reframed += 1;
+            }
+            Reframe::Fits | Reframe::Stop => {
+                return Ok(Reframed {
+                    rect: now,
+                    reframed,
+                })
+            }
+        }
     }
-    Ok(())
 }
 
 /// Installs the subclass for `role` and applies its bits once.
@@ -507,12 +564,13 @@ pub(crate) fn owned_window(raw: isize) -> Result<HWND, PlatformError> {
     Ok(hwnd)
 }
 
-/// Shows `hwnd` topmost at `frame`, without activating it.
-fn place(hwnd: HWND, frame: Rect) -> Result<(), PlatformError> {
-    const SHOW: SET_WINDOW_POS_FLAGS = SET_WINDOW_POS_FLAGS(SWP_NOACTIVATE.0 | SWP_SHOWWINDOW.0);
+/// Puts `hwnd` topmost at `frame` with `flags` (`SWP_NOACTIVATE`, and
+/// `SWP_SHOWWINDOW` to show it too).
+fn place(hwnd: HWND, frame: Rect, flags: SET_WINDOW_POS_FLAGS) -> Result<(), PlatformError> {
     // SAFETY: the caller checked that `hwnd` is a live window owned by this
     // thread. HWND_TOPMOST is a documented sentinel value, not a real
-    // window, and NOACTIVATE leaves the focus where it is.
+    // window, and every caller's flags have NOACTIVATE, which leaves the
+    // focus where it is.
     unsafe {
         SetWindowPos(
             hwnd,
@@ -521,7 +579,7 @@ fn place(hwnd: HWND, frame: Rect) -> Result<(), PlatformError> {
             frame.y,
             frame.width,
             frame.height,
-            SHOW,
+            flags,
         )
     }
     .map_err(|err| PlatformError::Os {
@@ -1063,6 +1121,76 @@ mod tests {
             describe_ex_style(ex)
         );
         assert_eq!(window_rect(window.0), before);
+    }
+
+    #[test]
+    fn reframe_overlay_puts_a_shown_window_back_on_its_frame_without_showing_one() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        harden_overlay(window.raw()).unwrap();
+        let frame = Rect {
+            x: 20,
+            y: 30,
+            width: 400,
+            height: 300,
+        };
+        // Hidden and elsewhere (32 × 32 at the origin): framed, still hidden.
+        assert_eq!(
+            reframe_overlay(window.raw(), frame),
+            Ok(Reframed {
+                rect: Some(frame),
+                reframed: 1,
+            })
+        );
+        // SAFETY: a plain query of this thread's own live window.
+        assert!(!unsafe { IsWindowVisible(window.0) }.as_bool());
+        // SAFETY: this thread's own live window, shown without activation;
+        // the return value is only whether it was visible.
+        let _ = unsafe { ShowWindow(window.0, SW_SHOWNOACTIVATE) };
+        // Already there: only read back.
+        assert_eq!(
+            reframe_overlay(window.raw(), frame),
+            Ok(Reframed {
+                rect: Some(frame),
+                reframed: 0,
+            })
+        );
+        // Resized behind its back, as tao's rescale does.
+        place(
+            window.0,
+            Rect {
+                width: 266,
+                height: 200,
+                ..frame
+            },
+            SWP_NOACTIVATE,
+        )
+        .unwrap();
+        assert_eq!(
+            reframe_overlay(window.raw(), frame),
+            Ok(Reframed {
+                rect: Some(frame),
+                reframed: 1,
+            })
+        );
+        // SAFETY: as above.
+        assert!(unsafe { IsWindowVisible(window.0) }.as_bool());
+    }
+
+    #[test]
+    fn reframe_overlay_rejects_a_window_from_another_thread_or_none() {
+        let window = TestWindow::new(WINDOW_EX_STYLE(0));
+        let raw = window.raw();
+        let result = std::thread::spawn(move || reframe_overlay(raw, Rect::default()))
+            .join()
+            .unwrap();
+        assert_eq!(result, Err(PlatformError::WrongThread));
+        assert!(matches!(
+            reframe_overlay(0, Rect::default()),
+            Err(PlatformError::Os {
+                context: "IsWindow",
+                ..
+            })
+        ));
     }
 
     #[test]

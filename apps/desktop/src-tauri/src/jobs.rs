@@ -262,7 +262,8 @@ pub fn submit_op(
     let spawned = thread::Builder::new()
         .name("grape-jobs".to_owned())
         .spawn(move || {
-            // On this thread: it checks the fallback folder on disk.
+            // On this thread: it checks a chosen fallback folder on disk,
+            // and `run` reads the folders the outputs may go to.
             let settings = settings::planning_settings(&app);
             let cancel = ticket.cancel.clone();
             run(&app, &op, &paths, &settings, anchor, &display, cancel);
@@ -364,11 +365,13 @@ struct Helper {
 /// The helpers the engines need. PDFium ships wherever a build has one
 /// (D29). FFmpeg (`ffmpeg` and `ffprobe`, Grape's own build, D24) and
 /// bsdtar (D27) ship in every installer and DMG through the per-OS
-/// sidecars overlay (D25). The image helper, for HEIC and AVIF (SVG to
-/// HEIC and AVIF included, D39), ships on Windows (`grape-heif.exe`, D33,
-/// D41); on macOS it's Grape itself, so it's never missing there. The SVG
-/// worker (D39) is Grape itself on every OS, so it has no row. Grape ships
-/// for no other OS, so there every drop that needs a helper is "coming".
+/// sidecars overlay (D25). The image helper, for HEIC and AVIF (their
+/// conversions, D33 and D41, SVG to HEIC and AVIF, D39, and HEIC Compress,
+/// D28, so its detail says "work with", not "convert"), ships on Windows
+/// (`grape-heif.exe`); on macOS it's Grape itself, so it's never missing
+/// there. The SVG worker (D39) is Grape itself on every OS, so it has no
+/// row. Grape ships for no other OS, so there every drop that needs a
+/// helper is "coming".
 const HELPERS: [Helper; 4] = [
     Helper {
         title: "Grape's PDF library is missing",
@@ -386,7 +389,7 @@ const HELPERS: [Helper; 4] = [
     // second line.
     Helper {
         title: "Grape's image helper is missing",
-        detail: "Reinstall Grape to convert HEIC and AVIF files.",
+        detail: "Reinstall Grape to work with HEIC and AVIF files.",
         ships: cfg!(windows),
         with: with_heif,
     },
@@ -1278,7 +1281,9 @@ mod tests {
                     why,
                     NotRunnable {
                         title: "Grape's image helper is missing".to_owned(),
-                        detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
+                        detail: Some(
+                            "Reinstall Grape to work with HEIC and AVIF files.".to_owned()
+                        ),
                     },
                     "{coming}"
                 );
@@ -1719,7 +1724,7 @@ mod tests {
 
         let missing = NotRunnable {
             title: "Grape's image helper is missing".to_owned(),
-            detail: Some("Reinstall Grape to convert HEIC and AVIF files.".to_owned()),
+            detail: Some("Reinstall Grape to work with HEIC and AVIF files.".to_owned()),
         };
         let coming = |detail: &str| NotRunnable {
             title: "Not in this build yet".to_owned(),

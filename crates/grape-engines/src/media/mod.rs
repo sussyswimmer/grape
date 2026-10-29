@@ -155,7 +155,7 @@ pub(crate) fn convert(
     let copies = args::copy_plan(to, info).any();
     let share = if copies { COPY_SHARE } else { PASSES_SHARE };
     let warnings = match run_passes(ffmpeg, &first, info.duration, ctx, &mut bar, share) {
-        Ok(warnings) => warnings,
+        Ok(finished) => finished.warnings(),
         Err(RunError::Cancelled) => return Err(crate::cancelled(src)),
         Err(e) => {
             let refused = matches!(e, RunError::Exit { .. });
@@ -168,6 +168,7 @@ pub(crate) fn convert(
             let again = args::reencode_passes(src_abs, to, info, &out, &palette_path)
                 .map_err(|missing| no_stream(names, missing, src))?;
             run_passes(ffmpeg, &again, info.duration, ctx, &mut bar, PASSES_SHARE)
+                .map(run::Finished::warnings)
                 .map_err(|e| or_cancelled(ffmpeg_failed(names, e, src)))?
         }
     };
@@ -424,8 +425,8 @@ fn probe_failed(names: &Names, e: RunError, src: &Path) -> GrapeError {
 /// by each pass's weight and output time against the source's duration
 /// (only at the end of each pass when the duration is unknown), so a
 /// retry fills what's left. The GIF palette pass reports no output time
-/// until it ends. Returns what the last pass wrote to stderr: FFmpeg's
-/// warnings, for the detail of a failed check.
+/// until it ends. Returns how the last pass finished: what it wrote to
+/// stderr, and why it ran uncontained, if it did ([`run::Finished`]).
 fn run_passes(
     ffmpeg: &Path,
     passes: &[Pass],
@@ -433,12 +434,15 @@ fn run_passes(
     ctx: &EngineCtx,
     bar: &mut Bar,
     end: f32,
-) -> Result<String, RunError> {
+) -> Result<run::Finished, RunError> {
     let total = duration.filter(|d| !d.is_zero());
     let start = bar.shown.min(end);
     let span = end - start;
     let mut done = 0.0f32;
-    let mut warnings = String::new();
+    let mut last = run::Finished {
+        stderr_tail: String::new(),
+        uncontained: None,
+    };
     for pass in passes {
         let weight = pass.weight;
         let mut on_time = |time: Duration| {
@@ -447,11 +451,11 @@ fn run_passes(
                 bar.to(start + span * (done + weight * fraction));
             }
         };
-        warnings = run::transcode(ffmpeg, &pass.args, &ctx.cancel, &mut on_time)?.stderr_tail;
+        last = run::transcode(ffmpeg, &pass.args, &ctx.cancel, &mut on_time)?;
         done = (done + weight).min(1.0);
         bar.to(start + span * done);
     }
-    Ok(warnings)
+    Ok(last)
 }
 
 /// Checks that FFmpeg wrote a file of the target's kind: not empty, and
@@ -1363,6 +1367,7 @@ mod tests {
         let e = RunError::Exit {
             code: Some(1),
             stderr_tail: stderr.to_string(),
+            uncontained: None,
         };
         ffmpeg_failed(&names, e, Path::new("/in/clip.mkv")).kind
     }
@@ -1427,6 +1432,31 @@ mod tests {
         );
         let cancelled = ffmpeg_failed(&names, RunError::Cancelled, Path::new("a.wav"));
         assert_eq!(cancelled.kind, Cancelled);
+    }
+
+    #[test]
+    fn why_a_run_wasnt_contained_is_logged_but_never_judged() {
+        // Fail open (D22): the hook's reason, whatever it says, goes in the
+        // detail; the error is FFmpeg's.
+        let names = Names::new(
+            Path::new("/in/clip.mkv"),
+            Path::new("/out/clip.mp4"),
+            Format::Mkv,
+            Format::Mp4,
+        );
+        let e = RunError::Exit {
+            code: Some(1),
+            stderr_tail: "[in#0 @ 0x1] Error opening input: Invalid data found".to_string(),
+            uncontained: Some("Access is denied. (os error 5)".to_string()),
+        };
+        let err = ffmpeg_failed(&names, e, Path::new("/in/clip.mkv"));
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert!(
+            err.detail
+                .contains("code 1 (not contained: Access is denied. (os error 5)): [in#0"),
+            "{}",
+            err.detail
+        );
     }
 
     #[test]

@@ -1,22 +1,28 @@
-//! Puts the helper processes Grape starts into an OS container (D33).
+//! Puts the processes Grape starts for a job into an OS container (D33).
 //!
-//! On Windows every image helper (`grape-heif.exe`) and every SVG worker
-//! (`Grape.exe --grape-svg-worker`, D39) runs in a Job Object of its own (`grape_platform::windows::job`): its memory is capped, it ends
-//! when Grape does or when its job is dropped, it can't start another
-//! process, an unhandled exception ends it without a dialog, and it's kept
-//! from the desktop and the clipboard. When Grape itself runs inside a job
-//! (`pnpm tauri dev` runs it through cargo, which makes one), the helper's
-//! job is nested in that one and can't have the UI limits; the log says so
-//! once. The engine
-//! reaches it through the process-wide hook `grape_engines::set_contain`,
-//! which [`install`] sets once in setup, before any drop can run. The
-//! engine fails closed: a helper it can't contain is killed and its job
-//! says the helper couldn't start.
+//! On Windows every image helper (`grape-heif.exe`), SVG worker
+//! (`Grape.exe --grape-svg-worker`, D39), PDF worker (`Grape.exe
+//! --grape-pdf-worker`, D29) and bsdtar (D27) runs in a Job Object of its
+//! own (`grape_platform::windows::job`): its memory is capped (2 GiB,
+//! 2.5 GiB, 6 GiB and 1 GiB), it ends when Grape does or when its job is
+//! dropped, it can't start another process, an unhandled exception ends it
+//! without a dialog, and it's kept from the desktop and the clipboard. When
+//! Grape itself runs inside a job (`pnpm tauri dev` runs it through cargo,
+//! which makes one), the helper's job is nested in that one and can't have
+//! the UI limits; the log says so once. The engine reaches it through the
+//! process-wide hook `grape_engines::set_contain`, which [`install`] sets
+//! once in setup, before any drop can run. The engine fails closed: a
+//! helper it can't contain is killed and its job says the helper couldn't
+//! start. Every `ffmpeg` and `ffprobe` run gets a job too (lane B's media
+//! engine, D22), with no memory cap: there the job only ends it with Grape,
+//! so a run that can't be contained runs on (it fails open), and the
+//! nested-job log line above covers it too.
 //!
 //! On macOS and elsewhere there's nothing to install: the image helper
 //! worker and the SVG worker (Grape itself) end on their own once Grape is
 //! gone, and cap their own memory with the 2 GiB heap bound they arm (D41,
-//! D39).
+//! D39). The PDF worker arms its 4 GiB one but runs to the end of its job
+//! (D29), and bsdtar stops once its input ends with Grape.
 
 /// Removes, off the calling thread, the image helper's and the SVG
 /// worker's work folders a Grape that crashed or was killed left in the OS

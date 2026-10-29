@@ -3,7 +3,8 @@ name: bsdtar
 # Grape's own bsdtar (DECISIONS D27): libarchive 3.8.10 plus scripts/bsdtar/patches,
 # built per OS, checked, smoke-tested in Grape's exact environment and uploaded as
 # artifacts for the jobs of the run that called this. No GitHub Release of the
-# builds until M7; release.yml builds it clean from its tag for the installer.
+# builds until M7; release.yml builds it clean from its tag for the installer
+# and the DMG.
 #
 # targets: "all" (the default, and a manual run) builds both. ci.yml calls it
 # once per OS ("windows", "macos"), so that a Mac failure never holds back the

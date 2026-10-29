@@ -420,13 +420,26 @@ while IFS=$'\t' read -r name pin url file want_size want_sha dir use; do
     echo "  $name $pin: from $tarballs/$file"
     cp "$tarballs/$file" "$dest"
   else
-    echo "  $name $pin: downloading $url"
-    if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
-      --silent --show-error --retry 3 --retry-all-errors --connect-timeout 30 \
-      --output "$dest" "$url"; then
+    # A server can answer 200 with a page that isn't the tarball (zlib.net
+    # did to CI's runners, so zlib now comes from its GitHub release); curl
+    # doesn't retry that, so a wrong size is fetched again twice before the
+    # check below fails it.
+    for try in 1 2 3; do
+      echo "  $name $pin: downloading $url"
+      if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --silent --show-error --retry 3 --retry-all-errors --connect-timeout 30 \
+        --output "$dest" "$url"; then
+        rm -f "$dest"
+        fail "couldn't download $name from $url."
+      fi
+      size=$(file_size "$dest")
+      if [ "$size" = "$want_size" ] || [ "$try" = 3 ]; then
+        break
+      fi
+      echo "  $file is $size bytes, not $want_size: trying again in 10 s."
       rm -f "$dest"
-      fail "couldn't download $name from $url."
-    fi
+      sleep 10
+    done
   fi
   size=$(file_size "$dest")
   if [ "$size" != "$want_size" ]; then
