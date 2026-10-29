@@ -21,7 +21,8 @@
 //!     `mpvd` and other unknown boxes that hold no kept data: each becomes
 //!     a zeroed `free` box of the same size, or is cut when it's past the
 //!     last box Grape keeps; bytes that aren't a box are cut (Other,
-//!     unless all zero); existing `free` and `skip` boxes are zeroed,
+//!     unless all zero: a Samsung `sefd` trailer, with the capture time
+//!     and mobile country code); existing `free` and `skip` boxes are zeroed,
 //!     unreported (old editors leave metadata there);
 //!   - every byte of `mdat` and `idat` that no kept item points to (still
 //!     pictures reach their data only through `iloc`): zeroed, as the copy
@@ -60,9 +61,11 @@
 //!   rebuilt `meta`, written straight into one buffer of the source's
 //!   size: twice a `meta` of data, and 4.74 times one packed at every cap
 //!   of the model, whose model is 2.4 times its size (`tests/heic_heap.rs`).
-//!   What's written is let go of before the check, which holds the
-//!   output's `meta` and its model. Besides, one Exif payload's first
-//!   [`MAX_EXIF`], and 64 KiB buffers.
+//!   The kept ranges (16 bytes each) are held until the copy, which zeroes
+//!   what they don't cover as it goes: 22.94 MiB for a 3.8 MiB `meta` of
+//!   262,132 extents a byte apart. What's written is let go of before the
+//!   check, which holds the output's `meta` and its model. Besides, one
+//!   Exif payload's first [`MAX_EXIF`], and 64 KiB buffers.
 
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
