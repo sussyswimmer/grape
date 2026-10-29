@@ -854,6 +854,11 @@ mod tests {
         Tiff::read(&mut Cursor::new(file), file.len() as u64).unwrap()
     }
 
+    /// The first page of `file`.
+    fn read_ifd(file: &[u8]) -> Ifd {
+        read(file).pages[0].clone()
+    }
+
     fn geometry(file: &[u8], ifd: &Ifd) -> Result<Geometry, Why> {
         let order = read(file).layout.order;
         let mut left = u64::MAX;
@@ -1134,17 +1139,32 @@ mod tests {
             let longer = [&picture[..], b"more bytes than the picture"].concat();
             let file = one_strip(8, 8, compression, code(&longer));
             assert_eq!(decoded(&file, &read(&file).pages[0], 0).unwrap(), picture);
+            // `data` as the strip, and its IFD. Uncompressed, the reader
+            // works a lone strip short of the picture out from the picture
+            // (past the file's end here, so it's broken): the decoder is
+            // given the whole picture's strip, cut to `data`'s size.
+            let strip = |data: Vec<u8>| {
+                let file = one_strip(8, 8, compression, data.clone());
+                if compression != 1 {
+                    let ifd = read(&file).pages[0].clone();
+                    return (file, ifd);
+                }
+                let len = file.len() as u64;
+                let read = Tiff::read(&mut Cursor::new(&file), len);
+                assert!(matches!(read, Err(Error::Broken(_))), "{read:?}");
+                let file = one_strip(8, 8, 1, picture.clone());
+                let mut ifd = read_ifd(&file);
+                ifd.blocks[0].len = data.len() as u64;
+                (file, ifd)
+            };
             // Less: the stream ends early.
-            let file = one_strip(8, 8, compression, code(&picture[..60]));
-            let why = undecodable(decoded(&file, &read(&file).pages[0], 0));
+            let (file, ifd) = strip(code(&picture[..60]));
+            let why = undecodable(decoded(&file, &ifd, 0));
             assert!(why.contains("ends before"), "{compression}: {why}");
             // Cut short: the data itself ends early.
             let whole = code(&picture);
-            let file = one_strip(8, 8, compression, whole[..whole.len() - 8].to_vec());
-            assert!(matches!(
-                decoded(&file, &read(&file).pages[0], 0),
-                Err(Fail::Undecodable(_))
-            ));
+            let (file, ifd) = strip(whole[..whole.len() - 8].to_vec());
+            assert!(matches!(decoded(&file, &ifd, 0), Err(Fail::Undecodable(_))));
         }
         // Junk isn't LZW or Deflate.
         for compression in [5, 8] {
@@ -1208,11 +1228,15 @@ mod tests {
 
     #[test]
     fn strips_tiles_and_planes_are_sized_as_libtiff_sizes_them() {
-        let page = |tags: Vec<(u16, V)>, blocks: usize, tiled: bool| Page {
-            tags,
-            blocks: vec![B::data(b"x"); blocks],
-            tiled,
-            ..Page::default()
+        // PackBits, so that the reader takes each block's byte at its word.
+        let page = |mut tags: Vec<(u16, V)>, blocks: usize, tiled: bool| {
+            tags.push((259, V::Short(vec![32773])));
+            Page {
+                tags,
+                blocks: vec![B::data(b"x"); blocks],
+                tiled,
+                ..Page::default()
+            }
         };
         let sized = |p: Page| {
             let file = Builder::new(b'I', false, vec![p]).build();
@@ -1320,7 +1344,7 @@ mod tests {
 
     #[test]
     fn sample_sizes_are_read_at_most_the_budget() {
-        let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+        let mut page = gray(1, 1, 1, vec![B::data(b"wxyz")]);
         page.tags[2] = (258, V::Short(vec![8; 4]));
         page.tags.push((277, V::Short(vec![4])));
         let file = Builder::new(b'I', false, vec![page]).build();

@@ -9,12 +9,13 @@
 //!   (Deflate) or 32773 (PackBits), with a FillOrder of 1 or none, whose
 //!   blocks [`Geometry`] can size. Only their Compression (to 8), their
 //!   Predictor and their blocks' offsets and counts change: RowsPerStrip,
-//!   the tiles and the planes stay. An empty block (GDAL's sparse tiles)
-//!   stays empty.
+//!   the tiles and the planes stay.
 //! - **Copied as they are**, with their tags ([`How::Copy`]): JPEG, fax,
 //!   JBIG, JPEG 2000, LZMA, ZSTD, WebP and other codecs; FillOrder 2
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
-//!   out wrong); layouts that can't be sized; and an IFD with a block that
+//!   out wrong); layouts that can't be sized; an IFD with an empty block
+//!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
+//!   crate and Pillow fail on them); and an IFD with a block that
 //!   can't be decoded (old-style LZW, data that's broken or short), whose
 //!   blocks written already are taken back ([`Recoder`]).
 //! - **Predictor:** a source's own (2, 3 or another) on LZW or Deflate
@@ -309,6 +310,11 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
             ifd.blocks.len(),
             geometry.blocks()
         ));
+    }
+    // An empty block (GDAL's sparse tiles) isn't Deflate data: the tiff
+    // crate and Pillow fail on it once the IFD says Deflate.
+    if ifd.blocks.iter().any(|b| b.len == 0) {
+        return copy("it has empty strips or tiles".into());
     }
     let own = match ifd.get(317) {
         None => 1,
@@ -682,12 +688,8 @@ impl<'a> Recoder<'a> {
         let mut offsets = Vec::with_capacity(image.blocks.len());
         let mut lens = Vec::with_capacity(image.blocks.len());
         let mut taken: u64 = 0;
+        // No block is empty ([`how`]).
         for (i, &block) in image.blocks.iter().enumerate() {
-            if block.len == 0 {
-                offsets.push(0);
-                lens.push(0);
-                continue;
-            }
             let recipe = Recipe {
                 codec: *codec,
                 expected: geometry.expected(i as u64),
@@ -941,8 +943,8 @@ mod tests {
     use std::io::Cursor;
     use std::path::PathBuf;
 
-    use super::super::read::read_value;
-    use super::super::tests::{gray, set_entry, Builder, Page, B, V};
+    use super::super::read::{read_value, MISSIZED};
+    use super::super::tests::{gray, miscounted, picture, set_entry, Builder, Page, B, V};
     use super::*;
 
     /// A file the test removes when it's done with it.
@@ -1425,6 +1427,72 @@ mod tests {
         assert_eq!(
             le(decoder.read_image().unwrap()),
             [&smooth(64)[..], &smooth(64), &smooth(32)].concat()
+        );
+    }
+
+    #[test]
+    fn byte_counts_libtiff_ignores_are_recoded_as_libtiff_reads_them() {
+        for (strips, counts) in [
+            (1, vec![0]),
+            (1, vec![15_000]),
+            (10, [3_000, 1_500].repeat(5)),
+        ] {
+            let out = compressed(&miscounted(strips, 1, counts.clone()));
+            let back = read(&out);
+            assert_eq!(back.pages[0].uint(259, back.layout.order), Some(8));
+            assert_eq!(
+                decoded_at(&out, back.pages[0].at).1,
+                picture(),
+                "{counts:?}"
+            );
+        }
+        let file = miscounted(2, 1, vec![15_000, 7_500]);
+        assert!(matches!(planned(&file), Err(Error::Refused(why)) if why == MISSIZED));
+    }
+
+    #[test]
+    fn an_ifd_with_empty_tiles_is_copied_as_it_is() {
+        // GDAL's sparse tiles: 0 bytes at 0. A page of them stays
+        // uncompressed, the empty ones empty; the page after is recoded.
+        let tiled = Page {
+            tags: vec![
+                (256, V::Long(vec![32])),
+                (257, V::Long(vec![32])),
+                (258, V::Short(vec![8])),
+                (262, V::Short(vec![1])),
+                (322, V::Short(vec![16])),
+                (323, V::Short(vec![16])),
+            ],
+            blocks: vec![
+                B::Data(smooth(256)),
+                B::Empty,
+                B::Empty,
+                B::Data(smooth(256)),
+            ],
+            tiled: true,
+            ..Page::default()
+        };
+        let file = Builder::new(b'I', false, vec![tiled, page(32, 8, 8, 8, &smooth(256))]).build();
+        let plan = plan(&file);
+        let (out, wrote) =
+            written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+        let (a, b) = (read(&file), read(&out));
+        let o = b.layout.order;
+        assert_eq!(b.pages[0].uint(259, o), None);
+        let empty = Block { offset: 0, len: 0 };
+        assert_eq!(b.pages[0].blocks[1..3], [empty, empty]);
+        let bytes = |f: &[u8], b: &Block| f[b.offset as usize..][..b.len as usize].to_vec();
+        for (ba, bb) in a.pages[0].blocks.iter().zip(&b.pages[0].blocks) {
+            assert_eq!(bytes(&file, ba), bytes(&out, bb));
+        }
+        assert_eq!(b.pages[1].uint(259, o), Some(8));
+        assert!(
+            wrote
+                .log
+                .to_string()
+                .contains("IFD 0 copied as it is: it has empty"),
+            "{}",
+            wrote.log
         );
     }
 

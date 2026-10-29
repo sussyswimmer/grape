@@ -80,6 +80,24 @@ pub(crate) fn gray(w: u32, h: u32, rows: u32, strips: Vec<B>) -> Page {
     }
 }
 
+/// A gray 300 × 100 picture of `strips` strips, uncompressed (or its
+/// bytes as they are, as `compression` says), every byte of it there,
+/// whose byte counts say `counts` (D28's review: libtiff ignores some
+/// such counts, and readers that size data themselves ignore them all).
+pub(crate) fn miscounted(strips: usize, compression: u16, counts: Vec<u64>) -> Vec<u8> {
+    let rows = 100_usize.div_ceil(strips);
+    let strips = picture().chunks(300 * rows).map(B::data).collect();
+    let mut page = gray(300, 100, rows as u32, strips);
+    page.tags.push((259, V::Short(vec![compression])));
+    page.counts = Some(counts);
+    Builder::new(b'I', false, vec![page]).build()
+}
+
+/// [`miscounted`]'s picture.
+pub(crate) fn picture() -> Vec<u8> {
+    (0..30_000).map(|i| (i % 251) as u8).collect()
+}
+
 /// Sets the count and the value field of the entry for `tag` in the IFD
 /// at `at` of `file`, a TIFF the builder made, so entries can point where
 /// the builder wouldn't: `value` is the one number the entry holds when

@@ -464,6 +464,33 @@ fn remove_metadata_strips_every_page_of_a_tiff_and_keeps_its_pixels() {
     }
 }
 
+/// A classic gray 64 × 64 TIFF of two uncompressed strips, every byte of
+/// them there, whose byte counts say the second is half its size: libtiff
+/// takes that at its word, and Pillow and ImageMagick read past it.
+fn miscounted_tiff() -> Vec<u8> {
+    let entries: [(u16, u16, u32, u32); 7] = [
+        (256, 4, 1, 64),
+        (257, 4, 1, 64),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (273, 4, 2, 98),
+        (278, 4, 1, 32),
+        (279, 4, 2, 106),
+    ];
+    let mut file = b"II*\0\x08\0\0\0\x07\0".to_vec();
+    for (tag, kind, count, value) in entries {
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    file.extend([114u32, 114 + 2_048].iter().flat_map(|n| n.to_le_bytes()));
+    file.extend([2_048u32, 1_024].iter().flat_map(|n| n.to_le_bytes()));
+    file.extend((0..4_096).map(|i| (i % 64 * 4) as u8));
+    file
+}
+
 #[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
@@ -513,6 +540,12 @@ fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
             progressive,
             ErrorKind::NotYetSupported,
             "scans.tif has JPEG data Grape can't check for metadata yet.",
+        ),
+        (
+            "counts.tif",
+            miscounted_tiff(),
+            ErrorKind::NotYetSupported,
+            "counts.tif says the wrong size for some of its image data, which Grape can't rewrite yet.",
         ),
         (
             "cut.tif",
@@ -1247,6 +1280,12 @@ fn compress_leaves_a_tiff_it_cant_shrink_alone_and_refuses_what_it_cant_rewrite(
             pointer,
             ErrorKind::NotYetSupported,
             "globe.tif has data Compress can't move yet.",
+        ),
+        (
+            "counts.tif",
+            miscounted_tiff(),
+            ErrorKind::NotYetSupported,
+            "counts.tif says the wrong size for some of its image data, which Grape can't rewrite yet.",
         ),
         (
             "cut.tif",

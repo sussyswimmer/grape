@@ -758,7 +758,7 @@ mod tests {
             4,
             4,
             1,
-            vec![B::data(b"abcd"), B::Same(0), B::Empty, B::data(b"efg")],
+            vec![B::data(b"abcd"), B::Same(0), B::Empty, B::data(b"efgh")],
         );
         first
             .tags

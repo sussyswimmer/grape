@@ -717,7 +717,10 @@ mod tests {
 
     use super::super::irb::tests::res;
     use super::super::read::Order;
-    use super::super::tests::{gray, set_entry, shared_meta, Builder, Page, B, V};
+    use super::super::read::MISSIZED;
+    use super::super::tests::{
+        gray, miscounted, picture, set_entry, shared_meta, Builder, Page, B, V,
+    };
     use super::*;
     use MetaField::*;
 
@@ -1060,6 +1063,29 @@ mod tests {
         // One block over 16 MiB is too large to read.
         let file = own_irbs(1, &res(2000, "", &[7; 16 << 20]));
         assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
+    }
+
+    #[test]
+    fn byte_counts_libtiff_ignores_are_copied_as_libtiff_reads_them() {
+        // One strip of 0 or 15,000 bytes, and ten in pairs of 3,000 and
+        // 1,500: libtiff reads the whole picture, so the output holds it.
+        for (strips, counts) in [
+            (1, vec![0]),
+            (1, vec![15_000]),
+            (10, [3_000, 1_500].repeat(5)),
+        ] {
+            let (out, _) = strip(&miscounted(strips, 1, counts.clone()));
+            let mut decoder = tiff::decoder::Decoder::new(Cursor::new(&out)).unwrap();
+            let tiff::decoder::DecodingResult::U8(back) = decoder.read_image().unwrap() else {
+                panic!("not 8-bit")
+            };
+            assert_eq!(back, picture(), "{counts:?}");
+            let lens: u64 = read(&out).pages[0].blocks.iter().map(|b| b.len).sum();
+            assert_eq!(lens, 30_000);
+        }
+        // Two strips, the second short: refused before anything's written.
+        let file = miscounted(2, 1, vec![15_000, 7_500]);
+        assert!(matches!(plan(&file), Err(Error::Refused(why)) if why == MISSIZED));
     }
 
     #[test]
