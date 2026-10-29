@@ -16,7 +16,8 @@
 //!   out wrong); layouts that can't be sized; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
-//!   can't be decoded (old-style LZW, data that's broken or short), whose
+//!   can't be decoded (old-style LZW, data that's broken or short), or
+//!   whose blocks come to more bytes recoded than as they were, whose
 //!   blocks written already are taken back ([`Recoder`]).
 //! - **Predictor:** a source's own (2, 3 or another) on LZW or Deflate
 //!   stays, its decoded bytes deflated as they are. Otherwise (None and
@@ -489,6 +490,15 @@ struct Place {
     how: u32,
 }
 
+/// What [`Recoder::recode`] made of an IFD's blocks.
+struct Recoded {
+    written: Written,
+    /// The bytes of the blocks it wrote, in the source and recoded (not
+    /// those an IFD before it wrote already).
+    from: u64,
+    made: u64,
+}
+
 /// The output while a block is written: a write that would take it past
 /// `most` bytes fails, and says so.
 struct Capped<'s, 'w> {
@@ -710,7 +720,7 @@ impl<'a> Recoder<'a> {
         out: &mut Sink,
         image: &Image,
         how: &How,
-    ) -> Result<Written, Fail> {
+    ) -> Result<Recoded, Fail> {
         let How::Recode {
             codec,
             geometry,
@@ -723,6 +733,7 @@ impl<'a> Recoder<'a> {
         let mut offsets = Vec::with_capacity(image.blocks.len());
         let mut lens = Vec::with_capacity(image.blocks.len());
         let mut taken: u64 = 0;
+        let (mut from, mut made) = (0u64, 0u64);
         // No block is empty ([`how`]).
         for (i, &block) in image.blocks.iter().enumerate() {
             let recipe = Recipe {
@@ -766,6 +777,8 @@ impl<'a> Recoder<'a> {
             if self.put(k, place) {
                 taken = taken.saturating_add(block.len);
             }
+            from = from.saturating_add(block.len);
+            made = made.saturating_add(len);
             let written = Block { offset: at, len };
             offsets.push(at);
             lens.push(len);
@@ -775,11 +788,16 @@ impl<'a> Recoder<'a> {
                 self.read_back(out)?;
             }
         }
-        Ok(Written {
+        let written = Written {
             offsets,
             lens: Some(lens),
             fields: fields.clone(),
             taken,
+        };
+        Ok(Recoded {
+            written,
+            from,
+            made,
         })
     }
 
@@ -857,9 +875,16 @@ impl Blocks for Recoder<'_> {
             How::Recode { .. } => {
                 let start = out.at();
                 match self.recode(r, out, image, how) {
-                    Ok(written) => {
+                    // Larger than as it was (noise, or data deflated better
+                    // already): copied as it is.
+                    Ok(Recoded { from, made, .. }) if made > from => {
+                        let why = format!("recoded, its blocks came to {made} bytes, from {from}");
+                        self.take_back(out, image, start, n, &why)?;
+                        self.copy(r, out, image)?
+                    }
+                    Ok(recoded) => {
                         self.read_back(out)?;
-                        written
+                        recoded.written
                     }
                     Err(Fail::Undecodable(why)) => {
                         self.take_back(out, image, start, n, &why)?;
@@ -1649,6 +1674,38 @@ mod tests {
                 "{log}"
             );
         }
+    }
+
+    #[test]
+    fn an_ifd_that_grows_recoded_is_taken_back_and_copied() {
+        // Noise, uncompressed, deflates to a few bytes more than it is;
+        // the smooth page after it shrinks.
+        let file = Builder::new(
+            b'M',
+            false,
+            vec![
+                page(64, 64, 16, 8, &noise(64 * 64)),
+                page(64, 64, 16, 8, &smooth(64 * 64)),
+            ],
+        )
+        .build();
+        let plan = plan(&file);
+        let (out, wrote) =
+            written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+        let (a, b) = (read(&file), read(&out));
+        let o = b.layout.order;
+        assert_eq!(b.pages[0].uint(259, o), None);
+        let bytes = |f: &[u8], b: &Block| f[b.offset as usize..][..b.len as usize].to_vec();
+        for (ba, bb) in a.pages[0].blocks.iter().zip(&b.pages[0].blocks) {
+            assert_eq!(bytes(&file, ba), bytes(&out, bb));
+        }
+        assert_eq!(b.pages[1].uint(259, o), Some(8));
+        assert_eq!(decoded(&out), decoded(&file));
+        let log = wrote.log.to_string();
+        assert!(
+            log.contains("IFD 0 copied as it is: recoded, its blocks"),
+            "{log}"
+        );
     }
 
     #[test]
