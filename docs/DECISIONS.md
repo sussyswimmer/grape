@@ -1004,7 +1004,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
 - **New dependencies:**
   - libwebp-sys =0.14.4: crate MIT, published 2026-04-29; vendors libwebp 1.6.0, BSD-3-Clause with Google's patent grant; `default-features = false, features = ["std"]`; +1 lock package.
   - Grape's own `grape-webp` crate (MIT), which holds the only `unsafe` for images and calls only the encoder.
-  - weezl 0.1.12 becomes direct (MIT OR Apache-2.0, already locked).
+  - weezl 0.1.12 is a direct dependency, for TIFF Compress's LZW decoding with TIFF's early code-size switch (MIT OR Apache-2.0; already locked through image's tiff, so no new package).
   - tiff 0.11.3 as a dev-dependency (MIT, already locked).
   - `deny.toml` and `about.toml` clarify libwebp-sys as MIT AND BSD-3-Clause; `about.hbs` prints `PATENTS`. A build must never set `TARGET_CPU`.
 - **Lane A:** `heif::Encoder` (with `max_picture`, `check_encode` and `encode`), `Decoder::decode_within`, `other_heif` made `pub(crate)`, a fake helper that writes real HEIF and echoes the quality, four fixtures, the app tests that used TIFF as "coming", and CI's heif-it cases. The protocol stays at v1.

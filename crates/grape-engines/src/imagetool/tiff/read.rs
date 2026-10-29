@@ -59,7 +59,7 @@ const MAX_SAMPLES: usize = 1 << 16;
 const STEP: usize = 64 * 1024;
 
 /// A TIFF's byte order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Order {
     Little,
     Big,

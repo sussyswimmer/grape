@@ -37,6 +37,9 @@ tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
 # RAR (D27). Both were already in Cargo.lock (flate2; lopdf → stringprep).
 crc32fast = "1.5.2"
+# Compress on TIFF (D28): LZW decoding, with TIFF's early code-size switch.
+# Already in Cargo.lock through image's tiff.
+weezl = "0.1.12"
 unicode-normalization = "0.1.25"
 # PDF (D29). PDFium is bound at run time from an absolute path, only inside
 # the PDF worker process. Never enable image_*, pdfium_enable_v8,
