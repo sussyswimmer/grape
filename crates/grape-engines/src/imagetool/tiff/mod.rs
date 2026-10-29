@@ -8,8 +8,6 @@
 //!   resources.
 
 pub(crate) mod codec;
-// Dispatched next.
-#[allow(dead_code)]
 pub(crate) mod compress;
 pub(crate) mod irb;
 pub(crate) mod read;

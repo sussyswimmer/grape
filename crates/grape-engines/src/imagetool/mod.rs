@@ -1,9 +1,10 @@
 //! Grape's own image tools (D26, D28), in Rust with no sidecar: Remove
 //! Metadata on JPEG, PNG, WebP, GIF, TIFF and HEIC by stripping the
 //! container, which keeps the image data byte for byte, and Compress on
-//! JPEG and PNG.
+//! JPEG, PNG and TIFF.
 //!
-//! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG.
+//! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG; on TIFF,
+//!   [`tiff`]'s, which deflates its strips and tiles again.
 //! - [`scale`]: scaling a picture down for Compress, and what that holds.
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`], [`tiff`]'s rewrite, and
@@ -43,7 +44,8 @@ use crate::{EngineCtx, GrapeError, JobOutcome};
 pub(crate) fn runs_tool(tool: ToolKey, from: Format, _heif: bool) -> bool {
     match tool {
         ToolKey::RemoveMetadata => strip::strips(from),
-        ToolKey::Compress => compress::compresses(from),
+        // By name; the content decides which compressor runs ([`run`]).
+        ToolKey::Compress => matches!(from, Format::Jpg | Format::Png | Format::Tiff),
         _ => false,
     }
 }
@@ -64,6 +66,7 @@ pub(crate) fn run(
         ToolKey::RemoveMetadata => strip::run(job, src, dest, from, ctx, progress),
         ToolKey::Compress => match sniff(src) {
             Some(Kind::Png) => png_compress::run(job, src, dest, from, ctx, progress),
+            Some(Kind::Tiff) => tiff::compress::run(job, src, dest, from, ctx, progress),
             // JPEG, or "isn't a readable …".
             _ => compress::run(job, src, dest, from, params.compress, ctx, progress),
         },

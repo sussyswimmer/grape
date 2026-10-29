@@ -67,12 +67,12 @@ fn supports_the_raster_subtitle_and_archive_pairs() {
         &Operation::convert(Format::Png),
         Some(Format::Heic)
     ));
-    // Compress runs on PNG with no sidecar (D26), not yet on TIFF.
+    // Compress runs on PNG (D26) and TIFF (D28) with no sidecar.
     assert!(supports(
         &Operation::tool(ToolKey::Compress),
         Some(Format::Png)
     ));
-    assert!(!supports(
+    assert!(supports(
         &Operation::tool(ToolKey::Compress),
         Some(Format::Tiff)
     ));
@@ -261,9 +261,10 @@ fn every_v1_pair_runs_with_every_sidecar() {
 }
 
 /// Grape's own image tools (D26, D28), which need no sidecar.
-const IMAGE_TOOLS: [(ToolKey, Format); 8] = [
+const IMAGE_TOOLS: [(ToolKey, Format); 9] = [
     (ToolKey::Compress, Format::Jpg),
     (ToolKey::Compress, Format::Png),
+    (ToolKey::Compress, Format::Tiff),
     (ToolKey::RemoveMetadata, Format::Jpg),
     (ToolKey::RemoveMetadata, Format::Png),
     (ToolKey::RemoveMetadata, Format::Webp),

@@ -1006,7 +1006,7 @@ fn tools_multiple_inputs_and_folder_outputs_are_not_supported() {
     let b = dir.join("b.png");
     fs::write(&a, encode(&gradient(), Format::Png)).unwrap();
     fs::write(&b, encode(&gradient(), Format::Png)).unwrap();
-    // Compress on TIFF is a later slice (D26).
+    // Crop Image is v2: it doesn't run in this build.
     let tiff = dir.join("t.tiff");
     fs::write(&tiff, encode(&gradient(), Format::Tiff)).unwrap();
     let names_before = dir.names();
@@ -1018,8 +1018,8 @@ fn tools_multiple_inputs_and_folder_outputs_are_not_supported() {
     let jobs = [
         Job {
             inputs: vec![tiff.clone()],
-            output: JobOutput::File(dir.join("t Compressed.tiff")),
-            op: Operation::tool(ToolKey::Compress),
+            output: JobOutput::File(dir.join("t Cropped.tiff")),
+            op: Operation::tool(ToolKey::CropImage),
             used_fallback: false,
         },
         Job {

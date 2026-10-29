@@ -1097,6 +1097,171 @@ fn compress_repacks_a_png_exactly_and_keeps_its_text() {
     }
 }
 
+/// A scanner's TIFF, classic or BigTIFF: an uncompressed RGB page with an
+/// Exif IFD, a GPS IFD, ICC, XMP and text tags, then an LZW 16-bit gray
+/// page.
+fn scan_tiff(big: bool) -> Vec<u8> {
+    use tiff::encoder::{colortype, Compression, Rational, TiffEncoder, TiffKind};
+    use tiff::tags::Tag;
+    fn pages<K: TiffKind>(mut e: TiffEncoder<&mut Cursor<Vec<u8>>, K>) {
+        let mut exif = e.extra_directory().unwrap();
+        exif.write_tag(Tag::Unknown(0x9003), "2024:05:01 10:20:30")
+            .unwrap();
+        let exif = exif.finish_with_offsets().unwrap().offset;
+        let mut gps = e.extra_directory().unwrap();
+        gps.write_tag(Tag::Unknown(2), Rational { n: 48, d: 1 })
+            .unwrap();
+        let gps = gps.finish_with_offsets().unwrap().offset;
+        let mut first = e.new_image::<colortype::RGB8>(300, 200).unwrap();
+        let tags = first.encoder();
+        tags.write_tag(Tag::Software, "Scanner 2000").unwrap();
+        tags.write_tag(Tag::Orientation, 6u16).unwrap();
+        tags.write_tag(Tag::IccProfile, &b"an ICC profile"[..])
+            .unwrap();
+        tags.write_tag(Tag::Unknown(700), &b"<x:xmpmeta>kept</x:xmpmeta>"[..])
+            .unwrap();
+        tags.write_tag(Tag::ExifDirectory, exif).unwrap();
+        tags.write_tag(Tag::GpsDirectory, gps).unwrap();
+        first.write_data(&photo(300, 200).into_raw()).unwrap();
+        let mut e = e.with_compression(Compression::Lzw);
+        let gray: Vec<u16> = (0..120 * 80).map(|i| (i % 120 * 400) as u16).collect();
+        e.write_image::<colortype::Gray16>(120, 80, &gray).unwrap();
+    }
+    let mut out = Cursor::new(Vec::new());
+    if big {
+        pages(TiffEncoder::new_big(&mut out).unwrap());
+    } else {
+        pages(TiffEncoder::new(&mut out).unwrap());
+    }
+    out.into_inner()
+}
+
+#[test]
+fn compress_deflates_every_page_of_a_tiff_and_keeps_its_tags() {
+    use tiff::tags::Tag;
+    let dir = TestDir::new("compress-tiff");
+    for (big, name) in [(false, "scan.tif"), (true, "Scan.TIF")] {
+        let src = scan_tiff(big);
+        let mut outputs = Vec::new();
+        // Lossless at every preset: the same file each time.
+        for preset in [
+            grape_core::CompressPreset::Small,
+            grape_core::CompressPreset::Balanced,
+            grape_core::CompressPreset::High,
+        ] {
+            let outcome = compress(&dir, name, &src, preset).unwrap();
+            let (stem, ext) = name.split_once('.').unwrap();
+            assert_eq!(
+                outcome.outputs,
+                [dir.join(&format!("{stem} Compressed.{ext}"))]
+            );
+            let out = fs::read(&outcome.outputs[0]).unwrap();
+            assert_eq!(
+                outcome.notes,
+                [Note::Compressed {
+                    before: src.len() as u64,
+                    after: out.len() as u64
+                }]
+            );
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+            fs::remove_file(dir.join(name)).unwrap();
+            outputs.push(out);
+        }
+        assert!(outputs.iter().all(|out| *out == outputs[0]));
+        let out = &outputs[0];
+        assert!(
+            out.len() * 20 <= src.len() * 19,
+            "{} of {}",
+            out.len(),
+            src.len()
+        );
+        assert_eq!(out[..4], src[..4]);
+        assert_eq!(tiff_pages(out), tiff_pages(&src), "{name}");
+        // Deflated and differenced; every other tag kept.
+        let mut decoder = tiff::decoder::Decoder::new(Cursor::new(out)).unwrap();
+        assert_eq!(decoder.get_tag_u32(Tag::Compression).unwrap(), 8);
+        assert_eq!(decoder.get_tag_u32(Tag::Predictor).unwrap(), 2);
+        assert_eq!(decoder.get_tag_u32(Tag::Orientation).unwrap(), 6);
+        assert_eq!(
+            decoder.get_tag_ascii_string(Tag::Software).unwrap(),
+            "Scanner 2000"
+        );
+        for kept in [Tag::IccProfile, Tag::ExifDirectory, Tag::GpsDirectory] {
+            assert!(decoder.find_tag(kept).unwrap().is_some(), "{kept:?}");
+        }
+        for kept in [&b"2024:05:01 10:20:30"[..], b"<x:xmpmeta>kept"] {
+            assert!(out.windows(kept.len()).any(|w| w == kept));
+        }
+        decoder.next_image().unwrap();
+        assert_eq!(decoder.get_tag_u32(Tag::Compression).unwrap(), 8);
+    }
+}
+
+#[test]
+fn compress_leaves_a_tiff_it_cant_shrink_alone_and_refuses_what_it_cant_rewrite() {
+    use tiff::encoder::{colortype, DirectoryEncoder, Ifd, TiffEncoder, TiffKindStandard};
+    use tiff::tags::Tag;
+    type Tags<'a, 'b> = DirectoryEncoder<'a, &'b mut Cursor<Vec<u8>>, TiffKindStandard>;
+    /// A gray 64 × 64 page, uncompressed, with the tags `tag` writes.
+    fn one(tag: impl FnOnce(&mut Tags)) -> Vec<u8> {
+        let mut out = Cursor::new(Vec::new());
+        let mut e = TiffEncoder::new(&mut out).unwrap();
+        let mut image = e.new_image::<colortype::Gray8>(64, 64).unwrap();
+        tag(image.encoder());
+        let gray: Vec<u8> = (0..64 * 64).map(|i| (i % 64 * 4) as u8).collect();
+        image.write_data(&gray).unwrap();
+        out.into_inner()
+    }
+    let dir = TestDir::new("compress-tiff-none");
+    let jpeg = one(|t| t.write_tag(Tag::Compression, 7u16).unwrap());
+    let dng = one(|t| {
+        t.write_tag(Tag::Unknown(50706), &[1u8, 4, 0, 0][..])
+            .unwrap()
+    });
+    // A GlobalParametersIFD (400) typed IFD, which Compress doesn't follow.
+    let pointer = one(|t| t.write_tag(Tag::Unknown(400), Ifd(8)).unwrap());
+    let plain = one(|t| t.write_tag(Tag::Software, "x").unwrap());
+    let packed = compress(&dir, "plain.tif", &plain, grape_core::CompressPreset::High).unwrap();
+    let packed = fs::read(&packed.outputs[0]).unwrap();
+    for (name, bytes, kind, message) in [
+        (
+            "photo.tif",
+            jpeg,
+            ErrorKind::NoChange,
+            "photo.tif is already as small as Grape makes it.",
+        ),
+        (
+            "again.tif",
+            packed,
+            ErrorKind::NoChange,
+            "again.tif is already as small as Grape makes it.",
+        ),
+        (
+            "raw.tif",
+            dng,
+            ErrorKind::NotYetSupported,
+            "raw.tif is a camera raw (DNG) file, which Grape can't change yet.",
+        ),
+        (
+            "globe.tif",
+            pointer,
+            ErrorKind::NotYetSupported,
+            "globe.tif has data Compress can't move yet.",
+        ),
+        (
+            "cut.tif",
+            scan_tiff(false)[..2_000].to_vec(),
+            ErrorKind::DecodeFailed,
+            "cut.tif isn't a readable TIFF image.",
+        ),
+    ] {
+        let err = compress(&dir, name, &bytes, grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, kind, "{name}: {}", err.detail);
+        assert_eq!(err.user_message, message);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
 /// `samples` as bytes in native order, as image's encoder takes 16-bit
 /// pixels.
 fn bytemuck_u16(samples: &[u16]) -> Vec<u8> {
@@ -1185,6 +1350,16 @@ fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
             nth,
         );
     }
+    // Compress on a TIFF: before its walk, and while its strips are
+    // deflated.
+    for nth in [1, 3] {
+        cancelled_at(
+            "scan.tif",
+            tiff.get_ref(),
+            compress_op(grape_core::CompressPreset::High),
+            nth,
+        );
+    }
     // A HEIC: before it's read, and while its mdat is copied.
     let (heic, _) = heif(b"heic", &LIBHEIF, &vec![0xA1; 600_000], b"");
     for nth in [1, 4] {
@@ -1233,7 +1408,18 @@ fn the_content_decides_what_each_tool_reads() {
     assert!(fs::read(&out.outputs[0])
         .unwrap()
         .starts_with(&[0xFF, 0xD8]));
-    // Compress reads only JPEG and PNG: a GIF named .jpg can't be read.
+    // A TIFF named .png is compressed as a TIFF, and keeps its name.
+    let out = compress(
+        &dir,
+        "scan.png",
+        &scan_tiff(false),
+        grape_core::CompressPreset::High,
+    )
+    .unwrap();
+    assert!(out.outputs[0].to_string_lossy().ends_with(".png"));
+    assert!(fs::read(&out.outputs[0]).unwrap().starts_with(b"II*\0"));
+    // Compress reads only JPEG, PNG and TIFF: a GIF named .jpg can't be
+    // read.
     let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
     let err = compress(&dir, "anim.jpg", gif, grape_core::CompressPreset::Small).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
