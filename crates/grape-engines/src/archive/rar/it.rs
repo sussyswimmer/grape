@@ -6,16 +6,25 @@
 //!
 //! `cargo test -p grape-engines --features rar-it --lib archive::rar`
 //!
-//! On Windows, CI also runs this test binary outside cargo with
+//! On Windows each bsdtar of one test goes into a Job Object of its own as
+//! the app makes it; under cargo that job is nested in cargo's, so it has
+//! no UI limits. CI also runs this test binary outside cargo with
 //! `GRAPE_TEST_JOB_UI=1`: then one test starts it again as a child that
-//! breaks away from the runner's job, where each bsdtar goes into a Job
-//! Object of its own as the app makes it, which must have the UI limits.
+//! breaks away from the runner's job, where each bsdtar's job must have
+//! the UI limits.
 
 #![allow(clippy::unwrap_used)]
 
 use std::fs::{self, File};
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(windows)]
+use std::sync::Arc;
+
+#[cfg(windows)]
+use grape_platform::windows::job::JobGuard;
 
 use grape_core::{Format, JobOutput, Operation, ToolKey};
 
@@ -24,10 +33,14 @@ use super::super::tests::{
     case as new_case, gunzip, tar_items, tree_items, zip_items, Case, Item, Node, TestDir,
 };
 use super::super::{convert_with, extract_with, ArchiveOutcome, Failure, LeftOut, Limits};
+#[cfg(windows)]
+use super::bsdtar::MAX_MEMORY;
 use super::header::{preflight, Expect, Plan};
 use super::vectors;
 use super::writer::{self, File4, File5, A, UNIX_2020};
 use super::{Launch, RarPaths};
+#[cfg(windows)]
+use crate::helper::{Contain, Contained};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError};
 
 /// Grape's bsdtar, as `GRAPE_TEST_BSDTAR` names it.
@@ -846,7 +859,109 @@ fn run_job_reaches_bsdtar_through_the_sidecars() {
     case.source.assert_unchanged();
 }
 
-// ---- In the UI-limited job (Windows) -----------------------------------------
+// ---- In a Job Object (Windows) ----------------------------------------------
+
+/// The hook the app's `contain.rs` sets: a Job Object of its own for each
+/// bsdtar (`grape_platform::windows::job`). It counts what it did.
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct Jobs {
+    /// bsdtars put in a job.
+    contained: AtomicUsize,
+    /// Of those, the ones whose job has the UI limits.
+    ui_limited: AtomicUsize,
+    /// Calls that asked for bsdtar's cap.
+    capped: AtomicUsize,
+    /// The highest peak a job reported when its bsdtar's run ended.
+    peak: Arc<AtomicU64>,
+}
+
+/// One bsdtar's job; its peak goes to [`Jobs::peak`] when it's dropped.
+#[cfg(windows)]
+struct Job(JobGuard, Arc<AtomicU64>);
+
+#[cfg(windows)]
+impl Contained for Job {
+    fn peak_memory(&self) -> Option<u64> {
+        self.0.peak_memory()
+    }
+}
+
+#[cfg(windows)]
+impl Drop for Job {
+    fn drop(&mut self) {
+        let peak = self.0.peak_memory().unwrap_or(0);
+        self.1.fetch_max(peak, Ordering::SeqCst);
+    }
+}
+
+#[cfg(windows)]
+impl Contain for Jobs {
+    fn contain(
+        &self,
+        child: &std::process::Child,
+        max_memory: Option<u64>,
+    ) -> Result<Box<dyn Contained>, String> {
+        let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
+        self.contained.fetch_add(1, Ordering::SeqCst);
+        if guard.has_ui_limits() {
+            self.ui_limited.fetch_add(1, Ordering::SeqCst);
+        }
+        if max_memory == Some(MAX_MEMORY) {
+            self.capped.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(Box::new(Job(guard, Arc::clone(&self.peak))))
+    }
+}
+
+/// A RAR 5 and a RAR 4 converted to ZIP and extracted by the real bsdtar,
+/// each bsdtar contained by `jobs`; the outputs are read back.
+#[cfg(windows)]
+fn convert_and_extract_in(jobs: &Arc<Jobs>) {
+    let launch = Launch {
+        contain: Some(Arc::clone(jobs) as Arc<dyn Contain>),
+        ..bsdtar()
+    };
+    let a = vec![("a.txt".to_string(), Node::File(A.to_vec()))];
+    for (name, bytes) in [
+        ("x.rar", writer::rar5(0, &[File5::new(b"a.txt", A)])),
+        ("y.rar", writer::rar4(0, &[File4::new(b"a.txt", A)])),
+    ] {
+        let case = new_case(name, &bytes, Operation::convert(Format::Zip));
+        case.run_rar(Limits::default(), None, Some(&launch))
+            .unwrap_or_else(|e| panic!("{name} → ZIP: {e:?}"));
+        let items: Vec<(String, Node)> = zip_items(&case.output_bytes())
+            .into_iter()
+            .map(|item| (item.name, item.node))
+            .collect();
+        assert_eq!(items, a, "{name} → ZIP");
+        let case = new_case(name, &bytes, Operation::tool(ToolKey::ExtractArchive));
+        case.run_rar(Limits::default(), None, Some(&launch))
+            .unwrap_or_else(|e| panic!("{name} extracted: {e:?}"));
+        assert_eq!(fs::read(case.planned().join("a.txt")).unwrap(), A, "{name}");
+        case.source.assert_unchanged();
+    }
+}
+
+/// Each bsdtar in a Job Object of its own, as the app makes it: the
+/// 1 GiB cap, one process, started with `DETACHED_PROCESS`. Under cargo
+/// the job is nested in cargo's, so it has no UI limits; the child below
+/// checks those.
+#[cfg(windows)]
+#[test]
+fn bsdtar_runs_in_a_job_object_as_the_app_makes_it() {
+    let jobs = Arc::new(Jobs::default());
+    convert_and_extract_in(&jobs);
+    let peak = jobs.peak.load(Ordering::SeqCst);
+    println!(
+        "bsdtar in its job: peak {} KiB (cap {} MiB)",
+        peak >> 10,
+        MAX_MEMORY >> 20
+    );
+    assert_eq!(jobs.contained.load(Ordering::SeqCst), 4);
+    assert_eq!(jobs.capped.load(Ordering::SeqCst), 4);
+    assert!(peak > 0, "no job reported a peak");
+}
 
 /// What tells this test binary it was started as the UI-limited child.
 #[cfg(windows)]
@@ -894,75 +1009,18 @@ fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
     assert!(status.success(), "the UI-limited child failed: {status}");
 }
 
-/// The child: a RAR 5 and a RAR 4 converted to ZIP and extracted by the
-/// real bsdtar, each run in a Job Object of its own made as the app makes
-/// it (`grape_platform::windows::job`), which must have the UI limits.
-/// Only for its parent above.
+/// The child: [`convert_and_extract_in`] with every bsdtar's job made as
+/// the app makes it, which must have the UI limits. Only for its parent
+/// above.
 #[cfg(windows)]
 #[test]
 #[ignore = "the child of bsdtar_runs_in_the_ui_limited_job_outside_cargo"]
 fn ui_limited_bsdtar_child() {
-    use std::process::Child;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    use grape_platform::windows::job::JobGuard;
-
-    use crate::helper::{Contain, Contained};
-
-    #[derive(Debug, Default)]
-    struct Jobs {
-        contained: AtomicUsize,
-        ui_limited: AtomicUsize,
-    }
-    struct Job(JobGuard);
-    impl Contained for Job {
-        fn peak_memory(&self) -> Option<u64> {
-            self.0.peak_memory()
-        }
-    }
-    impl Contain for Jobs {
-        fn contain(
-            &self,
-            child: &Child,
-            max_memory: Option<u64>,
-        ) -> Result<Box<dyn Contained>, String> {
-            let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
-            self.contained.fetch_add(1, Ordering::SeqCst);
-            if guard.has_ui_limits() {
-                self.ui_limited.fetch_add(1, Ordering::SeqCst);
-            }
-            Ok(Box::new(Job(guard)))
-        }
-    }
-
     if std::env::var_os(UI_CHILD).is_none() {
         return;
     }
     let jobs = Arc::new(Jobs::default());
-    let launch = Launch {
-        contain: Some(Arc::clone(&jobs) as Arc<dyn Contain>),
-        ..bsdtar()
-    };
-    let a = vec![("a.txt".to_string(), Node::File(A.to_vec()))];
-    for (name, bytes) in [
-        ("x.rar", writer::rar5(0, &[File5::new(b"a.txt", A)])),
-        ("y.rar", writer::rar4(0, &[File4::new(b"a.txt", A)])),
-    ] {
-        let case = new_case(name, &bytes, Operation::convert(Format::Zip));
-        case.run_rar(Limits::default(), None, Some(&launch))
-            .unwrap_or_else(|e| panic!("{name} → ZIP: {e:?}"));
-        let items: Vec<(String, Node)> = zip_items(&case.output_bytes())
-            .into_iter()
-            .map(|item| (item.name, item.node))
-            .collect();
-        assert_eq!(items, a, "{name} → ZIP");
-        let case = new_case(name, &bytes, Operation::tool(ToolKey::ExtractArchive));
-        case.run_rar(Limits::default(), None, Some(&launch))
-            .unwrap_or_else(|e| panic!("{name} extracted: {e:?}"));
-        assert_eq!(fs::read(case.planned().join("a.txt")).unwrap(), A, "{name}");
-        case.source.assert_unchanged();
-    }
+    convert_and_extract_in(&jobs);
     let contained = jobs.contained.load(Ordering::SeqCst);
     let ui_limited = jobs.ui_limited.load(Ordering::SeqCst);
     println!("UI-limited child: {ui_limited} of {contained} bsdtar jobs had the UI limits");

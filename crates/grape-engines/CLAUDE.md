@@ -44,6 +44,7 @@ src/
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar
                     feature "rar-it" runs the RAR tests (unit tests in src/archive/rar/it.rs) against a real bsdtar (GRAPE_TEST_BSDTAR)
+                    (on Windows one test puts each bsdtar in the app's Job Object; GRAPE_TEST_JOB_UI=1 outside cargo checks the UI-limited one)
                     feature "pdf-it" runs tests/pdf.rs with a real PDFium (GRAPE_TEST_PDFIUM) and the grape-pdf-worker bin
                     (on Windows each worker in the app's Job Object; GRAPE_TEST_JOB_UI=1 outside cargo checks the UI-limited one)
                     tests/svg.rs runs the real SVG worker, the grape-svg-worker bin (src/bin/, no feature needed; D39)
