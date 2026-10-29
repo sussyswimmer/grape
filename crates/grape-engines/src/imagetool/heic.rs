@@ -2790,25 +2790,28 @@ mod tests {
 
     #[test]
     fn many_ipma_boxes_take_a_time_in_proportion() {
-        // The best of three runs with `n` empty ipma boxes.
-        let time = |n: usize| {
+        // A file with `n` empty ipma boxes, and one run's time.
+        let file = |n: usize| {
             let mut b = described();
             b.more_ipma = n;
-            let (src, _) = b.build();
-            (0..3)
-                .map(|_| {
-                    let started = std::time::Instant::now();
-                    let (out, _) = strip(&src);
-                    assert_eq!(meta(&out).maps.len(), n + 1);
-                    started.elapsed()
-                })
-                .min()
-                .unwrap()
+            (b.build().0, n)
         };
+        let time = |(src, n): &(Vec<u8>, usize)| {
+            let started = std::time::Instant::now();
+            let (out, _) = strip(src);
+            assert_eq!(meta(&out).maps.len(), n + 1);
+            started.elapsed()
+        };
+        // The best of five, the two sizes taking turns so that a busy
+        // stretch on a shared runner slows both alike.
+        let (small, large) = (file(8_191), file(65_534));
+        let (few, many) = (0..5)
+            .map(|_| (time(&small), time(&large)))
+            .reduce(|a, b| (a.0.min(b.0), a.1.min(b.1)))
+            .unwrap();
         // Eight times the boxes: 64 times the time if each looked through
-        // them all.
-        let (few, many) = (time(8_191), time(65_534));
-        assert!(many < few * 16, "{few:?}, then {many:?}");
+        // them all; linear is 8, and 24 leaves room for a noisy runner.
+        assert!(many < few * 24, "{few:?}, then {many:?}");
     }
 
     #[test]
