@@ -563,8 +563,19 @@ fn heif(
     primary: &[u8],
     after: &[u8],
 ) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
+    turned_heif(1, brand, order, primary, after)
+}
+
+/// [`heif`] with its Exif's Orientation `orientation`.
+fn turned_heif(
+    orientation: u16,
+    brand: &[u8; 4],
+    order: &[&[u8; 4]],
+    primary: &[u8],
+    after: &[u8],
+) -> (Vec<u8>, Vec<std::ops::Range<usize>>) {
     let mut payload = 6u32.to_be_bytes().to_vec();
-    payload.extend_from_slice(&exif(1)[4..]);
+    payload.extend_from_slice(&exif(orientation)[4..]);
     payload.extend_from_slice(b"SecretSerial");
     let xmp = b"<x:xmpmeta xmlns:x='adobe:ns:meta/'>SecretPlace</x:xmpmeta>".to_vec();
     let thumb = vec![0xC4; 40];
@@ -707,6 +718,30 @@ fn remove_metadata_strips_a_heic_in_place_and_keeps_its_pictures() {
         assert!(out.windows(4).any(|w| w == b"free"));
         assert!(out.windows(4).any(|w| w == b"thmb"));
     }
+}
+
+#[test]
+fn remove_metadata_on_a_portrait_heic_keeps_its_orientation_in_its_exif() {
+    use MetaField::*;
+    let dir = TestDir::new("strip-heic-portrait");
+    let (src, at) = turned_heif(6, b"heic", &IPHONE, &[0xA1; 100], b"");
+    let outcome = strip(&dir, "portrait.heic", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out.len(), src.len());
+    // The Exif item stays, where it was: its header offset, `Exif\0\0`
+    // and a big-endian TIFF of Orientation 6 alone, then zeros.
+    let data = &out[at[1].clone()];
+    let mut payload = b"\0\0\0\x06Exif\0\0MM\0\x2a\0\0\0\x08\0\x01".to_vec();
+    payload.extend_from_slice(&[0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(data[..payload.len()], payload[..]);
+    assert!(data[payload.len()..].iter().all(|&b| b == 0));
+    assert!(out.windows(4).any(|w| w == b"Exif" || w == b"cdsc"));
+    assert!(!out.windows(6).any(|w| w == b"Secret"));
+    assert!(!out.windows(5).any(|w| w == b"Canon"));
 }
 
 #[test]

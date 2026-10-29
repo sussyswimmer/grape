@@ -125,16 +125,26 @@ impl Item {
     }
 }
 
-/// A camera's Exif as a big-endian TIFF: make, model, a date, a comment
-/// and a GPS position.
+/// A camera's Exif as a big-endian TIFF: make, model, Orientation 1 (a
+/// landscape photo), a date and a GPS position.
 pub(crate) fn camera() -> Vec<u8> {
+    turned(1)
+}
+
+/// A portrait photo's: the same with Orientation 6.
+pub(crate) fn portrait() -> Vec<u8> {
+    turned(6)
+}
+
+/// [`camera`]'s Exif with Orientation `orientation`.
+fn turned(orientation: u16) -> Vec<u8> {
     tiff(
         b'M',
         &[
             &[
                 (0x010F, V::Ascii("SecretMake")),
                 (0x0110, V::Ascii("SecretModel")),
-                (0x0112, V::Short(6)),
+                (0x0112, V::Short(orientation)),
                 (0x8769, V::Ifd(1)),
                 (0x8825, V::Ifd(2)),
             ],

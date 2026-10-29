@@ -33,19 +33,28 @@
 //!   every other property (`colr`, `irot`, `imir`, `clap`, `pixi`,
 //!   `hvcC`, `ispe`, `auxC`, `pasp`, …), `ftyp`, `etyp`, `hdlr`, `pitm`,
 //!   `dinf`, `grpl` (less the dropped ids), `idat` (all but kept data zeroed)
-//!   and each kept `iloc` entry, copied as it was. No minimal Exif goes
-//!   back: `irot` and `imir` turn the picture, and `colr` holds its color.
+//!   and each kept `iloc` entry, copied as it was; `colr` holds the color.
+//! - **Kept for the orientation** (D26, as JPEG's minimal Exif): the
+//!   primary's Exif when its Orientation is 2 to 8, whether or not `irot`
+//!   and `imir` turn the picture too, since readers that follow Exif don't
+//!   look at them, and those that do ignore Exif. Its `infe`, `iloc` entry
+//!   and `cdsc` stay byte for byte; its one extent is overwritten in place
+//!   with its 4-byte header offset (and `Exif\0\0` where the source had
+//!   it), a TIFF structure of that Orientation alone, then zeros. Its
+//!   other fields are reported.
 //! - **Refused** ([`LAYOUT`]): a dropped item whose data is in another
 //!   item (construction method 2) or another file, has an extent of
 //!   length 0 (to the end), overlaps kept data, or lies outside every
-//!   `mdat` and `idat`; kept data inside `meta`, or inside a box that's
-//!   dropped or zeroed; a picture made of a dropped item (`dimg`), or
-//!   whose data is in one; a primary item that is metadata. A sequence is
+//!   `mdat` and `idat`; the primary's Exif kept for its orientation in
+//!   several extents, or in too few bytes for it, or as dropped data may
+//!   not be; kept data inside `meta`, or inside a box that's dropped or
+//!   zeroed; a picture made of a dropped item (`dimg`), or whose data is
+//!   in one; a primary item that is metadata. A sequence is
 //!   refused too ([`SEQUENCE`]). Kept data that names another data
 //!   reference counts as this file's, as libheif reads it: it's kept,
 //!   overlapped by nothing dropped, and checked.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
-//!   published.
+//!   published, the Exif kept for the orientation holding nothing else.
 //! - **Memory:** the source's `meta` (within
 //!   [`MAX_META`](super::isobmff::boxes::MAX_META)) and its model, and the
 //!   rebuilt `meta`, written straight into one buffer of the source's
@@ -103,6 +112,32 @@ enum Fate {
     Free,
 }
 
+/// The primary's Exif, kept when it turns the picture (D26), its one
+/// extent overwritten in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Oriented {
+    id: u32,
+    /// 0: in the file; 1: in `idat`.
+    method: u8,
+    /// Its extent, in the file or in `idat`'s content.
+    range: Range<u64>,
+    /// What's written at its start, zeros after: its 4-byte header offset,
+    /// `Exif\0\0` when the source had it there, and a TIFF structure with
+    /// the Orientation alone.
+    payload: Vec<u8>,
+}
+
+/// What an Exif item holds, walked.
+#[derive(Debug, Default)]
+struct Walked {
+    fields: Vec<MetaField>,
+    /// IFD0's Orientation, when it's 1 to 8.
+    orientation: Option<u16>,
+    /// `Exif\0\0` between its header offset and its TIFF structure, as
+    /// Apple writes it.
+    prefixed: bool,
+}
+
 /// What Remove Metadata finds in a HEIF file ([module docs](self)).
 struct Survey {
     top: Top,
@@ -111,6 +146,12 @@ struct Survey {
     meta: Meta,
     /// The items dropped.
     dropped: HashSet<u32>,
+    /// The primary's Exif, kept for its orientation.
+    oriented: Option<Oriented>,
+    /// The Exif item walked to find it, reported already.
+    walked: Option<u32>,
+    /// What's left to read of Exif items: the file's size, at first.
+    left: u64,
     /// For each of `ipco`'s properties, whether it's removed.
     removed: Vec<bool>,
     /// Each top-level box's fate.
@@ -165,9 +206,12 @@ impl Survey {
             return Err(Error::Refused(LAYOUT.into()));
         }
         let mut s = Survey {
+            left: top.len,
             top,
             meta_box,
             dropped,
+            oriented: None,
+            walked: None,
             removed: meta
                 .properties
                 .iter()
@@ -183,6 +227,7 @@ impl Survey {
             idat_dirty: false,
             found: Found::default(),
         };
+        s.orient(r)?;
         s.place_data()?;
         s.check_pictures()?;
         s.judge_boxes(r)?;
@@ -192,6 +237,92 @@ impl Survey {
         Ok(s)
     }
 
+    /// Keeps the primary's Exif when it turns the picture (D26): the
+    /// first Exif item that describes the primary, walked (and reported:
+    /// it says no more than its orientation after), with an Orientation of
+    /// 2 to 8, whether or not `irot` or `imir` turn it too, so that readers
+    /// that follow Exif, and those that follow `irot` and ignore Exif as
+    /// the format says, see it as before. Its entries stay as they are,
+    /// and its one extent gets [`Oriented::payload`]; refused when it has
+    /// several, or too few bytes.
+    fn orient(&mut self, r: &mut dyn In) -> Result<(), Error> {
+        let m = &self.meta;
+        let describe_primary: HashSet<u32> = m
+            .refs
+            .iter()
+            .filter(|r| &r.kind == b"cdsc" && m.to(r).contains(&m.primary))
+            .map(|r| r.from)
+            .collect();
+        let Some(id) = m
+            .items
+            .iter()
+            .find(|i| i.role() == Role::Exif && describe_primary.contains(&i.id))
+            .map(|i| i.id)
+        else {
+            return Ok(());
+        };
+        // Data in another item or file is refused with the dropped.
+        let Some(loc) = m
+            .locations
+            .iter()
+            .find(|l| l.id == id && l.method < 2 && l.data_ref == 0)
+        else {
+            return Ok(());
+        };
+        let mut left = self.left;
+        let walked = self.exif(r, loc, &mut left)?;
+        let spans = m.spans(loc)?;
+        self.left = left;
+        self.walked = Some(id);
+        self.found.fields.extend(walked.fields);
+        let Some(tiff) = walked
+            .orientation
+            .and_then(|o| exif::minimal(Some(o), false))
+        else {
+            return Ok(());
+        };
+        let mut payload = if walked.prefixed {
+            [&6u32.to_be_bytes()[..], b"Exif\0\0"].concat()
+        } else {
+            0u32.to_be_bytes().to_vec()
+        };
+        payload.extend_from_slice(&tiff);
+        let [span] = spans[..] else {
+            return Err(Error::Refused(LAYOUT.into()));
+        };
+        let Some(len) = span.len.filter(|&len| len >= payload.len() as u64) else {
+            return Err(Error::Refused(LAYOUT.into()));
+        };
+        self.oriented = Some(Oriented {
+            id,
+            method: loc.method,
+            range: span.start..span.start + len,
+            payload,
+        });
+        self.dropped.remove(&id);
+        Ok(())
+    }
+
+    /// Where the oriented Exif's data is, by construction method: in the
+    /// file (0) or in `idat`'s content (1); none, or its one extent.
+    fn oriented_in(&self, method: u8) -> Vec<Range<u64>> {
+        self.oriented
+            .iter()
+            .filter(|o| o.method == method)
+            .map(|o| o.range.clone())
+            .collect()
+    }
+
+    /// Whether `range` of the file lies in an `mdat`'s content.
+    fn in_mdat(&self, range: &Range<u64>) -> bool {
+        let boxes = &self.top.boxes;
+        // The box it starts in: boxes are end to end.
+        let at = boxes.partition_point(|b| b.end() <= range.start);
+        boxes.get(at).is_some_and(|b| {
+            &b.kind == b"mdat" && b.content().start <= range.start && range.end <= b.end()
+        })
+    }
+
     /// Finds where kept and dropped data is, and refuses what can't be
     /// rewritten safely.
     fn place_data(&mut self) -> Result<(), Error> {
@@ -199,7 +330,13 @@ impl Survey {
         let idat = self.meta.idat().map_or(0, |r| r.len() as u64);
         let mut kept_file = Vec::new();
         let mut kept_idat = Vec::new();
-        for loc in &self.meta.locations {
+        let oriented = self.oriented.as_ref().map(|o| o.id);
+        for loc in self
+            .meta
+            .locations
+            .iter()
+            .filter(|l| Some(l.id) != oriented)
+        {
             let dropped = self.dropped.contains(&loc.id);
             if dropped && (loc.method == 2 || loc.data_ref != 0) {
                 return Err(Error::Refused(LAYOUT.into()));
@@ -244,24 +381,40 @@ impl Survey {
         if overlaps(&kept_file, &meta) {
             return Err(Error::Refused(LAYOUT.into()));
         }
-        let boxes = &self.top.boxes;
-        for range in &self.drop_file {
-            // The box it starts in: boxes are end to end.
-            let at = boxes.partition_point(|b| b.end() <= range.start);
-            let in_mdat = boxes.get(at).is_some_and(|b| {
-                &b.kind == b"mdat" && b.content().start <= range.start && range.end <= b.end()
-            });
-            if !in_mdat || overlaps(&kept_file, range) {
-                return Err(Error::Refused(LAYOUT.into()));
-            }
+        if self
+            .drop_file
+            .iter()
+            .any(|range| !self.in_mdat(range) || overlaps(&kept_file, range))
+        {
+            return Err(Error::Refused(LAYOUT.into()));
         }
         if self.drop_idat.iter().any(|r| overlaps(&kept_idat, r)) {
             return Err(Error::Refused(LAYOUT.into()));
         }
-        self.kept_file = kept_file;
-        self.kept_idat = kept_idat;
         self.drop_file = merged(std::mem::take(&mut self.drop_file));
         self.drop_idat = merged(std::mem::take(&mut self.drop_idat));
+        // The oriented Exif's extent is written over: in mdat or idat, as
+        // dropped data is, and apart from all else.
+        if let Some(o) = &self.oriented {
+            let (size, kept, drops) = match o.method {
+                0 => (len, &kept_file, &self.drop_file),
+                _ => (idat, &kept_idat, &self.drop_idat),
+            };
+            if o.range.end > size {
+                return Err(Error::Broken(format!(
+                    "item {}'s data runs past its end",
+                    o.id
+                )));
+            }
+            if (o.method == 0 && !self.in_mdat(&o.range))
+                || overlaps(kept, &o.range)
+                || overlaps(drops, &o.range)
+            {
+                return Err(Error::Refused(LAYOUT.into()));
+            }
+        }
+        self.kept_file = kept_file;
+        self.kept_idat = kept_idat;
         Ok(())
     }
 
@@ -324,18 +477,18 @@ impl Survey {
     fn report_items(&mut self, r: &mut dyn In) -> Result<(), Error> {
         let locations: HashMap<u32, &Location> =
             self.meta.locations.iter().map(|l| (l.id, l)).collect();
-        let mut left = self.top.len;
+        let mut left = self.left;
         let mut fields = Vec::new();
         for item in self
             .meta
             .items
             .iter()
-            .filter(|i| self.dropped.contains(&i.id))
+            .filter(|i| self.dropped.contains(&i.id) && Some(i.id) != self.walked)
         {
             match item.role() {
                 Role::Exif => {
                     if let Some(loc) = locations.get(&item.id) {
-                        fields.extend(self.exif(r, loc, &mut left)?);
+                        fields.extend(self.exif(r, loc, &mut left)?.fields);
                     }
                 }
                 Role::Xmp => fields.push(MetaField::Xmp),
@@ -351,37 +504,41 @@ impl Survey {
     /// [`MAX_EXIF`] of its TIFF structure, and Other past that, or for a
     /// header offset past its end, or when what it reads would pass
     /// `left`.
-    fn exif(
-        &self,
-        r: &mut dyn In,
-        loc: &Location,
-        left: &mut u64,
-    ) -> Result<Vec<MetaField>, Error> {
+    fn exif(&self, r: &mut dyn In, loc: &Location, left: &mut u64) -> Result<Walked, Error> {
+        let mut walked = Walked::default();
         let pieces = self.pieces(loc)?;
         let total: u64 = pieces.iter().map(|p| p.end - p.start).sum();
         if total == 0 {
-            return Ok(Vec::new());
+            return Ok(walked);
         }
-        let head = self.item_bytes(r, loc, &pieces, 0, 4)?;
-        let Ok(head) = <[u8; 4]>::try_from(head.as_slice()) else {
-            return Ok(vec![MetaField::Other]);
+        let head = self.item_bytes(r, loc, &pieces, 0, total.min(10))?;
+        let Some(offset) = head.first_chunk::<4>() else {
+            walked.fields.push(MetaField::Other);
+            return Ok(walked);
         };
-        let skip = 4 + u64::from(u32::from_be_bytes(head));
+        let skip = 4 + u64::from(u32::from_be_bytes(*offset));
         if skip > total {
-            return Ok(vec![MetaField::Other]);
+            walked.fields.push(MetaField::Other);
+            return Ok(walked);
         }
+        walked.prefixed = skip == 10 && head[4..] == *b"Exif\0\0";
         let take = (total - skip).min(MAX_EXIF as u64);
         match left.checked_sub(4 + take) {
             Some(rest) => *left = rest,
-            None => return Ok(vec![MetaField::Other]),
+            None => {
+                walked.fields.push(MetaField::Other);
+                return Ok(walked);
+            }
         }
         let data = self.item_bytes(r, loc, &pieces, skip, take)?;
         let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(&data);
-        let mut fields: Vec<MetaField> = exif::walk(tiff).fields.into_iter().collect();
+        let exif = exif::walk(tiff);
+        walked.fields.extend(exif.fields);
+        walked.orientation = exif.orientation;
         if total - skip > take {
-            fields.push(MetaField::Other);
+            walked.fields.push(MetaField::Other);
         }
-        Ok(fields)
+        Ok(walked)
     }
 
     /// A dropped item's extents, in the file or in `idat`'s content.
@@ -420,8 +577,20 @@ impl Survey {
                     read_at(r, start, &mut buf)?;
                     out.extend_from_slice(&buf);
                 } else {
-                    let s = idat.start + start as usize;
-                    out.extend_from_slice(&self.meta.bytes[s..s + n]);
+                    // Read before place_data checks it, for the primary's.
+                    let piece = usize::try_from(start)
+                        .ok()
+                        .and_then(|start| idat.start.checked_add(start))
+                        .and_then(|s| Some(s..s.checked_add(n)?))
+                        .filter(|range| range.end <= idat.end)
+                        .map(|range| &self.meta.bytes[range]);
+                    let Some(piece) = piece else {
+                        return Err(Error::Broken(format!(
+                            "item {}'s data runs past its end",
+                            loc.id
+                        )));
+                    };
+                    out.extend_from_slice(piece);
                 }
             }
             at += len;
@@ -473,9 +642,10 @@ impl Survey {
     fn report_gaps(&mut self, r: &mut dyn In) -> Result<(), Error> {
         let mut left_over = false;
         let mut buf = vec![0; STEP];
+        let (in_file, in_idat) = (self.oriented_in(0), self.oriented_in(1));
         'mdats: for b in self.top.all(b"mdat") {
             for gap in gaps(&self.kept_file, b.content()) {
-                for unread in gaps(&self.drop_file, gap) {
+                for unread in gaps(&self.drop_file, gap).flat_map(|g| gaps(&in_file, g)) {
                     if !zeros(r, unread, &mut buf)? {
                         left_over = true;
                         break 'mdats;
@@ -491,10 +661,9 @@ impl Survey {
                     .any(|&b| b != 0)
             };
             let all = 0..bytes.len() as u64;
-            self.idat_dirty = gaps(&self.kept_idat, all.clone()).any(set);
-            left_over |= gaps(&self.kept_idat, all)
-                .flat_map(|gap| gaps(&self.drop_idat, gap))
-                .any(set);
+            let unkept = || gaps(&self.kept_idat, all.clone()).flat_map(|g| gaps(&in_idat, g));
+            self.idat_dirty = unkept().any(set);
+            left_over |= unkept().flat_map(|g| gaps(&self.drop_idat, g)).any(set);
         }
         if left_over {
             self.found.fields.insert(MetaField::Other);
@@ -507,10 +676,10 @@ impl Survey {
         !self.dropped.is_empty() || self.removed.contains(&true)
     }
 
-    /// Whether `meta` is written again: it changes, or bytes in `idat` are
-    /// zeroed.
+    /// Whether `meta` is written again: it changes, bytes in `idat` are
+    /// zeroed, or the oriented Exif is in `idat`.
     fn rewrites_meta(&self) -> bool {
-        self.meta_changes() || self.idat_dirty
+        self.meta_changes() || self.idat_dirty || !self.oriented_in(1).is_empty()
     }
 }
 
@@ -654,6 +823,10 @@ fn rebuild(s: &Survey, out: &mut Vec<u8>) {
             out.extend_from_slice(&m.bytes[child.range.clone()]);
             for gap in gaps(&s.kept_idat, 0..child.content().len() as u64) {
                 out[from + gap.start as usize..from + gap.end as usize].fill(0);
+            }
+            if let Some(o) = s.oriented.as_ref().filter(|o| o.method == 1) {
+                let at = from + o.range.start as usize;
+                out[at..at + o.payload.len()].copy_from_slice(&o.payload);
             }
         } else if m.grpl == Some(i) {
             rebuild_grpl(s, child, out);
@@ -907,6 +1080,9 @@ pub(crate) struct Plan {
     /// Every item it keeps with an `iloc` entry, in `iloc`'s order.
     kept: Vec<Kept>,
     dropped: HashSet<u32>,
+    /// The primary's Exif, kept for its orientation, and what its data
+    /// starts with now.
+    oriented: Option<(u32, Vec<u8>)>,
     /// Where the source's `idat` content is in the file.
     idat_at: Option<u64>,
 }
@@ -918,15 +1094,16 @@ impl Plan {
         let mut s = Survey::new(r, len)?;
         let mut edits = Vec::new();
         // What the edits write, each in its place: the rebuilt meta and the
-        // free box after it, which fit in the source's meta, and a free
-        // header for each box that goes.
+        // free box after it, which fit in the source's meta, a free header
+        // for each box that goes, and the oriented Exif.
         let freed = s.fates.iter().filter(|&&f| f == Fate::Free).count();
         let room = if s.rewrites_meta() {
             s.meta_box.len as usize
         } else {
             0
         };
-        let mut bytes = Vec::with_capacity(room + 16 * freed);
+        let exif = s.oriented.as_ref().map_or(0, |o| o.payload.len());
+        let mut bytes = Vec::with_capacity(room + 16 * freed + exif);
         let mut len = s.end;
         let mut padded = false;
         if s.rewrites_meta() {
@@ -984,11 +1161,25 @@ impl Plan {
                 Fate::Keep | Fate::Meta => {}
             }
         }
+        // The oriented Exif in mdat (in idat, the rebuilt meta has it).
+        let mut keep = std::mem::take(&mut s.kept_file);
+        if let Some(o) = s.oriented.as_ref().filter(|o| o.method == 0) {
+            let start = bytes.len();
+            bytes.extend_from_slice(&o.payload);
+            edits.push(Edit::Write {
+                at: o.range.start,
+                bytes: start..bytes.len(),
+            });
+            edits.push(Edit::Zero(
+                o.range.start + o.payload.len() as u64..o.range.end,
+            ));
+            keep.push(o.range.clone());
+            keep = merged(keep);
+        }
         edits.retain(|e| !e.range().is_empty());
         edits.sort_unstable_by_key(|e| e.range().start);
         // With every byte of mdat that no kept item points to, dropped data
         // and what earlier editors left, zeroed as it's copied.
-        let keep = std::mem::take(&mut s.kept_file);
         let mdats: Vec<_> = s.top.all(b"mdat").map(|b| b.content()).collect();
         let mut end = 0;
         for change in changes(&edits, &keep, &mdats) {
@@ -1012,6 +1203,7 @@ impl Plan {
             })
             .collect();
         let idat_at = m.idat().map(|r| content + r.start as u64);
+        let oriented = s.oriented.take().map(|o| (o.id, o.payload));
         Ok(Plan {
             len,
             edits,
@@ -1023,6 +1215,7 @@ impl Plan {
             kept,
             idat_at,
             dropped: s.dropped,
+            oriented,
         })
     }
 
@@ -1064,8 +1257,9 @@ impl Plan {
     /// it came from: it must be the size planned; the reporter must find
     /// nothing in it; it must have the same primary item, every kept
     /// `iloc` entry byte for byte (read again from the source) with its
-    /// data the same bytes, and no reference from a dropped item.
-    /// [`Error::Broken`] says what's wrong.
+    /// data the same bytes but for the Exif kept for the orientation,
+    /// which must hold the payload planned and zeros, and no reference
+    /// from a dropped item. [`Error::Broken`] says what's wrong.
     pub(crate) fn check(&self, src: &mut dyn In, out: &mut dyn In, len: u64) -> Result<(), Error> {
         let wrong = |why: String| Err(Error::Broken(format!("the output {why}")));
         if len != self.len {
@@ -1101,12 +1295,38 @@ impl Plan {
                 return wrong(format!("changed item {}'s location", kept.id));
             }
         }
-        // Every kept item's data, each byte once however many items share
-        // it, in the file and in idat: what the output's survey found kept,
-        // which is every item it has, and so every item kept.
+        let mut a = vec![0; STEP];
+        let mut b = vec![0; STEP];
         let idat_at = m
             .idat()
             .map(|r| s.meta_box.content().start + r.start as u64);
+        // The primary's Exif, kept for its orientation: the same item, its
+        // data the payload planned, then zeros.
+        let oriented = s.oriented.as_ref().map(|o| (o.id, &o.payload[..]));
+        if oriented != self.oriented.as_ref().map(|(id, p)| (*id, &p[..])) {
+            return wrong("doesn't keep the orientation as planned".into());
+        }
+        if let Some(o) = &s.oriented {
+            let from = match (o.method, idat_at) {
+                (0, _) => 0,
+                (_, Some(at)) => at,
+                (_, None) => return wrong("lost its idat".into()),
+            };
+            let mut at = o.range.start;
+            while at < o.range.end {
+                let n = (o.range.end - at).min(STEP as u64) as usize;
+                read_at(out, from + at, &mut b[..n])?;
+                let i = (at - o.range.start) as usize;
+                let planned = (i..i + n).map(|i| o.payload.get(i).copied().unwrap_or(0));
+                if !b[..n].iter().copied().eq(planned) {
+                    return wrong(format!("changed item {}'s orientation", o.id));
+                }
+                at += n as u64;
+            }
+        }
+        // Every kept item's data, each byte once however many items share
+        // it, in the file and in idat: what the output's survey found kept,
+        // which is every item it has, and so every item kept.
         let mut places = vec![(0, 0, &s.kept_file)];
         if !s.kept_idat.is_empty() {
             let (Some(from), Some(to)) = (self.idat_at, idat_at) else {
@@ -1114,8 +1334,6 @@ impl Plan {
             };
             places.push((from, to, &s.kept_idat));
         }
-        let mut a = vec![0; STEP];
-        let mut b = vec![0; STEP];
         for (from, to, ranges) in places {
             for range in ranges.iter().cloned() {
                 let mut at = range.start;
@@ -1164,8 +1382,8 @@ mod tests {
 
     use super::super::isobmff::boxes::load;
     use super::super::isobmff::tests::{
-        bx, described, iphone, layouts, meta_at, read, simple, uuid, Builder, Item, Place, C2PA,
-        EXIF, GAIN, SECRET_XMP, TMAP, XMP, XMP_UUID as XMP_USER_TYPE,
+        bx, described, iphone, layouts, meta_at, portrait, read, simple, uuid, Builder, Item,
+        Place, C2PA, EXIF, GAIN, SECRET_XMP, THUMB, TMAP, XMP, XMP_UUID as XMP_USER_TYPE,
     };
     use super::*;
     use MetaField::*;
@@ -1345,6 +1563,134 @@ mod tests {
         assert!(!has(&out, b"Secret"));
         let refs: Vec<_> = m.refs.iter().map(|r| (r.kind, r.from)).collect();
         assert_eq!(refs, [(*b"cdsc", 16)]);
+    }
+
+    /// `b` with its first Exif item turned, as a portrait photo's is:
+    /// Orientation 6.
+    fn turned(mut b: Builder) -> Builder {
+        if let Some(item) = b.items.iter_mut().find(|i| &i.kind == b"Exif") {
+            item.data = Item::exif(item.id, &portrait()).data;
+        }
+        b
+    }
+
+    /// The payload a portrait photo's Exif keeps: its header offset (6 and
+    /// `Exif\0\0`, as Apple writes it, or 0) and a TIFF of Orientation 6.
+    fn upright(prefixed: bool) -> Vec<u8> {
+        let tiff = exif::minimal(Some(6), false).unwrap();
+        match prefixed {
+            true => [&[0, 0, 0, 6][..], b"Exif\0\0", &tiff].concat(),
+            false => [&[0; 4][..], &tiff].concat(),
+        }
+    }
+
+    #[test]
+    fn a_portrait_photos_exif_keeps_its_orientation_alone_in_its_place() {
+        for (name, b) in layouts() {
+            let b = turned(b);
+            let exif = b.items.iter().find(|i| &i.kind == b"Exif").unwrap();
+            let (src, layout) = b.build();
+            if exif.extents > 1 {
+                // Its orientation can't be written in place.
+                assert_eq!(refused(&src), LAYOUT, "{name}");
+                continue;
+            }
+            let (out, found) = strip(&src);
+            // Its other fields are reported as before.
+            assert!(
+                found.is_superset(&[Location, Camera, CreationDate].into()),
+                "{name}"
+            );
+            let (m, s) = (meta(&out), meta(&src));
+            // Its infe, iloc entry and cdsc stay as they were.
+            let id = exif.id;
+            let entry = |m: &Meta| m.bytes[m.location(id).unwrap().range.clone()].to_vec();
+            let infe = |m: &Meta| m.bytes[m.item(id).unwrap().range.clone()].to_vec();
+            assert_eq!((entry(&m), infe(&m)), (entry(&s), infe(&s)), "{name}");
+            assert!(m
+                .refs
+                .iter()
+                .any(|r| &r.kind == b"cdsc" && r.from == id && m.to(r) == [b.primary]));
+            // Its data: the Orientation alone, then zeros.
+            let data = read(&out, &m, id);
+            let payload = upright(true);
+            assert_eq!(data.len(), layout.data(id).len(), "{name}");
+            assert_eq!(data[..payload.len()], payload[..], "{name}");
+            assert!(data[payload.len()..].iter().all(|&b| b == 0), "{name}");
+            let walked = exif::walk(&data[10..]);
+            assert_eq!((walked.orientation, walked.fields.len()), (Some(6), 0));
+            assert!(!has(&out, b"Secret"), "{name}");
+            // A second pass copies it as it is.
+            let (again, found) = strip(&out);
+            assert_eq!(again, out, "{name}");
+            assert!(found.is_empty(), "{name}");
+        }
+    }
+
+    #[test]
+    fn an_exif_with_its_tiff_right_after_its_offset_keeps_that_form() {
+        // Samsung's: offset 0, the TIFF straight after it.
+        let mut b = simple();
+        b.items[1].data = [&[0; 4][..], &portrait()].concat();
+        let (src, _) = b.build();
+        let (out, found) = strip(&src);
+        assert_eq!(found, [Location, Camera, CreationDate, Xmp].into());
+        let data = read(&out, &meta(&out), EXIF);
+        let payload = upright(false);
+        assert_eq!(data[..payload.len()], payload[..]);
+        assert!(data[payload.len()..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn a_portrait_exif_that_cant_take_its_orientation_in_place_is_refused() {
+        // Too small for the payload: a TIFF of 22 bytes, its Orientation
+        // and no next IFD, after offset 0.
+        let mut tiny = super::super::exif::tests::tiff(
+            b'M',
+            &[&[(0x0112, super::super::exif::tests::V::Short(6))]],
+            None,
+        );
+        tiny.truncate(22);
+        let mut b = simple();
+        b.items[1].data = [&[0; 4][..], &tiny].concat();
+        assert_eq!(refused(&b.build().0), LAYOUT);
+        // In another item, in another file, or over kept data.
+        let (src, layout) = turned(simple()).build();
+        let exif = entry_at(&src, EXIF);
+        let primary = layout.file_ranges(1)[0].start as u32;
+        for (name, at, bytes) in [
+            ("in another item", exif + 2, vec![0, 2]),
+            ("in another file", exif + 4, vec![0, 1]),
+            ("over kept data", exif + 8, primary.to_be_bytes().to_vec()),
+        ] {
+            let mut file = src.clone();
+            file[at..at + bytes.len()].copy_from_slice(&bytes);
+            assert_eq!(refused(&file), LAYOUT, "{name}");
+        }
+        // An Exif that describes another item, the thumbnail's, goes.
+        let mut b = turned(simple());
+        b.items.push(Item::picture(THUMB, 0xC0, 40));
+        b.refs[0] = (*b"cdsc", EXIF, vec![THUMB]);
+        let (out, _) = strip(&b.build().0);
+        assert!(meta(&out).item(EXIF).is_none());
+    }
+
+    #[test]
+    fn the_check_catches_a_changed_orientation() {
+        let (src, layout) = turned(simple()).build();
+        let mut p = plan(&src).unwrap();
+        let mut o = Cursor::new(Vec::new());
+        p.write(&mut Cursor::new(&src), &mut o).unwrap();
+        let out = o.into_inner();
+        let check = |o: &[u8]| p.check(&mut Cursor::new(&src), &mut Cursor::new(o), o.len() as u64);
+        check(&out).unwrap();
+        let data = layout.file_ranges(EXIF)[0].clone();
+        // A byte left after it, or its Orientation changed.
+        for at in [data.end as usize - 1, data.start as usize + 10 + 8 + 2 + 9] {
+            let mut o = out.clone();
+            o[at] ^= 3;
+            assert!(matches!(check(&o), Err(Error::Broken(_))), "{at}");
+        }
     }
 
     #[test]
