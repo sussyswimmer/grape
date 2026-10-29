@@ -48,12 +48,13 @@
 //!   length 0 (to the end), overlaps kept data, or lies outside every
 //!   `mdat` and `idat`; the primary's Exif kept for its orientation in
 //!   several extents, or in too few bytes for it, or as dropped data may
-//!   not be; kept data inside `meta`, or inside a box that's dropped or
-//!   zeroed; a picture made of a dropped item (`dimg`), or whose data is
-//!   in one; a primary item that is metadata. A sequence is
-//!   refused too ([`SEQUENCE`]). Kept data that names another data
-//!   reference counts as this file's, as libheif reads it: it's kept,
-//!   overlapped by nothing dropped, and checked.
+//!   not be, or that a kept item refers to by anything but a `cdsc` (a
+//!   picture made of it, data in it); kept data inside `meta`, or inside
+//!   a box that's dropped or zeroed; a picture made of a dropped item
+//!   (`dimg`), or whose data is in one; a primary item that is metadata.
+//!   A sequence is refused too ([`SEQUENCE`]). Kept data that names
+//!   another data reference counts as this file's, as libheif reads it:
+//!   it's kept, overlapped by nothing dropped, and checked.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published, the Exif kept for the orientation holding nothing else.
 //! - **Memory:** the source's `meta` (within
@@ -437,14 +438,20 @@ impl Survey {
     }
 
     /// Refuses a kept picture made of a dropped item (`dimg`), or whose
-    /// data is in one (`iloc` references, for construction method 2).
+    /// data is in one (`iloc` references, for construction method 2), and
+    /// the Exif kept for the orientation when a kept item refers to it by
+    /// anything but a `cdsc`: a picture made of it, data in it, or what
+    /// else might lean on bytes that are written over.
     fn check_pictures(&self) -> Result<(), Error> {
-        let made_of_dropped = self.meta.refs.iter().any(|r| {
-            matches!(&r.kind, b"dimg" | b"iloc")
-                && !self.dropped.contains(&r.from)
-                && self.meta.to(r).iter().any(|to| self.dropped.contains(to))
+        let oriented = self.oriented.as_ref().map(|o| o.id);
+        let leans = self.meta.refs.iter().any(|r| {
+            let to = self.meta.to(r);
+            !self.dropped.contains(&r.from)
+                && ((matches!(&r.kind, b"dimg" | b"iloc")
+                    && to.iter().any(|id| self.dropped.contains(id)))
+                    || (&r.kind != b"cdsc" && oriented.is_some_and(|id| to.contains(&id))))
         });
-        if made_of_dropped {
+        if leans {
             return Err(Error::Refused(LAYOUT.into()));
         }
         Ok(())
@@ -1745,6 +1752,48 @@ mod tests {
         let mut file = src.clone();
         extent(&mut file, first + 16, 1, 0);
         assert_eq!(refused(&file), LAYOUT);
+    }
+
+    #[test]
+    fn a_portrait_exif_a_kept_item_leans_on_is_refused() {
+        // Item 8, hidden, its data in the Exif (construction method 2: 20
+        // bytes from its byte 10) by an iloc reference: a JPEG thumbnail of
+        // the primary, and an item of another type.
+        for kind in [*b"jpeg", *b"abcd"] {
+            let mut b = turned(simple());
+            let mut item = Item::new(8, kind, Place::Mdat, vec![0xB8; 20]);
+            item.hidden = true;
+            b.items.push(item);
+            b.refs.push((*b"iloc", 8, vec![EXIF]));
+            if &kind == b"jpeg" {
+                b.refs.push((*b"thmb", 8, vec![1]));
+            }
+            let (mut file, _) = b.build();
+            // iloc v1: id, construction method, data reference, extent
+            // count, then the extent's offset and length.
+            let at = entry_at(&file, 8);
+            file[at + 2..at + 4].copy_from_slice(&[0, 2]);
+            file[at + 8..at + 12].copy_from_slice(&10u32.to_be_bytes());
+            file[at + 12..at + 16].copy_from_slice(&20u32.to_be_bytes());
+            assert_eq!(refused(&file), LAYOUT, "{kind:?}");
+        }
+        // A grid made of it, and a picture that refers to it otherwise.
+        for kind in [b"dimg", b"thmb", b"auxl", b"prem", b"base", b"abcd"] {
+            let mut b = turned(simple());
+            b.items.push(match kind {
+                b"dimg" => Item::new(16, *b"grid", Place::Idat, vec![0, 0, 0, 0, 0, 64, 0, 48]),
+                _ => Item::picture(16, 0xC6, 20),
+            });
+            b.refs.push((*kind, 16, vec![EXIF]));
+            assert_eq!(refused(&b.build().0), LAYOUT, "{kind:?}");
+        }
+        // A cdsc to it is no reason: the Exif keeps its orientation.
+        let mut b = turned(simple());
+        b.items.push(Item::picture(16, 0xC6, 20));
+        b.refs.push((*b"cdsc", 16, vec![EXIF]));
+        let (out, _) = strip(&b.build().0);
+        assert!(meta(&out).item(EXIF).is_some());
+        assert!(meta(&out).refs.iter().any(|r| r.from == 16));
     }
 
     #[test]
