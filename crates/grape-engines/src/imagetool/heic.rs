@@ -8,9 +8,11 @@
 //! - **Dropped and reported:**
 //!   - every Exif item ([`exif::walk`] on its payload after its 4-byte
 //!     header offset and an `Exif\0\0`; the first [`MAX_EXIF`] of it, and
-//!     Other beyond), `mime` item (XMP, or Other) and `uri ` item: its
-//!     entries and references go (an `iref` left with none too), and its
-//!     bytes are zeroed in `mdat` or `idat`;
+//!     Other beyond), `mime` item (XMP, or Other), `uri ` item (Other),
+//!     `iptc` item (IPTC), and any other item that describes another (a
+//!     `cdsc` from it) but a picture (Other: a region annotation, Exif
+//!     under another type): its entries and references go (an `iref` left
+//!     with none too), and its bytes are zeroed in `mdat` or `idat`;
 //!   - the `udes` (title, description, tags), `crtt` and `mdft`
 //!     properties, the non-empty ones reported: each box is removed from
 //!     `ipco`, its associations from `ipma`, and every later index is
@@ -132,10 +134,22 @@ impl Survey {
         }
         let meta_box = file_meta(&top)?;
         let meta = Meta::parse(load(r, &meta_box)?)?;
+        // Metadata by its type, and any other item that describes another
+        // (a `cdsc` from it) but a picture: IPTC under another type, Exif
+        // under a type that isn't Exif, a region annotation.
+        let describes: HashSet<u32> = meta
+            .refs
+            .iter()
+            .filter(|r| &r.kind == b"cdsc")
+            .map(|r| r.from)
+            .collect();
         let dropped: HashSet<u32> = meta
             .items
             .iter()
-            .filter(|item| item.role().metadata())
+            .filter(|item| {
+                let role = item.role();
+                role.metadata() || (role != Role::Image && describes.contains(&item.id))
+            })
             .map(|item| item.id)
             .collect();
         if dropped.contains(&meta.primary) {
@@ -310,6 +324,7 @@ impl Survey {
                     }
                 }
                 Role::Xmp => fields.push(MetaField::Xmp),
+                Role::Iptc => fields.push(MetaField::Iptc),
                 _ => fields.push(MetaField::Other),
             }
         }
@@ -1188,6 +1203,49 @@ mod tests {
         uri.text = Some("urn:example");
         b.items.push(uri);
         assert_eq!(report(b), [Location, Camera, CreationDate, Other].into());
+    }
+
+    #[test]
+    fn items_that_describe_another_go_whatever_their_type_but_pictures() {
+        let mut b = simple();
+        let item =
+            |id, kind: &[u8; 4], data: &[u8]| Item::new(id, *kind, Place::Mdat, data.to_vec());
+        b.items.extend([
+            // IPTC: a city.
+            item(12, b"iptc", b"\x1c\x02\x5a\x00\x0aSecretCity"),
+            // An Exif payload under a type that isn't Exif.
+            item(13, b"E\xEAif", b"\0\0\0\0MM\0\x2aSecretExif"),
+            // A region annotation.
+            item(14, b"rgan", b"SecretRegion"),
+            // An item of another type that describes nothing, and a
+            // picture that describes the primary: kept.
+            item(15, b"abcd", b"kept"),
+            Item::picture(16, 0xC6, 20),
+        ]);
+        for id in [12, 13, 14, 16] {
+            b.refs.push((*b"cdsc", id, vec![1]));
+        }
+        let (src, layout) = b.build();
+        let (out, found) = strip(&src);
+        assert_eq!(
+            found,
+            [Location, Camera, CreationDate, Xmp, Iptc, Other].into()
+        );
+        let m = meta(&out);
+        for id in [12, 13, 14] {
+            assert!(m.item(id).is_none(), "{id}");
+            for r in layout.file_ranges(id) {
+                assert!(out[r.start as usize..r.end as usize]
+                    .iter()
+                    .all(|&b| b == 0));
+            }
+        }
+        for id in [15, 16] {
+            assert_eq!(read(&out, &m, id), layout.data(id), "{id}");
+        }
+        assert!(!has(&out, b"Secret"));
+        let refs: Vec<_> = m.refs.iter().map(|r| (r.kind, r.from)).collect();
+        assert_eq!(refs, [(*b"cdsc", 16)]);
     }
 
     #[test]

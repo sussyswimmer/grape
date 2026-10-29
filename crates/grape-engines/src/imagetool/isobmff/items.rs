@@ -12,7 +12,7 @@
 //!   `meta`'s bytes, so a tool writes back what it keeps byte for byte.
 //! - **Roles** ([`Role`]): a picture (`hvc1`, `av01`, `grid`, `iden`,
 //!   `iovl`, `tmap`, `jpeg`, …), Exif, XMP (a `mime` item of
-//!   `application/rdf+xml`), another `mime` item, a `uri ` item, or
+//!   `application/rdf+xml`), another `mime` item, a `uri ` item, IPTC, or
 //!   something else. Of the pictures, an auxiliary image's kind comes from
 //!   its `auxC` property ([`Aux`]), and a thumbnail has an outgoing `thmb`.
 //! - **Broken** ([`Error::Broken`], "isn't a readable HEIC image"): no
@@ -74,15 +74,20 @@ pub(crate) enum Role {
     Mime,
     /// A `uri ` item.
     Uri,
+    /// An `iptc` item: IPTC-IIM.
+    Iptc,
     /// An item of another type.
     Other,
 }
 
 impl Role {
-    /// Whether it's metadata: Exif, XMP, another `mime` item or a `uri `
-    /// item.
+    /// Whether it's metadata by its type: Exif, XMP, another `mime` item,
+    /// a `uri ` item or IPTC.
     pub(crate) fn metadata(self) -> bool {
-        matches!(self, Role::Exif | Role::Xmp | Role::Mime | Role::Uri)
+        matches!(
+            self,
+            Role::Exif | Role::Xmp | Role::Mime | Role::Uri | Role::Iptc
+        )
     }
 }
 
@@ -119,6 +124,7 @@ impl Item {
             b"mime" if self.xmp => Role::Xmp,
             b"mime" => Role::Mime,
             b"uri " => Role::Uri,
+            b"iptc" => Role::Iptc,
             kind if PICTURES.contains(&kind) => Role::Image,
             _ => Role::Other,
         }
@@ -763,6 +769,14 @@ mod tests {
         assert_eq!(role(EXIF), Role::Exif);
         assert_eq!(role(XMP), Role::Xmp);
         assert_eq!(role(TMAP), Role::Image);
+        let iptc = Item {
+            id: 1,
+            kind: *b"iptc",
+            hidden: true,
+            xmp: false,
+            range: 0..0,
+        };
+        assert!(iptc.role() == Role::Iptc && iptc.role().metadata());
         assert!(role(EXIF).metadata() && role(XMP).metadata());
         assert!(!role(GAIN).metadata() && !role(1).metadata());
         assert!(m.item(2).unwrap().hidden);
