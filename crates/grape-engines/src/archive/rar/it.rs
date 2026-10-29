@@ -963,7 +963,9 @@ fn bsdtar_runs_in_a_job_object_as_the_app_makes_it() {
     assert!(peak > 0, "no job reported a peak");
 }
 
-/// What tells this test binary it was started as the UI-limited child.
+/// What tells this test binary it was started as the UI-limited child: the
+/// file it writes once its checks pass, so its parent knows it ran (a name
+/// that matches no test runs none and still exits 0).
 #[cfg(windows)]
 const UI_CHILD: &str = "GRAPE_TEST_JOB_UI_CHILD";
 
@@ -984,6 +986,8 @@ fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
     if std::env::var_os("GRAPE_TEST_JOB_UI").is_none_or(|v| v != "1") {
         return;
     }
+    let dir = TestDir::new();
+    let ran = dir.join("ran");
     let started = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -992,7 +996,7 @@ fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(UI_CHILD, "1")
+        .env(UI_CHILD, &ran)
         .creation_flags(BREAKAWAY)
         .spawn();
     let mut child = match started {
@@ -1007,6 +1011,7 @@ fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
     };
     let status = child.wait().unwrap();
     assert!(status.success(), "the UI-limited child failed: {status}");
+    assert!(ran.is_file(), "the UI-limited child ran no test");
 }
 
 /// The child: [`convert_and_extract_in`] with every bsdtar's job made as
@@ -1016,9 +1021,9 @@ fn bsdtar_runs_in_the_ui_limited_job_outside_cargo() {
 #[test]
 #[ignore = "the child of bsdtar_runs_in_the_ui_limited_job_outside_cargo"]
 fn ui_limited_bsdtar_child() {
-    if std::env::var_os(UI_CHILD).is_none() {
+    let Some(ran) = std::env::var_os(UI_CHILD) else {
         return;
-    }
+    };
     let jobs = Arc::new(Jobs::default());
     convert_and_extract_in(&jobs);
     let contained = jobs.contained.load(Ordering::SeqCst);
@@ -1026,4 +1031,5 @@ fn ui_limited_bsdtar_child() {
     println!("UI-limited child: {ui_limited} of {contained} bsdtar jobs had the UI limits");
     assert_eq!(contained, 4);
     assert_eq!(ui_limited, 4, "a bsdtar's job had no UI limits");
+    fs::write(ran, b"").unwrap();
 }

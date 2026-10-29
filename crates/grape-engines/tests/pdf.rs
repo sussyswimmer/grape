@@ -1122,7 +1122,9 @@ fn the_largest_page_renders_under_the_memory_cap() {
     assert_no_leftovers(&dir.path);
 }
 
-/// What tells this test binary it was started as the UI-limited child.
+/// What tells this test binary it was started as the UI-limited child: the
+/// file it writes once its checks pass, so its parent knows it ran (a name
+/// that matches no test runs none and still exits 0).
 #[cfg(windows)]
 const UI_CHILD: &str = "GRAPE_TEST_JOB_UI_CHILD";
 
@@ -1144,6 +1146,8 @@ fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
     if std::env::var_os("GRAPE_TEST_JOB_UI").is_none_or(|v| v != "1") {
         return;
     }
+    let dir = TestDir::new("pdf-ui-child");
+    let ran = dir.join("ran");
     let started = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -1152,7 +1156,7 @@ fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(UI_CHILD, "1")
+        .env(UI_CHILD, &ran)
         .creation_flags(BREAKAWAY)
         .spawn();
     let mut child = match started {
@@ -1167,6 +1171,7 @@ fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
     };
     let status = child.wait().unwrap();
     assert!(status.success(), "the UI-limited child failed: {status}");
+    assert!(ran.is_file(), "the UI-limited child ran no test");
 }
 
 /// The child: PDF → PNG, PDF → TXT and Split PDF, each in a job with the
@@ -1179,9 +1184,9 @@ fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
 #[test]
 #[ignore = "the child of the_worker_runs_in_the_ui_limited_job_outside_cargo"]
 fn ui_limited_child() {
-    if std::env::var_os(UI_CHILD).is_none() {
+    let Some(ran) = std::env::var_os(UI_CHILD) else {
         return;
-    }
+    };
     let mut doc = pdf(&[
         letter(vec![line("Page 1", 24, 700)]),
         letter(vec![line("Page 2", 24, 700)]),
@@ -1243,4 +1248,5 @@ fn ui_limited_child() {
     println!("UI-limited child: {ui_limited} of {contained} workers' jobs had the UI limits");
     assert_eq!(contained, 3);
     assert_eq!(ui_limited, 3, "a worker's job had no UI limits");
+    fs::write(ran, b"").unwrap();
 }

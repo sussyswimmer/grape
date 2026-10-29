@@ -82,8 +82,10 @@ jobs:
             Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'pdf' -and $_.executable } |
             ForEach-Object { $_.executable }) | Select-Object -Last 1
           if (-not $bin) { Write-Output '::error::cargo named no pdf test binary.'; exit 1 }
-          & $bin --exact the_worker_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1
-          exit $LASTEXITCODE
+          & $bin --exact the_worker_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The pdf test binary ran no test of that name.'; exit 1 }
 
   ui-windows:
     name: UI (Windows)
@@ -212,8 +214,10 @@ jobs:
             Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'grape_engines' -and $_.profile.test -and $_.executable } |
             ForEach-Object { $_.executable }) | Select-Object -Last 1
           if (-not $bin) { Write-Output '::error::cargo named no grape_engines test binary.'; exit 1 }
-          & $bin --exact archive::rar::it::bsdtar_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1
-          exit $LASTEXITCODE
+          & $bin --exact archive::rar::it::bsdtar_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The grape_engines test binary ran no test of that name.'; exit 1 }
 
   # Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41),
   # built in this run with its source bundle and the HEIC and AVIF test
