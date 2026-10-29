@@ -1,7 +1,8 @@
 //! Helper processes: the plumbing an engine shares when it runs one of
 //! Grape's own helper programs (the image helper for HEIC and AVIF,
-//! DECISIONS D33, D41, and the SVG worker, D39). Lane A's module, taken
-//! from the PDF worker's runner (`pdf/run.rs`).
+//! DECISIONS D33, D41, the SVG worker, D39, and the PDF worker, D29).
+//! Lane A's module, first taken from the PDF worker's runner
+//! (`pdf/run.rs`), which runs on it too now.
 //!
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
@@ -67,8 +68,8 @@ const EXIT_POLL: Duration = Duration::from_millis(10);
 const OVER_MEMORY_PERCENT: u64 = 90;
 
 /// Puts a process Grape just started into an OS container (D33): a Job
-/// Object on Windows, set by the app ([`set_contain`]). The image helper
-/// and the SVG worker, and `ffmpeg` and `ffprobe` (D22).
+/// Object on Windows, set by the app ([`set_contain`]). The image helper,
+/// the SVG worker and the PDF worker, and `ffmpeg` and `ffprobe` (D22).
 pub trait Contain: Send + Sync + fmt::Debug {
     /// Contains `child` right after its start: before a helper's request is
     /// written, and before FFmpeg's output is read. `max_memory` caps its

@@ -28,7 +28,8 @@ src/
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
                     tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
                     tools/argv.rs (the five FFmpeg tools, D26)
-  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
+  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement), started on helper.rs and contained by the app's hook
+                    (a 6 GiB Job Object on Windows); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
   heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels,
                     and HEIC Compress (D28) has Encoder (check_encode probes once per helper; encode takes a quality and hands the bytes back)
                     and Decoder::decode_within (held to the tool's peak); the tests' fake helper writes real HEIF (fake_quality reads its quality)
@@ -41,6 +42,8 @@ src/
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar
                     feature "rar-it" runs the RAR tests (unit tests in src/archive/rar/it.rs) against a real bsdtar (GRAPE_TEST_BSDTAR)
+                    feature "pdf-it" runs tests/pdf.rs with a real PDFium (GRAPE_TEST_PDFIUM) and the grape-pdf-worker bin
+                    (on Windows each worker in the app's Job Object; GRAPE_TEST_JOB_UI=1 outside cargo checks the UI-limited one)
                     tests/svg.rs runs the real SVG worker, the grape-svg-worker bin (src/bin/, no feature needed; D39)
 ```
 

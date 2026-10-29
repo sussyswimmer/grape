@@ -5,11 +5,21 @@
 //! `grape-pdf-worker` binary. Every PDF is generated here with lopdf;
 //! every test checks that the sources are unchanged and that no temp file
 //! or folder is left.
+//!
+//! On Windows the worker is also contained as the app contains it
+//! (`set_contain` with a Job Object per worker: started detached, in a
+//! one-process job with the 6 GiB cap), and every job that succeeds was
+//! contained exactly once. Under cargo that job is nested in cargo's, so
+//! it has no UI limits. CI also runs this binary outside cargo with
+//! `GRAPE_TEST_JOB_UI=1`: then one test starts it again as a child that
+//! breaks away from the runner's job, whose workers must get the UI
+//! limits an installed Grape's get.
 
 #![allow(clippy::unwrap_used)]
 
 mod common;
 
+use std::cell::Cell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -26,6 +36,69 @@ use lopdf::content::{Content, Operation as Op};
 use lopdf::{dictionary, Document, Object, Stream};
 
 const WORKER: &str = env!("CARGO_BIN_EXE_grape-pdf-worker");
+
+thread_local! {
+    /// How many workers [`contain_like_the_app`]'s hook contained for jobs
+    /// run on this thread (a job starts its worker on the thread it runs
+    /// on, and its Job Object is dropped there).
+    static CONTAINED_HERE: Cell<usize> = const { Cell::new(0) };
+    /// How many of them had the UI limits.
+    #[cfg(windows)]
+    static UI_LIMITED_HERE: Cell<usize> = const { Cell::new(0) };
+    /// The peak memory of the last worker contained on this thread, as its
+    /// Job Object reported it when the job ended.
+    #[cfg(windows)]
+    static LAST_PEAK_HERE: Cell<Option<u64>> = const { Cell::new(None) };
+}
+
+/// On Windows, sets the hook the app's `contain.rs` sets: a Job Object of
+/// its own for every worker (`grape_platform::windows::job`), once for
+/// this test binary. Elsewhere there's nothing to set.
+fn contain_like_the_app() {
+    #[cfg(windows)]
+    {
+        use std::process::Child;
+        use std::sync::Once;
+
+        use grape_engines::{set_contain, Contain, Contained};
+        use grape_platform::windows::job::JobGuard;
+
+        #[derive(Debug)]
+        struct Jobs;
+        struct Job(JobGuard);
+        impl Contained for Job {
+            fn peak_memory(&self) -> Option<u64> {
+                self.0.peak_memory()
+            }
+        }
+        impl Drop for Job {
+            fn drop(&mut self) {
+                LAST_PEAK_HERE.with(|peak| peak.set(self.0.peak_memory()));
+            }
+        }
+        impl Contain for Jobs {
+            fn contain(
+                &self,
+                child: &Child,
+                max_memory: Option<u64>,
+            ) -> Result<Box<dyn Contained>, String> {
+                let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
+                CONTAINED_HERE.with(|n| n.set(n.get() + 1));
+                if guard.has_ui_limits() {
+                    UI_LIMITED_HERE.with(|n| n.set(n.get() + 1));
+                }
+                Ok(Box::new(Job(guard)))
+            }
+        }
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| assert!(set_contain(Arc::new(Jobs)), "the hook was set already"));
+    }
+}
+
+/// [`CONTAINED_HERE`]'s count.
+fn contained_here() -> usize {
+    CONTAINED_HERE.with(Cell::get)
+}
 
 fn pdfium() -> PathBuf {
     let path = std::env::var_os("GRAPE_TEST_PDFIUM")
@@ -138,8 +211,11 @@ fn numbered(n: usize) -> Vec<u8> {
     bytes(&pdf(&pages))
 }
 
-/// Runs `job` with Grape's bounds; also returns the progress seen.
+/// Runs `job` with Grape's bounds; also returns the progress seen. A job
+/// that succeeds ran one worker, contained once on Windows.
 fn run(job: &Job, options: Options) -> (Result<Outcome, GrapeError>, Vec<f32>) {
+    contain_like_the_app();
+    let before = contained_here();
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
     let mut progress = move |fraction: f32| log.lock().unwrap().push(fraction);
@@ -153,6 +229,9 @@ fn run(job: &Job, options: Options) -> (Result<Outcome, GrapeError>, Vec<f32>) {
     );
     let seen = seen.lock().unwrap().clone();
     assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    if result.is_ok() {
+        assert_eq!(contained_here(), before + usize::from(cfg!(windows)));
+    }
     (result, seen)
 }
 
@@ -769,6 +848,7 @@ fn cancel_kills_the_worker_within_two_seconds() {
         Operation::convert(Format::Png),
     );
     let source = SourceState::of(&src);
+    contain_like_the_app();
     let ctx = EngineCtx::default();
     let token = ctx.cancel.clone();
     let cancelled_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
@@ -834,6 +914,7 @@ fn the_folder_output_never_replaces_an_existing_folder() {
 
 /// The sidecars the app finds: PDFium and the worker.
 fn with_pdf() -> EngineCtx {
+    contain_like_the_app();
     EngineCtx {
         sidecars: SidecarPaths {
             pdfium: Some(pdfium()),
@@ -956,4 +1037,179 @@ fn without_pdfium_or_the_worker_no_pdf_job_runs() {
     }
     assert_eq!(names_in(&dir.path), names);
     source.assert_unchanged();
+}
+
+// ---- Contained as the app contains it (Windows) ------------------------------
+
+/// Every job `run_job` runs starts one worker, and each is contained once,
+/// with a peak to read when it ends.
+#[cfg(windows)]
+#[test]
+fn every_pdf_worker_run_is_contained() {
+    let ctx = with_pdf();
+    let ops = [
+        Operation::convert(Format::Png),
+        Operation::convert(Format::Jpg),
+        Operation::convert(Format::Txt),
+        Operation::convert(Format::Md),
+        Operation::tool(ToolKey::SplitPdf),
+        Operation::tool(ToolKey::RemoveMetadata),
+    ];
+    for op in ops {
+        let dir = TestDir::new("pdf-contained");
+        let (src, job) = plan_one(&dir, "doc.pdf", &numbered(2), op);
+        let source = SourceState::of(&src);
+        let before = contained_here();
+        LAST_PEAK_HERE.with(|peak| peak.set(None));
+        run_job(&job, &ctx, &mut |_| {}).unwrap();
+        assert_eq!(contained_here(), before + 1, "{op:?}");
+        let peak = LAST_PEAK_HERE.with(Cell::get);
+        assert!(peak.is_some_and(|peak| peak > 0), "{op:?}: {peak:?}");
+        source.assert_unchanged();
+        assert_no_leftovers(&dir.path);
+    }
+}
+
+/// The largest page Grape draws at 300 DPI: 2,400 points a side, so
+/// 10,000 × 10,000 pixels, exactly the 100-megapixel bound, as a PNG (on
+/// Linux its peak is JPEG's or more). The worker's peak goes to the log,
+/// to show how far under the 6 GiB cap it stays.
+#[cfg(windows)]
+#[test]
+fn the_largest_page_renders_under_the_memory_cap() {
+    let page = Page {
+        width: 2400,
+        height: 2400,
+        rotate: 0,
+        lines: vec![line("The largest page", 96, 1200)],
+    };
+    let dir = TestDir::new("pdf-largest");
+    let (src, job) = plan_one(
+        &dir,
+        "big.pdf",
+        &bytes(&pdf(&[page])),
+        Operation::convert(Format::Png),
+    );
+    let source = SourceState::of(&src);
+    LAST_PEAK_HERE.with(|peak| peak.set(None));
+    let started = Instant::now();
+    let (result, _) = run(&job, Options::default());
+    let outcome = result.unwrap();
+    let peak = LAST_PEAK_HERE.with(Cell::get);
+    println!(
+        "100 MP page → PNG: {:.1} s, worker peak {} MiB (cap 6144 MiB)",
+        started.elapsed().as_secs_f64(),
+        peak.unwrap_or(0) >> 20
+    );
+    assert!(outcome.scaled_pages.is_empty());
+    let file = dir.join("big.png");
+    assert_eq!(image::image_dimensions(&file).unwrap(), (10_000, 10_000));
+    assert!(peak.is_some_and(|peak| peak < 6 << 30), "{peak:?}");
+    source.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+}
+
+/// What tells this test binary it was started as the UI-limited child.
+#[cfg(windows)]
+const UI_CHILD: &str = "GRAPE_TEST_JOB_UI_CHILD";
+
+/// With `GRAPE_TEST_JOB_UI=1` (CI runs this binary outside cargo so),
+/// starts this binary again, breaking away from the jobs this process is
+/// in, to run [`ui_limited_child`]: its workers are then in no other job,
+/// as an installed Grape's are, so theirs must have the UI limits. If this
+/// process's job allows no breakaway, it warns and the PC checks it.
+/// Without the variable it does nothing.
+#[cfg(windows)]
+#[test]
+fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+
+    /// `CREATE_BREAKAWAY_FROM_JOB`.
+    const BREAKAWAY: u32 = 0x0100_0000;
+
+    if std::env::var_os("GRAPE_TEST_JOB_UI").is_none_or(|v| v != "1") {
+        return;
+    }
+    let started = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "ui_limited_child",
+            "--ignored",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(UI_CHILD, "1")
+        .creation_flags(BREAKAWAY)
+        .spawn();
+    let mut child = match started {
+        Ok(child) => child,
+        Err(err) => {
+            // On a line of its own, so GitHub shows it on the run.
+            println!(
+                "\n::warning::GRAPE_TEST_JOB_UI=1, but this process's job lets no child break away ({err}), so the PDF worker's UI-limited job isn't tested here; the PC checks it (TESTING.md, PDF, D29)"
+            );
+            return;
+        }
+    };
+    let status = child.wait().unwrap();
+    assert!(status.success(), "the UI-limited child failed: {status}");
+}
+
+/// The child: PDF → PNG, PDF → TXT and Split PDF, each in a job with the
+/// UI limits. The text is in Arial, not embedded, so PDFium asks Windows
+/// for its fonts from inside the job. Only for its parent above.
+#[cfg(windows)]
+#[test]
+#[ignore = "the child of the_worker_runs_in_the_ui_limited_job_outside_cargo"]
+fn ui_limited_child() {
+    if std::env::var_os(UI_CHILD).is_none() {
+        return;
+    }
+    let mut doc = pdf(&[
+        letter(vec![line("Page 1", 24, 700)]),
+        letter(vec![line("Page 2", 24, 700)]),
+    ]);
+    for object in doc.objects.values_mut() {
+        if let Object::Dictionary(dict) = object {
+            if dict.get(b"BaseFont").is_ok() {
+                dict.set("Subtype", "TrueType");
+                dict.set("BaseFont", "Arial");
+            }
+        }
+    }
+    let doc = bytes(&doc);
+    let ctx = with_pdf();
+    let cases = [
+        (Operation::convert(Format::Png), "doc"),
+        (Operation::convert(Format::Txt), "doc.txt"),
+        (Operation::tool(ToolKey::SplitPdf), "doc Pages"),
+    ];
+    for (op, output) in cases {
+        let dir = TestDir::new("pdf-ui-limited");
+        let (src, job) = plan_one(&dir, "doc.pdf", &doc, op);
+        let source = SourceState::of(&src);
+        let outcome = run_job(&job, &ctx, &mut |_| {}).unwrap();
+        let out = dir.join(output);
+        assert_eq!(outcome.outputs, std::slice::from_ref(&out), "{op:?}");
+        match output {
+            "doc" => {
+                assert_eq!(names_in(&out), ["doc 1.png", "doc 2.png"]);
+                assert_eq!(image_size(&out.join("doc 2.png")), (2550, 3300));
+                // The text was drawn: some pixel isn't white.
+                let page = image::open(out.join("doc 1.png")).unwrap().to_rgb8();
+                assert!(page.pixels().any(|px| px.0 != [255, 255, 255]));
+            }
+            "doc.txt" => {
+                assert_eq!(fs::read_to_string(&out).unwrap(), "Page 1\n\nPage 2\n");
+            }
+            _ => assert_eq!(names_in(&out), ["doc 1.pdf", "doc 2.pdf"]),
+        }
+        source.assert_unchanged();
+        assert_no_leftovers(&dir.path);
+    }
+    let (contained, ui_limited) = (contained_here(), UI_LIMITED_HERE.with(Cell::get));
+    println!("UI-limited child: {ui_limited} of {contained} workers' jobs had the UI limits");
+    assert_eq!(contained, 3);
+    assert_eq!(ui_limited, 3, "a worker's job had no UI limits");
 }

@@ -5,13 +5,19 @@
 //!    created.
 //! 2. A hidden temp folder `.grape-tmp-…` is made in the destination
 //!    folder; the worker writes into it only.
-//! 3. The worker ([`Launch`]) gets the request on stdin. Its stdout is read
-//!    on a thread; the job polls every 100 ms and kills the worker when the
-//!    job is cancelled or the time is up ([`Limits::timeout_base`] plus
-//!    [`Limits::timeout_per_page`] for each page it reports, counting at
-//!    most [`Bounds::max_pages`] pages). Progress is passed on, never
-//!    backwards. A worker that exits with [`OVER_HEAP_EXIT`] went past its
-//!    heap bound.
+//! 3. The worker ([`Launch::pdf_worker`]) starts through [`helper::start`]:
+//!    detached on Windows, stdin and stdout piped and stderr discarded, the
+//!    OS temp folder as its current folder, and contained by the app's hook
+//!    (a Job Object on Windows, [`Limits::worker_memory`]) before it gets
+//!    the request on stdin. One that can't be contained is killed, and the
+//!    job fails as if it couldn't start. The job polls every 100 ms and
+//!    kills the worker when the job is cancelled or the time is up
+//!    ([`Limits::timeout_base`] plus [`Limits::timeout_per_page`] for each
+//!    page it reports, counting at most [`Bounds::max_pages`] pages).
+//!    Progress is passed on, never backwards. A worker that exits with
+//!    [`OVER_HEAP_EXIT`] went past its heap bound; one that crashed, or
+//!    called the file damaged or failed inside, after committing 90% of the
+//!    container's cap ran out of memory.
 //! 4. A file output is moved onto a temp file in the destination folder and
 //!    published with [`publish::finalize`]; a folder output (pages, split)
 //!    is renamed page by page and published with
@@ -23,11 +29,8 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdout, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use grape_core::{Format, Job, JobOutput, Operation, ToolKey};
@@ -40,6 +43,7 @@ use super::protocol::{
 use super::worker::is_pdf;
 use super::WORKER_FLAG;
 use crate::archive::folder::{self, PublishFailure, TempDir};
+use crate::helper::{self, Launch, Polled, Start, StartError};
 use crate::output::TempFile;
 use crate::publish::{self, file_name, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome};
@@ -55,10 +59,12 @@ const POLL: Duration = Duration::from_millis(100);
 /// rule 3).
 const SNIFF_BYTES: u64 = 1024;
 
-/// `CREATE_NO_WINDOW`: a console-subsystem worker (a debug build, the test
-/// binary) opens no console window.
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// What the worker's memory cap allows above its heap bound: PDFium
+/// allocates with its own `malloc`, which the bound doesn't count. Its
+/// largest planned block is a page's BGRA bitmap, 400 MB at 100 megapixels,
+/// alive beside Grape's copy of it (`render.rs`); the rest is its decoded
+/// images, fonts and page objects.
+const PDFIUM_MEMORY: u64 = 2 * GIB;
 
 /// Where the PDF worker and the PDFium library are. The app fills it from
 /// `SidecarPaths` (D29): the worker is Grape's own executable.
@@ -88,6 +94,10 @@ pub(crate) struct Limits {
     pub(crate) timeout_base: Duration,
     /// The time added for each page the worker reports.
     pub(crate) timeout_per_page: Duration,
+    /// The worker's memory cap, where the app's container can set one (the
+    /// Job Object on Windows): it covers PDFium's own allocations, which
+    /// the heap bound doesn't see, and the stacks.
+    pub(crate) worker_memory: u64,
     /// What the worker holds to.
     pub(crate) bounds: Bounds,
 }
@@ -98,11 +108,14 @@ impl Default for Limits {
     /// 65,535 pixels a side; at most 2,000 pages exported as images and
     /// 100,000 split into files; at most 8 GiB written and 256 MiB of
     /// text; streams decompress to at most 512 MiB while loading; the
-    /// worker's heap holds at most 4 GiB.
+    /// worker's heap holds at most 4 GiB, and the container caps the whole
+    /// worker at 6 GiB (the heap bound and [`PDFIUM_MEMORY`]).
     fn default() -> Self {
+        let max_heap_bytes = 4 * GIB;
         Limits {
             timeout_base: Duration::from_secs(10 * 60),
             timeout_per_page: Duration::from_secs(5),
+            worker_memory: max_heap_bytes + PDFIUM_MEMORY,
             bounds: Bounds {
                 dpi: 300.0,
                 max_pages: 2_000,
@@ -112,7 +125,7 @@ impl Default for Limits {
                 max_output_bytes: 8 * GIB,
                 max_text_bytes: 256 * MIB,
                 max_decompressed: 512 * MIB,
-                max_heap_bytes: 4 * GIB,
+                max_heap_bytes,
             },
         }
     }
@@ -184,7 +197,7 @@ pub(crate) fn run(
         job,
         ctx,
         progress,
-        &Launch::worker(paths),
+        &Launch::pdf_worker(paths),
         &paths.pdfium,
         &Limits::default(),
     )
@@ -447,24 +460,16 @@ fn execute(
                 "the PDF worker ran past its time",
             ))
         }
-        Ended::OverHeap => {
+        Ended::OverMemory(detail) => {
             return Err(GrapeError::new(
                 ErrorKind::DecodeFailed,
                 format!("{} needs too much memory, so Grape stopped.", names.source),
-                format!(
-                    "the PDF worker went past its {} MiB heap bound",
-                    limits.bounds.max_heap_bytes / MIB
-                ),
+                detail,
             ))
         }
         Ended::Crashed(detail) => return Err(helper_stopped(detail)),
-        Ended::Spawn(kind) => {
-            return Err(GrapeError::new(
-                ErrorKind::NotYetSupported,
-                "Grape's PDF helper couldn't start.",
-                format!("starting the PDF worker: {kind:?}"),
-            ))
-        }
+        Ended::Spawn(kind) => return Err(couldnt_start(format!("starting it: {kind:?}"))),
+        Ended::Contain(why) => return Err(couldnt_start(format!("containing it: {why}"))),
     };
     if ctx.cancel.is_cancelled() {
         return Err(cancelled());
@@ -581,6 +586,15 @@ fn cancelled() -> GrapeError {
         ErrorKind::Cancelled,
         "Cancelled. Nothing was saved.",
         "cancelled",
+    )
+}
+
+/// The worker couldn't be started or contained.
+fn couldnt_start(detail: String) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::NotYetSupported,
+        "Grape's PDF helper couldn't start.",
+        format!("PDF worker: {detail}"),
     )
 }
 
@@ -713,24 +727,14 @@ fn publish_pages(
     })
 }
 
-/// How to start the worker.
-#[derive(Debug, Clone)]
-pub(crate) struct Launch {
-    /// The executable.
-    pub(crate) program: PathBuf,
-    /// Its arguments.
-    pub(crate) args: Vec<OsString>,
-    /// Extra environment variables (tests).
-    pub(crate) envs: Vec<(OsString, OsString)>,
-}
-
 impl Launch {
-    /// `<worker> --grape-pdf-worker`.
-    pub(crate) fn worker(paths: &PdfPaths) -> Launch {
+    /// `<worker> --grape-pdf-worker`, contained by the app's hook.
+    pub(crate) fn pdf_worker(paths: &PdfPaths) -> Launch {
         Launch {
             program: paths.worker.clone(),
             args: vec![OsString::from(WORKER_FLAG)],
             envs: Vec::new(),
+            contain: helper::contain_hook(),
         }
     }
 }
@@ -746,29 +750,17 @@ enum Ended {
     Cancelled,
     /// The deadline passed; the worker was killed.
     TimedOut,
-    /// The worker exited with [`OVER_HEAP_EXIT`]: past its heap bound.
-    OverHeap,
+    /// It exited with [`OVER_HEAP_EXIT`] (past its heap bound), or ended
+    /// without a result after committing nearly all the memory its
+    /// container allows. The detail.
+    OverMemory(String),
     /// It ended without a consistent result (a crash, an abort, a stack
     /// overflow, a lie).
     Crashed(String),
     /// It couldn't be started.
     Spawn(io::ErrorKind),
-}
-
-/// The worker process, killed (if still running) and reaped when dropped.
-struct Worker(Child);
-
-impl Drop for Worker {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// What the stdout thread passes on.
-enum Event {
-    Message(Message),
-    End,
+    /// It couldn't be contained, so it was killed.
+    Contain(String),
 }
 
 /// Runs the worker on `request` until it ends, is cancelled or runs out of
@@ -780,85 +772,50 @@ fn drive(
     limits: &Limits,
     progress: &mut dyn FnMut(f32),
 ) -> Ended {
-    let mut command = Command::new(&launch.program);
-    command
-        .args(&launch.args)
-        .envs(launch.envs.iter().map(|(k, v)| (k, v)))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    let mut worker = match command.spawn() {
-        Ok(child) => Worker(child),
-        Err(e) => return Ended::Spawn(e.kind()),
+    let Ok(mut line) = serde_json::to_vec(request) else {
+        return Ended::Crashed("the request couldn't be written".to_string());
     };
-    let Some(stdout) = worker.0.stdout.take() else {
-        return Ended::Crashed("no stdout".to_string());
+    line.push(b'\n');
+    // The worker opens everything by absolute path and writes only into
+    // the request's folder, so its own folder only has to exist. Not the
+    // job's temp folder: in a deep folder of the user's, its path can be
+    // longer than Windows takes for a new process's current folder.
+    let cwd = std::env::temp_dir();
+    let options = Start {
+        cwd: &cwd,
+        env_remove: &[],
+        max_memory: Some(limits.worker_memory),
+        max_line: MAX_LINE_BYTES,
+        name: "grape-pdf",
     };
-    let (tx, rx) = mpsc::channel();
-    let reader = thread::Builder::new()
-        .name("grape-pdf-stdout".to_string())
-        .spawn(move || read_messages(stdout, tx));
-    if reader.is_err() {
-        return Ended::Crashed("no reader thread".to_string());
-    }
-    if let (Some(mut stdin), Ok(mut line)) = (worker.0.stdin.take(), serde_json::to_vec(request)) {
-        line.push(b'\n');
-        // On a thread, so a worker that doesn't read can't block the job
-        // (cancel and the deadline still apply). A worker that died at once
-        // shows up as a crash below; a killed one ends the write. Dropping
-        // stdin closes it: the worker reads to the end.
-        let writer = thread::Builder::new()
-            .name("grape-pdf-stdin".to_string())
-            .spawn(move || {
-                let _ = stdin.write_all(&line);
-            });
-        if writer.is_err() {
-            return Ended::Crashed("no writer thread".to_string());
-        }
-    }
-    watch(&mut worker, &rx, cancel, limits, progress)
-}
-
-/// The job's side of [`drive`]: polls the messages, the cancel token and
-/// the deadline.
-fn watch(
-    worker: &mut Worker,
-    rx: &Receiver<Event>,
-    cancel: &CancelToken,
-    limits: &Limits,
-    progress: &mut dyn FnMut(f32),
-) -> Ended {
+    let mut running = match helper::start::<Message>(launch, options, line) {
+        Ok(running) => running,
+        Err(StartError::Spawn(kind)) => return Ended::Spawn(kind),
+        Err(StartError::Contain(why)) => return Ended::Contain(why),
+        Err(StartError::Plumbing(why)) => return Ended::Crashed(why.to_string()),
+    };
     let start = Instant::now();
     let mut deadline = start.checked_add(limits.timeout_base);
     let mut done = None;
     let mut failure = None;
-    let mut stream_open = true;
-    let status: ExitStatus = loop {
+    let status = loop {
         if cancel.is_cancelled() {
             return Ended::Cancelled;
         }
         let now = Instant::now();
-        let left = match deadline {
+        let wait = match deadline {
             Some(deadline) if now >= deadline => return Ended::TimedOut,
-            Some(deadline) => deadline - now,
+            Some(deadline) => (deadline - now).min(POLL),
             None => POLL,
         };
-        let wait = left.min(POLL);
-        if !stream_open {
-            match worker.0.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) => thread::sleep(wait.min(Duration::from_millis(10))),
-                Err(e) => return Ended::Crashed(format!("waiting: {:?}", e.kind())),
-            }
-            continue;
-        }
-        match rx.recv_timeout(wait) {
-            Ok(Event::Message(Message::Pages(pages))) => {
+        let message = match running.poll(wait) {
+            Ok(Polled::Message(message)) => message,
+            Ok(Polled::Idle) => continue,
+            Ok(Polled::Exited(status)) => break status,
+            Err(e) => return Ended::Crashed(format!("waiting: {:?}", e.kind())),
+        };
+        match message {
+            Message::Pages(pages) => {
                 // The worker's count isn't trusted: a file's /Count can
                 // claim a million pages it doesn't have.
                 let pages = pages.min(limits.bounds.max_pages);
@@ -871,23 +828,39 @@ fn watch(
                     deadline = Some(current.max(extended));
                 }
             }
-            Ok(Event::Message(Message::Progress(fraction))) => {
+            Message::Progress(fraction) => {
                 if fraction.is_finite() {
                     progress(fraction.clamp(0.0, 1.0));
                 }
             }
-            Ok(Event::Message(Message::Done(result))) => done = Some(result),
-            Ok(Event::Message(Message::Error(result))) => failure = Some(result),
-            Ok(Event::End) | Err(RecvTimeoutError::Disconnected) => stream_open = false,
-            Err(RecvTimeoutError::Timeout) => {}
+            Message::Done(result) => done = Some(result),
+            Message::Error(result) => failure = Some(result),
         }
     };
     if status.code() == Some(OVER_HEAP_EXIT) {
-        return Ended::OverHeap;
+        return Ended::OverMemory(format!(
+            "the PDF worker went past its {} MiB heap bound",
+            limits.bounds.max_heap_bytes / MIB
+        ));
     }
+    let near_cap = || helper::near_memory_cap(running.peak_memory(), limits.worker_memory);
+    let over_memory = || {
+        Ended::OverMemory(format!(
+            "the PDF worker ended near its {} MiB memory cap",
+            limits.worker_memory / MIB
+        ))
+    };
     match (done, failure, status.success()) {
         (Some(done), None, true) => Ended::Done(done),
+        // PDFium reports a bitmap or a text page it couldn't allocate as a
+        // page it couldn't read, which the worker calls damaged.
+        (None, Some(failure), false)
+            if matches!(failure.kind, FailKind::Damaged | FailKind::Internal) && near_cap() =>
+        {
+            over_memory()
+        }
         (None, Some(failure), false) => Ended::Failed(failure),
+        _ if near_cap() => over_memory(),
         (done, failure, success) => Ended::Crashed(format!(
             "exit {:?} (success {success}) with done {} and error {}",
             status.code(),
@@ -897,73 +870,35 @@ fn watch(
     }
 }
 
-/// The stdout thread: one [`Event::Message`] per line that is a message
-/// (other lines, and lines over [`MAX_LINE_BYTES`], are skipped), then
-/// [`Event::End`].
-fn read_messages(stdout: ChildStdout, tx: Sender<Event>) {
-    let mut reader = BufReader::new(stdout);
-    let mut line = Vec::new();
-    while let Ok(Some(())) = read_line(&mut reader, &mut line) {
-        if let Ok(message) = serde_json::from_slice::<Message>(&line) {
-            if tx.send(Event::Message(message)).is_err() {
-                return;
-            }
-        }
-    }
-    let _ = tx.send(Event::End);
-}
-
-/// Reads the next line into `line` (without its `\n`), keeping at most
-/// [`MAX_LINE_BYTES`]: a longer line comes back empty. `None` at the end.
-fn read_line(reader: &mut impl BufRead, line: &mut Vec<u8>) -> io::Result<Option<()>> {
-    line.clear();
-    let mut seen_any = false;
-    let mut overlong = false;
-    loop {
-        let buf = reader.fill_buf()?;
-        if buf.is_empty() {
-            return Ok(seen_any.then_some(()));
-        }
-        seen_any = true;
-        let (take, end) = match buf.iter().position(|&b| b == b'\n') {
-            Some(at) => (at + 1, true),
-            None => (buf.len(), false),
-        };
-        let content = if end { &buf[..take - 1] } else { &buf[..take] };
-        if !overlong {
-            if line.len() + content.len() > MAX_LINE_BYTES {
-                overlong = true;
-                line.clear();
-            } else {
-                line.extend_from_slice(content);
-            }
-        }
-        reader.consume(take);
-        if end {
-            return Ok(Some(()));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher;
-    use std::io::Cursor;
+    use std::io::{BufReader, Cursor, Write};
+    use std::process::Child;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::thread;
 
     use grape_core::{plan, Settings};
     use lopdf::Document;
 
     use super::super::copy::tests::{contains, fixture, save_classic, save_modern};
     use super::*;
+    use crate::helper::{Contain, Contained};
     use crate::output::unique_suffix;
 
     /// The environment variable that turns the ignored test below into a
     /// fake worker when the test binary runs itself.
     const FAKE: &str = "GRAPE_PDF_FAKE_WORKER";
+
+    /// Where the `linger` fake writes, if it's still running then.
+    const LATE: &str = "GRAPE_PDF_FAKE_LATE";
+
+    /// What [`FakeContain`] writes into the job's temp folder.
+    const MARKER: &str = "contained";
 
     /// Not a test: the worker the tests start. The test binary runs only
     /// this "test" (`--exact … --ignored`) with [`FAKE`] set to a mode.
@@ -975,6 +910,14 @@ mod tests {
         };
         if mode == "real" {
             std::process::exit(if super::super::worker::serve() { 0 } else { 1 });
+        }
+        if mode == "linger" {
+            // Never reads its request: only a kill stops it writing.
+            thread::sleep(Duration::from_millis(1500));
+            if let Some(late) = std::env::var_os(LATE) {
+                fs::write(late, b"still running").unwrap();
+            }
+            std::process::exit(0);
         }
         let mut input = String::new();
         io::stdin().read_to_string(&mut input).unwrap();
@@ -1016,6 +959,21 @@ mod tests {
                 say(r#"{"error":{"kind":"encrypted","detail":"fake","input":1}}"#);
                 std::process::exit(1);
             }
+            "damaged" => {
+                say(r#"{"error":{"kind":"damaged","detail":"fake"}}"#);
+                std::process::exit(1);
+            }
+            "contained" => {
+                // The container marked the temp folder before this read
+                // its request.
+                if !request.out_dir.join(MARKER).is_file() {
+                    say(r#"{"error":{"kind":"internal","detail":"not contained"}}"#);
+                    std::process::exit(1);
+                }
+                fs::write(request.out_dir.join("clean.pdf"), b"%PDF-1.7 fake").unwrap();
+                say(r#"{"done":{"pages":1}}"#);
+                std::process::exit(0);
+            }
             "noisy" => {
                 say("not a message");
                 say(&"x".repeat(MAX_LINE_BYTES + 10));
@@ -1047,6 +1005,7 @@ mod tests {
             .map(OsString::from)
             .collect(),
             envs: vec![(OsString::from(FAKE), OsString::from(mode))],
+            contain: None,
         }
     }
 
@@ -1400,6 +1359,7 @@ mod tests {
             program: pdf.dir.0.join("no-such-worker"),
             args: Vec::new(),
             envs: Vec::new(),
+            contain: None,
         };
         let (result, _) = pdf.run(&missing, &Limits::default());
         assert_eq!(
@@ -1447,13 +1407,14 @@ mod tests {
         long.extend_from_slice(b"\n{\"pages\":1}\nlast");
         let mut reader = BufReader::with_capacity(16, Cursor::new(long));
         let mut line = Vec::new();
-        assert_eq!(read_line(&mut reader, &mut line).unwrap(), Some(()));
+        let mut read = |line: &mut Vec<u8>| helper::read_line(&mut reader, line, MAX_LINE_BYTES);
+        assert_eq!(read(&mut line).unwrap(), Some(()));
         assert!(line.is_empty());
-        assert_eq!(read_line(&mut reader, &mut line).unwrap(), Some(()));
+        assert_eq!(read(&mut line).unwrap(), Some(()));
         assert_eq!(line, b"{\"pages\":1}");
-        assert_eq!(read_line(&mut reader, &mut line).unwrap(), Some(()));
+        assert_eq!(read(&mut line).unwrap(), Some(()));
         assert_eq!(line, b"last");
-        assert_eq!(read_line(&mut reader, &mut line).unwrap(), None);
+        assert_eq!(read(&mut line).unwrap(), None);
     }
 
     #[test]
@@ -1497,6 +1458,168 @@ mod tests {
         );
         assert_eq!(message(FailKind::Read), "Grape couldn't read a.pdf.");
         assert_eq!(message(FailKind::Write), "Grape couldn't save into out.");
+    }
+
+    /// A container that marks the job's temp folder in `dir`, so the
+    /// `contained` fake can tell it came before the request; it can refuse,
+    /// and reports a peak.
+    #[derive(Debug)]
+    struct FakeContain {
+        dir: PathBuf,
+        fail: bool,
+        peak: Option<u64>,
+        calls: AtomicUsize,
+        max_memory: Mutex<Option<Option<u64>>>,
+    }
+
+    impl FakeContain {
+        fn new(case: &Case, fail: bool, peak: Option<u64>) -> Arc<FakeContain> {
+            Arc::new(FakeContain {
+                dir: case.dir.0.clone(),
+                fail,
+                peak,
+                calls: AtomicUsize::new(0),
+                max_memory: Mutex::new(None),
+            })
+        }
+    }
+
+    struct FakeContained(Option<u64>);
+
+    impl Contained for FakeContained {
+        fn peak_memory(&self) -> Option<u64> {
+            self.0
+        }
+    }
+
+    impl Contain for FakeContain {
+        fn contain(
+            &self,
+            _child: &Child,
+            max_memory: Option<u64>,
+        ) -> Result<Box<dyn Contained>, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.max_memory.lock().unwrap() = Some(max_memory);
+            if self.fail {
+                return Err("fake: no container".to_string());
+            }
+            // A moment first, so a worker that already had its request
+            // would have looked for the mark.
+            thread::sleep(Duration::from_millis(200));
+            for entry in fs::read_dir(&self.dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".grape-tmp-")
+                {
+                    fs::write(entry.path().join(MARKER), b"").unwrap();
+                }
+            }
+            Ok(Box::new(FakeContained(self.peak)))
+        }
+    }
+
+    /// [`fake`] in `mode`, contained by `hook`.
+    fn contained(mode: &str, hook: &Arc<FakeContain>) -> Launch {
+        Launch {
+            contain: Some(Arc::clone(hook) as Arc<dyn Contain>),
+            ..fake(mode)
+        }
+    }
+
+    fn metadata_case() -> Case {
+        case(
+            &[("doc.pdf", save_classic(&fixture("A")))],
+            Operation::tool(ToolKey::RemoveMetadata),
+        )
+    }
+
+    #[test]
+    fn the_worker_is_contained_once_before_it_gets_its_request() {
+        let case = metadata_case();
+        let hook = FakeContain::new(&case, false, None);
+        let (result, _) = case.run(&contained("contained", &hook), &Limits::default());
+        let outcome = result.unwrap();
+        assert_eq!(outcome.pages, 1);
+        assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+        // The heap bound and 2 GiB for PDFium.
+        assert_eq!(*hook.max_memory.lock().unwrap(), Some(Some(6 << 30)));
+        assert_eq!(listing(&case.dir.0), ["doc No Metadata.pdf", "doc.pdf"]);
+        case.assert_sources_unchanged();
+
+        // Uncontained, the fake notices.
+        let case = metadata_case();
+        let (result, _) = case.run(&fake("contained"), &Limits::default());
+        assert_eq!(
+            result.unwrap_err().user_message,
+            "Grape's PDF helper stopped unexpectedly."
+        );
+        assert_eq!(listing(&case.dir.0), ["doc.pdf"]);
+    }
+
+    #[test]
+    fn a_worker_that_cant_be_contained_is_killed_and_the_job_fails() {
+        let case = metadata_case();
+        let late = case.dir.0.join("late");
+        let hook = FakeContain::new(&case, true, None);
+        let mut launch = contained("linger", &hook);
+        launch
+            .envs
+            .push((OsString::from(LATE), late.clone().into_os_string()));
+        let started = Instant::now();
+        let (result, progress) = case.run(&launch, &Limits::default());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::NotYetSupported);
+        assert_eq!(error.user_message, "Grape's PDF helper couldn't start.");
+        assert!(error.detail.contains("fake: no container"), "{error:?}");
+        assert!(!error.detail.contains(&case.dir.0.display().to_string()));
+        assert_eq!(hook.calls.load(Ordering::SeqCst), 1);
+        assert!(progress.is_empty(), "{progress:?}");
+        // No temp folder or file is left, and the worker was killed: it
+        // would have written `late` after 1.5 s.
+        assert_eq!(listing(&case.dir.0), ["doc.pdf"]);
+        thread::sleep(Duration::from_millis(2500));
+        assert!(!late.exists(), "the worker outlived its failed container");
+        case.assert_sources_unchanged();
+    }
+
+    #[test]
+    fn a_worker_that_ends_near_its_memory_cap_needs_too_much_memory() {
+        let cap: u64 = 6 << 30;
+        let at = (cap * 9).div_ceil(10);
+        let crashed = "Grape's PDF helper stopped unexpectedly.";
+        let damaged = "doc.pdf is damaged or isn't a PDF.";
+        let too_much = "doc.pdf needs too much memory, so Grape stopped.";
+        for (mode, peak, message) in [
+            ("crash", Some(cap), too_much),
+            ("crash", Some(at), too_much),
+            ("crash", Some(at - 1), crashed),
+            ("crash", None, crashed),
+            ("lie", Some(cap), too_much),
+            // PDFium's bitmap that couldn't be allocated is a damaged page.
+            ("damaged", Some(at), too_much),
+            ("damaged", Some(at - 1), damaged),
+            // A failure that isn't about memory keeps its own words.
+            ("error", Some(cap), "doc.pdf is password-protected."),
+        ] {
+            let case = metadata_case();
+            let hook = FakeContain::new(&case, false, peak);
+            let (result, _) = case.run(&contained(mode, &hook), &Limits::default());
+            let error = result.unwrap_err();
+            assert_eq!(error.user_message, message, "{mode} {peak:?}");
+            if message == too_much {
+                assert_eq!(error.kind, ErrorKind::DecodeFailed);
+                assert!(error.detail.contains("6144 MiB memory cap"), "{error:?}");
+            }
+            assert_eq!(listing(&case.dir.0), ["doc.pdf"], "{mode} {peak:?}");
+        }
+        // A run that succeeds is a success, whatever its peak.
+        let case = metadata_case();
+        let hook = FakeContain::new(&case, false, Some(cap));
+        let (result, _) = case.run(&contained("noisy", &hook), &Limits::default());
+        assert!(result.is_ok());
     }
 
     #[test]
