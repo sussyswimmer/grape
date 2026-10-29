@@ -421,8 +421,9 @@ while IFS=$'\t' read -r name pin url file want_size want_sha dir use; do
     cp "$tarballs/$file" "$dest"
   else
     # A server can answer 200 with a page that isn't the tarball (zlib.net
-    # did, once, to a CI runner); curl doesn't retry that, so a wrong size
-    # is fetched again twice before the check below fails it.
+    # did to CI's runners, so zlib now comes from its GitHub release); curl
+    # doesn't retry that, so a wrong size is fetched again twice before the
+    # check below fails it.
     for try in 1 2 3; do
       echo "  $name $pin: downloading $url"
       if ! curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 \
