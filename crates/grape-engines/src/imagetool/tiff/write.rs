@@ -2,9 +2,11 @@
 //! source's byte order and kind, of the IFDs a tool chose ([`Dir`]).
 //!
 //! 1. The header, with a placeholder for the first IFD's offset.
-//! 2. Every image IFD's blocks, in IFD order, each on an even offset,
-//!    copied from the source. A block listed more than once is written
-//!    once ([`repeats`] finds them); an empty one stays 0 bytes at 0.
+//! 2. Every image IFD's blocks, in IFD order, written by the tool's
+//!    [`Blocks`]: copied from the source by Remove Metadata's [`Copier`],
+//!    each on an even offset, a block listed more than once written once
+//!    ([`repeats`] finds them), an empty one left 0 bytes at 0; or
+//!    re-encoded by Compress, with the fields that change with them.
 //! 3. Every IFD, each followed by its values that don't fit in their
 //!    entries, on even offsets: the entries sorted by tag, with the block
 //!    offsets and counts, the SubIFDs (330) and the pointers to the Exif,
@@ -21,7 +23,7 @@
 //! bytes than the source has (values that overlap): so an output outgrows
 //! its source only by the offsets, counts, IFDs and padding Grape writes.
 //! Reads and writes go through the caller's `Cancellable` source and temp
-//! file, and the token is checked before each block.
+//! file, and the [`Copier`] checks the token before each block.
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, SeekFrom, Write};
@@ -105,10 +107,133 @@ pub(crate) struct Image {
     pub(crate) subs: Vec<Vec<Dir>>,
 }
 
+/// Writes each image IFD's blocks: copies them as they are ([`Copier`],
+/// Remove Metadata), or re-encodes them (Compress).
+pub(crate) trait Blocks {
+    /// Writes the blocks of `image`, the image IFD number `n` in the order
+    /// they're written (each page, then its SubIFDs, depth first, as
+    /// `Tiff::ifds` lists them), at the end of `out`.
+    fn write(
+        &mut self,
+        n: usize,
+        r: &mut dyn In,
+        out: &mut Sink,
+        image: &Image,
+    ) -> Result<Written, Error>;
+}
+
+/// What a [`Blocks`] wrote for an image IFD.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Written {
+    /// Where each of its blocks went, in order: 0 for an empty one.
+    pub(crate) offsets: Vec<u64>,
+    /// Each one's bytes, when they aren't the source's.
+    pub(crate) lens: Option<Vec<u64>>,
+    /// Fields that take the place of the IFD's own for their tags, or that
+    /// it gains: the ones that change with its blocks.
+    pub(crate) fields: Vec<Field>,
+    /// The bytes it took from the source, each block once: counted, with
+    /// the values, against the source's size.
+    pub(crate) taken: u64,
+}
+
+/// Remove Metadata's [`Blocks`]: each block copied as it is, one listed
+/// more than once written once.
+pub(crate) struct Copier<'c> {
+    /// The blocks listed more than once ([`repeats`]), and where each went:
+    /// 0 until it's written, since no block is written at 0.
+    shared: Vec<Block>,
+    placed: Vec<u64>,
+    buf: Vec<u8>,
+    cancel: &'c CancelToken,
+}
+
+impl<'c> Copier<'c> {
+    /// A copier for the image IFDs of `pages`, which checks `cancel` before
+    /// each block.
+    pub(crate) fn new(pages: &[Dir], cancel: &'c CancelToken) -> Copier<'c> {
+        let images = images(pages);
+        let shared = repeats(|| {
+            let blocks = images.iter().flat_map(|image| &image.blocks);
+            blocks.filter(|b| b.len > 0)
+        });
+        Copier {
+            placed: vec![0; shared.len()],
+            shared,
+            buf: vec![0; COPY],
+            cancel,
+        }
+    }
+}
+
+impl Blocks for Copier<'_> {
+    fn write(
+        &mut self,
+        _n: usize,
+        r: &mut dyn In,
+        out: &mut Sink,
+        image: &Image,
+    ) -> Result<Written, Error> {
+        let mut written = Written {
+            offsets: Vec::with_capacity(image.blocks.len()),
+            ..Written::default()
+        };
+        for &block in &image.blocks {
+            if self.cancel.is_cancelled() {
+                return Err(Error::Write(io::Error::other("cancelled")));
+            }
+            if block.len == 0 {
+                written.offsets.push(0);
+                continue;
+            }
+            // Where it went, if it's a shared block written already.
+            let place = self
+                .shared
+                .binary_search(&block)
+                .ok()
+                .and_then(|n| self.placed.get_mut(n));
+            let at = match place {
+                Some(&mut at) if at > 0 => at,
+                place => {
+                    out.align()?;
+                    let at = out.at();
+                    copy(r, out, block.offset, block.len, &mut self.buf)?;
+                    written.taken = sum(written.taken, block.len)?;
+                    if let Some(place) = place {
+                        *place = at;
+                    }
+                    at
+                }
+            };
+            written.offsets.push(at);
+        }
+        Ok(written)
+    }
+}
+
+/// The images of `dirs` and of every IFD under them, depth first.
+pub(crate) fn images(dirs: &[Dir]) -> Vec<&Image> {
+    fn add<'d>(dir: &'d Dir, all: &mut Vec<&'d Image>) {
+        if let Some(image) = &dir.image {
+            all.push(image);
+            for sub in image.subs.iter().flatten() {
+                add(sub, all);
+            }
+        }
+    }
+    let mut all = Vec::new();
+    for dir in dirs {
+        add(dir, &mut all);
+    }
+    all
+}
+
 /// An entry's value, as the writer makes it.
 enum Made {
     /// The IFD's field number n.
     Field(usize),
+    /// Field number n of those its [`Written`] gave.
+    Written(usize),
     /// The output's block offsets.
     Offsets,
     /// The output's block byte counts.
@@ -139,6 +264,8 @@ enum Place {
 /// One IFD as it's laid out.
 struct Node<'d> {
     dir: &'d Dir,
+    /// The entries the writer makes: (tag, type, count, value).
+    made: Vec<(u16, u16, u64, Made)>,
     /// (tag, type, count, value), sorted by tag.
     entries: Vec<(u16, u16, u64, Made)>,
     /// The next IFD in its chain.
@@ -147,13 +274,14 @@ struct Node<'d> {
     at: u64,
     /// Where each entry's value goes.
     values: Vec<Place>,
-    /// Where its blocks are in the output.
-    offsets: Vec<u64>,
+    /// What its blocks' writing gave: where they are in the output, and
+    /// the fields that change with them.
+    written: Written,
 }
 
 /// Writes `pages`, the main chain, into `w` (a new, empty file) as a TIFF
 /// of `layout`'s byte order and kind, copying values and blocks from the
-/// source `r` ([module docs](self)).
+/// source `r` ([module docs](self)); checks `cancel` before each block.
 pub(crate) fn write(
     r: &mut dyn In,
     w: &mut dyn Out,
@@ -161,13 +289,25 @@ pub(crate) fn write(
     pages: &[Dir],
     cancel: &CancelToken,
 ) -> Result<(), Error> {
+    write_with(r, w, layout, pages, &mut Copier::new(pages, cancel)).map(|_| ())
+}
+
+/// Writes `pages` as [`write`] does, each image IFD's blocks by `blocks`;
+/// gives the output's size.
+pub(crate) fn write_with(
+    r: &mut dyn In,
+    w: &mut dyn Out,
+    layout: Layout,
+    pages: &[Dir],
+    blocks: &mut dyn Blocks,
+) -> Result<u64, Error> {
     let mut nodes = Vec::new();
     let Some(first) = chain(pages, &mut nodes, layout) else {
         return Err(Error::Broken("no page to write".into()));
     };
     let o = layout.order;
     let word = layout.word() as usize;
-    let mut out = Counted { w, at: 0 };
+    let mut out = Sink { w, at: 0 };
     out.put(match o {
         Order::Little => b"II",
         Order::Big => b"MM",
@@ -182,50 +322,30 @@ pub(crate) fn write(
     out.put(&o.bytes(0, word))?;
 
     let mut buf = vec![0; COPY];
-    // The blocks listed more than once, and where each went: 0 until it's
-    // written, since no block is written at 0.
-    let shared = repeats(|| {
-        let images = nodes.iter().filter_map(|node| node.dir.image.as_ref());
-        images.flat_map(|image| &image.blocks).filter(|b| b.len > 0)
-    });
-    let mut placed = vec![0; shared.len()];
     // The bytes taken from the source: each block and value once.
     let mut taken: u64 = 0;
+    let mut n = 0;
     for node in &mut nodes {
         let Some(image) = &node.dir.image else {
             continue;
         };
-        let mut offsets = Vec::with_capacity(image.blocks.len());
-        for &block in &image.blocks {
-            if cancel.is_cancelled() {
-                return Err(Error::Write(io::Error::other("cancelled")));
-            }
-            if block.len == 0 {
-                offsets.push(0);
-                continue;
-            }
-            // Where it went, if it's a shared block written already.
-            let place = shared
-                .binary_search(&block)
-                .ok()
-                .and_then(|n| placed.get_mut(n));
-            let at = match place {
-                Some(&mut at) if at > 0 => at,
-                place => {
-                    out.align()?;
-                    let at = out.at;
-                    copy(r, &mut out, block.offset, block.len, &mut buf)?;
-                    fits(layout, out.at)?;
-                    taken = sum(taken, block.len)?;
-                    if let Some(place) = place {
-                        *place = at;
-                    }
-                    at
-                }
-            };
-            offsets.push(at);
+        let written = blocks.write(n, r, &mut out, image)?;
+        n += 1;
+        fits(layout, out.at)?;
+        let n_lens = written.lens.as_ref().map_or(image.blocks.len(), Vec::len);
+        if written.offsets.len() != image.blocks.len() || n_lens != image.blocks.len() {
+            return Err(Error::Broken(format!(
+                "{} blocks written for {}",
+                written.offsets.len(),
+                image.blocks.len()
+            )));
         }
-        node.offsets = offsets;
+        taken = sum(taken, written.taken)?;
+        node.written = written;
+        node.entries = entries(node);
+    }
+    for node in nodes.iter_mut().filter(|node| node.dir.image.is_none()) {
+        node.entries = entries(node);
     }
 
     // The IFDs, laid out before they're written. A value copied from the
@@ -241,6 +361,7 @@ pub(crate) fn write(
         for (_, kind, count, made) in &node.entries {
             let field = match made {
                 Made::Field(n) => Some(&node.dir.fields[*n]),
+                Made::Written(n) => Some(&node.written.fields[*n]),
                 _ => None,
             };
             let len = field.map_or_else(|| type_size(*kind).unwrap_or(8) * count, Field::len);
@@ -305,12 +426,14 @@ pub(crate) fn write(
     }
 
     // The first IFD's offset, in the header.
+    let len = out.at;
     out.w
         .seek(SeekFrom::Start(layout.header() - layout.word()))
         .map_err(Error::Write)?;
     out.w
         .write_all(&o.bytes(ats[first], word))
-        .map_err(Error::Write)
+        .map_err(Error::Write)?;
+    Ok(len)
 }
 
 /// `a + b`, or [`Error::TooLarge`] past any number: sizes that only a
@@ -352,11 +475,12 @@ fn add<'d>(dir: &'d Dir, nodes: &mut Vec<Node<'d>>, layout: Layout) -> usize {
     let at = nodes.len();
     nodes.push(Node {
         dir,
+        made: Vec::new(),
         entries: Vec::new(),
         next: None,
         at: 0,
         values: Vec::new(),
-        offsets: Vec::new(),
+        written: Written::default(),
     });
     // Offsets and counts are LONG in a classic file and LONG8 in a
     // BigTIFF; pointers LONG or IFD8, as libtiff writes them.
@@ -381,19 +505,32 @@ fn add<'d>(dir: &'d Dir, nodes: &mut Vec<Node<'d>>, layout: Layout) -> usize {
         let n = add(child, nodes, layout);
         made.push((*tag, pointer, 1, Made::Ifds(vec![n])));
     }
+    nodes[at].made = made;
+    at
+}
+
+/// `node`'s entries, sorted by tag, once its blocks are written: the ones
+/// the writer makes, the fields its blocks' writing gave, then its own,
+/// each tag once.
+fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
+    let made = std::mem::take(&mut node.made);
     let mut tags: HashSet<u16> = [273, 279, 324, 325, 330].into();
     tags.extend(made.iter().map(|m| m.0));
-    let mut entries: Vec<(u16, u16, u64, Made)> = dir
-        .fields
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| tags.insert(f.tag))
-        .map(|(n, f)| (f.tag, f.kind, f.count, Made::Field(n)))
+    let fields = |fields: &[Field], made: fn(usize) -> Made| {
+        fields
+            .iter()
+            .enumerate()
+            .map(move |(n, f)| (f.tag, f.kind, f.count, made(n)))
+            .collect::<Vec<_>>()
+    };
+    let mut entries: Vec<(u16, u16, u64, Made)> = fields(&node.written.fields, Made::Written)
+        .into_iter()
+        .chain(fields(&node.dir.fields, Made::Field))
+        .filter(|e| tags.insert(e.0))
         .collect();
     entries.extend(made);
     entries.sort_by_key(|e| e.0);
-    nodes[at].entries = entries;
-    at
+    entries
 }
 
 /// Writes the value `made` (of type `kind`) of one of `node`'s entries
@@ -410,30 +547,34 @@ fn value(
     buf: &mut [u8],
 ) -> Result<(), Error> {
     let size = type_size(kind).unwrap_or(8) as usize;
-    let mut numbers = |numbers: &mut dyn Iterator<Item = u64>| {
-        for v in numbers {
-            w.write_all(&order.bytes(v, size)).map_err(Error::Write)?;
-        }
-        Ok(())
+    let source = node.dir.image.iter().flat_map(|image| &image.blocks);
+    let numbers: &mut dyn Iterator<Item = u64> = match (made, &node.written.lens) {
+        (Made::Field(n), _) => return field(r, w, &node.dir.fields[*n], buf),
+        (Made::Written(n), _) => return field(r, w, &node.written.fields[*n], buf),
+        (Made::Offsets, _) => &mut node.written.offsets.iter().copied(),
+        (Made::Counts, Some(lens)) => &mut lens.iter().copied(),
+        (Made::Counts, None) => &mut source.map(|b| b.len),
+        (Made::Ifds(ifds), _) => &mut ifds.iter().map(|&n| ats[n]),
     };
-    match made {
-        Made::Field(n) => match &node.dir.fields[*n].value {
-            Data::Bytes(bytes) => w.write_all(bytes).map_err(Error::Write),
-            Data::Shared(bytes) => w.write_all(bytes).map_err(Error::Write),
-            Data::Source { offset, len } => copy(r, w, *offset, *len, buf),
-        },
-        Made::Offsets => numbers(&mut node.offsets.iter().copied()),
-        Made::Counts => {
-            let blocks = node.dir.image.iter().flat_map(|image| &image.blocks);
-            numbers(&mut blocks.map(|b| b.len))
-        }
-        Made::Ifds(ifds) => numbers(&mut ifds.iter().map(|&n| ats[n])),
+    for v in numbers {
+        w.write_all(&order.bytes(v, size)).map_err(Error::Write)?;
+    }
+    Ok(())
+}
+
+/// Writes `field`'s value into `w`: its bytes, or copied from the source
+/// `r` through `buf`.
+fn field(r: &mut dyn In, w: &mut dyn Write, field: &Field, buf: &mut [u8]) -> Result<(), Error> {
+    match &field.value {
+        Data::Bytes(bytes) => w.write_all(bytes).map_err(Error::Write),
+        Data::Shared(bytes) => w.write_all(bytes).map_err(Error::Write),
+        Data::Source { offset, len } => copy(r, w, *offset, *len, buf),
     }
 }
 
 /// Copies `len` bytes at `offset` in `r` into `w`, through `buf`: only
 /// they are read ([`read_at`]), however far from what was read before.
-fn copy(
+pub(crate) fn copy(
     r: &mut dyn In,
     w: &mut dyn Write,
     offset: u64,
@@ -454,18 +595,23 @@ fn copy(
 }
 
 /// The output, counting where the next byte goes.
-struct Counted<'w> {
+pub(crate) struct Sink<'w> {
     w: &'w mut dyn Out,
     at: u64,
 }
 
-impl Counted<'_> {
+impl Sink<'_> {
+    /// Where the next byte goes.
+    pub(crate) fn at(&self) -> u64 {
+        self.at
+    }
+
     fn put(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.write_all(bytes).map_err(Error::Write)
     }
 
     /// Pads to an even offset.
-    fn align(&mut self) -> Result<(), Error> {
+    pub(crate) fn align(&mut self) -> Result<(), Error> {
         let to = self.at + self.at % 2;
         self.pad_to(to)
     }
@@ -480,7 +626,7 @@ impl Counted<'_> {
     }
 }
 
-impl Write for Counted<'_> {
+impl Write for Sink<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let n = self.w.write(buf)?;
         self.at += n as u64;
@@ -922,6 +1068,105 @@ mod tests {
         );
         assert!(matches!(result, Err(Error::Write(_))));
         assert_eq!(out.into_inner().len(), 8);
+    }
+
+    /// A [`Blocks`] that writes each block's bytes backwards and a `!`,
+    /// gives each image IFD a Compression of 8, and notes the numbers it's
+    /// given.
+    struct Backwards {
+        order: Order,
+        seen: Vec<usize>,
+        /// Leaves the last block out.
+        short: bool,
+    }
+
+    impl Blocks for Backwards {
+        fn write(
+            &mut self,
+            n: usize,
+            r: &mut dyn In,
+            out: &mut Sink,
+            image: &Image,
+        ) -> Result<Written, Error> {
+            self.seen.push(n);
+            let mut written = Written {
+                lens: Some(Vec::new()),
+                ..Written::default()
+            };
+            let lens = written.lens.get_or_insert_default();
+            for block in &image.blocks {
+                if block.len == 0 {
+                    written.offsets.push(0);
+                    lens.push(0);
+                    continue;
+                }
+                let mut bytes = vec![0; block.len as usize];
+                read_at(r, block.offset, &mut bytes)?;
+                bytes.reverse();
+                bytes.push(b'!');
+                out.align()?;
+                let offset = out.at();
+                out.write_all(&bytes).map_err(Error::Write)?;
+                written.offsets.push(offset);
+                lens.push(bytes.len() as u64);
+                written.taken += block.len;
+            }
+            if self.short {
+                lens.pop();
+            }
+            written.fields.push(Field {
+                tag: 259,
+                kind: 3,
+                count: 1,
+                value: Data::Bytes(self.order.bytes(8, 2)),
+            });
+            Ok(written)
+        }
+    }
+
+    #[test]
+    fn a_tools_blocks_and_fields_are_written_in_place_of_the_sources() {
+        for (order, big) in [(b'I', false), (b'M', true)] {
+            let file = sample(order, big).build();
+            let tiff = read(&file);
+            let pages: Vec<Dir> = tiff.pages.iter().map(everything).collect();
+            let mut blocks = Backwards {
+                order: tiff.layout.order,
+                seen: Vec::new(),
+                short: false,
+            };
+            let mut out = Cursor::new(Vec::new());
+            let mut r = Cursor::new(&file[..]);
+            let len = write_with(&mut r, &mut out, tiff.layout, &pages, &mut blocks).unwrap();
+            let out = out.into_inner();
+            assert_eq!(len, out.len() as u64);
+            let back = read(&out);
+            let (was, now) = (tiff.ifds(), back.ifds());
+            // Each image IFD in the order `Tiff::ifds` lists them.
+            assert_eq!(blocks.seen, (0..was.len()).collect::<Vec<_>>());
+            assert_eq!(was.len(), now.len());
+            for (a, b) in was.iter().zip(&now) {
+                assert_eq!(b.uint(259, back.layout.order), Some(8));
+                for (ba, bb) in a.blocks.iter().zip(&b.blocks) {
+                    let mut want = file[ba.offset as usize..][..ba.len as usize].to_vec();
+                    want.reverse();
+                    if ba.len > 0 {
+                        want.push(b'!');
+                    }
+                    assert_eq!(out[bb.offset as usize..][..bb.len as usize], want);
+                }
+            }
+            // A tool that writes too few blocks is caught.
+            blocks.short = true;
+            let result = write_with(
+                &mut r,
+                &mut Cursor::new(Vec::new()),
+                tiff.layout,
+                &pages,
+                &mut blocks,
+            );
+            assert!(matches!(result, Err(Error::Broken(_))), "{result:?}");
+        }
     }
 
     #[test]
