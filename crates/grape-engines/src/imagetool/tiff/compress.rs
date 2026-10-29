@@ -2,8 +2,9 @@
 //! is written again compact by the writer Remove Metadata uses
 //! ([`write`](super::write)), in the source's byte order and kind, with
 //! every tag; each strip or tile of an IFD Compress can decode is deflated
-//! again at zlib's level 9 ([`codec`](super::codec)), differenced when its
-//! samples allow, and read back before the file is published.
+//! again ([`codec`](super::codec)), at a zlib level from what the whole
+//! file has to recode ([`level`]), differenced when its samples allow, and
+//! read back before the file is published.
 //!
 //! - **Recoded:** IFDs of compression 1 (None), 5 (LZW), 8 or 32946
 //!   (Deflate) or 32773 (PackBits), with a FillOrder of 1 or none, whose
@@ -85,6 +86,30 @@ const MAX_LOG: usize = 16;
 /// are): past them, such a block is written again each time it's listed.
 const MAX_MORE: usize = 65_536;
 
+/// The most decoded bytes Compress recodes at zlib's level 9 in a file,
+/// and at level 6; past them, [`LEVEL_PAST`] (D28's Q10).
+const LEVEL_9_UP_TO: u64 = 16 << 20;
+const LEVEL_6_UP_TO: u64 = 256 << 20;
+
+/// The level past [`LEVEL_6_UP_TO`], so that 1 GiB takes about a minute
+/// at most: of the levels that ran at 18 MB/s or more on photo-like scans
+/// in a Linux release build (1 to 5), the one that wrote the least, and
+/// faster than miniz_oxide's 4 and 5, which wrote more.
+const LEVEL_PAST: u32 = 3;
+
+/// The zlib level Compress deflates a file's blocks at, from the decoded
+/// bytes it recodes in the whole file: 9 for up to 16 MiB, 6 for up to
+/// 256 MiB, [`LEVEL_PAST`] past that (D28's Q10). The presets are the same.
+pub(crate) fn level(recoded: u64) -> u32 {
+    if recoded <= LEVEL_9_UP_TO {
+        9
+    } else if recoded <= LEVEL_6_UP_TO {
+        6
+    } else {
+        LEVEL_PAST
+    }
+}
+
 /// Why a file with an entry that points where Compress can't follow is
 /// refused.
 pub(crate) const UNMOVABLE: &str = "has data Compress can't move yet.";
@@ -123,6 +148,8 @@ pub(crate) struct Plan {
     /// The decoded bytes of the blocks recoded and the bytes of those
     /// copied: what progress counts.
     work: u64,
+    /// The zlib level the blocks are deflated at ([`level`]).
+    level: u32,
     /// What the plan dropped, for the log.
     log: Log,
     /// A test's broken encoder ([`Codecs::broken`]).
@@ -178,20 +205,21 @@ impl Planned {
         // more.
         let mut left = len;
         let mut hows = Vec::new();
-        let mut work: u64 = 0;
+        let (mut recoded, mut copied): (u64, u64) = (0, 0);
         let mut log = Log::default();
         for (n, ifd) in tiff.ifds().into_iter().enumerate() {
             let how = how(r, ifd, order, &mut left)?;
             let blocks = ifd.blocks.iter().enumerate().filter(|(_, b)| b.len > 0);
-            work = match &how {
-                How::Recode { geometry, .. } => blocks
-                    .map(|(i, _)| geometry.expected(i as u64))
-                    .fold(work, u64::saturating_add),
+            match &how {
+                How::Recode { geometry, .. } => {
+                    let bytes = blocks.map(|(i, _)| geometry.expected(i as u64));
+                    recoded = bytes.fold(recoded, u64::saturating_add);
+                }
                 How::Copy(why) => {
                     log.add(format!("IFD {n} copied as it is: {why}"));
-                    blocks.map(|(_, b)| b.len).fold(work, u64::saturating_add)
+                    copied = blocks.map(|(_, b)| b.len).fold(copied, u64::saturating_add);
                 }
-            };
+            }
             hows.push(how);
         }
         if !hows.iter().any(|how| matches!(how, How::Recode { .. })) {
@@ -206,7 +234,8 @@ impl Planned {
             layout,
             pages,
             hows,
-            work,
+            work: recoded.saturating_add(copied),
+            level: level(recoded),
             log,
             #[cfg(test)]
             broken: false,
@@ -616,7 +645,7 @@ impl<'a> Recoder<'a> {
             blocks.filter(|b| b.len > 0)
         });
         #[cfg_attr(not(test), allow(unused_mut))]
-        let mut codecs = Codecs::default();
+        let mut codecs = Codecs::new(plan.level);
         #[cfg(test)]
         {
             codecs.broken = plan.broken;
@@ -1733,6 +1762,32 @@ mod tests {
             log.contains("IFD 0 copied as it is: recoded, its blocks"),
             "{log}"
         );
+    }
+
+    #[test]
+    fn the_level_goes_down_as_the_bytes_to_recode_go_up() {
+        let mib = 1 << 20;
+        for (bytes, want) in [
+            (0, 9),
+            (16 * mib, 9),
+            (16 * mib + 1, 6),
+            (256 * mib, 6),
+            (256 * mib + 1, 3),
+            (u64::MAX, 3),
+        ] {
+            assert_eq!(level(bytes), want, "{bytes}");
+        }
+        // The decoded bytes of what's recoded, not the bytes of what's
+        // copied as it is: 17 MiB of JPEG data, then 64 × 64 samples.
+        let jpeg = coded(7, vec![0xD8; 17 << 20]);
+        let file = Builder::new(
+            b'I',
+            false,
+            vec![jpeg, page(64, 64, 16, 8, &smooth(64 * 64))],
+        )
+        .build();
+        let plan = plan(&file);
+        assert_eq!((plan.work, plan.level), ((17 << 20) + 64 * 64, 9));
     }
 
     #[test]

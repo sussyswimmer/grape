@@ -17,8 +17,9 @@
 //! - **Predicted** ([`Predictor`]): horizontal differencing (TIFF's
 //!   predictor 2) over each row of 8 or 16-bit samples, in the file's byte
 //!   order, and its inverse.
-//! - **Deflated** ([`Encoder`]) at zlib's level 9 (flate2's Rust backend,
-//!   miniz_oxide), the state reused from block to block.
+//! - **Deflated** ([`Encoder`]) at the zlib level Compress chooses for the
+//!   file (flate2's Rust backend, miniz_oxide), the state reused from block
+//!   to block.
 //! - **Checked** ([`Codecs::check`]): a block Grape wrote, inflated again
 //!   and its predictor undone, gives the CRC32 of the bytes it was made
 //!   from ([`Codecs::recode`]).
@@ -677,16 +678,11 @@ pub(crate) struct Encoder {
     out: Vec<u8>,
 }
 
-impl Default for Encoder {
-    fn default() -> Self {
-        Encoder::new()
-    }
-}
-
 impl Encoder {
-    pub(crate) fn new() -> Encoder {
+    /// A deflater at zlib's `level` (0 to 9).
+    pub(crate) fn new(level: u32) -> Encoder {
         Encoder {
-            deflate: Compress::new(Compression::best(), true),
+            deflate: Compress::new(Compression::new(level), true),
             out: vec![0; INPUT],
         }
     }
@@ -749,7 +745,6 @@ pub(crate) struct Recipe {
 }
 
 /// The decoders and the deflater, kept from block to block.
-#[derive(Default)]
 pub(crate) struct Codecs {
     decoder: Decoder,
     encoder: Encoder,
@@ -760,6 +755,16 @@ pub(crate) struct Codecs {
 }
 
 impl Codecs {
+    /// The codecs, deflating at zlib's `level`.
+    pub(crate) fn new(level: u32) -> Codecs {
+        Codecs {
+            decoder: Decoder::new(),
+            encoder: Encoder::new(level),
+            #[cfg(test)]
+            broken: false,
+        }
+    }
+
     /// Decodes `block` of `r` as `recipe` says, cut at its size, adds its
     /// predictor, and deflates it into `w`; gives the CRC32 of the bytes it
     /// decoded to, before the predictor. `tick` is told of each step's
@@ -1390,7 +1395,7 @@ mod tests {
         let lzw = weezl::encode::Encoder::with_tiff_size_switch(weezl::BitOrder::Msb, 8)
             .encode(&picture)
             .unwrap();
-        let mut codecs = Codecs::default();
+        let mut codecs = Codecs::new(9);
         for (compression, data) in [(1, picture.clone()), (5, lzw)] {
             let file = one_strip(60, 20, compression, data);
             for predictor in [
@@ -1454,7 +1459,7 @@ mod tests {
             z.write_all(bytes).unwrap();
             z.finish().unwrap()
         };
-        let mut codecs = Codecs::default();
+        let mut codecs = Codecs::new(9);
         let check = |codecs: &mut Codecs, file: &[u8]| {
             let block = Block {
                 offset: 0,
@@ -1499,7 +1504,7 @@ mod tests {
         };
         let page = &read(&file).pages[0];
         let mut ticks = 0;
-        let result = Codecs::default().recode(
+        let result = Codecs::new(9).recode(
             &mut Cursor::new(&file),
             page.blocks[0],
             recipe,
