@@ -46,8 +46,12 @@
 //!   presets are the same.
 //! - **Held:** the model, a step of decoded bytes (or a row, when a row is
 //!   longer), the codecs' state, and at most [`MAX_PENDING`] blocks waiting
-//!   to be read back. The token is checked at every step of decoded bytes,
-//!   256 KiB at most, and every read and write is `Cancellable`.
+//!   to be read back. The token is checked at every step of decoded bytes:
+//!   256 KiB, or, when a predictor runs over them, as many whole rows as
+//!   fit, one at least, and a row may be up to [`MAX_ROW`]. Within a step,
+//!   the `Cancellable` source and temp file catch a cancel at their next
+//!   read or write, 64 KiB of either (13 to 98 ms in a review's measure);
+//!   one that lands in the temp file's last flush is a cancel too.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -1010,15 +1014,7 @@ pub(crate) fn run(
     let log = std::mem::take(&mut wrote.log);
     let logged = |e| logged(e, &log);
     // Cut what an IFD taken back left past the end.
-    let out = writer
-        .into_inner()
-        .map_err(|e| names.write_failed(format!("write {}: {}", path.display(), e.error())))
-        .map_err(logged)?
-        .into_inner();
-    out.set_len(wrote.len)
-        .and_then(|()| out.sync_all())
-        .map_err(|e| logged(names.write_failed(format!("write {}: {e}", path.display()))))?;
-    drop(out);
+    strips::close(writer, Some(wrote.len), path, &names, src, cancel).map_err(logged)?;
     drop(reader);
     progress(0.97);
     let after = wrote.len;

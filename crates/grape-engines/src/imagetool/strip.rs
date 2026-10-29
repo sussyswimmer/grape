@@ -218,13 +218,7 @@ pub(crate) fn run(
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
     let found = found.map_err(|e| failed(e, &names, src, temp.path(), &ctx.cancel))?;
-    let out = writer
-        .into_inner()
-        .map_err(|e| names.write_failed(format!("write {}: {}", temp.path().display(), e.error())))?
-        .into_inner();
-    out.sync_all()
-        .map_err(|e| names.write_failed(format!("sync {}: {e}", temp.path().display())))?;
-    drop(out);
+    close(writer, None, temp.path(), &names, src, &ctx.cancel)?;
     drop(reader);
     check(&stripper, temp.path(), &names, src, &ctx.cancel)?;
     if ctx.cancel.is_cancelled() {
@@ -236,6 +230,32 @@ pub(crate) fn run(
         .notes
         .push(Note::MetadataRemoved(found.fields.into_iter().collect()));
     Ok(outcome)
+}
+
+/// Flushes what `writer` holds into the temp file at `path`, cuts the file
+/// at `len` when given (Compress on TIFF may leave bytes past its end), and
+/// syncs it: the last step before a temp file is checked and published. A
+/// cancel that lands in the flush is the job's cancel, not a write that
+/// failed.
+pub(crate) fn close(
+    writer: BufWriter<Cancellable<File>>,
+    len: Option<u64>,
+    path: &Path,
+    names: &Names,
+    src: &Path,
+    cancel: &CancelToken,
+) -> Result<(), GrapeError> {
+    let failed = |e: String| publish::or_cancelled(cancel, src, names.write_failed(e));
+    let out = writer
+        .into_inner()
+        .map_err(|e| failed(format!("write {}: {}", path.display(), e.error())))?
+        .into_inner();
+    if let Some(len) = len {
+        out.set_len(len)
+            .map_err(|e| failed(format!("write {}: {e}", path.display())))?;
+    }
+    out.sync_all()
+        .map_err(|e| failed(format!("sync {}: {e}", path.display())))
 }
 
 /// The error for the user when a stripper stopped: `src` is the source,
@@ -359,6 +379,22 @@ mod tests {
         fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
             self.file.seek(pos)
         }
+    }
+
+    #[test]
+    fn a_cancel_in_the_last_flush_is_a_cancel() {
+        let name = format!("grape-close-{}.tif", crate::output::unique_suffix());
+        let path = std::env::temp_dir().join(name);
+        let cancel = CancelToken::new();
+        let file = File::create_new(&path).unwrap();
+        let mut writer = BufWriter::new(Cancellable::new(file, &cancel));
+        writer.write_all(b"still in the buffer").unwrap();
+        cancel.cancel();
+        let src = Path::new("scan.tif");
+        let names = Names::new(src, &path, Format::Tiff, Format::Tiff);
+        let result = close(writer, Some(5), &path, &names, src, &cancel);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Cancelled);
     }
 
     #[test]
