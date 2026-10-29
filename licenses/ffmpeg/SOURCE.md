@@ -54,7 +54,7 @@ Windows: `ffmpeg.exe` and `ffprobe.exe` import only `KERNEL32.dll`, `SHELL32.dll
 | libvorbis | 1.3.7 | BSD-3-Clause | https://github.com/xiph/vorbis/releases/download/v1.3.7/libvorbis-1.3.7.tar.xz | `b33cc4934322bcbf6efcbacf49e3ca01aadbea4114ec9589d1b1e9d20f72954b` | `vorbis.txt` |
 | libvpx | 1.17.0 (tag `v1.17.0`, commit `6df3ec34557879fff673706f4a1d9fbd0f3a6f0e`) | BSD-3-Clause | https://github.com/webmproject/libvpx/archive/refs/tags/v1.17.0.tar.gz | `1020f184046187baa2985dbde38e0691f49c44088bca7a1842b0236c6081dc0a` | `libvpx.txt`, `libvpx-PATENTS.txt`, `libvpx-x86inc.txt` |
 | dav1d | 1.5.4 | BSD-2-Clause | https://downloads.videolan.org/pub/videolan/dav1d/1.5.4/dav1d-1.5.4.tar.xz | `686616b7c69eb88d44459391ab25cac13b6647a3b288835c5784e71c1514a5c5` | `dav1d.txt`, `dav1d-PATENTS.txt` |
-| zlib | 1.3.2 | Zlib | https://zlib.net/fossils/zlib-1.3.2.tar.gz | `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16` | `zlib.txt` |
+| zlib | 1.3.2 | Zlib | https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz | `bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16` | `zlib.txt` |
 | mingw-w64 runtime (Windows; not built by the script, see "The source") | 11.0.1 | ZPL-2.1 and the notices in its text | https://downloads.sourceforge.net/project/mingw-w64/mingw-w64/mingw-w64-release/mingw-w64-v11.0.1.tar.bz2 | `3f66bce069ee8bed7439a1a13da7cb91a5e67ea6170f21317ac7f5794625ee10` | `mingw-w64-runtime.txt` |
 
 `scripts/ffmpeg/sources.json` has the same pins with their sizes, and notes how each download was checked. `ffmpeg-notices.txt` has the notices inside all of them.
