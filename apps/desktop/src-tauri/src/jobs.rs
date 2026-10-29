@@ -1300,6 +1300,16 @@ mod tests {
         }
     }
 
+    /// Remove Metadata on a HEIC decodes nothing (D28, lane B's
+    /// `imagetool/heic.rs`), so it runs with no helper at all, on every OS.
+    #[test]
+    fn heic_remove_metadata_needs_no_helper() {
+        let heic = [SelectionItem::file("/a/IMG_0001.HEIC")];
+        let strip = Operation::tool(ToolKey::RemoveMetadata);
+        assert_eq!(check_runnable(&strip, &heic, &none()), Ok(()));
+        assert_eq!(check_runnable(&strip, &heic, &installed()), Ok(()));
+    }
+
     #[test]
     fn a_heic_and_an_avif_need_the_one_image_helper() {
         let to_png = Operation::Convert { to: Format::Png };
