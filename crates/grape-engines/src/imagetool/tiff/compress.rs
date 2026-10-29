@@ -55,8 +55,10 @@
 //!   256 KiB, or, when a predictor runs over them, as many whole rows as
 //!   fit, one at least, and a row may be up to [`MAX_ROW`]. Within a step,
 //!   the `Cancellable` source and temp file catch a cancel at their next
-//!   read or write, 64 KiB of either (13 to 98 ms in a review's measure);
-//!   one that lands in the temp file's last flush is a cancel too.
+//!   read or write, 64 KiB of either (13 to 98 ms in a review's measure,
+//!   and up to 146 ms inside one 16 MB row at level 9, through which
+//!   progress stays put); one that lands in the temp file's last flush is
+//!   a cancel too.
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;

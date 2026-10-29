@@ -633,6 +633,17 @@ impl Sizes {
         };
         rows.div_ceil(self.per_row).saturating_mul(row)
     }
+
+    /// The bytes libtiff wants of a lone strip before it takes its count
+    /// at its word (`ByteCountLooksBad`): its scanline's bytes times the
+    /// picture's rows, where a scanline of subsampled YCbCr is a row of
+    /// sampling units over the vertical subsampling, rounded down (27
+    /// bytes for 5 × 3 at 2 × 2, where the strip holds 36).
+    fn lone(&self) -> u64 {
+        let row = self.row.first().copied().unwrap_or(0);
+        let rows = self.height.unwrap_or(self.rows);
+        (row / self.per_row.max(1)).saturating_mul(rows)
+    }
 }
 
 /// Reads `len` bytes of `entry`'s value, and only them ([`read_at`]), or
@@ -936,7 +947,8 @@ impl Walk<'_> {
     /// - **Worked out from the picture** ([`Walk::sizes`]) where libtiff
     ///   ignores them ("Bogus" and "Wrong" StripByteCounts): a lone strip
     ///   at a nonzero offset whose count is 0, or, uncompressed, that runs
-    ///   past the file's end or is short of the picture; and uncompressed
+    ///   past the file's end or is short of what libtiff wants of it
+    ///   ([`Sizes::lone`]); and uncompressed
     ///   strips or tiles, more than 2 in one plane, whose first two counts
     ///   differ and aren't 0. Compressed data, a layout Grape can't size,
     ///   or blocks listed that aren't libtiff's (more or fewer of them), is
@@ -970,7 +982,8 @@ impl Walk<'_> {
         let ignored = if count == 1 && !tiled {
             let one = entry(0);
             let past = one.offset <= l.len && one.len > l.len - one.offset;
-            one.offset != 0 && (one.len == 0 || (plain && (past || short(0, &one))))
+            let short = sizes.as_ref().is_some_and(|s| one.len < s.lone());
+            one.offset != 0 && (one.len == 0 || (plain && (past || short)))
         } else {
             let (first, second) = (entry(0), entry(1));
             plain
@@ -1698,18 +1711,37 @@ mod tests {
     fn subsampled_ycbcr_is_sized_in_sampling_units() {
         // 5 × 3 in one strip: subsampled 2 × 2 (the default), 3 units of
         // 6 bytes a row, in 2 rows of them; 4 × 2, 2 units of 10 bytes;
-        // 1 × 1, three samples a pixel.
-        for (sub, len) in [(None, 36), (Some(vec![4, 2]), 40), (Some(vec![1, 1]), 45)] {
-            let mut page = gray(5, 3, 3, vec![B::Data(vec![7; len])]);
+        // 1 × 1, three samples a pixel. libtiff takes a lone strip's count
+        // at its word from its scanline's bytes times the rows (a row of
+        // units over the vertical subsampling, rounded down): from 27, 30
+        // and 45 bytes.
+        for (sub, len, lone) in [
+            (None, 36, 27),
+            (Some(vec![4, 2]), 40, 30),
+            (Some(vec![1, 1]), 45, 45),
+        ] {
+            let mut page = gray(5, 3, 3, vec![B::Data(vec![7; len as usize])]);
             page.tags[2] = (258, V::Short(vec![8, 8, 8]));
             page.tags[3] = (262, V::Short(vec![6]));
             page.tags.push((277, V::Short(vec![3])));
             page.tags.extend(sub.map(|s| (530, V::Short(s))));
-            // With no byte count, and with one a byte short of it.
-            for counts in [Vec::new(), vec![len as u64 - 1]] {
+            let file = |counts: Vec<u64>| {
+                let mut page = page.clone();
                 page.counts = Some(counts);
-                let file = Builder::new(b'I', false, vec![page.clone()]).build();
-                assert_eq!(lens(&read(&file).unwrap()), [len as u64]);
+                Builder::new(b'I', false, vec![page]).build()
+            };
+            // With no byte count, and with one short of libtiff's figure,
+            // it's worked out to the strip's size.
+            for counts in [Vec::new(), vec![lone - 1]] {
+                assert_eq!(lens(&read(&file(counts)).unwrap()), [len]);
+            }
+            // From there, short of the strip, libtiff can't read it.
+            for count in lone..len {
+                let refused = read(&file(vec![count]));
+                assert!(
+                    matches!(&refused, Err(Error::Refused(why)) if why == MISSIZED),
+                    "{count}: {refused:?}"
+                );
             }
         }
     }
