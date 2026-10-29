@@ -17,9 +17,10 @@
 //!   out wrong); layouts that can't be sized; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
-//!   can't be decoded (old-style LZW, data that's broken or short), or
-//!   whose blocks come to more bytes recoded than as they were, whose
-//!   blocks written already are taken back ([`Recoder`]).
+//!   can't be decoded (old-style LZW, data that's broken or short), whose
+//!   blocks come to more bytes recoded than as they were, or whose recode
+//!   takes the output past 95 % of the source, whose blocks written
+//!   already are taken back ([`Recoder`]).
 //! - **Predictor:** a source's own (2, 3 or another) on LZW or Deflate
 //!   stays, its decoded bytes deflated as they are. Otherwise (None and
 //!   PackBits, whatever their 317 says, since libtiff applies a predictor
@@ -42,9 +43,10 @@
 //!   written ([`Wrote::check`]). Otherwise it's Grape's own failure.
 //! - **Size:** with nothing to recode it ends `NoChange` before anything is
 //!   created ([`Planned::Nothing`]); once the output passes 95 % of the
-//!   source while it's written, at once ([`Stopped::NotSmaller`]); and the
-//!   runner holds the finished file to 95 % too. Never "Try Small": the
-//!   presets are the same.
+//!   source while it's written, at once ([`Stopped::NotSmaller`]), unless
+//!   that's while an IFD is recoded, which is copied as it is instead if
+//!   that fits; and the runner holds the finished file to 95 % too. Never
+//!   "Try Small": the presets are the same.
 //! - **Held:** the model, a step of decoded bytes (or a row, when a row is
 //!   longer), the codecs' state, and at most [`MAX_PENDING`] blocks waiting
 //!   to be read back. The token is checked at every step of decoded bytes:
@@ -542,6 +544,14 @@ struct Place {
 }
 
 /// What [`Recoder::recode`] made of an IFD's blocks.
+enum Recode {
+    /// Every block recoded.
+    Done(Recoded),
+    /// Given up, to be copied as it is: why, for the log.
+    Copy(Why),
+}
+
+/// An IFD's blocks, recoded.
 struct Recoded {
     written: Written,
     /// The bytes of the blocks it wrote, in the source and recoded (not
@@ -549,6 +559,10 @@ struct Recoded {
     from: u64,
     made: u64,
 }
+
+/// Why an IFD whose recode took the output past the most is copied as it
+/// is instead.
+const PASSED: &str = "recoded, it took the output past 95 % of the source";
 
 /// The output while a block is written: a write that would take it past
 /// `most` bytes fails, and says so.
@@ -763,15 +777,32 @@ impl<'a> Recoder<'a> {
         Ok(written)
     }
 
-    /// Recodes `image`'s blocks as `how` says: [`Fail::Undecodable`] when
-    /// one can't be decoded.
+    /// Recodes `image`'s blocks as `how` says; gives up on them when one
+    /// can't be decoded, or when they take the output past the most (a
+    /// copy may fit where they didn't: noise grows recoded).
     fn recode(
         &mut self,
         r: &mut dyn In,
         out: &mut Sink,
         image: &Image,
         how: &How,
-    ) -> Result<Recoded, Fail> {
+    ) -> Result<Recode, Error> {
+        match self.recode_blocks(r, out, image, how) {
+            Ok(recoded) => Ok(recoded),
+            Err(Fail::Undecodable(why)) => Ok(Recode::Copy(why)),
+            Err(Fail::Job(e)) => Err(e),
+        }
+    }
+
+    /// [`Recoder::recode`]'s work: [`Fail::Undecodable`] when a block can't
+    /// be decoded.
+    fn recode_blocks(
+        &mut self,
+        r: &mut dyn In,
+        out: &mut Sink,
+        image: &Image,
+        how: &How,
+    ) -> Result<Recode, Fail> {
         let How::Recode {
             codec,
             geometry,
@@ -816,7 +847,7 @@ impl<'a> Recoder<'a> {
                 .codecs
                 .recode(r, block, recipe, &mut capped, &mut |n| ticker.tick(n));
             if capped.over {
-                return Err(Fail::Job(self.stop(Stopped::NotSmaller)));
+                return Ok(Recode::Copy(PASSED.into()));
             }
             let crc = crc?;
             let len = out.at() - at;
@@ -845,11 +876,11 @@ impl<'a> Recoder<'a> {
             fields: fields.clone(),
             taken,
         };
-        Ok(Recoded {
+        Ok(Recode::Done(Recoded {
             written,
             from,
             made,
-        })
+        }))
     }
 
     /// Reads back each block waiting to be: it must give the CRC32 its
@@ -925,23 +956,25 @@ impl Blocks for Recoder<'_> {
             How::Copy(_) => self.copy(r, out, image)?,
             How::Recode { .. } => {
                 let start = out.at();
-                match self.recode(r, out, image, how) {
+                let recoded = match self.recode(r, out, image, how)? {
                     // Larger than as it was (noise, or data deflated better
                     // already): copied as it is.
-                    Ok(Recoded { from, made, .. }) if made > from => {
-                        let why = format!("recoded, its blocks came to {made} bytes, from {from}");
-                        self.take_back(out, image, start, n, &why)?;
-                        self.copy(r, out, image)?
-                    }
-                    Ok(recoded) => {
+                    Recode::Done(Recoded { from, made, .. }) if made > from => Err(format!(
+                        "recoded, its blocks came to {made} bytes, from {from}"
+                    )),
+                    Recode::Done(recoded) => Ok(recoded.written),
+                    Recode::Copy(why) => Err(why),
+                };
+                match recoded {
+                    Ok(written) => {
                         self.read_back(out)?;
-                        recoded.written
+                        written
                     }
-                    Err(Fail::Undecodable(why)) => {
+                    // Copied, held to the most too.
+                    Err(why) => {
                         self.take_back(out, image, start, n, &why)?;
                         self.copy(r, out, image)?
                     }
-                    Err(Fail::Job(e)) => return Err(e),
                 }
             }
         };
@@ -1765,6 +1798,45 @@ mod tests {
         assert!(
             log.contains("IFD 0 copied as it is: recoded, its blocks"),
             "{log}"
+        );
+    }
+
+    #[test]
+    fn an_ifd_that_passes_the_most_recoded_is_copied_when_that_fits() {
+        // A smooth page, then noise, which grows recoded: with the most
+        // where the noise ends copied, its recode passes it, and the copy
+        // takes its place.
+        let file = Builder::new(
+            b'I',
+            false,
+            vec![
+                page(64, 64, 16, 8, &smooth(64 * 64)),
+                page(64, 64, 16, 8, &noise(64 * 64)),
+            ],
+        )
+        .build();
+        let plan = plan(&file);
+        let (whole, _) = written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+        let blocks = &read(&whole).pages[1].blocks;
+        let most = blocks.iter().map(|b| b.offset + b.len).max().unwrap();
+        let (out, wrote) = written(&file, &plan, most, &CancelToken::new(), &mut |_| {}).unwrap();
+        assert_eq!(out, whole);
+        let log = wrote.log.to_string();
+        assert!(
+            log.contains(&format!("IFD 1 copied as it is: {PASSED}")),
+            "{log}"
+        );
+        // A byte less, and the copy doesn't fit either.
+        let stopped = written(&file, &plan, most - 1, &CancelToken::new(), &mut |_| {});
+        assert!(
+            matches!(
+                stopped,
+                Err(Halt {
+                    why: Stopped::NotSmaller,
+                    ..
+                })
+            ),
+            "{stopped:?}"
         );
     }
 
