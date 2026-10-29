@@ -42,7 +42,7 @@ pub(crate) const STEP: usize = 256 * 1024;
 const INPUT: usize = 64 * 1024;
 
 /// The most samples a pixel has, for reading BitsPerSample and SampleFormat.
-const MAX_SAMPLES: u64 = 1 << 16;
+pub(crate) const MAX_SAMPLES: u64 = 1 << 16;
 
 /// Why an IFD's blocks can't be re-encoded: the end of "copied as it is,
 /// because …", for the log.
@@ -113,14 +113,20 @@ impl Geometry {
         left: &mut u64,
     ) -> Result<Result<Geometry, Why>, Error> {
         let get = |tag| ifd.uint(tag, order);
+        // A tag's one number, or `default` when it's absent; `None` when
+        // it's there but can't be read, which isn't the default.
+        let or = |tag, default| ifd.get(tag).map_or(Some(default), |e| e.uint(order));
         let not = |why: String| Ok(Err(why));
+        let unread = |name: &str| not(format!("its {name} can't be read"));
         let (Some(width), Some(height)) = (get(256), get(257)) else {
             return not("it has no size".into());
         };
         if width == 0 || height == 0 {
             return not(format!("it's {width} × {height}"));
         }
-        let samples = get(277).unwrap_or(1);
+        let Some(samples) = or(277, 1) else {
+            return unread("SamplesPerPixel");
+        };
         if samples == 0 || samples > MAX_SAMPLES {
             return not(format!("its SamplesPerPixel is {samples}"));
         }
@@ -144,13 +150,18 @@ impl Geometry {
         if bits == 0 || bits > 64 {
             return not(format!("its BitsPerSample is {bits}"));
         }
-        let planar = match get(284).unwrap_or(1) {
-            1 => false,
-            2 => true,
-            n => return not(format!("its PlanarConfiguration is {n}")),
+        let planar = match or(284, 1) {
+            Some(1) => false,
+            Some(2) => true,
+            Some(n) => return not(format!("its PlanarConfiguration is {n}")),
+            None => return unread("PlanarConfiguration"),
         };
+        let photometric = ifd.get(262).map(|e| e.uint(order));
+        if photometric == Some(None) {
+            return unread("PhotometricInterpretation");
+        }
         // YCbCr is subsampled 2 × 2 unless it says otherwise (TIFF 6 §21).
-        let (h, v) = if get(262) == Some(6) {
+        let (h, v) = if photometric == Some(Some(6)) {
             let sub = match ifd.get(530) {
                 None => vec![2, 2],
                 Some(entry) => numbers(r, entry, order, 2, left)?.unwrap_or_default(),
@@ -176,7 +187,10 @@ impl Geometry {
             }
             (true, _, _) => return not("it has no tile size".into()),
             (false, _, _) => {
-                let rows = get(278).unwrap_or(height).min(height);
+                let Some(rows) = or(278, height) else {
+                    return unread("RowsPerStrip");
+                };
+                let rows = rows.min(height);
                 if rows == 0 {
                     return not("its RowsPerStrip is 0".into());
                 }
@@ -1284,7 +1298,14 @@ mod tests {
         huge[2] = (258, V::Short(vec![64]));
         huge[4] = (277, V::Short(vec![u16::MAX]));
         huge[5] = (278, V::Long(vec![u32::MAX]));
+        // SamplesPerPixel and RowsPerStrip there but not one number.
+        let mut two_counts = rgb.clone();
+        two_counts[4] = (277, V::Short(vec![3, 3]));
+        let mut rows_rational = rgb.clone();
+        rows_rational[5] = (278, V::Rational(vec![(3, 1)]));
         for (tags, blocks, why) in [
+            (two_counts, 3, "SamplesPerPixel can't be read"),
+            (rows_rational, 3, "RowsPerStrip can't be read"),
             (planes_apart, 3, "subsampled"),
             (odd, 1, "YCbCrSubsampling"),
             (mixed, 3, "different sizes"),
