@@ -8,11 +8,12 @@
 //! - **Dropped and reported:**
 //!   - every Exif item ([`exif::walk`] on its payload after its 4-byte
 //!     header offset and an `Exif\0\0`; the first [`MAX_EXIF`] of it, and
-//!     Other beyond), `mime` item (XMP, or Other), `uri ` item (Other),
-//!     `iptc` item (IPTC), and any other item that describes another (a
-//!     `cdsc` from it) but a picture (Other: a region annotation, Exif
-//!     under another type): its entries and references go (an `iref` left
-//!     with none too), and its bytes are zeroed in `mdat` or `idat`;
+//!     Other beyond unless it's all zeros), `mime` item (XMP, or Other),
+//!     `uri ` item (Other), `iptc` item (IPTC), and any other item that
+//!     describes another (a `cdsc` from it) but a picture (Other: a region
+//!     annotation, Exif under another type): its entries and references go
+//!     (an `iref` left with none too), and its bytes are zeroed in `mdat`
+//!     or `idat`;
 //!   - the `udes` (title, description, tags), `crtt` and `mdft`
 //!     properties, the non-empty ones reported: each box is removed from
 //!     `ipco`, its associations from `ipma`, and every later index is
@@ -149,8 +150,9 @@ struct Walked {
     /// `Exif\0\0` between its header offset and its TIFF structure, as
     /// Apple writes it.
     prefixed: bool,
-    /// More than [`MAX_EXIF`] follows its header: the rest isn't read.
-    unread: bool,
+    /// What follows its first [`MAX_EXIF`] after its header is other
+    /// fields: a byte of it isn't zero, or it isn't read.
+    rest: bool,
 }
 
 /// What a [`Survey`] reads.
@@ -316,17 +318,18 @@ impl Survey {
             }
         }
         let mut left = self.left;
-        let walked = self.exif(r, loc, &mut left)?;
+        // What follows its first MAX_EXIF is read in a source: other fields
+        // unless it's all zeros. Not in an output, whose Exif kept for the
+        // orientation holds zeros there, which the check reads byte for
+        // byte.
+        let walked = self.exif(r, loc, &mut left, self.pass == Pass::Source)?;
         self.left = left;
         self.walked = Some(id);
         self.found.fields.extend(walked.fields);
         let tiff = walked
             .orientation
             .and_then(|o| exif::minimal(Some(o), false));
-        // What's unread past its first MAX_EXIF is other fields, but in an
-        // output, whose Exif kept for the orientation holds zeros there,
-        // and the check reads them byte for byte.
-        if walked.unread && (self.pass == Pass::Source || tiff.is_none()) {
+        if walked.rest && (self.pass == Pass::Source || tiff.is_none()) {
             self.found.fields.insert(MetaField::Other);
         }
         let Some(tiff) = tiff else {
@@ -576,9 +579,9 @@ impl Survey {
             match item.role() {
                 Role::Exif => {
                     if let Some(loc) = locations.get(&item.id) {
-                        let walked = self.exif(r, loc, &mut left)?;
+                        let walked = self.exif(r, loc, &mut left, true)?;
                         fields.extend(walked.fields);
-                        if walked.unread {
+                        if walked.rest {
                             fields.push(MetaField::Other);
                         }
                     }
@@ -593,10 +596,17 @@ impl Survey {
     }
 
     /// What the Exif item at `loc` holds: [`exif::walk`] on the first
-    /// [`MAX_EXIF`] of its TIFF structure ([`Walked::unread`] past that),
-    /// and Other for a header offset past its end, or when what it reads
-    /// would pass `left`.
-    fn exif(&self, r: &mut dyn In, loc: &Location, left: &mut u64) -> Result<Walked, Error> {
+    /// [`MAX_EXIF`] of its TIFF structure, and Other for a header offset
+    /// past its end, or when what it reads would pass `left`. What follows
+    /// that is read too when `rest` says so, [`STEP`] at a time, to see
+    /// whether it's all zeros ([`Walked::rest`]).
+    fn exif(
+        &self,
+        r: &mut dyn In,
+        loc: &Location,
+        left: &mut u64,
+        rest: bool,
+    ) -> Result<Walked, Error> {
         let mut walked = Walked::default();
         let pieces = self.pieces(loc)?;
         // Each piece lies in its file or idat; many that share bytes may
@@ -637,7 +647,16 @@ impl Survey {
         let exif = exif::walk(tiff);
         walked.fields.extend(exif.fields);
         walked.orientation = exif.orientation;
-        walked.unread = total - skip > take;
+        let more = total - skip - take;
+        if more > 0 {
+            walked.rest = match left.checked_sub(more) {
+                Some(after) if rest => {
+                    *left = after;
+                    !self.zero_data(r, loc, &pieces, skip + take, more)?
+                }
+                _ => true,
+            };
+        }
         Ok(walked)
     }
 
@@ -663,45 +682,58 @@ impl Survey {
         skip: u64,
         take: u64,
     ) -> Result<Vec<u8>, Error> {
-        let idat = self.meta.idat().unwrap_or(0..0);
         let mut out = Vec::new();
-        let end = skip.saturating_add(take);
-        // Where `piece` starts in the item's data.
-        let mut at = 0u64;
-        for piece in pieces {
-            if at >= end {
-                break;
+        for range in within(pieces, skip, take) {
+            if loc.method == 0 {
+                let mut buf = vec![0; (range.end - range.start) as usize];
+                read_at(r, range.start, &mut buf)?;
+                out.extend_from_slice(&buf);
+            } else {
+                out.extend_from_slice(self.in_idat(loc, range)?);
             }
-            let len = piece.end - piece.start;
-            let from = skip.max(at);
-            let to = end.min(at.saturating_add(len));
-            if from < to {
-                let start = piece.start + (from - at);
-                let n = (to - from) as usize;
-                if loc.method == 0 {
-                    let mut buf = vec![0; n];
-                    read_at(r, start, &mut buf)?;
-                    out.extend_from_slice(&buf);
-                } else {
-                    // Within idat (checked), but checked again here.
-                    let piece = usize::try_from(start)
-                        .ok()
-                        .and_then(|start| idat.start.checked_add(start))
-                        .and_then(|s| Some(s..s.checked_add(n)?))
-                        .filter(|range| range.end <= idat.end)
-                        .map(|range| &self.meta.bytes[range]);
-                    let Some(piece) = piece else {
-                        return Err(Error::Broken(format!(
-                            "item {}'s data runs past its end",
-                            loc.id
-                        )));
-                    };
-                    out.extend_from_slice(piece);
-                }
-            }
-            at = at.saturating_add(len);
         }
         Ok(out)
+    }
+
+    /// Whether `take` bytes of an item's data from `skip` on, its `pieces`
+    /// end to end, are all zeros: read [`STEP`] at a time from the file, or
+    /// looked at in `idat`.
+    fn zero_data(
+        &self,
+        r: &mut dyn In,
+        loc: &Location,
+        pieces: &[Range<u64>],
+        skip: u64,
+        take: u64,
+    ) -> Result<bool, Error> {
+        let mut buf = vec![0; STEP];
+        for range in within(pieces, skip, take) {
+            let zero = if loc.method == 0 {
+                zeros(r, range, &mut buf)?
+            } else {
+                self.in_idat(loc, range)?.iter().all(|&b| b == 0)
+            };
+            if !zero {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// `range` of `idat`'s content, which holds data of the item at `loc`:
+    /// within it (checked), but checked again here.
+    fn in_idat(&self, loc: &Location, range: Range<u64>) -> Result<&[u8], Error> {
+        let idat = self.meta.idat().unwrap_or(0..0);
+        let at = |offset: u64| idat.start.checked_add(usize::try_from(offset).ok()?);
+        match (at(range.start), at(range.end)) {
+            (Some(start), Some(end)) if start <= end && end <= idat.end => {
+                Ok(&self.meta.bytes[start..end])
+            }
+            _ => Err(Error::Broken(format!(
+                "item {}'s data runs past its end",
+                loc.id
+            ))),
+        }
     }
 
     /// Reports the removed properties' non-empty fields.
@@ -854,6 +886,21 @@ fn gaps(covered: &[Range<u64>], within: Range<u64>) -> impl Iterator<Item = Rang
             }
         }
         None
+    })
+}
+
+/// Where `take` bytes of an item's data from `skip` on lie in its `pieces`
+/// (end to end, each in order): fewer when it ends first.
+fn within(pieces: &[Range<u64>], skip: u64, take: u64) -> impl Iterator<Item = Range<u64>> + '_ {
+    let end = skip.saturating_add(take);
+    // Where each piece starts in the item's data.
+    let mut at = 0u64;
+    pieces.iter().filter_map(move |piece| {
+        let len = piece.end - piece.start;
+        let (from, to) = (skip.max(at), end.min(at.saturating_add(len)));
+        let part = (from < to).then(|| piece.start + (from - at)..piece.start + (to - at));
+        at = at.saturating_add(len);
+        part
     })
 }
 
@@ -1864,28 +1911,82 @@ mod tests {
 
     #[test]
     fn a_portrait_exif_past_its_first_mib_keeps_its_orientation() {
-        // 1 MiB and a byte after its header, in mdat and in idat: what's
-        // past the first MiB is unread, so other fields; in the output it's
-        // zeros, which the check reads byte for byte.
+        // 1 MiB, 64 KiB and a byte after its header, in mdat and in idat:
+        // what's past the first MiB is other fields unless it's all zeros,
+        // its last byte 1 or 0; in the output it's zeros, which the check
+        // reads byte for byte.
+        let len = 10 + MAX_EXIF + STEP + 1;
+        let photo: BTreeSet<_> = [Location, Camera, CreationDate, Xmp].into();
         for place in [Place::Mdat, Place::Idat] {
-            let mut b = turned(simple());
-            b.items[1].data.resize(10 + MAX_EXIF + 1, 0x5A);
-            b.items[1].place = place;
-            let (src, _) = b.build();
-            let (out, found) = strip(&src);
-            let photo: BTreeSet<_> = [Location, Camera, CreationDate, Xmp, Other].into();
-            assert_eq!(found, photo, "{place:?}");
-            let data = read(&out, &meta(&out), EXIF);
-            let payload = upright(true);
-            assert_eq!(data.len(), 10 + MAX_EXIF + 1, "{place:?}");
-            assert_eq!(data[..payload.len()], payload[..], "{place:?}");
-            assert!(data[payload.len()..].iter().all(|&b| b == 0), "{place:?}");
-            // A second pass copies it as it is, and doesn't read past the
-            // first MiB either: the rest is other fields to it.
-            let (again, found) = strip(&out);
-            assert_eq!(again, out, "{place:?}");
-            assert_eq!(found, [Other].into(), "{place:?}");
+            for last in [1, 0] {
+                let mut b = turned(simple());
+                b.items[1].data.resize(len, 0);
+                b.items[1].data[len - 1] = last;
+                b.items[1].place = place;
+                let (src, _) = b.build();
+                let (out, found) = strip(&src);
+                let other = match last {
+                    0 => BTreeSet::new(),
+                    _ => [Other].into(),
+                };
+                assert_eq!(found, &photo | &other, "{place:?} {last}");
+                let data = read(&out, &meta(&out), EXIF);
+                let payload = upright(true);
+                assert_eq!(data.len(), len, "{place:?}");
+                assert_eq!(data[..payload.len()], payload[..], "{place:?}");
+                assert!(data[payload.len()..].iter().all(|&b| b == 0), "{place:?}");
+                // A second pass copies it as it is, and finds nothing.
+                let (again, found) = strip(&out);
+                assert_eq!(again, out, "{place:?} {last}");
+                assert!(found.is_empty(), "{place:?} {last}");
+            }
         }
+    }
+
+    /// A file that cancels `cancel` once a read passes `at`.
+    struct Tripwire {
+        file: Cursor<Vec<u8>>,
+        at: u64,
+        cancel: crate::CancelToken,
+    }
+
+    impl std::io::Read for Tripwire {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.file.read(buf)?;
+            if self.file.position() > self.at {
+                self.cancel.cancel();
+            }
+            Ok(n)
+        }
+    }
+
+    impl std::io::Seek for Tripwire {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            self.file.seek(pos)
+        }
+    }
+
+    #[test]
+    fn what_follows_an_exifs_first_mib_is_read_a_step_at_a_time_till_a_cancel() {
+        // A portrait Exif with 4 MiB of zeros after its first MiB, cancelled
+        // as the first 64 KiB of them are read: the next read stops.
+        let mut b = turned(simple());
+        b.items[1].data.resize(10 + MAX_EXIF + (4 << 20), 0);
+        let (file, layout) = b.build();
+        let rest = layout.file_ranges(EXIF)[0].start + 10 + MAX_EXIF as u64;
+        let len = file.len() as u64;
+        let cancel = crate::CancelToken::new();
+        let tripwire = Tripwire {
+            file: Cursor::new(file),
+            at: rest + 1,
+            cancel: cancel.clone(),
+        };
+        let mut r = std::io::BufReader::with_capacity(
+            STEP,
+            crate::cancel::Cancellable::new(tripwire, &cancel),
+        );
+        let planned = Plan::new(&mut r, len);
+        assert!(matches!(planned, Err(Error::Read(_))), "{planned:?}");
     }
 
     #[test]
@@ -1923,17 +2024,30 @@ mod tests {
         // An offset past its end.
         b.items[1].data = vec![0, 0, 1, 0, 1, 2];
         assert_eq!(strip(&b.build().0).1, [Other].into());
-        // Past 1 MiB, only the first is walked, and the rest is Other.
+        // Past 1 MiB, only the first is walked, and the rest is Other
+        // unless it's all zeros (its last byte 1 or 0), read across its 20
+        // extents: the primary's Exif, and one that describes nothing.
         let mut big = 6u32.to_be_bytes().to_vec();
         big.extend_from_slice(b"Exif\0\0");
         big.extend_from_slice(&tiff);
-        big.resize(4 + 6 + MAX_EXIF + 1, 0);
-        b.items[1].data = big;
-        b.items[1].extents = 3;
-        assert_eq!(
-            strip(&b.build().0).1,
-            [Location, Camera, CreationDate, Other].into()
-        );
+        big.resize(4 + 6 + MAX_EXIF + STEP + 1, 0);
+        b.items[1].extents = 20;
+        let walked: BTreeSet<_> = [Location, Camera, CreationDate].into();
+        for refs in [1, 0] {
+            b.refs.truncate(refs);
+            for last in [1, 0] {
+                if let Some(end) = big.last_mut() {
+                    *end = last;
+                }
+                b.items[1].data = big.clone();
+                let other = match last {
+                    0 => BTreeSet::new(),
+                    _ => [Other].into(),
+                };
+                let found = strip(&b.build().0).1;
+                assert_eq!(found, &walked | &other, "{refs} {last}");
+            }
+        }
     }
 
     /// A file that counts the bytes read from it.
@@ -1958,41 +2072,47 @@ mod tests {
 
     #[test]
     fn exif_items_that_share_bytes_are_read_up_to_the_files_size() {
-        // Fifty Exif items whose extents are all the first's 200 KB.
-        let mut b = simple();
-        b.items.truncate(2);
-        b.refs.truncate(1);
-        b.items[1].data.resize(200_000, 0);
-        for id in 100..150 {
-            b.items.push(Item::exif(id, b"x"));
+        // Fifty Exif items whose extents are all the first's 200 KB, or
+        // its 1 MiB and 200 KB, read past its first MiB to see it's zeros.
+        for size in [200_000, MAX_EXIF + 200_000] {
+            let mut b = simple();
+            b.items.truncate(2);
+            b.refs.truncate(1);
+            b.items[1].data.resize(size, 0);
+            for id in 100..150 {
+                b.items.push(Item::exif(id, b"x"));
+            }
+            let (mut file, layout) = b.build();
+            let shared = layout.file_ranges(EXIF)[0].clone();
+            for id in 100..150 {
+                let at = entry_at(&file, id) + 8;
+                file[at..at + 4].copy_from_slice(&(shared.start as u32).to_be_bytes());
+                let len = (shared.end - shared.start) as u32;
+                file[at + 4..at + 8].copy_from_slice(&len.to_be_bytes());
+            }
+            let len = file.len() as u64;
+            let mut r = std::io::BufReader::with_capacity(
+                64 * 1024,
+                Tally {
+                    file: Cursor::new(file.clone()),
+                    read: 0,
+                },
+            );
+            let p = Plan::new(&mut r, len).unwrap();
+            // The first is walked; past the file's size, the rest are
+            // unread.
+            assert_eq!(
+                p.found.fields,
+                [Location, Camera, CreationDate, Other].into(),
+                "{size}"
+            );
+            let read = r.get_ref().read;
+            assert!(read < 3 * len, "{size}: {read} of {len}");
+            let (out, _) = strip(&file);
+            assert!(out[shared.start as usize..shared.end as usize]
+                .iter()
+                .all(|&b| b == 0));
         }
-        let (mut file, layout) = b.build();
-        let shared = layout.file_ranges(EXIF)[0].clone();
-        for id in 100..150 {
-            let at = entry_at(&file, id) + 8;
-            file[at..at + 4].copy_from_slice(&(shared.start as u32).to_be_bytes());
-            let len = (shared.end - shared.start) as u32;
-            file[at + 4..at + 8].copy_from_slice(&len.to_be_bytes());
-        }
-        let len = file.len() as u64;
-        let mut r = std::io::BufReader::with_capacity(
-            64 * 1024,
-            Tally {
-                file: Cursor::new(file.clone()),
-                read: 0,
-            },
-        );
-        let p = Plan::new(&mut r, len).unwrap();
-        // The first is walked; past the file's size, the rest are unread.
-        assert_eq!(
-            p.found.fields,
-            [Location, Camera, CreationDate, Other].into()
-        );
-        assert!(r.get_ref().read < 3 * len, "{} of {len}", r.get_ref().read);
-        let (out, _) = strip(&file);
-        assert!(out[shared.start as usize..shared.end as usize]
-            .iter()
-            .all(|&b| b == 0));
     }
 
     #[test]
