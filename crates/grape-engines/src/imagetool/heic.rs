@@ -36,9 +36,14 @@
 //!   refused too ([`SEQUENCE`]).
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
-//! - **Memory:** `meta` twice at most (the source's and the rebuilt one,
-//!   each within [`MAX_META`](super::isobmff::boxes::MAX_META)), one Exif
-//!   payload's first [`MAX_EXIF`], and 64 KiB buffers.
+//! - **Memory:** the source's `meta` (within
+//!   [`MAX_META`](super::isobmff::boxes::MAX_META)) and its model, and the
+//!   rebuilt `meta`, written straight into one buffer of the source's
+//!   size: twice a `meta` of data, and 4.74 times one packed at every cap
+//!   of the model, whose model is 2.4 times its size (`tests/heic_heap.rs`).
+//!   What's written is let go of before the check, which holds the
+//!   output's `meta` and its model. Besides, one Exif payload's first
+//!   [`MAX_EXIF`], and 64 KiB buffers.
 
 use std::collections::{HashMap, HashSet};
 use std::io::SeekFrom;
@@ -223,6 +228,7 @@ impl Survey {
             return Err(Error::Refused(LAYOUT.into()));
         }
         self.kept_file = kept_file;
+        self.drop_file = merged(std::mem::take(&mut self.drop_file));
         Ok(())
     }
 
@@ -461,17 +467,17 @@ fn dropped_box(r: &mut dyn In, b: &Header) -> Result<Option<MetaField>, Error> {
     }))
 }
 
-/// `ranges` sorted and merged where they touch or overlap.
+/// `ranges` sorted and merged where they touch or overlap, in place.
 fn merged(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     ranges.sort_unstable_by_key(|r| (r.start, r.end));
-    let mut out: Vec<Range<u64>> = Vec::with_capacity(ranges.len());
-    for r in ranges {
-        match out.last_mut() {
-            Some(last) if r.start <= last.end => last.end = last.end.max(r.end),
-            _ => out.push(r),
+    ranges.dedup_by(|next, last| {
+        let touches = next.start <= last.end;
+        if touches {
+            last.end = last.end.max(next.end);
         }
-    }
-    out
+        touches
+    });
+    ranges
 }
 
 /// Whether `range` overlaps any of `merged` (sorted, apart).
@@ -495,143 +501,156 @@ fn zeros(r: &mut dyn In, range: Range<u64>) -> Result<bool, Error> {
     Ok(true)
 }
 
-/// A box of `kind` in `form` (an explicit size for one that ran to the
-/// end) holding `content`.
-fn boxed(kind: &[u8; 4], form: Form, content: &[u8]) -> Vec<u8> {
-    let head = match form {
-        Form::Large => 16,
-        Form::Small | Form::ToEnd => 8,
-    };
-    let mut out = Header::write(kind, form, head + content.len() as u64);
-    out.extend_from_slice(content);
-    out
+/// Starts a box of `kind` in `form` (an explicit size for one that ran to
+/// the end) at the end of `out`, for [`end_box`] to give its size; gives
+/// where it starts.
+fn start_box(out: &mut Vec<u8>, kind: &[u8; 4], form: Form) -> usize {
+    let at = out.len();
+    out.extend_from_slice(&Header::write(kind, form, form.head()));
+    at
 }
 
-/// An item id: 32 bits when `wide`, 16 otherwise (dropping ids never
-/// makes one wider).
-fn id_bytes(id: u32, wide: bool) -> Vec<u8> {
+/// Sets the size of the box [`start_box`] started at `at` in `form`: the
+/// rest of `out`. A rebuilt box is never bigger than the source's, so a
+/// 32-bit size still fits.
+fn end_box(out: &mut [u8], at: usize, form: Form) {
+    let len = out.len() - at;
+    match form {
+        Form::Large => out[at + 8..at + 16].copy_from_slice(&(len as u64).to_be_bytes()),
+        Form::Small | Form::ToEnd => {
+            let len = u32::try_from(len).unwrap_or(u32::MAX);
+            out[at..at + 4].copy_from_slice(&len.to_be_bytes());
+        }
+    }
+}
+
+/// Writes an item id: 32 bits when `wide`, 16 otherwise (an id the source
+/// wrote in 16 bits).
+fn put_id(out: &mut Vec<u8>, id: u32, wide: bool) {
     if wide {
-        id.to_be_bytes().to_vec()
+        out.extend_from_slice(&id.to_be_bytes());
     } else {
-        // An id the source wrote in 16 bits.
-        (id as u16).to_be_bytes().to_vec()
+        out.extend_from_slice(&(id as u16).to_be_bytes());
     }
 }
 
-/// `meta`'s content rebuilt without what `s` drops ([module docs](self)).
-fn rebuild(s: &Survey) -> Vec<u8> {
+/// Writes `meta` rebuilt without what `s` drops at the end of `out`
+/// ([module docs](self)), each box straight into it.
+fn rebuild(s: &Survey, out: &mut Vec<u8>) {
     let m = &s.meta;
-    let b = &m.bytes;
-    let mut out = b[..4].to_vec();
+    let form = match s.meta_box.form {
+        Form::Large => Form::Large,
+        Form::Small | Form::ToEnd => Form::Small,
+    };
+    let at = start_box(out, b"meta", form);
+    out.extend_from_slice(&m.bytes[..4]);
     for (i, child) in m.children.iter().enumerate() {
-        let raw = &b[child.range.clone()];
-        let rebuilt = if i == m.iinf.0 {
-            rebuild_iinf(s, child)
+        if i == m.iinf.0 {
+            rebuild_iinf(s, child, out);
         } else if i == m.iloc.0 {
-            rebuild_iloc(s, child)
+            rebuild_iloc(s, child, out);
         } else if m.iref.is_some_and(|(at, _)| at == i) {
-            // An iref left with no references goes.
-            match rebuild_iref(s, child) {
-                Some(iref) => iref,
-                None => continue,
-            }
+            rebuild_iref(s, child, out);
         } else if m.iprp.as_ref().is_some_and(|p| p.child == i) {
-            rebuild_iprp(s, child)
+            rebuild_iprp(s, child, out);
         } else if m.idat == Some(i) {
-            let mut idat = raw.to_vec();
-            let head = child.form.head() as usize;
+            let from = out.len() + child.form.head() as usize;
+            out.extend_from_slice(&m.bytes[child.range.clone()]);
             for range in &s.drop_idat {
-                idat[head + range.start as usize..head + range.end as usize].fill(0);
+                out[from + range.start as usize..from + range.end as usize].fill(0);
             }
-            idat
         } else if m.grpl == Some(i) {
-            rebuild_grpl(s, child)
+            rebuild_grpl(s, child, out);
         } else {
-            raw.to_vec()
-        };
-        out.extend_from_slice(&rebuilt);
+            out.extend_from_slice(&m.bytes[child.range.clone()]);
+        }
     }
-    out
+    end_box(out, at, form);
 }
 
-fn rebuild_iinf(s: &Survey, child: &Child) -> Vec<u8> {
+fn rebuild_iinf(s: &Survey, child: &Child, out: &mut Vec<u8>) {
     let m = &s.meta;
     let start = child.content().start;
-    let kept: Vec<_> = m
-        .items
-        .iter()
-        .filter(|item| !s.dropped.contains(&item.id))
-        .collect();
-    let mut c = m.bytes[start..start + 4].to_vec();
+    let kept = || m.items.iter().filter(|item| !s.dropped.contains(&item.id));
+    let n = kept().count();
+    let at = start_box(out, b"iinf", child.form);
+    out.extend_from_slice(&m.bytes[start..start + 4]);
     if m.iinf.1 == 0 {
-        c.extend_from_slice(&(kept.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(n as u16).to_be_bytes());
     } else {
-        c.extend_from_slice(&(kept.len() as u32).to_be_bytes());
+        out.extend_from_slice(&(n as u32).to_be_bytes());
     }
-    for item in kept {
-        c.extend_from_slice(&m.bytes[item.range.clone()]);
+    for item in kept() {
+        out.extend_from_slice(&m.bytes[item.range.clone()]);
     }
-    boxed(b"iinf", child.form, &c)
+    end_box(out, at, child.form);
 }
 
-fn rebuild_iloc(s: &Survey, child: &Child) -> Vec<u8> {
+fn rebuild_iloc(s: &Survey, child: &Child, out: &mut Vec<u8>) {
     let m = &s.meta;
     let start = child.content().start;
-    let kept: Vec<_> = m
-        .locations
-        .iter()
-        .filter(|loc| !s.dropped.contains(&loc.id))
-        .collect();
+    let kept = || {
+        m.locations
+            .iter()
+            .filter(|loc| !s.dropped.contains(&loc.id))
+    };
+    let n = kept().count();
+    let at = start_box(out, b"iloc", child.form);
     // Its version, flags and field sizes.
-    let mut c = m.bytes[start..start + 6].to_vec();
+    out.extend_from_slice(&m.bytes[start..start + 6]);
     if m.iloc.1 < 2 {
-        c.extend_from_slice(&(kept.len() as u16).to_be_bytes());
+        out.extend_from_slice(&(n as u16).to_be_bytes());
     } else {
-        c.extend_from_slice(&(kept.len() as u32).to_be_bytes());
+        out.extend_from_slice(&(n as u32).to_be_bytes());
     }
-    for loc in kept {
-        c.extend_from_slice(&m.bytes[loc.range.clone()]);
+    for loc in kept() {
+        out.extend_from_slice(&m.bytes[loc.range.clone()]);
     }
-    c.extend_from_slice(&m.bytes[m.iloc_end..child.range.end]);
-    boxed(b"iloc", child.form, &c)
+    out.extend_from_slice(&m.bytes[m.iloc_end..child.range.end]);
+    end_box(out, at, child.form);
 }
 
-/// `iref` without the dropped ids, and its boxes left with none; `None`
+/// `iref` without the dropped ids, and its boxes left with none; nothing
 /// when no box is left.
-fn rebuild_iref(s: &Survey, child: &Child) -> Option<Vec<u8>> {
+fn rebuild_iref(s: &Survey, child: &Child, out: &mut Vec<u8>) {
     let m = &s.meta;
     let start = child.content().start;
     let wide = m.iref.is_some_and(|(_, v)| v == 1);
-    let mut c = m.bytes[start..start + 4].to_vec();
+    let at = start_box(out, b"iref", child.form);
+    out.extend_from_slice(&m.bytes[start..start + 4]);
     let mut any = false;
     for r in m.refs.iter().filter(|r| !s.dropped.contains(&r.from)) {
         let to = m.to(r);
-        let kept: Vec<u32> = to
-            .iter()
-            .copied()
-            .filter(|id| !s.dropped.contains(id))
-            .collect();
-        if kept.len() == to.len() {
-            c.extend_from_slice(&m.bytes[r.child.range.clone()]);
-        } else if !kept.is_empty() {
-            let mut body = id_bytes(r.from, wide);
-            body.extend_from_slice(&(kept.len() as u16).to_be_bytes());
-            for id in kept {
-                body.extend_from_slice(&id_bytes(id, wide));
+        let kept = || to.iter().copied().filter(|id| !s.dropped.contains(id));
+        let n = kept().count();
+        if n == to.len() {
+            out.extend_from_slice(&m.bytes[r.child.range.clone()]);
+        } else if n > 0 {
+            let b = start_box(out, &r.kind, r.child.form);
+            put_id(out, r.from, wide);
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+            for id in kept() {
+                put_id(out, id, wide);
             }
-            c.extend_from_slice(&boxed(&r.kind, r.child.form, &body));
+            end_box(out, b, r.child.form);
         } else {
             continue;
         }
         any = true;
     }
-    any.then(|| boxed(b"iref", child.form, &c))
+    if any {
+        end_box(out, at, child.form);
+    } else {
+        // An iref left with no references goes.
+        out.truncate(at);
+    }
 }
 
-fn rebuild_iprp(s: &Survey, child: &Child) -> Vec<u8> {
+fn rebuild_iprp(s: &Survey, child: &Child, out: &mut Vec<u8>) {
     let m = &s.meta;
     let Some(iprp) = &m.iprp else {
-        return m.bytes[child.range.clone()].to_vec();
+        out.extend_from_slice(&m.bytes[child.range.clone()]);
+        return;
     };
     // Each index's new number: less the removed properties before it.
     let mut renumbered = vec![0u16; s.removed.len() + 1];
@@ -642,86 +661,82 @@ fn rebuild_iprp(s: &Survey, child: &Child) -> Vec<u8> {
         }
         renumbered[i + 1] = (i + 1 - gone) as u16;
     }
-    let mut c = Vec::new();
+    let at = start_box(out, b"iprp", child.form);
     // The ipma boxes, in iprp's order.
     let mut maps = m.maps.iter().peekable();
     for (i, kid) in iprp.children.iter().enumerate() {
         if iprp.ipco == Some(i) {
-            let mut ipco = Vec::new();
+            let ipco = start_box(out, b"ipco", kid.form);
             for (p, _) in m.properties.iter().zip(&s.removed).filter(|(_, &r)| !r) {
-                ipco.extend_from_slice(&m.bytes[p.range.clone()]);
+                out.extend_from_slice(&m.bytes[p.range.clone()]);
             }
-            c.extend_from_slice(&boxed(b"ipco", kid.form, &ipco));
+            end_box(out, ipco, kid.form);
         } else if let Some(map) = maps.next_if(|map| map.child == i) {
             let start = kid.content().start;
-            let mut ipma = m.bytes[start..start + 4].to_vec();
-            let entries: Vec<_> = map
-                .entries
-                .iter()
-                .filter(|e| !s.dropped.contains(&e.item))
-                .collect();
-            ipma.extend_from_slice(&(entries.len() as u32).to_be_bytes());
-            for entry in entries {
+            let ipma = start_box(out, b"ipma", kid.form);
+            out.extend_from_slice(&m.bytes[start..start + 4]);
+            let entries = || map.entries.iter().filter(|e| !s.dropped.contains(&e.item));
+            out.extend_from_slice(&(entries().count() as u32).to_be_bytes());
+            for entry in entries() {
                 let props = m.props(entry);
                 let unchanged = props.iter().all(|a| {
                     let i = usize::from(a.index);
                     i == 0 || (!s.removed[i - 1] && renumbered[i] == a.index)
                 });
                 if unchanged {
-                    ipma.extend_from_slice(&m.bytes[entry.range.clone()]);
+                    out.extend_from_slice(&m.bytes[entry.range.clone()]);
                     continue;
                 }
-                let kept: Vec<_> = props
-                    .iter()
-                    .filter(|a| a.index == 0 || !s.removed[usize::from(a.index) - 1])
-                    .collect();
-                ipma.extend_from_slice(&id_bytes(entry.item, map.version == 1));
-                ipma.push(kept.len() as u8);
-                for a in kept {
+                let kept = || {
+                    props
+                        .iter()
+                        .filter(|a| a.index == 0 || !s.removed[usize::from(a.index) - 1])
+                };
+                put_id(out, entry.item, map.version == 1);
+                out.push(kept().count() as u8);
+                for a in kept() {
                     let index = renumbered[usize::from(a.index)];
                     if map.wide() {
-                        ipma.extend_from_slice(
+                        out.extend_from_slice(
                             &(index | u16::from(a.essential) << 15).to_be_bytes(),
                         );
                     } else {
-                        ipma.push(index as u8 | u8::from(a.essential) << 7);
+                        out.push(index as u8 | u8::from(a.essential) << 7);
                     }
                 }
             }
-            ipma.extend_from_slice(&m.bytes[map.end..kid.range.end]);
-            c.extend_from_slice(&boxed(b"ipma", kid.form, &ipma));
+            out.extend_from_slice(&m.bytes[map.end..kid.range.end]);
+            end_box(out, ipma, kid.form);
         } else {
-            c.extend_from_slice(&m.bytes[kid.range.clone()]);
+            out.extend_from_slice(&m.bytes[kid.range.clone()]);
         }
     }
-    boxed(b"iprp", child.form, &c)
+    end_box(out, at, child.form);
 }
 
-fn rebuild_grpl(s: &Survey, child: &Child) -> Vec<u8> {
+fn rebuild_grpl(s: &Survey, child: &Child, out: &mut Vec<u8>) {
     let m = &s.meta;
-    let mut c = Vec::new();
+    let at = start_box(out, b"grpl", child.form);
     for g in &m.groups {
         let members = m.members(g);
-        let kept: Vec<u32> = members
-            .iter()
-            .copied()
-            .filter(|id| !s.dropped.contains(id))
-            .collect();
-        if kept.len() == members.len() {
-            c.extend_from_slice(&m.bytes[g.child.range.clone()]);
-        } else if !kept.is_empty() {
+        let kept = || members.iter().copied().filter(|id| !s.dropped.contains(id));
+        let n = kept().count();
+        if n == members.len() {
+            out.extend_from_slice(&m.bytes[g.child.range.clone()]);
+        } else if n > 0 {
             let start = g.child.content().start;
+            let b = start_box(out, &g.child.kind, g.child.form);
             // Its version, flags and group id.
-            let mut body = m.bytes[start..start + 8].to_vec();
-            body.extend_from_slice(&(kept.len() as u32).to_be_bytes());
-            for id in kept {
-                body.extend_from_slice(&id.to_be_bytes());
+            out.extend_from_slice(&m.bytes[start..start + 8]);
+            out.extend_from_slice(&(n as u32).to_be_bytes());
+            for id in kept() {
+                out.extend_from_slice(&id.to_be_bytes());
             }
-            body.extend_from_slice(&m.bytes[g.list_end..g.child.range.end]);
-            c.extend_from_slice(&boxed(&g.child.kind, g.child.form, &body));
+            out.extend_from_slice(&m.bytes[g.list_end..g.child.range.end]);
+            end_box(out, b, g.child.form);
         }
     }
-    boxed(b"grpl", child.form, &c)
+    end_box(out, at, child.form);
 }
 
 /// What the output has instead of a source range.
@@ -742,12 +757,13 @@ impl Edit {
     }
 }
 
-/// An item Remove Metadata keeps, for the check.
+/// An item Remove Metadata keeps, for the check: where its `iloc` entry is
+/// in the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Kept {
     id: u32,
-    /// Its `iloc` entry.
-    entry: Vec<u8>,
+    at: u64,
+    len: usize,
 }
 
 /// Remove Metadata's plan for one HEIF file: what to write, and what goes.
@@ -761,7 +777,7 @@ pub(crate) struct Plan {
     bytes: Vec<u8>,
     found: Found,
     primary: u32,
-    /// Every `iloc` entry it keeps.
+    /// Every item it keeps with an `iloc` entry, in `iloc`'s order.
     kept: Vec<Kept>,
     dropped: HashSet<u32>,
     /// Where the source's `idat` content is in the file.
@@ -773,22 +789,25 @@ impl Plan {
     /// it ([module docs](self)).
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
         let s = Survey::new(r, len)?;
-        let mut bytes = Vec::new();
         let mut edits = Vec::new();
+        // What the edits write, each in its place: the rebuilt meta and the
+        // free box after it, which fit in the source's meta, and a free
+        // header for each box that goes.
+        let freed = s.fates.iter().filter(|&&f| f == Fate::Free).count();
+        let room = if s.meta_changes() {
+            s.meta_box.len as usize
+        } else {
+            0
+        };
+        let mut bytes = Vec::with_capacity(room + 16 * freed);
         if s.meta_changes() {
-            let content = rebuild(&s);
-            let form = match s.meta_box.form {
-                Form::Large => Form::Large,
-                Form::Small | Form::ToEnd => Form::Small,
-            };
-            let rebuilt = boxed(b"meta", form, &content);
+            rebuild(&s, &mut bytes);
             let saved = s
                 .meta_box
                 .len
-                .checked_sub(rebuilt.len() as u64)
+                .checked_sub(bytes.len() as u64)
                 .filter(|&saved| saved == 0 || saved >= 8)
                 .ok_or_else(|| Error::Refused(LAYOUT.into()))?;
-            bytes.extend_from_slice(&rebuilt);
             if saved > 0 {
                 bytes.extend_from_slice(&Header::write(b"free", Form::Small, saved));
             }
@@ -820,7 +839,7 @@ impl Plan {
                 Fate::Keep | Fate::Meta => {}
             }
         }
-        for range in merged(s.drop_file.clone()) {
+        for range in &s.drop_file {
             if range.start < s.end {
                 edits.push(Edit::Zero(range.start..range.end.min(s.end)));
             }
@@ -835,35 +854,40 @@ impl Plan {
             return Err(Error::Refused(LAYOUT.into()));
         }
         let m = &s.meta;
+        let content = s.meta_box.content().start;
+        let kept = m
+            .locations
+            .iter()
+            .filter(|loc| !s.dropped.contains(&loc.id))
+            .map(|loc| Kept {
+                id: loc.id,
+                at: content + loc.range.start as u64,
+                len: loc.range.len(),
+            })
+            .collect();
+        let idat_at = m.idat().map(|r| content + r.start as u64);
         Ok(Plan {
             len: s.end,
             edits,
             bytes,
-            found: s.found.clone(),
+            found: s.found,
             primary: m.primary,
-            kept: m
-                .locations
-                .iter()
-                .filter(|loc| !s.dropped.contains(&loc.id))
-                .map(|loc| Kept {
-                    id: loc.id,
-                    entry: m.bytes[loc.range.clone()].to_vec(),
-                })
-                .collect(),
-            idat_at: m
-                .idat()
-                .map(|r| s.meta_box.content().start + r.start as u64),
+            kept,
+            idat_at,
             dropped: s.dropped,
         })
     }
 
     /// Writes the plan into `w`, copying from the source `r` it was made
-    /// from; gives what went.
-    pub(crate) fn write(&self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
+    /// from, once; gives what went. What it writes is let go of as it
+    /// returns, so the check never holds it beside the output's `meta`.
+    pub(crate) fn write(&mut self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
+        let edits = std::mem::take(&mut self.edits);
+        let bytes = std::mem::take(&mut self.bytes);
         r.seek(SeekFrom::Start(0)).map_err(Error::Read)?;
         let mut buf = vec![0; STEP];
         let mut at = 0;
-        for edit in &self.edits {
+        for edit in &edits {
             let range = edit.range();
             copy(r, w, range.start - at, &mut buf)?;
             skip(r, range.end - range.start, &mut buf)?;
@@ -877,9 +901,8 @@ impl Plan {
                         left -= n as u64;
                     }
                 }
-                Edit::Write { bytes, .. } => {
-                    w.write_all(&self.bytes[bytes.clone()])
-                        .map_err(Error::Write)?;
+                Edit::Write { bytes: written, .. } => {
+                    w.write_all(&bytes[written.clone()]).map_err(Error::Write)?;
                 }
             }
             at = range.end;
@@ -891,8 +914,9 @@ impl Plan {
     /// Reads the output `out` (`len` bytes) again against the source `src`
     /// it came from: it must be the size planned; the reporter must find
     /// nothing in it; it must have the same primary item, every kept
-    /// `iloc` entry byte for byte with its data the same bytes, and no
-    /// reference from a dropped item. [`Error::Broken`] says what's wrong.
+    /// `iloc` entry byte for byte (read again from the source) with its
+    /// data the same bytes, and no reference from a dropped item.
+    /// [`Error::Broken`] says what's wrong.
     pub(crate) fn check(&self, src: &mut dyn In, out: &mut dyn In, len: u64) -> Result<(), Error> {
         let wrong = |why: String| Err(Error::Broken(format!("the output {why}")));
         if len != self.len {
@@ -921,11 +945,15 @@ impl Plan {
         // it, in the file and in idat.
         let mut file = Vec::new();
         let mut in_idat = Vec::new();
+        let mut entry = Vec::new();
         for kept in &self.kept {
             let Some(loc) = locations.get(&kept.id) else {
                 return wrong(format!("lost item {}", kept.id));
             };
-            if m.bytes[loc.range.clone()] != kept.entry[..] {
+            // The source's entry, read again.
+            entry.resize(kept.len, 0);
+            read_at(src, kept.at, &mut entry)?;
+            if m.bytes[loc.range.clone()] != entry[..] {
                 return wrong(format!("changed item {}'s location", kept.id));
             }
             if loc.data_ref != 0 || loc.method == 2 {
@@ -1012,7 +1040,7 @@ mod tests {
     /// Strips `file`, checks the output against it, and gives the output
     /// and what went.
     fn strip(file: &[u8]) -> (Vec<u8>, BTreeSet<MetaField>) {
-        let plan = plan(file).unwrap();
+        let mut plan = plan(file).unwrap();
         let mut out = Cursor::new(Vec::new());
         let found = plan.write(&mut Cursor::new(file), &mut out).unwrap();
         let out = out.into_inner();
@@ -1495,7 +1523,7 @@ mod tests {
         let (src, _) = b.build();
         for n in 0..src.len() {
             let file = &src[..n];
-            if let Ok(p) = plan(file) {
+            if let Ok(mut p) = plan(file) {
                 let mut out = Cursor::new(Vec::new());
                 p.write(&mut Cursor::new(file), &mut out).unwrap();
                 let out = out.into_inner();
@@ -1512,7 +1540,7 @@ mod tests {
     #[test]
     fn the_check_catches_a_planted_leftover() {
         let (src, layout) = simple().build();
-        let p = plan(&src).unwrap();
+        let mut p = plan(&src).unwrap();
         let mut out = Cursor::new(Vec::new());
         p.write(&mut Cursor::new(&src), &mut out).unwrap();
         let out = out.into_inner();
@@ -1528,7 +1556,7 @@ mod tests {
         let mut b = simple();
         b.items.push(Item::picture(2, 0xA2, 10));
         let (src2, _) = b.build();
-        let p2 = plan(&src2).unwrap();
+        let mut p2 = plan(&src2).unwrap();
         let mut out2 = Cursor::new(Vec::new());
         p2.write(&mut Cursor::new(&src2), &mut out2).unwrap();
         let mut o = out2.into_inner();

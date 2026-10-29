@@ -188,7 +188,7 @@ pub(crate) fn run(
     };
     // A TIFF or a HEIF file is read first: one Grape won't strip is
     // refused before anything is created.
-    let stripper = match kind {
+    let mut stripper = match kind {
         Kind::Jpeg => Stripper::Jpeg,
         Kind::Png => Stripper::Png,
         Kind::Webp => Stripper::Webp,
@@ -208,7 +208,7 @@ pub(crate) fn run(
     let (temp, out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
     let mut writer = BufWriter::with_capacity(64 * 1024, Cancellable::new(out, &ctx.cancel));
-    let found = match &stripper {
+    let found = match &mut stripper {
         Stripper::Jpeg => jpeg::strip(&mut reader, &mut writer),
         Stripper::Png => png::strip(&mut reader, &mut writer),
         Stripper::Webp => webp::strip(&mut reader, &mut writer),
