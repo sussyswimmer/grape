@@ -566,6 +566,51 @@ fn both_tiff_tools_refuse_counts_libtiff_reads_for_other_strips() {
 }
 
 #[test]
+fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
+    // A gray 300 × 100 page of one strip counted 0, which libtiff works
+    // out to the whole picture, but only 20,000 bytes of it, then an XMP
+    // packet (700), then the IFD: libtiff reads the packet as pixels.
+    let xmp = b"<x:xmpmeta>a secret</x:xmpmeta>".repeat(450);
+    let at = 8 + 20_000;
+    let ifd = at + u32::try_from(xmp.len()).unwrap();
+    let entries: [(u16, u16, u32, u32); 8] = [
+        (256, 4, 1, 300),
+        (257, 4, 1, 100),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (273, 4, 1, 8),
+        (278, 4, 1, 100),
+        (279, 4, 1, 0),
+        (700, 1, u32::try_from(xmp.len()).unwrap(), at),
+    ];
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..20_000).map(|i| (i % 251) as u8));
+    file.extend(&xmp);
+    file.extend(8u16.to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    let dir = TestDir::new("tiff-into-xmp");
+    for op in [
+        Operation::tool(ToolKey::RemoveMetadata),
+        compress_op(grape_core::CompressPreset::High),
+    ] {
+        let err = run(&dir, "packet.tif", &file, op).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "packet.tif says the wrong size for some of its image data, which Grape can't rewrite yet."
+        );
+        fs::remove_file(dir.join("packet.tif")).unwrap();
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

@@ -21,8 +21,10 @@
 //!   worked out only for uncompressed data, and so are the counts libtiff
 //!   4.5 ignores and works out ([`Walk::recount`]). A block of 0 bytes at
 //!   0 stays empty (GDAL's sparse tiles); blocks that are the same bytes
-//!   are fine, and any other overlap, between blocks or with an IFD, is
-//!   [`Error::Broken`].
+//!   are fine, and any other overlap, between blocks, or with an IFD or a
+//!   value out of line (any IFD's), is [`Error::Broken`], or [`MISSIZED`]
+//!   when only blocks worked out from the picture overlap
+//!   ([`Tiff::check_overlaps`]).
 //! - **Refused:** a DNG, or an old-style JPEG, in any image IFD:
 //!   [`Error::Refused`] as soon as the walk reads that IFD, before its
 //!   strips or tiles, which an old-style JPEG may not have; and byte counts
@@ -193,6 +195,9 @@ pub(crate) struct Ifd {
     pub(crate) blocks: Vec<Block>,
     /// Tiles rather than strips.
     pub(crate) tiled: bool,
+    /// Its blocks' sizes were worked out from the picture, not read: its
+    /// byte counts are missing, or libtiff ignores them ([`Walk::recount`]).
+    pub(crate) estimated: bool,
     /// Its SubIFDs (330): each the head of a chain, usually of one.
     pub(crate) subs: Vec<Vec<Ifd>>,
     /// Its Exif IFD (34665).
@@ -334,8 +339,15 @@ impl Tiff {
 
     /// Every block with bytes, IFD by IFD.
     fn listed(&self) -> impl Iterator<Item = &Block> {
+        self.with_bytes(false)
+    }
+
+    /// Every block with bytes, IFD by IFD; with `given`, only those of
+    /// IFDs whose blocks the file gave the sizes of.
+    fn with_bytes(&self, given: bool) -> impl Iterator<Item = &Block> {
         self.ifds()
             .into_iter()
+            .filter(move |ifd| !(given && ifd.estimated))
             .flat_map(|ifd| &ifd.blocks)
             .filter(|b| b.len > 0)
     }
@@ -347,8 +359,14 @@ impl Tiff {
         repeats(|| self.listed())
     }
 
-    /// Fails when two blocks overlap without being the same bytes, or a
-    /// block or an IFD overlaps an IFD.
+    /// Fails when two blocks overlap without being the same bytes, an IFD
+    /// overlaps another, or a block reaches into an IFD or a value out of
+    /// line, of any IFD the walk read (an Exif, GPS or Interop IFD's too):
+    /// [`Error::Broken`], or, when only blocks worked out from the picture
+    /// do, [`MISSIZED`], as libtiff would read the IFD or the value as
+    /// pixels. What the check holds besides the model: 16 bytes for each
+    /// IFD and value out of line (the values at most [`MAX_ALL_ENTRIES`]),
+    /// and the sorted references [`InOrder`] may make.
     fn check_overlaps(&self) -> Result<(), Error> {
         let layout = self.layout;
         let all = self.ifds();
@@ -356,25 +374,70 @@ impl Tiff {
         let span = |at: u64, n: usize| (at, at + layout.ifd_len(n as u64));
         for ifd in &all {
             ifds.push(span(ifd.at, ifd.entries.len()));
-            for meta in [&ifd.exif, &ifd.gps].into_iter().flatten() {
-                let interop = meta.interop.as_deref();
-                for meta in std::iter::once(meta).chain(interop) {
-                    if !meta.unread {
-                        ifds.push(span(meta.at, meta.entries.len()));
-                    }
-                }
-            }
+            ifds.extend(metas(ifd).map(|meta| span(meta.at, meta.entries.len())));
         }
         // An Exif, GPS or Interop IFD that IFDs share is listed for each.
         ifds.sort_unstable();
         ifds.dedup();
-        let ifds_apart = ifds.windows(2).all(|w| w[1].0 >= w[0].1);
-        if ifds_apart && clear_of(InOrder::new(|| self.listed()).iter(), &ifds) {
+        if !ifds.windows(2).all(|w| w[1].0 >= w[0].1) {
+            return Err(Error::Broken("IFDs overlap".into()));
+        }
+        // Where no block may reach: the IFDs, and the values out of line,
+        // counted first so the list isn't grown past their number, merged
+        // where they meet.
+        let mut taken = ifds;
+        taken.reserve_exact(all.iter().map(|ifd| values(ifd).count()).sum());
+        for ifd in &all {
+            taken.extend(values(ifd));
+        }
+        let taken = merged(taken);
+        let clear = |given| clear_of(InOrder::new(|| self.with_bytes(given)).iter(), &taken);
+        if clear(false) {
             Ok(())
+        } else if all.iter().any(|ifd| ifd.estimated) && clear(true) {
+            Err(Error::Refused(MISSIZED.into()))
         } else {
-            Err(Error::Broken("blocks or IFDs overlap".into()))
+            Err(Error::Broken(
+                "blocks reach into each other, an IFD or a value".into(),
+            ))
         }
     }
+}
+
+/// The Exif, GPS and Interop IFDs of `ifd` the walk could read.
+fn metas(ifd: &Ifd) -> impl Iterator<Item = &Meta> {
+    [&ifd.exif, &ifd.gps]
+        .into_iter()
+        .flatten()
+        .flat_map(|meta| std::iter::once(meta).chain(meta.interop.as_deref()))
+        .filter(|meta| !meta.unread)
+}
+
+/// Where each value out of line of `ifd` and its Exif, GPS and Interop
+/// IFDs is: its start and end, within the file.
+fn values(ifd: &Ifd) -> impl Iterator<Item = (u64, u64)> + '_ {
+    let entries = ifd
+        .entries
+        .iter()
+        .chain(metas(ifd).flat_map(|m| &m.entries));
+    entries.filter_map(|entry| match entry.value {
+        Value::At { offset, len } => Some((offset, offset + len)),
+        _ => None,
+    })
+}
+
+/// `spans` (start and end) in order, those that meet or touch merged: so
+/// in order and apart.
+fn merged(mut spans: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    spans.sort_unstable();
+    spans.dedup_by(|next, last| {
+        let meets = next.0 <= last.1;
+        if meets {
+            last.1 = last.1.max(next.1);
+        }
+        meets
+    });
+    spans
 }
 
 /// The blocks that `listed` (blocks with bytes, given afresh each call)
@@ -709,6 +772,7 @@ impl Walk<'_> {
             entries,
             blocks: Vec::new(),
             tiled: false,
+            estimated: false,
             subs: Vec::new(),
             exif: None,
             gps: None,
@@ -834,7 +898,7 @@ impl Walk<'_> {
                         blocks.len()
                     )));
                 }
-                self.recount(ifd, &mut blocks, plain)?;
+                ifd.estimated = self.recount(ifd, &mut blocks, plain)?;
             }
             None => {
                 let unsure = |why: &str| Error::Broken(format!("no byte counts, and {why}"));
@@ -845,6 +909,7 @@ impl Walk<'_> {
                 for (n, block) in (0..).zip(&mut blocks) {
                     block.len = sizes.of(n);
                 }
+                ifd.estimated = true;
             }
         }
         let l = self.layout;
@@ -881,7 +946,9 @@ impl Walk<'_> {
     ///   (one at 0 is empty, GDAL's sparse tiles), and an uncompressed
     ///   block libtiff reads that's shorter than the picture says, which
     ///   libtiff fails on and Pillow and ImageMagick read past.
-    fn recount(&mut self, ifd: &Ifd, blocks: &mut [Block], plain: bool) -> Result<(), Error> {
+    ///
+    /// Gives whether it worked them out.
+    fn recount(&mut self, ifd: &Ifd, blocks: &mut [Block], plain: bool) -> Result<bool, Error> {
         let l = self.layout;
         let listed = blocks.len() as u64;
         let (count, tiled) = libtiff_count(ifd, l.order).unwrap_or((listed, ifd.tiled));
@@ -928,7 +995,7 @@ impl Walk<'_> {
         if (0..).zip(blocks.iter()).any(wrong) {
             return Err(Error::Refused(MISSIZED.into()));
         }
-        Ok(())
+        Ok(ignored)
     }
 
     /// How an uncompressed IFD's `want` strips or tiles are sized from its
@@ -1445,6 +1512,54 @@ mod tests {
         into_ifd.counts = Some(vec![2, 2]);
         let file = Builder::new(b'I', false, vec![into_ifd]).build();
         assert!(matches!(read(&file), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn a_block_that_reaches_into_a_value_is_refused() {
+        let refused =
+            |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
+        let broken = |file: &[u8]| matches!(read(file), Err(Error::Broken(_)));
+        // 300 × 100 with only 20,000 bytes of its picture, then an XMP
+        // packet (700) of 13,500 bytes; `strips` strips listed from the
+        // picture's start, each a strip's size apart, with `counts`.
+        let xmp = b"<x:xmpmeta>a secret</x:xmpmeta>".repeat(450);
+        let packet = |strips: u64, counts: Vec<u64>| {
+            let rows = 100 / strips;
+            let mut page = gray(300, 100, rows as u32, vec![B::data(&picture()[..20_000])]);
+            page.tags.push((700, V::Bytes(1, vec![0; 8])));
+            page.counts = Some(counts);
+            page.offsets = Some(vec![0; strips as usize]);
+            let build = |page: Page| {
+                let pages = vec![page];
+                let tail = xmp.clone();
+                Builder {
+                    tail,
+                    ..Builder::new(b'I', false, pages)
+                }
+                .build()
+            };
+            let at = (build(page.clone()).len() - xmp.len() - 20_000) as u64;
+            page.offsets = Some((0..strips).map(|i| at + i * 300 * rows).collect());
+            let mut file = build(page);
+            set_entry(&mut file, 8, 700, xmp.len() as u64, at + 20_000);
+            file
+        };
+        // A lone strip counted 0 ("Bogus") is worked out to the whole
+        // picture, and so are ten counted "Wrong" to 3,000 bytes each:
+        // they run into the packet, which libtiff reads as pixels.
+        assert!(refused(&packet(1, vec![0])));
+        assert!(refused(&packet(10, [3_000, 1_500].repeat(5))));
+        // Counted so at their word, they're broken.
+        assert!(broken(&packet(10, vec![3_000; 10])));
+        // A MakerNote in an Exif IFD, pointed into a strip.
+        let mut page = gray(30, 10, 10, vec![B::data(&picture()[..300])]);
+        page.exif = Some(vec![(0x927C, V::Bytes(7, b"a maker note".to_vec()))]);
+        let mut file = Builder::new(b'M', true, vec![page]).build();
+        let tiff = read(&file).unwrap();
+        let strip = tiff.pages[0].blocks[0];
+        let exif = tiff.pages[0].exif.as_ref().unwrap().at;
+        set_entry(&mut file, exif, 0x927C, 12, strip.offset + 280);
+        assert!(broken(&file));
     }
 
     fn lens(tiff: &Tiff) -> Vec<u64> {
