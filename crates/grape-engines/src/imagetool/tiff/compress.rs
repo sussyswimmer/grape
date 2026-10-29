@@ -58,7 +58,7 @@
 //!   read or write, 64 KiB of either (13 to 98 ms in a review's measure);
 //!   one that lands in the temp file's last flush is a cancel too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, SeekFrom, Write};
 use std::path::Path;
@@ -102,8 +102,10 @@ const LEVEL_6_UP_TO: u64 = 256 << 20;
 const LEVEL_PAST: u32 = 3;
 
 /// The zlib level Compress deflates a file's blocks at, from the decoded
-/// bytes it recodes in the whole file: 9 for up to 16 MiB, 6 for up to
-/// 256 MiB, [`LEVEL_PAST`] past that (D28's Q10). The presets are the same.
+/// bytes it recodes in the whole file, a block listed more than once
+/// counted once for each way it's recoded ([`Ways`]): 9 for up to 16 MiB,
+/// 6 for up to 256 MiB, [`LEVEL_PAST`] past that (D28's Q10). The presets
+/// are the same.
 pub(crate) fn level(recoded: u64) -> u32 {
     if recoded <= LEVEL_9_UP_TO {
         9
@@ -150,7 +152,8 @@ pub(crate) struct Plan {
     /// writes them (`Tiff::ifds`').
     hows: Vec<How>,
     /// The decoded bytes of the blocks recoded and the bytes of those
-    /// copied: what progress counts.
+    /// copied, each block once for each way it's written ([`Ways`]): what
+    /// progress counts.
     work: u64,
     /// The zlib level the blocks are deflated at ([`level`]).
     level: u32,
@@ -209,23 +212,44 @@ impl Planned {
         // more.
         let mut left = len;
         let mut hows = Vec::new();
+        // Each block once for each way it's written.
+        let mut ways = Ways::new(tiff.shared());
         let (mut recoded, mut copied): (u64, u64) = (0, 0);
         let mut log = Log::default();
         for (n, ifd) in tiff.ifds().into_iter().enumerate() {
             let how = how(r, ifd, order, &mut left)?;
             let blocks = ifd.blocks.iter().enumerate().filter(|(_, b)| b.len > 0);
             match &how {
-                How::Recode { geometry, .. } => {
-                    let bytes = blocks.map(|(i, _)| geometry.expected(i as u64));
-                    recoded = bytes.fold(recoded, u64::saturating_add);
+                How::Recode {
+                    codec,
+                    geometry,
+                    predictor,
+                    ..
+                } => {
+                    for (i, block) in blocks {
+                        let recipe = Recipe {
+                            codec: *codec,
+                            expected: geometry.expected(i as u64),
+                            row: geometry.row,
+                            predictor: *predictor,
+                        };
+                        if ways.new_way(block, Some(recipe)) {
+                            recoded = recoded.saturating_add(recipe.expected);
+                        }
+                    }
                 }
                 How::Copy(why) => {
                     log.add(format!("IFD {n} copied as it is: {why}"));
-                    copied = blocks.map(|(_, b)| b.len).fold(copied, u64::saturating_add);
+                    for (_, block) in blocks {
+                        if ways.new_way(block, None) {
+                            copied = copied.saturating_add(block.len);
+                        }
+                    }
                 }
             }
             hows.push(how);
         }
+        drop(ways);
         if !hows.iter().any(|how| matches!(how, How::Recode { .. })) {
             return Ok(Planned::Nothing(log.to_string()));
         }
@@ -244,6 +268,60 @@ impl Planned {
             #[cfg(test)]
             broken: false,
         }))
+    }
+}
+
+/// The ways the blocks listed more than once are written, as the
+/// [`Recoder`] writes them, so that the plan counts what it will write:
+/// once for each way (copied as it is, or each [`Recipe`]), and past
+/// [`MAX_MORE`] ways besides a block's first, each time it's listed.
+struct Ways {
+    shared: Vec<Block>,
+    /// Each shared block's first way: 0 for none yet, 1 for copied, or its
+    /// recipe's number.
+    first: Vec<u32>,
+    more: HashSet<(usize, u32)>,
+    /// The recipes met, numbered from 2.
+    recipes: HashMap<Recipe, u32>,
+}
+
+impl Ways {
+    fn new(shared: Vec<Block>) -> Ways {
+        Ways {
+            first: vec![0; shared.len()],
+            shared,
+            more: HashSet::new(),
+            recipes: HashMap::new(),
+        }
+    }
+
+    /// Whether `block` is written as `recipe` (copied as it is for `None`)
+    /// for the first time, noting that it is.
+    fn new_way(&mut self, block: &Block, recipe: Option<Recipe>) -> bool {
+        let Ok(k) = self.shared.binary_search(block) else {
+            return true;
+        };
+        let way = match recipe {
+            None => 1,
+            Some(recipe) => {
+                let next = u32::try_from(self.recipes.len() + 2).unwrap_or(u32::MAX);
+                *self.recipes.entry(recipe).or_insert(next)
+            }
+        };
+        let Some(first) = self.first.get_mut(k) else {
+            return true;
+        };
+        if *first == 0 {
+            *first = way;
+            return true;
+        }
+        if *first == way || self.more.contains(&(k, way)) {
+            return false;
+        }
+        if self.more.len() < MAX_MORE {
+            self.more.insert((k, way));
+        }
+        true
     }
 }
 
@@ -1961,6 +2039,36 @@ mod tests {
         .build();
         let plan = plan(&file);
         assert_eq!((plan.work, plan.level), ((17 << 20) + 64 * 64, 9));
+    }
+
+    #[test]
+    fn a_block_listed_more_than_once_counts_once_for_each_way_it_is_written() {
+        // 2,000 × 9,500 in strips of 1,000 rows, all ten listing one block
+        // of 2,000,000 bytes: recoded whole, and cut at the last strip's
+        // 500 rows, 3 MB in all (counted once a strip, it came to 19 MB, and
+        // level 6).
+        let strips = [vec![B::Data(smooth(2_000_000))], vec![B::Same(0); 9]].concat();
+        let file = Builder::new(b'I', false, vec![gray(2_000, 9_500, 1_000, strips)]).build();
+        let strips = plan(&file);
+        assert_eq!((strips.work, strips.level), (3_000_000, 9));
+        // 17 LZW pages of one 1 MiB strip, and two JPEG pages of one block,
+        // each a block that every page lists.
+        let picture = smooth(1 << 20);
+        let lzw_page = |data: Vec<u8>| {
+            let mut page = gray(1_024, 1_024, 1_024, vec![B::Data(data)]);
+            page.tags.push((259, V::Short(vec![5])));
+            page
+        };
+        let mut pages = vec![lzw_page(lzw(&picture))];
+        pages.extend((0..16).map(|_| lzw_page(vec![0])));
+        pages.extend([coded(7, vec![0xD8; 300]), coded(7, vec![0])]);
+        let mut file = Builder::new(b'I', false, pages).build();
+        for to in 1..17 {
+            file = shared(file, (0, 0), (to, 0));
+        }
+        let file = shared(file, (17, 0), (18, 0));
+        let pages = plan(&file);
+        assert_eq!((pages.work, pages.level), ((1 << 20) + 300, 9));
     }
 
     #[test]
