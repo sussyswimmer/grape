@@ -56,7 +56,9 @@
 //!   another data reference counts as this file's, as libheif reads it:
 //!   it's kept, overlapped by nothing dropped, and checked.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
-//!   published, the Exif kept for the orientation holding nothing else.
+//!   published, the Exif kept for the orientation holding nothing else:
+//!   read byte for byte, its zeros past its first [`MAX_EXIF`] aren't
+//!   other fields there.
 //! - **Memory:** the source's `meta` (within
 //!   [`MAX_META`](super::isobmff::boxes::MAX_META)) and its model, and the
 //!   rebuilt `meta`, written straight into one buffer of the source's
@@ -140,10 +142,22 @@ struct Walked {
     /// `Exif\0\0` between its header offset and its TIFF structure, as
     /// Apple writes it.
     prefixed: bool,
+    /// More than [`MAX_EXIF`] follows its header: the rest isn't read.
+    unread: bool,
+}
+
+/// What a [`Survey`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// A source, to plan its rewrite.
+    Source,
+    /// The output Grape wrote from one, read again by [`Plan::check`].
+    Output,
 }
 
 /// What Remove Metadata finds in a HEIF file ([module docs](self)).
 struct Survey {
+    pass: Pass,
     top: Top,
     /// The file-level `meta` box.
     meta_box: Header,
@@ -176,9 +190,9 @@ struct Survey {
 }
 
 impl Survey {
-    /// Reads the HEIF `r` (`len` bytes), and finds what goes and what
-    /// stays, or refuses it ([module docs](self)).
-    fn new(r: &mut dyn In, len: u64) -> Result<Survey, Error> {
+    /// Reads the HEIF `r` (`len` bytes) on `pass`, and finds what goes and
+    /// what stays, or refuses it ([module docs](self)).
+    fn new(r: &mut dyn In, len: u64, pass: Pass) -> Result<Survey, Error> {
         let top = Top::read(r, len)?;
         if top.boxes.first().map(|b| &b.kind) != Some(b"ftyp") {
             return Err(Error::Broken("no ftyp box first".into()));
@@ -210,6 +224,7 @@ impl Survey {
             return Err(Error::Refused(LAYOUT.into()));
         }
         let mut s = Survey {
+            pass,
             left: top.len,
             top,
             meta_box,
@@ -294,10 +309,16 @@ impl Survey {
         self.left = left;
         self.walked = Some(id);
         self.found.fields.extend(walked.fields);
-        let Some(tiff) = walked
+        let tiff = walked
             .orientation
-            .and_then(|o| exif::minimal(Some(o), false))
-        else {
+            .and_then(|o| exif::minimal(Some(o), false));
+        // What's unread past its first MAX_EXIF is other fields, but in an
+        // output, whose Exif kept for the orientation holds zeros there,
+        // and the check reads them byte for byte.
+        if walked.unread && (self.pass == Pass::Source || tiff.is_none()) {
+            self.found.fields.insert(MetaField::Other);
+        }
+        let Some(tiff) = tiff else {
             return Ok(());
         };
         let mut payload = if walked.prefixed {
@@ -513,7 +534,11 @@ impl Survey {
             match item.role() {
                 Role::Exif => {
                     if let Some(loc) = locations.get(&item.id) {
-                        fields.extend(self.exif(r, loc, &mut left)?.fields);
+                        let walked = self.exif(r, loc, &mut left)?;
+                        fields.extend(walked.fields);
+                        if walked.unread {
+                            fields.push(MetaField::Other);
+                        }
                     }
                 }
                 Role::Xmp => fields.push(MetaField::Xmp),
@@ -526,9 +551,9 @@ impl Survey {
     }
 
     /// What the Exif item at `loc` holds: [`exif::walk`] on the first
-    /// [`MAX_EXIF`] of its TIFF structure, and Other past that, or for a
-    /// header offset past its end, or when what it reads would pass
-    /// `left`.
+    /// [`MAX_EXIF`] of its TIFF structure ([`Walked::unread`] past that),
+    /// and Other for a header offset past its end, or when what it reads
+    /// would pass `left`.
     fn exif(&self, r: &mut dyn In, loc: &Location, left: &mut u64) -> Result<Walked, Error> {
         let mut walked = Walked::default();
         let pieces = self.pieces(loc)?;
@@ -570,9 +595,7 @@ impl Survey {
         let exif = exif::walk(tiff);
         walked.fields.extend(exif.fields);
         walked.orientation = exif.orientation;
-        if total - skip > take {
-            walked.fields.push(MetaField::Other);
-        }
+        walked.unread = total - skip > take;
         Ok(walked)
     }
 
@@ -1132,7 +1155,7 @@ impl Plan {
     /// Reads the HEIF `r` (`len` bytes) and plans its rewrite, or refuses
     /// it ([module docs](self)).
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
-        let mut s = Survey::new(r, len)?;
+        let mut s = Survey::new(r, len, Pass::Source)?;
         let mut edits = Vec::new();
         // What the edits write, each in its place: the rebuilt meta and the
         // free box after it, which fit in the source's meta, a free header
@@ -1306,7 +1329,7 @@ impl Plan {
         if len != self.len {
             return wrong(format!("is {len} bytes, not {}", self.len));
         }
-        let s = Survey::new(out, len)?;
+        let s = Survey::new(out, len, Pass::Output)?;
         if !s.found.fields.is_empty() {
             return wrong(format!("still holds {:?}", s.found.fields));
         }
@@ -1794,6 +1817,32 @@ mod tests {
         let (out, _) = strip(&b.build().0);
         assert!(meta(&out).item(EXIF).is_some());
         assert!(meta(&out).refs.iter().any(|r| r.from == 16));
+    }
+
+    #[test]
+    fn a_portrait_exif_past_its_first_mib_keeps_its_orientation() {
+        // 1 MiB and a byte after its header, in mdat and in idat: what's
+        // past the first MiB is unread, so other fields; in the output it's
+        // zeros, which the check reads byte for byte.
+        for place in [Place::Mdat, Place::Idat] {
+            let mut b = turned(simple());
+            b.items[1].data.resize(10 + MAX_EXIF + 1, 0x5A);
+            b.items[1].place = place;
+            let (src, _) = b.build();
+            let (out, found) = strip(&src);
+            let photo: BTreeSet<_> = [Location, Camera, CreationDate, Xmp, Other].into();
+            assert_eq!(found, photo, "{place:?}");
+            let data = read(&out, &meta(&out), EXIF);
+            let payload = upright(true);
+            assert_eq!(data.len(), 10 + MAX_EXIF + 1, "{place:?}");
+            assert_eq!(data[..payload.len()], payload[..], "{place:?}");
+            assert!(data[payload.len()..].iter().all(|&b| b == 0), "{place:?}");
+            // A second pass copies it as it is, and doesn't read past the
+            // first MiB either: the rest is other fields to it.
+            let (again, found) = strip(&out);
+            assert_eq!(again, out, "{place:?}");
+            assert_eq!(found, [Other].into(), "{place:?}");
+        }
     }
 
     #[test]
