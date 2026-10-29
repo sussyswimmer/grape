@@ -49,6 +49,10 @@ thread_local! {
     /// Job Object reported it when the job ended.
     #[cfg(windows)]
     static LAST_PEAK_HERE: Cell<Option<u64>> = const { Cell::new(None) };
+    /// Set while [`ui_limited_child`] draws its reference: the hook then
+    /// leaves the worker in no job at all and counts nothing.
+    #[cfg(windows)]
+    static IN_NO_JOB_HERE: Cell<bool> = const { Cell::new(false) };
 }
 
 /// On Windows, sets the hook the app's `contain.rs` sets: a Job Object of
@@ -66,6 +70,12 @@ fn contain_like_the_app() {
         #[derive(Debug)]
         struct Jobs;
         struct Job(JobGuard);
+        struct NoJob;
+        impl Contained for NoJob {
+            fn peak_memory(&self) -> Option<u64> {
+                None
+            }
+        }
         impl Contained for Job {
             fn peak_memory(&self) -> Option<u64> {
                 self.0.peak_memory()
@@ -82,6 +92,9 @@ fn contain_like_the_app() {
                 child: &Child,
                 max_memory: Option<u64>,
             ) -> Result<Box<dyn Contained>, String> {
+                if IN_NO_JOB_HERE.with(Cell::get) {
+                    return Ok(Box::new(NoJob));
+                }
                 let guard = JobGuard::assign(child, max_memory).map_err(|e| e.to_string())?;
                 CONTAINED_HERE.with(|n| n.set(n.get() + 1));
                 if guard.has_ui_limits() {
@@ -1158,7 +1171,10 @@ fn the_worker_runs_in_the_ui_limited_job_outside_cargo() {
 
 /// The child: PDF → PNG, PDF → TXT and Split PDF, each in a job with the
 /// UI limits. The text is in Arial, not embedded, so PDFium asks Windows
-/// for its fonts from inside the job. Only for its parent above.
+/// for its fonts from inside the job. Page 1 must come out as a worker in
+/// no job at all draws it: had the job kept PDFium from Windows' Arial,
+/// PDFium's built-in stand-in would have drawn other pixels. Only for its
+/// parent above.
 #[cfg(windows)]
 #[test]
 #[ignore = "the child of the_worker_runs_in_the_ui_limited_job_outside_cargo"]
@@ -1180,6 +1196,17 @@ fn ui_limited_child() {
     }
     let doc = bytes(&doc);
     let ctx = with_pdf();
+    let reference = {
+        let dir = TestDir::new("pdf-no-job");
+        let (_, job) = plan_one(&dir, "doc.pdf", &doc, Operation::convert(Format::Png));
+        IN_NO_JOB_HERE.with(|no_job| no_job.set(true));
+        let outcome = run_job(&job, &ctx, &mut |_| {});
+        IN_NO_JOB_HERE.with(|no_job| no_job.set(false));
+        outcome.unwrap();
+        image::open(dir.join("doc").join("doc 1.png"))
+            .unwrap()
+            .to_rgb8()
+    };
     let cases = [
         (Operation::convert(Format::Png), "doc"),
         (Operation::convert(Format::Txt), "doc.txt"),
@@ -1199,6 +1226,10 @@ fn ui_limited_child() {
                 // The text was drawn: some pixel isn't white.
                 let page = image::open(out.join("doc 1.png")).unwrap().to_rgb8();
                 assert!(page.pixels().any(|px| px.0 != [255, 255, 255]));
+                assert!(
+                    page == reference,
+                    "page 1 in the UI-limited job isn't page 1 drawn in no job: a font PDFium couldn't get from Windows?"
+                );
             }
             "doc.txt" => {
                 assert_eq!(fs::read_to_string(&out).unwrap(), "Page 1\n\nPage 2\n");
