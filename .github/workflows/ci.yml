@@ -68,10 +68,10 @@ jobs:
       # cargo runs its tests inside a job of its own, so above the worker's
       # job is always nested, without UI limits. The runner starts this step
       # inside a job too, so with GRAPE_TEST_JOB_UI=1 the test starts a
-      # child of this binary breaking away from it, whose PDF workers are
-      # then in no other job, as in an installed Grape, and must get the UI
-      # limits. If the runner's job doesn't allow that, the test warns and
-      # the PC checks it.
+      # child of this binary breaking away from it, whose PDF workers would
+      # then be in no other job, as in an installed Grape, and must get the
+      # UI limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
       - name: PDF tests outside cargo (the UI-limited job)
         env:
           GRAPE_TEST_JOB_UI: "1"
@@ -199,9 +199,10 @@ jobs:
           GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
         run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
       # As the PDF one in rust-windows: outside cargo, with
-      # GRAPE_TEST_JOB_UI=1, a child of the lib's test binary breaks away
-      # from the runner's job, so each bsdtar's own job must get the UI
-      # limits; it warns when the runner's job allows no breakaway.
+      # GRAPE_TEST_JOB_UI=1, a child of the lib's test binary would break
+      # away from the runner's job, so each bsdtar's own job must get the UI
+      # limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
       - name: RAR tests outside cargo (the UI-limited job)
         if: runner.os == 'Windows'
         shell: pwsh

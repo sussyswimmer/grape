@@ -13,7 +13,8 @@
 //! it has no UI limits. CI also runs this binary outside cargo with
 //! `GRAPE_TEST_JOB_UI=1`: then one test starts it again as a child that
 //! breaks away from the runner's job, whose workers must get the UI
-//! limits an installed Grape's get.
+//! limits an installed Grape's get. GitHub's runner allows no breakaway,
+//! so there that test only warns, and the PC checks the UI-limited job.
 
 #![allow(clippy::unwrap_used)]
 

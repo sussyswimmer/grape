@@ -11,7 +11,8 @@
 //! no UI limits. CI also runs this test binary outside cargo with
 //! `GRAPE_TEST_JOB_UI=1`: then one test starts it again as a child that
 //! breaks away from the runner's job, where each bsdtar's job must have
-//! the UI limits.
+//! the UI limits. GitHub's runner allows no breakaway, so there that test
+//! only warns, and the PC checks the UI-limited job.
 
 #![allow(clippy::unwrap_used)]
 
