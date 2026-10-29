@@ -51,7 +51,7 @@ use std::io::SeekFrom;
 use std::ops::Range;
 
 use super::exif::{self, MAX_EXIF};
-use super::isobmff::boxes::{load, Child, Fields, Form, Header, Top};
+use super::isobmff::boxes::{load, Child, Fields, Form, Header, Top, MAX_BOXES};
 use super::isobmff::items::{file_meta, is_sequence, Location, Meta, Role};
 use super::strip::{read_at, read_exact, Error, Found, In, Out};
 use crate::MetaField;
@@ -802,6 +802,7 @@ impl Plan {
         };
         let mut bytes = Vec::with_capacity(room + 16 * freed);
         let mut len = s.end;
+        let mut padded = false;
         if s.meta_changes() {
             rebuild(&s, &mut bytes);
             // A meta that ends the output ends it sooner, with no free box
@@ -817,6 +818,7 @@ impl Plan {
                 len -= saved;
             } else if saved > 0 {
                 bytes.extend_from_slice(&Header::write(b"free", Form::Small, saved));
+                padded = true;
             }
             let at = s.meta_box.at;
             edits.push(Edit::Write {
@@ -827,6 +829,14 @@ impl Plan {
                 let written = at + bytes.len() as u64;
                 edits.push(Edit::Zero(written..s.meta_box.end()));
             }
+        }
+        // The output's boxes: those it keeps, and the free box after meta.
+        // Over the cap, Grape couldn't read what it wrote.
+        let boxes = s.top.boxes.iter().take_while(|b| b.at < s.end).count();
+        if boxes + usize::from(padded) > MAX_BOXES {
+            return Err(Error::TooLarge(format!(
+                "it would write over {MAX_BOXES} top-level boxes"
+            )));
         }
         for (b, fate) in s.top.boxes.iter().zip(&s.fates) {
             if b.at >= s.end {
@@ -1359,6 +1369,41 @@ mod tests {
             assert_eq!(again, out);
             assert!(found.is_empty());
         }
+    }
+
+    #[test]
+    fn an_output_holds_as_many_top_level_boxes_as_a_source_may_and_no_more() {
+        // ftyp, meta, empty free boxes, mdat: `n` boxes in all, or with
+        // meta last.
+        let file = |n: usize, meta_last: bool| {
+            let mut b = simple();
+            b.between = vec![bx(b"free", b""); n - 3];
+            b.meta_after_mdat = meta_last;
+            b.build().0
+        };
+        let boxes = |f: &[u8]| {
+            Top::read(&mut Cursor::new(f), f.len() as u64)
+                .unwrap()
+                .boxes
+                .len()
+        };
+        // With the free box after meta, 4,096.
+        let (out, _) = strip(&file(MAX_BOXES - 1, false));
+        assert_eq!(boxes(&out), MAX_BOXES);
+        // Which a source of 4,096 can't have: too large, as is one more.
+        for n in [MAX_BOXES, MAX_BOXES + 1] {
+            assert!(
+                matches!(plan(&file(n, false)), Err(Error::TooLarge(_))),
+                "{n}"
+            );
+        }
+        // A meta that ends the file adds none.
+        let (out, _) = strip(&file(MAX_BOXES, true));
+        assert_eq!(boxes(&out), MAX_BOXES);
+        assert!(matches!(
+            plan(&file(MAX_BOXES + 1, true)),
+            Err(Error::TooLarge(_))
+        ));
     }
 
     #[test]
