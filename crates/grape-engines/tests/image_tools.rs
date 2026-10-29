@@ -1301,6 +1301,43 @@ fn compress_leaves_a_tiff_it_cant_shrink_alone_and_refuses_what_it_cant_rewrite(
     }
 }
 
+#[test]
+fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
+    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::tags::Tag;
+    // A page of JPEG data, copied as it is, and a small one: the output
+    // passes 95 % of the source while the first is copied.
+    let mut out = Cursor::new(Vec::new());
+    let mut e = TiffEncoder::new(&mut out).unwrap();
+    let mut jpeg = e.new_image::<colortype::Gray8>(256, 256).unwrap();
+    jpeg.encoder().write_tag(Tag::Compression, 7u16).unwrap();
+    let data: Vec<u8> = (0..256 * 256).map(|i| (i % 251) as u8).collect();
+    jpeg.write_data(&data).unwrap();
+    let gray: Vec<u8> = (0..64).collect();
+    e.write_image::<colortype::Gray8>(8, 8, &gray).unwrap();
+    let dir = TestDir::new("compress-tiff-log");
+    let err = compress(
+        &dir,
+        "mostly.tif",
+        &out.into_inner(),
+        grape_core::CompressPreset::High,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "mostly.tif is already as small as Grape makes it."
+    );
+    assert!(
+        err.detail.contains("passed 95 %")
+            && err
+                .detail
+                .contains("IFD 0 copied as it is: its compression is 7"),
+        "{}",
+        err.detail
+    );
+}
+
 /// `samples` as bytes in native order, as image's encoder takes 16-bit
 /// pixels.
 fn bytemuck_u16(samples: &[u16]) -> Vec<u8> {

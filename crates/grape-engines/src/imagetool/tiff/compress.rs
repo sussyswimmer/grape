@@ -225,13 +225,24 @@ impl Plan {
         most: u64,
         cancel: &CancelToken,
         progress: &mut dyn FnMut(f32),
-    ) -> Result<Wrote, Stopped> {
+    ) -> Result<Wrote, Halt> {
         let mut recoder = Recoder::new(self, back, most, cancel, progress);
         let written = write::write_with(r, w, self.layout, &self.pages, &mut recoder);
-        if let Some(stop) = recoder.stop.take() {
-            return Err(stop);
-        }
-        let len = written.map_err(Stopped::Failed)?;
+        let len = match (recoder.stop.take(), written) {
+            (None, Ok(len)) => len,
+            (Some(why), _) => {
+                return Err(Halt {
+                    why,
+                    log: recoder.log,
+                })
+            }
+            (None, Err(e)) => {
+                return Err(Halt {
+                    why: Stopped::Failed(e),
+                    log: recoder.log,
+                })
+            }
+        };
         Ok(Wrote {
             len,
             layout: self.layout,
@@ -278,6 +289,13 @@ impl Wrote {
         }
         Ok(())
     }
+}
+
+/// Why [`Plan::write`] stopped, and what its log held by then.
+#[derive(Debug)]
+pub(crate) struct Halt {
+    pub(crate) why: Stopped,
+    pub(crate) log: Log,
 }
 
 /// Why [`Plan::write`] stopped.
@@ -903,6 +921,12 @@ impl Blocks for Recoder<'_> {
     }
 }
 
+/// `e` with what `log` holds after its detail.
+fn logged(mut e: GrapeError, log: &Log) -> GrapeError {
+    e.detail = log.after(std::mem::take(&mut e.detail));
+    e
+}
+
 /// Runs Compress on the TIFF `src` (named as `from`) into `dest`.
 pub(crate) fn run(
     job: &Job,
@@ -965,47 +989,54 @@ pub(crate) fn run(
     // 95 % of the source (D26's exact rule).
     let most = before.saturating_mul(19) / 20;
     let wrote = plan.write(&mut reader, &mut writer, &mut back, most, cancel, progress);
-    let wrote = wrote.map_err(|stop| match stop {
-        Stopped::NotSmaller => {
-            let detail = format!(
-                "{}: the output passed 95 % of {before} bytes",
-                src.display()
-            );
-            publish::or_cancelled(cancel, src, names.not_smaller(false, detail))
-        }
-        Stopped::Wrong(why) => {
-            let e = names.encode_failed(format!("check {}: {why}", path.display()));
-            publish::or_cancelled(cancel, src, e)
-        }
-        Stopped::Failed(e) => failed(e, Some(path)),
+    let mut wrote = wrote.map_err(|Halt { why, log }| {
+        let e = match why {
+            Stopped::NotSmaller => {
+                let detail = format!(
+                    "{}: the output passed 95 % of {before} bytes",
+                    src.display()
+                );
+                publish::or_cancelled(cancel, src, names.not_smaller(false, detail))
+            }
+            Stopped::Wrong(why) => {
+                let e = names.encode_failed(format!("check {}: {why}", path.display()));
+                publish::or_cancelled(cancel, src, e)
+            }
+            Stopped::Failed(e) => failed(e, Some(path)),
+        };
+        logged(e, &log)
     })?;
+    // From here on, every error says why IFDs were copied as they are.
+    let log = std::mem::take(&mut wrote.log);
+    let logged = |e| logged(e, &log);
     // Cut what an IFD taken back left past the end.
     let out = writer
         .into_inner()
-        .map_err(|e| names.write_failed(format!("write {}: {}", path.display(), e.error())))?
+        .map_err(|e| names.write_failed(format!("write {}: {}", path.display(), e.error())))
+        .map_err(logged)?
         .into_inner();
     out.set_len(wrote.len)
         .and_then(|()| out.sync_all())
-        .map_err(|e| names.write_failed(format!("write {}: {e}", path.display())))?;
+        .map_err(|e| logged(names.write_failed(format!("write {}: {e}", path.display()))))?;
     drop(out);
     drop(reader);
     progress(0.97);
     let after = wrote.len;
     if after.saturating_mul(20) > before.saturating_mul(19) {
         let detail = format!("{after} bytes from {before} in {}", src.display());
-        return Err(names.not_smaller(false, wrote.log.after(detail)));
+        return Err(logged(names.not_smaller(false, detail)));
     }
     // The plan is let go of first: the check holds the output's model.
     drop(plan);
     drop(back);
-    if let Err(why) = wrote.check(&mut reopen()?) {
+    if let Err(why) = wrote.check(&mut reopen().map_err(logged)?) {
         let e = names.encode_failed(format!("check {}: {why}", path.display()));
-        return Err(publish::or_cancelled(cancel, src, e));
+        return Err(logged(publish::or_cancelled(cancel, src, e)));
     }
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    let mut outcome = publish::finalize(&temp, job, src, dest, dir, &names)?;
+    let mut outcome = publish::finalize(&temp, job, src, dest, dir, &names).map_err(logged)?;
     progress(1.0);
     outcome.notes.push(Note::Compressed { before, after });
     Ok(outcome)
@@ -1053,7 +1084,7 @@ mod tests {
         most: u64,
         cancel: &CancelToken,
         progress: &mut dyn FnMut(f32),
-    ) -> Result<(Vec<u8>, Wrote), Stopped> {
+    ) -> Result<(Vec<u8>, Wrote), Halt> {
         let name = format!("grape-tiff-compress-{}.tif", crate::output::unique_suffix());
         let temp = Temp(std::env::temp_dir().join(name));
         let mut w = BufWriter::new(File::create_new(&temp.0).unwrap());
@@ -1713,11 +1744,48 @@ mod tests {
         let file = five_pages(false);
         let plan = plan(&file);
         let result = written(&file, &plan, 300, &CancelToken::new(), &mut |_| {});
-        assert!(matches!(result, Err(Stopped::NotSmaller)), "{result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(Halt {
+                    why: Stopped::NotSmaller,
+                    ..
+                })
+            ),
+            "{result:?}"
+        );
         // At its own size, it's written.
         let (out, _) = written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
         let most = out.len() as u64;
         assert!(written(&file, &plan, most, &CancelToken::new(), &mut |_| {}).is_ok());
+    }
+
+    #[test]
+    fn whatever_stops_the_writer_hands_back_the_log() {
+        // A page of JPEG data, copied as it is (said in the log), then
+        // one that's recoded.
+        let file = Builder::new(
+            b'I',
+            false,
+            vec![
+                coded(7, vec![0xD8; 64]),
+                page(64, 64, 16, 8, &smooth(64 * 64)),
+            ],
+        )
+        .build();
+        let mut plan = plan(&file);
+        let said = |halt: &Halt| halt.log.to_string().contains("IFD 0 copied as it is");
+        // Past the most, a block read back wrong, and a cancel.
+        let stopped = written(&file, &plan, 100, &CancelToken::new(), &mut |_| {}).unwrap_err();
+        assert!(matches!(stopped.why, Stopped::NotSmaller) && said(&stopped));
+        let cancel = CancelToken::new();
+        let stopped =
+            written(&file, &plan, u64::MAX, &cancel, &mut |_| cancel.cancel()).unwrap_err();
+        assert!(matches!(stopped.why, Stopped::Failed(_)) && said(&stopped));
+        plan.broken = true;
+        let stopped =
+            written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap_err();
+        assert!(matches!(stopped.why, Stopped::Wrong(_)) && said(&stopped));
     }
 
     #[test]
@@ -1726,7 +1794,11 @@ mod tests {
         let mut plan = plan(&file);
         plan.broken = true;
         let result = written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {});
-        let Err(Stopped::Wrong(why)) = result else {
+        let Err(Halt {
+            why: Stopped::Wrong(why),
+            ..
+        }) = result
+        else {
             panic!("{result:?}")
         };
         assert!(why.contains("reads back wrong"), "{why}");
@@ -1751,7 +1823,13 @@ mod tests {
             }
         });
         assert!(
-            matches!(result, Err(Stopped::Failed(Error::Write(_)))),
+            matches!(
+                result,
+                Err(Halt {
+                    why: Stopped::Failed(Error::Write(_)),
+                    ..
+                })
+            ),
             "{result:?}"
         );
         // Cancelled 3 steps into 16.
