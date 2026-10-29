@@ -1,7 +1,10 @@
 //! Helper processes: the plumbing an engine shares when it runs one of
 //! Grape's own helper programs (the image helper for HEIC and AVIF,
-//! DECISIONS D33, D41, and the SVG worker, D39). Lane A's module, taken
-//! from the PDF worker's runner (`pdf/run.rs`).
+//! DECISIONS D33, D41, the SVG worker, D39, and the PDF worker, D29).
+//! Lane A's module, first taken from the PDF worker's runner
+//! (`pdf/run.rs`), which runs on it too now. bsdtar (D27) has a spawn and
+//! a pump of its own (`archive/rar/bsdtar.rs`), but the same hook,
+//! [`DETACHED_PROCESS`] and memory rule.
 //!
 //! - [`WorkDir`]: a new, private folder under the OS temp folder (0700 on
 //!   Unix), where the engine and its helper exchange files. It's removed
@@ -18,6 +21,8 @@
 //!   can't block the job, and stdout is read as JSON lines on another.
 //! - [`Running`]: the engine polls it for messages and the exit status. It
 //!   kills and reaps the helper when dropped, then ends its containment.
+//! - [`near_memory_cap`]: a helper that ended without a result after
+//!   committing 90% of its container's cap ran out of memory.
 //! - [`read_pixel_file`]: a helper's `pixels.rgba` (grape-heif-proto's raw
 //!   pixel file), read into one buffer no larger than what its `image`
 //!   line announced and the engine approved.
@@ -50,8 +55,9 @@ use crate::CancelToken;
 /// so Windows starts no `conhost.exe` for it. Its stdio are pipes, so it
 /// needs none, and a console host would be a second process in a job that
 /// allows one (D33). `CREATE_NO_WINDOW` would still make a hidden console.
+/// bsdtar is started so too.
 #[cfg(windows)]
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+pub(crate) const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// How many fresh names [`WorkDir::create`] tries.
 const UNIQUE_ATTEMPTS: usize = 8;
@@ -60,15 +66,21 @@ const UNIQUE_ATTEMPTS: usize = 8;
 /// of a helper whose stdout has closed.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
+/// A helper that ended without a result after committing at least this
+/// share of its container's memory cap (in percent) ran out of memory.
+const OVER_MEMORY_PERCENT: u64 = 90;
+
 /// Puts a process Grape just started into an OS container (D33): a Job
-/// Object on Windows, set by the app ([`set_contain`]). The image helper
-/// and the SVG worker, and `ffmpeg` and `ffprobe` (D22).
+/// Object on Windows, set by the app ([`set_contain`]). The image helper,
+/// the SVG worker and the PDF worker, bsdtar (D27), and `ffmpeg` and
+/// `ffprobe` (D22).
 pub trait Contain: Send + Sync + fmt::Debug {
     /// Contains `child` right after its start: before a helper's request is
-    /// written, and before FFmpeg's output is read. `max_memory` caps its
-    /// committed memory, where the OS can. An `Err` says why, for the log.
-    /// A helper is then killed and its job fails (the container is its
-    /// memory cap); FFmpeg runs on uncontained (`media/run.rs`, D22).
+    /// written, before bsdtar is given a byte of the RAR, and before
+    /// FFmpeg's output is read. `max_memory` caps its committed memory,
+    /// where the OS can. An `Err` says why, for the log. A helper or bsdtar
+    /// is then killed and its job fails (the container is its memory cap);
+    /// FFmpeg runs on uncontained (`media/run.rs`, D22).
     fn contain(&self, child: &Child, max_memory: Option<u64>)
         -> Result<Box<dyn Contained>, String>;
 }
@@ -80,6 +92,16 @@ pub trait Contained: Send {
     /// reports it. The engine reads it after a crash, to tell "needs too
     /// much memory" from other failures.
     fn peak_memory(&self) -> Option<u64>;
+}
+
+/// True when `peak`, a contained helper's [`Contained::peak_memory`], is at
+/// least [`OVER_MEMORY_PERCENT`] of `cap`, the memory cap it was contained
+/// with: a helper that ended so without a result ran out of memory. False
+/// when the OS reported no peak.
+pub(crate) fn near_memory_cap(peak: Option<u64>, cap: u64) -> bool {
+    peak.is_some_and(|peak| {
+        u128::from(peak) * 100 >= u128::from(cap) * u128::from(OVER_MEMORY_PERCENT)
+    })
 }
 
 /// Removes the helpers' work folders (the image helper's
@@ -611,6 +633,19 @@ mod tests {
         );
         drop(made);
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn a_peak_at_90_percent_of_the_cap_is_near_it() {
+        const GIB: u64 = 1 << 30;
+        let at = (2 * GIB * 9).div_ceil(10);
+        assert!(near_memory_cap(Some(2 * GIB), 2 * GIB));
+        assert!(near_memory_cap(Some(at), 2 * GIB));
+        assert!(!near_memory_cap(Some(at - 1), 2 * GIB));
+        assert!(!near_memory_cap(None, 2 * GIB));
+        // No overflow at the extremes.
+        assert!(near_memory_cap(Some(u64::MAX), u64::MAX));
+        assert!(!near_memory_cap(Some(0), u64::MAX));
     }
 
     #[test]

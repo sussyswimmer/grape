@@ -28,19 +28,27 @@ src/
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
                     tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
                     tools/argv.rs (the five FFmpeg tools, D26)
-  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
+  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement), started on helper.rs and contained by the app's hook
+                    (a 6 GiB Job Object on Windows); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
   heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels,
                     and HEIC Compress (D28) has Encoder (check_encode probes once per helper; encode takes a quality and hands the bytes back)
                     and Decoder::decode_within (held to the tool's peak); the tests' fake helper writes real HEIF (fake_quality reads its quality)
   svg/              SVG in a worker process: resvg (D39; lane A's module by agreement): protocol.rs (the worker's own JSON), worker.rs
                     (`Grape --grape-svg-worker`: read, gunzip, parse, draw), resolve.rs (data: references only, a job-wide budget),
                     size.rs (the size rule, pure), run.rs (the parent: start, watch, read the pixels)
-  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader and the containment hook set_contain (lane A's)
-  archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/pump/watchdog, tap) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
+  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader, the containment hook set_contain and its 90% memory rule (lane A's):
+                    the image helper, the SVG and PDF workers and bsdtar are contained by it, failing closed; FFmpeg too, failing open
+  archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/contain/pump/watchdog, tap; a 1 GiB
+                    Job Object on Windows) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
   docs.rs           v2, behind feature "v2"
 tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
                     feature "engines-it" adds the ones that need the FFmpeg sidecar
                     feature "rar-it" runs the RAR tests (unit tests in src/archive/rar/it.rs) against a real bsdtar (GRAPE_TEST_BSDTAR)
+                    (on Windows one test puts each bsdtar in the app's Job Object)
+                    feature "pdf-it" runs tests/pdf.rs with a real PDFium (GRAPE_TEST_PDFIUM) and the grape-pdf-worker bin
+                    (on Windows each worker in the app's Job Object)
+                    on Windows, GRAPE_TEST_JOB_UI=1 outside cargo checks both in the UI-limited job, in a child that breaks away
+                    from the parent's job; GitHub's runner allows no breakaway, so there it only warns
                     tests/svg.rs runs the real SVG worker, the grape-svg-worker bin (src/bin/, no feature needed; D39)
 ```
 

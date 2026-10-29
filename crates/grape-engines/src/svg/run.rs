@@ -54,10 +54,6 @@ pub(crate) const WORK_PREFIX: &str = "grape-svg-";
 /// How often the job checks for a cancel and the deadline.
 const POLL: Duration = Duration::from_millis(100);
 
-/// A worker that ended without a result after committing at least this
-/// share of [`Limits::worker_memory`] (in percent) ran out of memory.
-const OVER_MEMORY_PERCENT: u64 = 90;
-
 /// How many of the source's first bytes the rule-3 sniff reads.
 const SNIFF_BYTES: u64 = 16;
 
@@ -457,12 +453,8 @@ fn drive(
         (Some(_), None, true, None) => Ended::Crashed("done without an image line".to_string()),
         (None, Some(failure), false, _) => Ended::Failed(failure),
         (done, failure, success, _) => {
-            let peak = running.peak_memory();
             let limit = run.limits.worker_memory;
-            let over = peak.is_some_and(|peak| {
-                u128::from(peak) * 100 >= u128::from(limit) * u128::from(OVER_MEMORY_PERCENT)
-            });
-            if over {
+            if helper::near_memory_cap(running.peak_memory(), limit) {
                 Ended::OverMemory(format!(
                     "the SVG worker ended near its {} MiB memory cap",
                     limit / MIB

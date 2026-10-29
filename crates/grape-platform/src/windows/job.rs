@@ -1,8 +1,9 @@
 //! The Job Object a helper process runs in (DECISIONS D33, heic-spec §6).
 //!
-//! Grape starts `grape-heif.exe` and puts it in a job of its own right
-//! away, before it writes the helper's request (the helper waits for it, so
-//! nothing runs outside the job). The job:
+//! Grape starts a helper (`grape-heif.exe`, the SVG worker, D39, the PDF
+//! worker, D29, or bsdtar, D27) and puts it in a job of its own right away,
+//! before it writes the helper's request or the first byte of its input
+//! (the helper waits for it, so nothing runs outside the job). The job:
 //! - ends the helper when it closes: when the [`JobGuard`] drops, and when
 //!   Grape itself exits or crashes, because Grape holds its only handle;
 //! - ends it on an unhandled exception instead of showing an error dialog;

@@ -7,6 +7,7 @@
 //!   `pdfium-render`) and lopdf parse untrusted files. A fault in either one
 //!   ends the process it runs in, and PDFium's bindings are process-global.
 //!   So each job starts `<worker> --grape-pdf-worker` ([`worker_main`]),
+//!   puts it in the app's container (a Job Object on Windows, D33's hook),
 //!   writes one JSON request to its stdin and reads JSON lines from its
 //!   stdout ([`protocol`]). The worker writes only into a hidden temp folder
 //!   the parent made. The parent ([`run`]) kills it on a cancel or a
@@ -19,6 +20,8 @@
 //!   to PDFium's page import when lopdf can't read a file.
 //! - The worker bounds its own heap ([`heap`]): its executables install a
 //!   global allocator that calls [`heap::reserve`] and [`heap::release`].
+//!   On Windows its Job Object caps the whole process, PDFium's own
+//!   allocations too.
 //! - Only the worker's entry point and the heap bookkeeping are public (the
 //!   app and the test binary use them). Everything else is crate-private.
 

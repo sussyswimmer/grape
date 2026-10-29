@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use grape_core::Job;
 
 use super::protocol::MetaKey;
-use super::run::{run_with, Launch, Limits, PdfPaths};
+use super::run::{run_with, Limits, PdfPaths};
+use crate::helper::Launch;
 use crate::{EngineCtx, GrapeError};
 
 /// What a PDF job wrote and reported.
@@ -71,7 +72,14 @@ pub fn run(
     limits.bounds.max_pages = options.max_pages;
     limits.bounds.max_split_pages = options.max_split_pages;
     limits.bounds.max_heap_bytes = options.max_heap_bytes;
-    let outcome = run_with(job, ctx, progress, &Launch::worker(&paths), pdfium, &limits)?;
+    let outcome = run_with(
+        job,
+        ctx,
+        progress,
+        &Launch::pdf_worker(&paths),
+        pdfium,
+        &limits,
+    )?;
     Ok(Outcome {
         outputs: outcome.outcome.outputs,
         renamed: outcome.outcome.renamed,

@@ -262,7 +262,8 @@ pub fn submit_op(
     let spawned = thread::Builder::new()
         .name("grape-jobs".to_owned())
         .spawn(move || {
-            // On this thread: it checks the fallback folder on disk.
+            // On this thread: it checks a chosen fallback folder on disk,
+            // and `run` reads the folders the outputs may go to.
             let settings = settings::planning_settings(&app);
             let cancel = ticket.cancel.clone();
             run(&app, &op, &paths, &settings, anchor, &display, cancel);

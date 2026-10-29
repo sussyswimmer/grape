@@ -54,11 +54,38 @@ jobs:
       # when they run, which the engines-it job does with this run's build.
       - name: Clippy (pdf-it, engines-it)
         run: cargo clippy -p grape-engines --features pdf-it,engines-it --all-targets --locked -- -D warnings
-      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
+      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM. On
+      # Windows each worker runs in a Job Object as the app makes it. The
+      # 100 MP page runs next, on its own, so the log keeps its peak.
       - name: PDF tests (PDFium)
         env:
           GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
-        run: cargo test -p grape-engines --features pdf-it --locked
+        run: cargo test -p grape-engines --features pdf-it --locked -- --skip the_largest_page_renders_under_the_memory_cap
+      - name: PDF's largest page under the 6 GiB Job cap (prints the peak)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: cargo test -p grape-engines --features pdf-it --locked --test pdf -- --exact the_largest_page_renders_under_the_memory_cap --nocapture
+      # cargo runs its tests inside a job of its own, so above the worker's
+      # job is always nested, without UI limits. The runner starts this step
+      # inside a job too, so with GRAPE_TEST_JOB_UI=1 the test starts a
+      # child of this binary breaking away from it, whose PDF workers would
+      # then be in no other job, as in an installed Grape, and must get the
+      # UI limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
+      - name: PDF tests outside cargo (the UI-limited job)
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: |
+          $bin = @(cargo test -p grape-engines --features pdf-it --test pdf --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'pdf' -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no pdf test binary.'; exit 1 }
+          & $bin --exact the_worker_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The pdf test binary ran no test of that name.'; exit 1 }
 
   ui-windows:
     name: UI (Windows)
@@ -171,6 +198,27 @@ jobs:
         env:
           GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
         run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
+      # As the PDF one in rust-windows: outside cargo, with
+      # GRAPE_TEST_JOB_UI=1, a child of the lib's test binary would break
+      # away from the runner's job, so each bsdtar's own job must get the UI
+      # limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
+      - name: RAR tests outside cargo (the UI-limited job)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+          GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
+        run: |
+          $bin = @(cargo test -p grape-engines --features rar-it --lib --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'grape_engines' -and $_.profile.test -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no grape_engines test binary.'; exit 1 }
+          & $bin --exact archive::rar::it::bsdtar_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The grape_engines test binary ran no test of that name.'; exit 1 }
 
   # Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41),
   # built in this run with its source bundle and the HEIC and AVIF test
