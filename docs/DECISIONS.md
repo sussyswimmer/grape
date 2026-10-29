@@ -977,7 +977,7 @@ Append-only. Each entry records the decision, why it was made, and what would ch
   - The output is re-read before publishing.
 - **Remove Metadata, HEIC:**
   - `meta` is rebuilt in place without its Exif, XMP and other metadata items, or the `udes`/`crtt`/`mdft` properties (`ipma` renumbered).
-  - A top-level `free` box takes up the bytes saved, so no offset changes. Removed bytes are zeroed.
+  - A top-level `free` box takes up the bytes saved, so no offset changes; a `meta` that ends the file (Samsung's) ends it sooner instead. Removed bytes are zeroed.
   - XMP and C2PA `uuid` boxes become zeroed `free` boxes. Trailing motion-photo data is cut.
   - Every image item (thumbnails, alpha, depth, gain maps, `tmap`) and every other property stays byte for byte.
   - No helper and no decode. Sequences and layouts it can't rewrite safely are refused.

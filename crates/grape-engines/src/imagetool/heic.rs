@@ -1,6 +1,7 @@
 //! Remove Metadata on HEIC (D28): `meta` rebuilt in place without the
-//! metadata, a `free` box where it shrank, so no offset changes; nothing
-//! is decoded and no offset is rewritten. It works on any HEIF the
+//! metadata, a `free` box where it shrank, so no offset changes (when
+//! nothing follows it, the file ends sooner instead); nothing is decoded
+//! and no offset is rewritten. It works on any HEIF the
 //! [model](super::isobmff) reads, AVIF content named `.heic` too, and
 //! needs no helper.
 //!
@@ -800,15 +801,21 @@ impl Plan {
             0
         };
         let mut bytes = Vec::with_capacity(room + 16 * freed);
+        let mut len = s.end;
         if s.meta_changes() {
             rebuild(&s, &mut bytes);
+            // A meta that ends the output ends it sooner, with no free box
+            // after it: Samsung's ftyp, mdat, meta.
+            let last = s.meta_box.end() == s.end;
             let saved = s
                 .meta_box
                 .len
                 .checked_sub(bytes.len() as u64)
-                .filter(|&saved| saved == 0 || saved >= 8)
+                .filter(|&saved| last || saved == 0 || saved >= 8)
                 .ok_or_else(|| Error::Refused(LAYOUT.into()))?;
-            if saved > 0 {
+            if last {
+                len -= saved;
+            } else if saved > 0 {
                 bytes.extend_from_slice(&Header::write(b"free", Form::Small, saved));
             }
             let at = s.meta_box.at;
@@ -816,8 +823,10 @@ impl Plan {
                 at,
                 bytes: 0..bytes.len(),
             });
-            let written = at + bytes.len() as u64;
-            edits.push(Edit::Zero(written..s.meta_box.end()));
+            if !last {
+                let written = at + bytes.len() as u64;
+                edits.push(Edit::Zero(written..s.meta_box.end()));
+            }
         }
         for (b, fate) in s.top.boxes.iter().zip(&s.fates) {
             if b.at >= s.end {
@@ -867,7 +876,7 @@ impl Plan {
             .collect();
         let idat_at = m.idat().map(|r| content + r.start as u64);
         Ok(Plan {
-            len: s.end,
+            len,
             edits,
             bytes,
             found: s.found,
@@ -1082,8 +1091,9 @@ mod tests {
         for (name, b) in layouts() {
             let (src, layout) = b.build();
             let (out, _) = strip(&src);
-            // The same size, but for what's cut from the end.
-            let cut = !b.after.is_empty() || !b.tail.is_empty();
+            // The same size, but for what's cut from the end, and what a
+            // meta that ends the file saved.
+            let cut = !b.after.is_empty() || !b.tail.is_empty() || b.meta_after_mdat;
             assert_eq!(out.len() == src.len(), !cut, "{name}");
             let m = meta(&out);
             for item in &b.items {
@@ -1327,6 +1337,27 @@ mod tests {
                 Form::Large => assert_eq!(form, Form::Large, "{name}"),
                 _ => assert_eq!(form, Form::Small, "{name}"),
             }
+        }
+    }
+
+    #[test]
+    fn a_meta_that_ends_the_file_shrinks_with_no_free_box_after_it() {
+        // ftyp, mdat, meta, as Samsung lays it out, and with a motion
+        // photo's video after it, which is cut.
+        for after in [vec![], vec![bx(b"mpvd", b"SecretClip")]] {
+            let mut b = simple();
+            b.meta_after_mdat = true;
+            b.after = after;
+            let (src, _) = b.build();
+            let (out, _) = strip(&src);
+            let t = Top::read(&mut Cursor::new(&out), out.len() as u64).unwrap();
+            let kinds: Vec<_> = t.boxes.iter().map(|b| b.kind).collect();
+            assert_eq!(kinds, [*b"ftyp", *b"mdat", *b"meta"]);
+            assert_eq!(t.tail, out.len() as u64);
+            // A second pass copies it byte for byte, and finds nothing.
+            let (again, found) = strip(&out);
+            assert_eq!(again, out);
+            assert!(found.is_empty());
         }
     }
 
