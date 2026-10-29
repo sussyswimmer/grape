@@ -46,12 +46,6 @@ use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 
-/// The formats Compress runs on through this engine, by name; the content
-/// decides which compressor runs ([`super::run`]).
-pub(crate) fn compresses(from: Format) -> bool {
-    matches!(from, Format::Jpg | Format::Png)
-}
-
 /// A JPEG preset's quality and the long side it scales down to.
 fn plan(preset: CompressPreset) -> (u8, Option<u32>) {
     match preset {

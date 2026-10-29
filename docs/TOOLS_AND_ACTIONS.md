@@ -14,7 +14,7 @@ Keys, titles and which formats get which tool are **[observed]** (see `REA_FINDI
 
 | Key | Wheel title | Name | Panel | Combine | Multi-OK | Tier | Engine (see ENGINES.md) |
 |---|---|---|---|---|---|---|---|
-| compress | COMPRESS | Compress | ✓ |  | ✓ | v1 (img/audio/video), v2 (pdf) | image (JPG, PNG) / FFmpeg (audio, video) / lopdf (v2) |
+| compress | COMPRESS | Compress | ✓ |  | ✓ | v1 (img/audio/video), v2 (pdf) | image (JPG, PNG) / Grape's TIFF rewriter (TIFF, D28) / FFmpeg (audio, video) / lopdf (v2) |
 | removeMetadata | METADATA | Remove Metadata | ✓ |  | ✓ | v1 | container strip (JPG PNG WebP GIF TIFF HEIC) / FFmpeg `-map_metadata -1 -c copy` / lopdf |
 | editImage | EDIT | Edit Photo | ✓ |  |  | v2 | image pipeline |
 | annotateImage | ANNOTATE | Annotate Photo | ✓ |  |  | v2 | canvas in UI → PNG |

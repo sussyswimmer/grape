@@ -1,10 +1,14 @@
 //! TIFF for the image tools (D28).
 //!
 //! - [`read`]: a TIFF's model, every page and SubIFD, read by seeking.
+//! - [`codec`]: the strips and tiles Compress decodes and deflates again.
+//! - [`compress`]: Compress on TIFF.
 //! - [`write`]: a TIFF written back compact from the IFDs a tool chose.
 //! - [`strip`]: Remove Metadata on TIFF, with [`irb`] for Photoshop's
 //!   resources.
 
+pub(crate) mod codec;
+pub(crate) mod compress;
 pub(crate) mod irb;
 pub(crate) mod read;
 pub(crate) mod strip;
