@@ -22,12 +22,17 @@
 //!     a zeroed `free` box of the same size, or is cut when it's past the
 //!     last box Grape keeps; bytes that aren't a box are cut (Other,
 //!     unless all zero); existing `free` and `skip` boxes are zeroed,
-//!     unreported (old editors leave metadata there).
+//!     unreported (old editors leave metadata there);
+//!   - every byte of `mdat` and `idat` that no kept item points to (still
+//!     pictures reach their data only through `iloc`): zeroed, as the copy
+//!     goes, and reported as Other when what no item at all points to
+//!     isn't all zeros (an earlier editor's leftovers, a writer's
+//!     signature).
 //! - **Kept byte for byte:** every other item (the primary, a grid's
 //!   tiles, thumbnails, alpha, depth, Portrait mattes, gain maps, `tmap`),
 //!   every other property (`colr`, `irot`, `imir`, `clap`, `pixi`,
 //!   `hvcC`, `ispe`, `auxC`, `pasp`, …), `ftyp`, `etyp`, `hdlr`, `pitm`,
-//!   `dinf`, `grpl` (less the dropped ids), `idat` (dropped data zeroed)
+//!   `dinf`, `grpl` (less the dropped ids), `idat` (all but kept data zeroed)
 //!   and each kept `iloc` entry, copied as it was. No minimal Exif goes
 //!   back: `irot` and `imir` turn the picture, and `colr` holds its color.
 //! - **Refused** ([`LAYOUT`]): a dropped item whose data is in another
@@ -113,11 +118,15 @@ struct Survey {
     /// Where the output ends: past it, boxes and bytes are cut.
     end: u64,
     /// Where kept data is in the file, and in `idat`'s content: merged,
-    /// sorted.
+    /// sorted. Every other byte of `mdat` and `idat` is zeroed.
     kept_file: Vec<Range<u64>>,
-    /// Where dropped data is in the file and in `idat`'s content.
+    kept_idat: Vec<Range<u64>>,
+    /// Where dropped data is in the file and in `idat`'s content: merged,
+    /// sorted.
     drop_file: Vec<Range<u64>>,
     drop_idat: Vec<Range<u64>>,
+    /// Whether `idat` holds a byte to zero.
+    idat_dirty: bool,
     found: Found,
 }
 
@@ -168,8 +177,10 @@ impl Survey {
             fates: Vec::new(),
             end: 0,
             kept_file: Vec::new(),
+            kept_idat: Vec::new(),
             drop_file: Vec::new(),
             drop_idat: Vec::new(),
+            idat_dirty: false,
             found: Found::default(),
         };
         s.place_data()?;
@@ -177,6 +188,7 @@ impl Survey {
         s.judge_boxes(r)?;
         s.report_items(r)?;
         s.report_properties();
+        s.report_gaps(r)?;
         Ok(s)
     }
 
@@ -247,7 +259,9 @@ impl Survey {
             return Err(Error::Refused(LAYOUT.into()));
         }
         self.kept_file = kept_file;
+        self.kept_idat = kept_idat;
         self.drop_file = merged(std::mem::take(&mut self.drop_file));
+        self.drop_idat = merged(std::mem::take(&mut self.drop_idat));
         Ok(())
     }
 
@@ -294,7 +308,8 @@ impl Survey {
             }
             fates.push(fate);
         }
-        if self.top.tail < self.top.len && !zeros(r, self.top.tail..self.top.len)? {
+        let mut buf = vec![0; STEP];
+        if self.top.tail < self.top.len && !zeros(r, self.top.tail..self.top.len, &mut buf)? {
             self.found.fields.insert(MetaField::Other);
         }
         self.fates = fates;
@@ -451,9 +466,51 @@ impl Survey {
         }
     }
 
-    /// Whether anything changes in `meta`.
+    /// Reports the bytes of `mdat` and `idat` that no item points to:
+    /// still pictures reach their data only through `iloc`, so they're
+    /// zeroed, and when any isn't zero (what an earlier editor left of an
+    /// item it dropped), they're reported as Other.
+    fn report_gaps(&mut self, r: &mut dyn In) -> Result<(), Error> {
+        let mut left_over = false;
+        let mut buf = vec![0; STEP];
+        'mdats: for b in self.top.all(b"mdat") {
+            for gap in gaps(&self.kept_file, b.content()) {
+                for unread in gaps(&self.drop_file, gap) {
+                    if !zeros(r, unread, &mut buf)? {
+                        left_over = true;
+                        break 'mdats;
+                    }
+                }
+            }
+        }
+        if let Some(idat) = self.meta.idat() {
+            let bytes = &self.meta.bytes[idat];
+            let set = |r: Range<u64>| {
+                bytes[r.start as usize..r.end as usize]
+                    .iter()
+                    .any(|&b| b != 0)
+            };
+            let all = 0..bytes.len() as u64;
+            self.idat_dirty = gaps(&self.kept_idat, all.clone()).any(set);
+            left_over |= gaps(&self.kept_idat, all)
+                .flat_map(|gap| gaps(&self.drop_idat, gap))
+                .any(set);
+        }
+        if left_over {
+            self.found.fields.insert(MetaField::Other);
+        }
+        Ok(())
+    }
+
+    /// Whether `meta` loses an item or a property.
     fn meta_changes(&self) -> bool {
         !self.dropped.is_empty() || self.removed.contains(&true)
+    }
+
+    /// Whether `meta` is written again: it changes, or bytes in `idat` are
+    /// zeroed.
+    fn rewrites_meta(&self) -> bool {
+        self.meta_changes() || self.idat_dirty
     }
 }
 
@@ -506,12 +563,30 @@ fn overlaps(merged: &[Range<u64>], range: &Range<u64>) -> bool {
     merged.get(i).is_some_and(|m| m.start < range.end)
 }
 
-/// Whether the file's bytes in `range` are all zero.
-fn zeros(r: &mut dyn In, range: Range<u64>) -> Result<bool, Error> {
-    let mut buf = vec![0; STEP];
+/// The parts of `within` that none of `covered` (sorted, apart) covers.
+fn gaps(covered: &[Range<u64>], within: Range<u64>) -> impl Iterator<Item = Range<u64>> + '_ {
+    let first = covered.partition_point(|c| c.end <= within.start);
+    let mut rest = covered[first..].iter();
+    let mut at = within.start;
+    std::iter::from_fn(move || {
+        while at < within.end {
+            let next = rest.next().filter(|c| c.start < within.end);
+            let to = next.map_or(within.end, |c| c.start.max(at));
+            let gap = at..to;
+            at = next.map_or(within.end, |c| c.end.max(at));
+            if !gap.is_empty() {
+                return Some(gap);
+            }
+        }
+        None
+    })
+}
+
+/// Whether the file's bytes in `range` are all zero, read through `buf`.
+fn zeros(r: &mut dyn In, range: Range<u64>, buf: &mut [u8]) -> Result<bool, Error> {
     let mut at = range.start;
     while at < range.end {
-        let n = (range.end - at).min(STEP as u64) as usize;
+        let n = (range.end - at).min(buf.len() as u64) as usize;
         read_at(r, at, &mut buf[..n])?;
         if buf[..n].iter().any(|&b| b != 0) {
             return Ok(false);
@@ -574,10 +649,11 @@ fn rebuild(s: &Survey, out: &mut Vec<u8>) {
         } else if m.iprp.as_ref().is_some_and(|p| p.child == i) {
             rebuild_iprp(s, child, out);
         } else if m.idat == Some(i) {
+            // Zeros where no kept item points.
             let from = out.len() + child.form.head() as usize;
             out.extend_from_slice(&m.bytes[child.range.clone()]);
-            for range in &s.drop_idat {
-                out[from + range.start as usize..from + range.end as usize].fill(0);
+            for gap in gaps(&s.kept_idat, 0..child.content().len() as u64) {
+                out[from + gap.start as usize..from + gap.end as usize].fill(0);
             }
         } else if m.grpl == Some(i) {
             rebuild_grpl(s, child, out);
@@ -777,6 +853,32 @@ impl Edit {
     }
 }
 
+/// `edits` (sorted), and zeros for each stretch of the `mdats` (contents,
+/// in order) that none of `keep` (merged, sorted) covers, in the file's
+/// order.
+fn changes<'a>(
+    edits: &'a [Edit],
+    keep: &'a [Range<u64>],
+    mdats: &'a [Range<u64>],
+) -> impl Iterator<Item = Edit> + 'a {
+    let mut zeros = mdats
+        .iter()
+        .flat_map(move |m| gaps(keep, m.clone()))
+        .peekable();
+    let mut edits = edits.iter().peekable();
+    std::iter::from_fn(move || {
+        let zero_first = match (edits.peek(), zeros.peek()) {
+            (Some(e), Some(z)) => z.start < e.range().start,
+            (e, z) => e.is_none() && z.is_some(),
+        };
+        if zero_first {
+            zeros.next().map(Edit::Zero)
+        } else {
+            edits.next().cloned()
+        }
+    })
+}
+
 /// An item Remove Metadata keeps, for the check: where its `iloc` entry is
 /// in the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -791,10 +893,15 @@ struct Kept {
 pub(crate) struct Plan {
     /// The output's size.
     len: u64,
-    /// What changes, sorted, apart.
+    /// What changes, sorted, apart; and every byte of `mdat` no kept item
+    /// points to is zeroed.
     edits: Vec<Edit>,
     /// The bytes the edits write: `meta` and `free` headers.
     bytes: Vec<u8>,
+    /// Where kept data is in the file: merged, sorted.
+    keep: Vec<Range<u64>>,
+    /// Where each `mdat`'s content is, in order.
+    mdats: Vec<Range<u64>>,
     found: Found,
     primary: u32,
     /// Every item it keeps with an `iloc` entry, in `iloc`'s order.
@@ -808,13 +915,13 @@ impl Plan {
     /// Reads the HEIF `r` (`len` bytes) and plans its rewrite, or refuses
     /// it ([module docs](self)).
     pub(crate) fn new(r: &mut dyn In, len: u64) -> Result<Plan, Error> {
-        let s = Survey::new(r, len)?;
+        let mut s = Survey::new(r, len)?;
         let mut edits = Vec::new();
         // What the edits write, each in its place: the rebuilt meta and the
         // free box after it, which fit in the source's meta, and a free
         // header for each box that goes.
         let freed = s.fates.iter().filter(|&&f| f == Fate::Free).count();
-        let room = if s.meta_changes() {
+        let room = if s.rewrites_meta() {
             s.meta_box.len as usize
         } else {
             0
@@ -822,7 +929,7 @@ impl Plan {
         let mut bytes = Vec::with_capacity(room + 16 * freed);
         let mut len = s.end;
         let mut padded = false;
-        if s.meta_changes() {
+        if s.rewrites_meta() {
             rebuild(&s, &mut bytes);
             // A meta that ends the output ends it sooner, with no free box
             // after it: Samsung's ftyp, mdat, meta.
@@ -877,19 +984,20 @@ impl Plan {
                 Fate::Keep | Fate::Meta => {}
             }
         }
-        for range in &s.drop_file {
-            if range.start < s.end {
-                edits.push(Edit::Zero(range.start..range.end.min(s.end)));
-            }
-        }
         edits.retain(|e| !e.range().is_empty());
         edits.sort_unstable_by_key(|e| e.range().start);
-        if edits
-            .windows(2)
-            .any(|w| w[0].range().end > w[1].range().start)
-        {
-            // The drops are in mdat, apart from meta and the boxes freed.
-            return Err(Error::Refused(LAYOUT.into()));
+        // With every byte of mdat that no kept item points to, dropped data
+        // and what earlier editors left, zeroed as it's copied.
+        let keep = std::mem::take(&mut s.kept_file);
+        let mdats: Vec<_> = s.top.all(b"mdat").map(|b| b.content()).collect();
+        let mut end = 0;
+        for change in changes(&edits, &keep, &mdats) {
+            let range = change.range();
+            if range.start < end {
+                // Drops are in mdat, apart from meta and the boxes freed.
+                return Err(Error::Refused(LAYOUT.into()));
+            }
+            end = range.end;
         }
         let m = &s.meta;
         let content = s.meta_box.content().start;
@@ -908,6 +1016,8 @@ impl Plan {
             len,
             edits,
             bytes,
+            keep,
+            mdats,
             found: s.found,
             primary: m.primary,
             kept,
@@ -922,10 +1032,11 @@ impl Plan {
     pub(crate) fn write(&mut self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
         let edits = std::mem::take(&mut self.edits);
         let bytes = std::mem::take(&mut self.bytes);
+        let keep = std::mem::take(&mut self.keep);
         r.seek(SeekFrom::Start(0)).map_err(Error::Read)?;
         let mut buf = vec![0; STEP];
         let mut at = 0;
-        for edit in &edits {
+        for edit in changes(&edits, &keep, &self.mdats) {
             let range = edit.range();
             copy(r, w, range.start - at, &mut buf)?;
             skip(r, range.end - range.start, &mut buf)?;
@@ -940,7 +1051,7 @@ impl Plan {
                     }
                 }
                 Edit::Write { bytes: written, .. } => {
-                    w.write_all(&bytes[written.clone()]).map_err(Error::Write)?;
+                    w.write_all(&bytes[written]).map_err(Error::Write)?;
                 }
             }
             at = range.end;
@@ -978,11 +1089,6 @@ impl Plan {
         if locations.len() != self.kept.len() {
             return wrong("has other items".into());
         }
-        let idat = m.idat().map_or(0, |r| r.len() as u64);
-        // Every kept item's data, each byte once however many items share
-        // it, in the file and in idat.
-        let mut file = Vec::new();
-        let mut in_idat = Vec::new();
         let mut entry = Vec::new();
         for kept in &self.kept {
             let Some(loc) = locations.get(&kept.id) else {
@@ -994,31 +1100,24 @@ impl Plan {
             if m.bytes[loc.range.clone()] != entry[..] {
                 return wrong(format!("changed item {}'s location", kept.id));
             }
-            if loc.method == 2 {
-                continue;
-            }
-            for span in m.spans(loc)? {
-                match loc.method {
-                    0 => file.push(span.start..span.end(len)),
-                    _ => in_idat.push(span.start..span.end(idat)),
-                }
-            }
         }
+        // Every kept item's data, each byte once however many items share
+        // it, in the file and in idat: what the output's survey found kept,
+        // which is every item it has, and so every item kept.
         let idat_at = m
             .idat()
             .map(|r| s.meta_box.content().start + r.start as u64);
-        let mut places = vec![(0, 0, merged(file))];
-        let in_idat = merged(in_idat);
-        if !in_idat.is_empty() {
+        let mut places = vec![(0, 0, &s.kept_file)];
+        if !s.kept_idat.is_empty() {
             let (Some(from), Some(to)) = (self.idat_at, idat_at) else {
                 return wrong("lost its idat".into());
             };
-            places.push((from, to, in_idat));
+            places.push((from, to, &s.kept_idat));
         }
         let mut a = vec![0; STEP];
         let mut b = vec![0; STEP];
         for (from, to, ranges) in places {
-            for range in ranges {
+            for range in ranges.iter().cloned() {
                 let mut at = range.start;
                 while at < range.end {
                     let n = (range.end - at).min(STEP as u64) as usize;
@@ -1066,7 +1165,7 @@ mod tests {
     use super::super::isobmff::boxes::load;
     use super::super::isobmff::tests::{
         bx, described, iphone, layouts, meta_at, read, simple, uuid, Builder, Item, Place, C2PA,
-        EXIF, GAIN, SECRET_XMP, XMP, XMP_UUID as XMP_USER_TYPE,
+        EXIF, GAIN, SECRET_XMP, TMAP, XMP, XMP_UUID as XMP_USER_TYPE,
     };
     use super::*;
     use MetaField::*;
@@ -1493,6 +1592,73 @@ mod tests {
     }
 
     #[test]
+    fn bytes_in_mdat_and_idat_no_item_points_to_are_zeroed() {
+        // An earlier editor shortened the primary's extent: its last 100
+        // bytes in mdat are no item's. Its first 200 stay.
+        let primary = |tail: u8| {
+            let mut b = simple();
+            b.items[0].data = [vec![0xA1; 200], vec![tail; 100]].concat();
+            let (mut file, layout) = b.build();
+            let len = entry_at(&file, 1) + 12;
+            file[len..len + 4].copy_from_slice(&200u32.to_be_bytes());
+            (file, layout.file_ranges(1)[0].clone())
+        };
+        let photo: BTreeSet<_> = [Location, Camera, CreationDate, Xmp].into();
+        let (file, data) = primary(0xA1);
+        let (out, found) = strip(&file);
+        assert_eq!(found, &photo | &[Other].into());
+        let (a, b) = (data.start as usize, data.end as usize);
+        assert_eq!(out[a..a + 200], file[a..a + 200]);
+        assert!(out[a + 200..b].iter().all(|&b| b == 0));
+        // A second pass finds nothing, and copies it as it is.
+        let (again, found) = strip(&out);
+        assert_eq!(again, out);
+        assert!(found.is_empty());
+        // A gap of zeros isn't reported.
+        assert_eq!(strip(&primary(0).0).1, photo);
+        // In idat: the tone map's last 3 bytes.
+        let (mut file, _) = iphone().build();
+        let len = entry_at(&file, TMAP) + 12;
+        file[len..len + 4].copy_from_slice(&3u32.to_be_bytes());
+        let (out, found) = strip(&file);
+        assert!(found.contains(&Other));
+        let m = meta(&out);
+        let idat = meta_at(&out) + m.idat().unwrap().start;
+        // The grid's 8 bytes, the tone map's first 3, then zeros.
+        assert_eq!(
+            out[idat..idat + 14],
+            [0, 0, 0, 1, 0, 64, 0, 48, 0, 1, 2, 0, 0, 0]
+        );
+        // The check finds a byte left in a gap.
+        let (file, _) = primary(0xA1);
+        let mut p = plan(&file).unwrap();
+        let mut o = Cursor::new(Vec::new());
+        p.write(&mut Cursor::new(&file), &mut o).unwrap();
+        let mut o = o.into_inner();
+        o[b - 1] = 1;
+        assert!(matches!(
+            p.check(
+                &mut Cursor::new(&file),
+                &mut Cursor::new(&o),
+                o.len() as u64
+            ),
+            Err(Error::Broken(_))
+        ));
+    }
+
+    #[test]
+    fn gaps_are_what_nothing_covers_within_a_range() {
+        let covered = [2..4, 6..9, 12..20];
+        let all = |within: Range<u64>| gaps(&covered, within).collect::<Vec<_>>();
+        assert_eq!(all(0..30), [0..2, 4..6, 9..12, 20..30]);
+        // Ranges that start before it or run past it.
+        assert_eq!(all(3..13), [4..6, 9..12]);
+        assert_eq!(all(7..8), []);
+        assert_eq!(all(20..20), []);
+        assert_eq!(gaps(&[], 5..9).next(), Some(5..9));
+    }
+
+    #[test]
     fn a_file_with_nothing_to_drop_is_copied_byte_for_byte() {
         let mut b = simple();
         b.items.truncate(1);
@@ -1655,7 +1821,8 @@ mod tests {
         // After ftyp's 24 bytes and abcd's header.
         file[at..at + 4].copy_from_slice(&32u32.to_be_bytes());
         let (out, found) = strip(&file);
-        assert_eq!(found, [Location, Camera, CreationDate, Xmp].into());
+        // The bytes it had in mdat are no item's now, and go.
+        assert_eq!(found, [Location, Camera, CreationDate, Xmp, Other].into());
         assert_eq!(out[24..24 + 308], file[24..24 + 308]);
         // An XMP uuid box holding kept data is refused.
         let mut b = simple();

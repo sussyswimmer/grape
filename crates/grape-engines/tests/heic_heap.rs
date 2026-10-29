@@ -132,6 +132,9 @@ struct Meta {
     /// For each item after 2, its extents (each one byte of the primary's
     /// data).
     extents: Vec<u16>,
+    /// Each of those a byte of its own instead, a byte apart, in `mdat`
+    /// after the Exif: as many bytes no item points to between them.
+    spread: bool,
     /// `iref`'s boxes after the Exif's `cdsc`.
     iref: Vec<u8>,
     ipco: Vec<u8>,
@@ -143,11 +146,18 @@ struct Meta {
 }
 
 /// A HEIF file: `ftyp`, a `meta` of `m`, then `mdat` (the primary's 100
-/// bytes, then the Exif's, unless it's in `idat`).
+/// bytes, then the Exif's, unless it's in `idat`, then the spread bytes).
 fn heif(m: &Meta) -> Vec<u8> {
     let exif = exif();
+    let in_mdat = if m.idat.is_none() { exif.len() } else { 0 };
+    let spread: u32 = if m.spread {
+        m.extents.iter().map(|&n| u32::from(n)).sum()
+    } else {
+        0
+    };
     let build = |mdat_at: u32| -> Vec<u8> {
         let primary = mdat_at + 8;
+        let mut byte = primary + 100 + in_mdat as u32;
         let mut iinf = u16::try_from(m.count).unwrap().to_be_bytes().to_vec();
         iinf.extend_from_slice(&full(b"infe", 2, 0, b"\0\x01\0\0hvc1\0"));
         iinf.extend_from_slice(&full(b"infe", 2, 1, b"\0\x02\0\0Exif\0"));
@@ -175,7 +185,12 @@ fn heif(m: &Meta) -> Vec<u8> {
             iloc.extend_from_slice(&[0, 0, 0, 0]);
             iloc.extend_from_slice(&n.to_be_bytes());
             for _ in 0..n {
-                extent(&mut iloc, primary, 1);
+                if m.spread {
+                    extent(&mut iloc, byte, 1);
+                    byte += 2;
+                } else {
+                    extent(&mut iloc, primary, 1);
+                }
             }
         }
         let mut iref = bx(b"cdsc", &[0, 2, 0, 1, 0, 1]);
@@ -212,6 +227,7 @@ fn heif(m: &Meta) -> Vec<u8> {
     if m.idat.is_none() {
         mdat.extend_from_slice(&exif);
     }
+    mdat.resize(mdat.len() + 2 * spread as usize, 0xA5);
     [ftyp, build(mdat_at), bx(b"mdat", &mdat)].concat()
 }
 
@@ -250,6 +266,7 @@ fn a_meta_of_data_just_under_its_cap_is_held_twice() {
         ipma: full(b"ipma", 0, 0, &[0, 0, 0, 1, 0, 1, 1, 0x81]),
         grpl: None,
         extra: Vec::new(),
+        spread: false,
     });
     assert!(meta_len(&file) > (16 << 20) - 256);
     let metas = metas(&dir, "big.heic", &file);
@@ -316,7 +333,51 @@ fn a_meta_packed_at_every_cap_is_held_twice_beside_its_model() {
         ipma,
         grpl: Some(grpl),
         extra,
+        spread: false,
     });
     let metas = metas(&dir, "caps.heic", &file);
     assert!(metas < 5.0, "{metas:.2} metas");
+}
+
+#[test]
+fn a_meta_whose_extents_leave_a_gap_after_each_zeroes_them_as_it_copies() {
+    // 65,533 items of 4 one-byte extents, each a byte apart: 262,132
+    // stretches of mdat to zero between them, found as the copy goes from
+    // the kept ranges the plan holds, not held as an edit each (32.69 MiB
+    // then) beside the 3.8 MiB meta, its model and the rebuilt one.
+    let _turn = turn();
+    let dir = TestDir::new("heic-heap-gaps");
+    let items = 65_535u16;
+    let mut infe = Vec::new();
+    for id in 3..=items {
+        let mut c = id.to_be_bytes().to_vec();
+        c.extend_from_slice(b"\0\0hvt1\0");
+        infe.extend_from_slice(&full(b"infe", 2, 1, &c));
+    }
+    let file = heif(&Meta {
+        infe,
+        count: usize::from(items),
+        idat: None,
+        extents: vec![4; usize::from(items) - 2],
+        iref: Vec::new(),
+        ipco: bx(b"hvcC", &[1; 23]),
+        ipma: full(b"ipma", 0, 0, &[0, 0, 0, 1, 0, 1, 1, 0x81]),
+        grpl: None,
+        extra: Vec::new(),
+        spread: true,
+    });
+    let (_, job) = plan_one(
+        &dir,
+        "gaps.heic",
+        &file,
+        Operation::tool(ToolKey::RemoveMetadata),
+    );
+    let (peak, result) = peak_of(&job);
+    result.unwrap();
+    let mib = peak as f64 / f64::from(1 << 20);
+    eprintln!(
+        "gaps.heic: meta {:.2} MiB, peak {mib:.2} MiB",
+        meta_len(&file) as f64 / f64::from(1 << 20)
+    );
+    assert!(mib < 25.0, "{mib:.2} MiB");
 }
