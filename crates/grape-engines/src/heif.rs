@@ -92,10 +92,6 @@ const LIBHEIF_ENV: [&str; 2] = ["LIBHEIF_PLUGIN_PATH", "LIBHEIF_SECURITY_LIMITS"
 /// The buffer of the writers that stream pixels and copy the output.
 const WRITE_BUFFER: usize = 1 << 20;
 
-/// A helper that ended without a result after committing at least this
-/// share of [`Limits::helper_memory`] (in percent) ran out of memory.
-const OVER_MEMORY_PERCENT: u64 = 90;
-
 /// The formats the helper reads and writes (D41).
 pub(crate) const HEIF: [Format; 2] = [Format::Heic, Format::Avif];
 
@@ -1329,12 +1325,8 @@ fn drive(
         (Some(done), None, true) => Ended::Done(done, image),
         (None, Some(failure), false) => Ended::Failed(failure),
         (done, failure, success) => {
-            let peak = running.peak_memory();
             let limit = run.limits.helper_memory;
-            let over = peak.is_some_and(|peak| {
-                u128::from(peak) * 100 >= u128::from(limit) * u128::from(OVER_MEMORY_PERCENT)
-            });
-            if over {
+            if helper::near_memory_cap(running.peak_memory(), limit) {
                 Ended::OverMemory(format!(
                     "the HEIF helper ended near its {} MiB memory cap",
                     limit / MIB

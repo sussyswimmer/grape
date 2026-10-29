@@ -18,6 +18,8 @@
 //!   can't block the job, and stdout is read as JSON lines on another.
 //! - [`Running`]: the engine polls it for messages and the exit status. It
 //!   kills and reaps the helper when dropped, then ends its containment.
+//! - [`near_memory_cap`]: a helper that ended without a result after
+//!   committing 90% of its container's cap ran out of memory.
 //! - [`read_pixel_file`]: a helper's `pixels.rgba` (grape-heif-proto's raw
 //!   pixel file), read into one buffer no larger than what its `image`
 //!   line announced and the engine approved.
@@ -60,6 +62,10 @@ const UNIQUE_ATTEMPTS: usize = 8;
 /// of a helper whose stdout has closed.
 const EXIT_POLL: Duration = Duration::from_millis(10);
 
+/// A helper that ended without a result after committing at least this
+/// share of its container's memory cap (in percent) ran out of memory.
+const OVER_MEMORY_PERCENT: u64 = 90;
+
 /// Puts a process Grape just started into an OS container (D33): a Job
 /// Object on Windows, set by the app ([`set_contain`]). The image helper
 /// and the SVG worker, and `ffmpeg` and `ffprobe` (D22).
@@ -80,6 +86,16 @@ pub trait Contained: Send {
     /// reports it. The engine reads it after a crash, to tell "needs too
     /// much memory" from other failures.
     fn peak_memory(&self) -> Option<u64>;
+}
+
+/// True when `peak`, a contained helper's [`Contained::peak_memory`], is at
+/// least [`OVER_MEMORY_PERCENT`] of `cap`, the memory cap it was contained
+/// with: a helper that ended so without a result ran out of memory. False
+/// when the OS reported no peak.
+pub(crate) fn near_memory_cap(peak: Option<u64>, cap: u64) -> bool {
+    peak.is_some_and(|peak| {
+        u128::from(peak) * 100 >= u128::from(cap) * u128::from(OVER_MEMORY_PERCENT)
+    })
 }
 
 /// Removes the helpers' work folders (the image helper's
@@ -611,6 +627,19 @@ mod tests {
         );
         drop(made);
         fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn a_peak_at_90_percent_of_the_cap_is_near_it() {
+        const GIB: u64 = 1 << 30;
+        let at = (2 * GIB * 9).div_ceil(10);
+        assert!(near_memory_cap(Some(2 * GIB), 2 * GIB));
+        assert!(near_memory_cap(Some(at), 2 * GIB));
+        assert!(!near_memory_cap(Some(at - 1), 2 * GIB));
+        assert!(!near_memory_cap(None, 2 * GIB));
+        // No overflow at the extremes.
+        assert!(near_memory_cap(Some(u64::MAX), u64::MAX));
+        assert!(!near_memory_cap(Some(0), u64::MAX));
     }
 
     #[test]
