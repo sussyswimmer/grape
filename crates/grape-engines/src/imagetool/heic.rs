@@ -34,7 +34,9 @@
 //!   `mdat` and `idat`; kept data inside `meta`, or inside a box that's
 //!   dropped or zeroed; a picture made of a dropped item (`dimg`), or
 //!   whose data is in one; a primary item that is metadata. A sequence is
-//!   refused too ([`SEQUENCE`]).
+//!   refused too ([`SEQUENCE`]). Kept data that names another data
+//!   reference counts as this file's, as libheif reads it: it's kept,
+//!   overlapped by nothing dropped, and checked.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 //! - **Memory:** the source's `meta` (within
@@ -176,8 +178,10 @@ impl Survey {
             if dropped && (loc.method == 2 || loc.data_ref != 0) {
                 return Err(Error::Refused(LAYOUT.into()));
             }
-            // Data in another file, or in other items, isn't this file's.
-            if loc.data_ref != 0 || loc.method == 2 {
+            // Data in other items has no place of its own. Kept data that
+            // names another data reference is read from this file all the
+            // same, as libheif reads it (and a self-contained `url ` says).
+            if loc.method == 2 {
                 continue;
             }
             let size = if loc.method == 0 { len } else { idat };
@@ -975,7 +979,7 @@ impl Plan {
             if m.bytes[loc.range.clone()] != entry[..] {
                 return wrong(format!("changed item {}'s location", kept.id));
             }
-            if loc.data_ref != 0 || loc.method == 2 {
+            if loc.method == 2 {
                 continue;
             }
             for span in m.spans(loc)? {
@@ -1549,6 +1553,38 @@ mod tests {
         let mut b = simple();
         b.after = vec![bx(b"moov", b"")];
         assert_eq!(refused(&b.build().0), SEQUENCE);
+    }
+
+    #[test]
+    fn kept_data_that_names_another_data_reference_is_this_files_all_the_same() {
+        // The primary at data reference 1: libheif reads it from this file
+        // whatever the index says, as a self-contained `url ` means.
+        let (src, layout) = simple().build();
+        let mut file = src.clone();
+        let primary = entry_at(&file, 1);
+        file[primary + 4..primary + 6].copy_from_slice(&[0, 1]);
+        let data = layout.file_ranges(1)[0].clone();
+        let (out, _) = strip(&file);
+        let (a, b) = (data.start as usize, data.end as usize);
+        assert_eq!(out[a..b], file[a..b]);
+        // The check reads it as kept data.
+        let mut p = plan(&file).unwrap();
+        let mut o = Cursor::new(Vec::new());
+        p.write(&mut Cursor::new(&file), &mut o).unwrap();
+        let mut o = o.into_inner();
+        o[b - 1] ^= 1;
+        assert!(matches!(
+            p.check(
+                &mut Cursor::new(&file),
+                &mut Cursor::new(&o),
+                o.len() as u64
+            ),
+            Err(Error::Broken(_))
+        ));
+        // An Exif over its last 40 bytes would zero them: refused.
+        let exif = entry_at(&file, EXIF) + 8;
+        file[exif..exif + 4].copy_from_slice(&(data.end as u32 - 40).to_be_bytes());
+        assert_eq!(refused(&file), LAYOUT);
     }
 
     #[test]
