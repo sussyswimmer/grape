@@ -25,10 +25,10 @@
 //!     unless all zero: a Samsung `sefd` trailer, with the capture time
 //!     and mobile country code); existing `free` and `skip` boxes are zeroed,
 //!     unreported (old editors leave metadata there);
-//!   - `meta`'s own `uuid` boxes (XMP, or Other: a Canon HIF's encoder
-//!     version), and its `xml ` (XMP) and `bxml` (Other) boxes: left out
-//!     of the rebuilt `meta`, unreported when they hold nothing past their
-//!     user type, or their version and flags;
+//!   - the `uuid` boxes directly in `meta` (XMP, or Other: a Canon HIF's
+//!     encoder version), and its `xml ` (XMP) and `bxml` (Other) boxes:
+//!     left out of the rebuilt `meta`, unreported when they hold nothing
+//!     past their user type, or their version and flags;
 //!   - every `iloc` entry with no item (no `infe`), which no reader
 //!     follows: what it points to is no item's (below);
 //!   - every byte of `mdat` and `idat` that no kept item points to (still
@@ -42,7 +42,11 @@
 //!   `hvcC`, `ispe`, `auxC`, `pasp`, …), `ftyp`, `etyp`, `hdlr`, `pitm`,
 //!   `dinf`, `grpl` (less the dropped ids), `idat` (all but kept data zeroed),
 //!   each kept `iloc` entry and every other box in `meta`, copied as it
-//!   was; `colr` holds the color.
+//!   was; `colr` holds the color. So `uuid`, `xml ` and `bxml` boxes
+//!   deeper in `meta` (in a box Grape doesn't know, in `dinf`, beside
+//!   `ipco` and `ipma` in `iprp`, or as a property) stay, unreported:
+//!   Apple's spatial and stereo photos have `uuid` properties that must
+//!   stay.
 //! - **Kept for the orientation** (D26, as JPEG's minimal Exif): the
 //!   primary's Exif when its Orientation is 2 to 8, whether or not `irot`
 //!   and `imir` turn the picture too, since readers that follow Exif don't
@@ -512,12 +516,13 @@ impl Survey {
         Ok(())
     }
 
-    /// Leaves out of `meta` the boxes in it that hold metadata, and
-    /// reports the ones that hold anything past their user type, or their
-    /// version and flags: each `uuid` (XMP, or other fields: a Canon HIF's
-    /// encoder version), `xml ` (XMP) and `bxml` (other fields). Kept data
-    /// in one is refused, though `meta` holds none (place_data), and
-    /// construction method 1 points into `idat` only.
+    /// Leaves out of `meta` the boxes directly in it that hold metadata,
+    /// and reports the ones that hold anything past their user type, or
+    /// their version and flags: each `uuid` (XMP, or other fields: a Canon
+    /// HIF's encoder version), `xml ` (XMP) and `bxml` (other fields).
+    /// Deeper ones stay ([module docs](self)). Kept data in one is refused,
+    /// though `meta` holds none (place_data), and construction method 1
+    /// points into `idat` only.
     fn judge_meta_boxes(&mut self) -> Result<(), Error> {
         let at = self.meta_box.content().start;
         for (i, child) in self.meta.children.iter().enumerate() {
