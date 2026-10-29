@@ -1,7 +1,7 @@
-//! The heap Remove Metadata on TIFF holds at its peak (D28): TIFFs of a
-//! million strips, and of pages with Photoshop's resources, through
-//! `run_job`, under an allocator that counts. The tests take turns, so
-//! nothing else allocates meanwhile.
+//! The heap Remove Metadata and Compress on TIFF hold at their peak (D28):
+//! TIFFs of a million strips, of 65,536 pages, and of pages with
+//! Photoshop's resources, through `run_job`, under an allocator that
+//! counts. The tests take turns, so nothing else allocates meanwhile.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use common::{plan_one, TestDir};
-use grape_core::{Job, Operation, ToolKey};
+use grape_core::{CompressPreset, Job, Operation, ToolKey, ToolParams};
 use grape_engines::{run_job, EngineCtx, GrapeError, JobOutcome};
 
 /// The bytes held now, and the most held since the last reset.
@@ -97,15 +97,22 @@ fn peak(job: &Job) -> usize {
     peak
 }
 
-/// Which byte strip `i` of `n` is.
+/// Which row strip `i` of `n` is.
 type At = fn(u32, u32) -> u32;
 
 /// A classic TIFF of one gray page, 1 × `n`, one 1-byte row a strip: `n`
 /// strips, their offsets and counts LONG arrays, then `n` bytes, of which
 /// strip `i` is byte `at(i, n)`.
 fn strips(n: u32, at: At) -> Vec<u8> {
+    rows(n, 1, at)
+}
+
+/// A classic TIFF of one gray page, `width` × `n`, one row a strip: `n`
+/// strips, their offsets and counts LONG arrays, then `n` rows, each of one
+/// value, of which strip `i` is row `at(i, n)`.
+fn rows(n: u32, width: u32, at: At) -> Vec<u8> {
     let entries: [(u16, u16, u32, u32); 7] = [
-        (256, 4, 1, 1),
+        (256, 4, 1, width),
         (257, 4, 1, n),
         (258, 3, 1, 8),
         (262, 3, 1, 1),
@@ -129,9 +136,10 @@ fn strips(n: u32, at: At) -> Vec<u8> {
         file.extend(value.to_le_bytes());
     }
     file.extend([0; 4]);
-    file.extend((0..n).flat_map(|i| (data + at(i, n)).to_le_bytes()));
-    file.extend((0..n).flat_map(|_| 1u32.to_le_bytes()));
-    file.extend((0..n).map(|i| (i % 251) as u8));
+    file.extend((0..n).flat_map(|i| (data + at(i, n) * width).to_le_bytes()));
+    file.extend((0..n).flat_map(|_| width.to_le_bytes()));
+    let row = |i: u32| std::iter::repeat_n((i % 251) as u8, width as usize);
+    file.extend((0..n).flat_map(row));
     file
 }
 
@@ -295,4 +303,84 @@ fn pages_that_name_photoshops_resources_each_their_own_way_hold_16_mib_at_most()
     );
     let mib = peak as f64 / f64::from(1 << 20);
     assert!(mib < 18.0, "{mib:.2} MiB");
+}
+
+/// Compress at Balanced.
+fn compress() -> Operation {
+    Operation::Tool {
+        tool: ToolKey::Compress,
+        params: ToolParams {
+            compress: CompressPreset::Balanced,
+            ..ToolParams::DEFAULT
+        },
+    }
+}
+
+#[test]
+fn compress_on_a_tiff_of_many_strips_holds_two_models_and_40_bytes_a_repeat() {
+    let _turn = turn();
+    // Fewer strips than Remove Metadata's test, as a debug build deflates
+    // each one in about 140 µs: the heap that two strips take (the codecs'
+    // state and buffers, about 1.1 MB) is taken off. Up to 4,096 blocks
+    // waiting to be read back stay in the count (0.1 model here; a million
+    // strips measured 2.09, 2.09 and 3.34 models).
+    let n = (1 << 17) + 2;
+    let dir = TestDir::new("tiff-heap-compress");
+    let (_, job) = plan_one(&dir, "two.tif", &rows(2, 32, |i, _| i), compress());
+    let fixed = peak(&job);
+    // The plan holds the model (16 bytes a strip) and the writer where each
+    // strip went and its size (16 more); a block listed twice, its place
+    // (24 bytes) beside the list of them (16); the source's strips out of
+    // order, sorted references to them (8), but not at once.
+    let cases: [(&str, At, f64); 3] = [
+        ("scan.tif", |i, _| i, 2.5),
+        ("reversed.tif", |i, n| n - 1 - i, 2.5),
+        // Each row two strips in a row: half of them listed twice.
+        ("pairs.tif", |i, _| i / 2, 3.75),
+    ];
+    for (name, at, most) in cases {
+        let (_, job) = plan_one(&dir, name, &rows(n, 32, at), compress());
+        let models = peak(&job).saturating_sub(fixed) as f64 / (16 * n) as f64;
+        assert!(models < most, "{name}: {models:.2} models");
+    }
+}
+
+/// A classic TIFF of `n` gray 32 × 8 pages, a chain, one 256-byte strip
+/// each, of one value.
+fn pages(n: u32) -> Vec<u8> {
+    let ifd = 2 + 12 * 7 + 4;
+    let strips = 8 + n * ifd;
+    let mut file = b"II*\0\x08\0\0\0".to_vec();
+    for k in 0..n {
+        let entries: [(u16, u16, u32, u32); 7] = [
+            (256, 4, 1, 32),
+            (257, 4, 1, 8),
+            (258, 3, 1, 8),
+            (262, 3, 1, 1),
+            (273, 4, 1, strips + 256 * k),
+            (278, 4, 1, 8),
+            (279, 4, 1, 256),
+        ];
+        file.extend(7u16.to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            file.extend(tag.to_le_bytes());
+            file.extend(kind.to_le_bytes());
+            file.extend(count.to_le_bytes());
+            file.extend(value.to_le_bytes());
+        }
+        let next = if k + 1 < n { 8 + (k + 1) * ifd } else { 0 };
+        file.extend(next.to_le_bytes());
+    }
+    file.extend((0..n).flat_map(|k| std::iter::repeat_n((k % 251) as u8, 256)));
+    file
+}
+
+#[test]
+fn compress_on_a_tiff_of_65536_pages_holds_128_mib_at_most() {
+    // About 1.9 KB a page: its entries, fields and plan, and the writer's.
+    let _turn = turn();
+    let dir = TestDir::new("tiff-heap-compress-pages");
+    let (_, job) = plan_one(&dir, "pages.tif", &pages(65_536), compress());
+    let mib = peak(&job) as f64 / f64::from(1 << 20);
+    assert!(mib < 128.0, "{mib:.2} MiB");
 }
