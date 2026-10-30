@@ -985,6 +985,52 @@ fn remove_metadata_refuses_metadata_in_a_jpeg_strip_whatever_type_says_so() {
 }
 
 #[test]
+fn both_tiff_tools_refuse_two_compressions_that_disagree() {
+    // A 16 × 16 gray JPEG strip with an Exif APP1 that holds a GPS IFD,
+    // under two Compression entries, 5 then 7: libtiff reads the first,
+    // Pillow the last, and Grape read it as LZW, never scanned it, and
+    // published it with the GPS in it. Both tools refuse it; the same
+    // entry twice reads as one.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let data = with(&jpeg, &[exif(1)], b"");
+    let tags = |compressions: &[u64]| {
+        let mut tags = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+        ];
+        tags.extend(compressions.iter().map(|&n| (259, 3, le(n, 2))));
+        tags
+    };
+    let dir = TestDir::new("tiff-two-compressions");
+    let bytes = one_strip(false, &data, tags(&[5, 7]));
+    for op in [
+        Operation::tool(ToolKey::RemoveMetadata),
+        compress_op(grape_core::CompressPreset::High),
+    ] {
+        let err = run(&dir, "two.tif", &bytes, op).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "two.tif says how it's compressed in a way Grape can't read yet."
+        );
+    }
+    let err = strip(&dir, "same.tif", &one_strip(false, &data, tags(&[7, 7]))).unwrap_err();
+    assert!(
+        err.user_message
+            .starts_with("same.tif has metadata inside its image data"),
+        "{}",
+        err.user_message
+    );
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

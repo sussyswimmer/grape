@@ -34,8 +34,11 @@
 //! - **Refused:** a DNG, an old-style JPEG, or a Compression libtiff can't
 //!   read, in any image IFD: [`Error::Refused`] as soon as the walk reads
 //!   that IFD, before its strips or tiles, which an old-style JPEG may not
-//!   have; a layout libtiff can't read where Grape needs it to size or
-//!   pick the blocks ([`UNREAD_LAYOUT`]); and byte counts
+//!   have; entries for a tag the tools decide on that disagree, of which
+//!   libtiff reads the first and Pillow the last ([`UNREAD_COMPRESSION`]
+//!   for Compression, [`UNREAD_LAYOUT`] for the others); a layout libtiff
+//!   can't read where Grape needs it to size or pick the blocks
+//!   ([`UNREAD_LAYOUT`]); and byte counts
 //!   libtiff takes at their word that readers which size data themselves
 //!   read past ([`MISSIZED`]): a block of 0 bytes at a nonzero offset, or
 //!   an uncompressed one shorter than the picture says.
@@ -556,6 +559,25 @@ fn clear_of<'a>(blocks: impl Iterator<Item = &'a Block>, ifds: &[(u64, u64)]) ->
 /// checked, can't be told.
 pub(crate) const UNREAD_COMPRESSION: &str =
     "says how it's compressed in a way Grape can't read yet.";
+
+/// The tags either tool decides on to read an image IFD's blocks: its
+/// layout, samples, Compression, PhotometricInterpretation, FillOrder,
+/// Predictor, SampleFormat and YCbCrSubsampling, its blocks and its
+/// SubIFDs.
+const DECIDED: [u16; 21] = [
+    256, 257, 258, 259, 262, 266, 273, 277, 278, 279, 284, 317, 322, 323, 324, 325, 330, 339, 530,
+    32997, 32998,
+];
+
+/// The first tag of [`DECIDED`] that `ifd` lists more than once, its
+/// entries not all the same (type, count and value, where it is): libtiff
+/// reads the first, and Pillow the last.
+fn disagreeing(ifd: &Ifd) -> Option<u16> {
+    DECIDED.into_iter().find(|&tag| {
+        let mut all = ifd.entries.iter().filter(|e| e.tag == tag);
+        all.next().is_some_and(|first| all.any(|e| e != first))
+    })
+}
 
 /// The image IFD `ifd`'s Compression, given as libtiff reads it
 /// (`compression`, `None` where it can't), or why neither TIFF tool can
@@ -1141,6 +1163,16 @@ impl Walk<'_> {
         // Before its blocks: an old-style JPEG may have none.
         let compression = self.compression(&ifd)?;
         ifd.compression = admitted(&ifd, compression).map_err(|why| Error::Refused(why.into()))?;
+        // Readers that take the first entry and those that take the last
+        // would read different files.
+        if let Some(tag) = disagreeing(&ifd) {
+            let why = if tag == 259 {
+                UNREAD_COMPRESSION
+            } else {
+                UNREAD_LAYOUT
+            };
+            return Err(Error::Refused(why.into()));
+        }
         self.blocks(&mut ifd)?;
         if let Some(subs) = ifd.get(330).cloned() {
             if depth >= MAX_DEPTH {
@@ -2823,6 +2855,44 @@ mod tests {
         both.tags.push((324, V::Long(vec![20])));
         let file = Builder::new(b'I', false, vec![both]).build();
         assert!(matches!(read(&file), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn entries_a_tool_decides_on_that_disagree_are_refused() {
+        // Two entries for a tag, in the IFD's order: libtiff reads the
+        // first, Pillow the last. Where they're the same, either reads it.
+        let file = |tag: u16, first: V, second: V| {
+            let strips = picture().chunks(3_000).map(B::data).collect();
+            let mut page = gray(300, 100, 10, strips);
+            page.tags.retain(|t| t.0 != tag);
+            page.tags.extend([(tag, first), (tag, second)]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let refused =
+            |file: &[u8], want: &str| matches!(read(file), Err(Error::Refused(why)) if why == want);
+        // A Compression of 5, then 7 (a JPEG strip, read as LZW).
+        let compression = file(259, V::Short(vec![5]), V::Short(vec![7]));
+        assert!(refused(&compression, UNREAD_COMPRESSION));
+        // A RowsPerStrip of 10, then 20; a PhotometricInterpretation, a
+        // Predictor, a SampleFormat; a second StripByteCounts.
+        for (tag, first, second) in [
+            (278, V::Long(vec![10]), V::Long(vec![20])),
+            (262, V::Short(vec![1]), V::Short(vec![0])),
+            (317, V::Short(vec![1]), V::Short(vec![2])),
+            (339, V::Short(vec![1]), V::Short(vec![2])),
+            (279, V::Long(vec![3_000; 10]), V::Long(vec![1_500; 10])),
+        ] {
+            let file = file(tag, first, second);
+            assert!(refused(&file, UNREAD_LAYOUT), "{tag}: {:?}", read(&file));
+        }
+        // The same twice: read as one.
+        let same = file(259, V::Short(vec![1]), V::Short(vec![1]));
+        assert_eq!(read(&same).unwrap().pages[0].compression, 1);
+        let same = file(278, V::Long(vec![10]), V::Long(vec![10]));
+        assert_eq!(lens(&read(&same).unwrap()), [3_000; 10]);
+        // A tag no tool decides on may be there twice, whatever it says.
+        let other = file(305, V::Ascii("one"), V::Ascii("another"));
+        assert!(read(&other).is_ok());
     }
 
     #[test]
