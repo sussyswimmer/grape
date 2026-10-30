@@ -27,7 +27,8 @@
 //!   frame's only one, and through every scan otherwise), and JPEG data
 //!   Grape can't check, whose segments or scans run past the first
 //!   [`MAX_SCAN`] bytes read before that, that's hierarchical, or
-//!   JPEGTables libtiff can't read as bytes; metadata inside WebP data (an
+//!   JPEGTables libtiff can't read as bytes, or that are more than tables
+//!   ([`only_tables`]); metadata inside WebP data (an
 //!   EXIF or XMP chunk, [`chunks`]), and WebP data Grape can't check: not
 //!   a RIFF container that covers its block, nor a bare bitstream, or
 //!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
@@ -485,7 +486,12 @@ impl Scan<'_> {
             else {
                 return Ok((Seen::Unseen, "JPEG"));
             };
-            let seen = segments(&tables, whole);
+            // Metadata among them is said to be; anything but tables
+            // (what follows their EOI, say) can't be seen through.
+            let seen = match segments(&tables, whole) {
+                Seen::Clean if !only_tables(&tables, whole) => Seen::Unseen,
+                seen => seen,
+            };
             if seen != Seen::Clean {
                 return Ok((seen, "JPEG"));
             }
@@ -671,6 +677,39 @@ fn tables(
         each.push(v as u8);
     }
     Ok(Some((each, n == entry.count)))
+}
+
+/// Whether JPEGTables `tables` (all of them, if `whole`) are tables alone,
+/// as libtiff's writer makes them (`jpeg_write_tables`) and libjpeg reads
+/// them, up to their EOI, as abbreviated tables: SOI, then DQT, DHT, DAC
+/// and DRI segments, each after any fill bytes, then EOI, their last
+/// bytes. What follows an EOI, comes before the SOI or isn't a table, no
+/// reader reads, so it can't be checked as one would.
+fn only_tables(tables: &[u8], whole: bool) -> bool {
+    let Some(mut rest) = tables.strip_prefix(&[0xFF, 0xD8]) else {
+        return false;
+    };
+    loop {
+        let fill = rest.iter().take_while(|&&b| b == 0xFF).count();
+        let Some(&marker) = rest.get(fill).filter(|_| fill > 0) else {
+            return false;
+        };
+        rest = &rest[fill + 1..];
+        match marker {
+            0xD9 => return whole && rest.is_empty(),
+            0xDB | 0xC4 | 0xCC | 0xDD => {
+                let Some(len) = rest.get(..2) else {
+                    return false;
+                };
+                let len = usize::from(u16::from_be_bytes([len[0], len[1]]));
+                match rest.get(len..) {
+                    Some(next) if len >= 2 => rest = next,
+                    _ => return false,
+                }
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// What JPEG or WebP data holds, as far as it's read.
@@ -1548,6 +1587,49 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_tables_must_be_soi_tables_and_eoi_alone() {
+        // libjpeg reads tables only up to their EOI, so what follows it,
+        // what comes before their SOI and segments that aren't tables no
+        // reader shows: tables with an APP1 after their EOI, stray bytes
+        // before their SOI, or an APP1 before it, kept the APP1.
+        let (soi, eoi) = (b"\xFF\xD8".to_vec(), b"\xFF\xD9".to_vec());
+        let (dqt, dht) = (segment(0xDB, &[0; 65]), segment(0xC4, &[0; 17]));
+        let app1 = segment(0xE1, b"Exif\0\0MM\0*");
+        let tables = [&soi[..], &dqt, &dht, &eoi].concat();
+        let why = |tables: Vec<u8>| match plan(&jpeg_page(jpeg(b""), Some(tables))) {
+            Ok(_) => None,
+            Err(Error::Refused(why)) => Some(why),
+            Err(e) => panic!("{e:?}"),
+        };
+        let unseen = Some(unchecked("JPEG"));
+        assert_eq!(why(tables.clone()), None);
+        // Fill bytes before a marker, and arithmetic coding's and restart
+        // intervals' tables, are tables too.
+        let dac = segment(0xCC, &[0, 1]);
+        let dri = segment(0xDD, &[0, 4]);
+        let filled = [&soi[..], b"\xFF\xFF", &dqt, &dac, &dri, &eoi].concat();
+        assert_eq!(why(filled), None);
+        for refused in [
+            [&tables[..], &app1].concat(),
+            [&tables[..], &[0]].concat(),
+            [&b"\0\0"[..], &tables].concat(),
+            [&app1[..], &tables].concat(),
+            // An APP0 (a JFIF thumbnail), an APP2, a frame, stray bytes,
+            // or no EOI.
+            [&soi[..], &segment(0xE0, b"JFIF\0"), &dqt, &eoi].concat(),
+            [&soi[..], &segment(0xE2, b"ICC_PROFILE\0"), &eoi].concat(),
+            [&soi[..], &dqt, &frame(0xC0, 1), &eoi].concat(),
+            [&soi[..], &dqt, b"\0", &eoi].concat(),
+            [&soi[..], &dqt].concat(),
+        ] {
+            assert_eq!(why(refused.clone()), unseen, "{refused:?}");
+        }
+        // Metadata among the tables is said to be so.
+        let inside = [&soi[..], &dqt, &app1, &eoi].concat();
+        assert_eq!(why(inside).as_deref(), Some(IN_DATA));
+    }
+
+    #[test]
     fn metadata_inside_jpeg_data_is_refused_and_plain_jpeg_data_kept() {
         let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
         let com = b"\xFF\xFE\0\x08secret";
@@ -2139,11 +2221,12 @@ mod tests {
 
     #[test]
     fn what_ifds_share_or_the_report_has_said_is_read_once() {
-        // 40 JPEG pages whose strip, JPEGTables and description are the
-        // first page's, of over 64 KiB each, and whose Software tags are
-        // 64 KiB each, all different.
+        // 40 JPEG pages whose strip and description are the first page's,
+        // of over 64 KiB each, and JPEGTables, of 60 KB, and whose
+        // Software tags are 64 KiB each, all different.
         let strip = [jpeg(b""), vec![0; 64 * 1024]].concat();
-        let tables = [&b"\xFF\xD8\xFF\xD9"[..], &[0; 64 * 1024]].concat();
+        let dqt = segment(0xDB, &[0; 65]);
+        let tables = [&b"\xFF\xD8"[..], &dqt.repeat(900), b"\xFF\xD9"].concat();
         let description = b"A scan ".repeat(10_000);
         let pages = (0..40u8)
             .map(|n| {
@@ -2376,11 +2459,22 @@ mod tests {
 
     #[test]
     fn descriptions_or_jpeg_tables_that_overlap_are_read_up_to_the_files_size() {
-        // 40 JPEG pages whose descriptions, or JPEG tables, are 64 KiB of
-        // one run of text, each 2 bytes further on: 2.5 MiB to read from
-        // a file of under 100 KB.
+        // 40 JPEG pages whose descriptions are 64 KiB of one run of text,
+        // each 2 bytes further on, or whose JPEG tables are tables of
+        // nearly 64 KiB, each the DQT's data of the one before, 6 bytes
+        // further on: 2.5 MiB to read from a file of under 100 KB.
         let run = b"A scan ".repeat(10_000);
-        for (tag, kind) in [(270, 2), (347, 7)] {
+        let mut nested = [
+            &b"\xFF\xD8"[..],
+            &segment(0xDB, &vec![0; 65_528 - 39 * 8 - 8]),
+            b"\xFF\xD9",
+        ]
+        .concat();
+        for _ in 1..40 {
+            nested = [&b"\xFF\xD8"[..], &segment(0xDB, &nested), b"\xFF\xD9"].concat();
+        }
+        assert_eq!(nested.len(), 65_528);
+        for (tag, kind, run, step, shrink) in [(270, 2, &run, 2, 0), (347, 7, &nested, 6, 8)] {
             let pages = (0..40)
                 .map(|n| {
                     let mut page = gray(8, 8, 8, vec![B::Data(jpeg(b""))]);
@@ -2393,11 +2487,12 @@ mod tests {
                 .collect();
             let mut file = Builder::new(b'I', false, pages).build();
             let tiff = read(&file);
-            let Value::At { offset, .. } = tiff.pages[0].get(tag).unwrap().value else {
+            let Value::At { offset, len } = tiff.pages[0].get(tag).unwrap().value else {
                 panic!("an inline {tag}")
             };
+            let len = len.min(64 * 1024);
             for (n, page) in (0..).zip(&tiff.pages) {
-                set_entry(&mut file, page.at, tag, 64 * 1024, offset + 2 * n);
+                set_entry(&mut file, page.at, tag, len - shrink * n, offset + step * n);
             }
             assert!(file.len() < 100_000);
             assert!(matches!(plan(&file), Err(Error::TooLarge(_))), "{tag}");

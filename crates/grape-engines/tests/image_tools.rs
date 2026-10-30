@@ -1087,6 +1087,67 @@ fn both_tiff_tools_refuse_two_compressions_that_disagree() {
 }
 
 #[test]
+fn remove_metadata_refuses_jpeg_tables_with_more_than_tables() {
+    // The review's layouts, around a 16 × 16 gray JPEG strip's tables (SOI,
+    // DQT, DHT and EOI): an APP1 (a Make and a GPS IFD) after their EOI,
+    // stray bytes before their SOI, and an APP1 before it. libjpeg reads
+    // none of it, and Remove Metadata kept it.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    // The encoder's DQT and DHT segments, as tables.
+    let sos = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    let mut tables = vec![0xFF, 0xD8];
+    let mut at = 2;
+    while at < sos {
+        let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+        if matches!(jpeg[at + 1], 0xDB | 0xC4) {
+            tables.extend_from_slice(&jpeg[at..at + 2 + len]);
+        }
+        at += 2 + len;
+    }
+    tables.extend([0xFF, 0xD9]);
+    let entries = |tables: Vec<u8>| {
+        vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (347, 7, tables),
+        ]
+    };
+    let dir = TestDir::new("strip-tiff-loose-tables");
+    let outcome = strip(
+        &dir,
+        "tables.tif",
+        &one_strip(false, &jpeg, entries(tables.clone())),
+    )
+    .unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])]);
+    for (name, tables) in [
+        ("after.tif", [&tables[..], &exif(1)].concat()),
+        ("stray.tif", [&b"\0\0\0\0"[..], &tables].concat()),
+        ("before.tif", [&exif(1)[..], &tables].concat()),
+    ] {
+        let err = strip(&dir, name, &one_strip(false, &jpeg, entries(tables))).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has JPEG data Grape can't check for metadata yet.")
+        );
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_metadata_in_jpeg_tables_whatever_type_holds_them() {
     // The review's file: a 16 × 16 gray JPEG strip whose JPEGTables hold
     // SOI, an Exif APP1 (its Make and a GPS IFD) and EOI, each byte a
