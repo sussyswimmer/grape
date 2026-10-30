@@ -3120,17 +3120,60 @@ fn compress_keeps_a_lossy_webps_alpha_exactly() {
 fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     use grape_core::CompressPreset::{Balanced, High, Small};
     let dir = TestDir::new("compress-webp-none");
-    let small = lossy_webp(photo(800, 600).as_raw(), 800, 600, false, 40.0);
-    for (preset, message) in [
-        (Small, "pic.webp is already as small as Grape makes it."),
-        (Balanced, "pic.webp is already compact. Try Small."),
-        (High, "pic.webp is already compact. Try Small."),
+    // At q40, q50 and q30, under 2048 px, Small can't do more: it isn't
+    // sent there (D26). Nor for a fully transparent picture, whose VP8 is
+    // flat whatever its quality, nor one whose metadata outweighs it.
+    let picture = photo(960, 540);
+    let transparent = lossy_webp(&vec![0; 256 * 256 * 4], 256, 256, true, 80.0);
+    let fine = lossy_webp(picture.as_raw(), 960, 540, false, 90.0);
+    let tagged = riff(&[
+        vp8x_chunk(0x04, 960, 540),
+        fine[12..].to_vec(),
+        riff_chunk(b"XMP ", &vec![b'x'; fine.len() * 10]),
+    ]);
+    for (name, src) in [
+        (
+            "q40.webp",
+            lossy_webp(picture.as_raw(), 960, 540, false, 40.0),
+        ),
+        (
+            "q50.webp",
+            lossy_webp(picture.as_raw(), 960, 540, false, 50.0),
+        ),
+        (
+            "q30.webp",
+            lossy_webp(picture.as_raw(), 960, 540, false, 30.0),
+        ),
+        ("clear.webp", transparent),
+        ("tagged.webp", tagged),
     ] {
-        let err = compress(&dir, "pic.webp", &small, preset).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
-        assert_eq!(err.user_message, message);
-        fs::remove_file(dir.join("pic.webp")).unwrap();
+        for preset in [Small, Balanced, High] {
+            let err = compress(&dir, name, &src, preset).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NoChange,
+                "{name} {preset:?}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!("{name} is already as small as Grape makes it."),
+                "{preset:?}"
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
     }
+    // At q80, Balanced and High can't make it 10 % smaller, and Small can.
+    let q80 = lossy_webp(picture.as_raw(), 960, 540, false, 80.0);
+    for preset in [Balanced, High] {
+        let err = compress(&dir, "q80.webp", &q80, preset).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{preset:?}: {}", err.detail);
+        assert_eq!(err.user_message, "q80.webp is already compact. Try Small.");
+        fs::remove_file(dir.join("q80.webp")).unwrap();
+    }
+    let out = compress(&dir, "q80.webp", &q80, Small).unwrap();
+    fs::remove_file(&out.outputs[0]).unwrap();
+    fs::remove_file(dir.join("q80.webp")).unwrap();
     let frame = lossy_webp(&[9; 16 * 16 * 3], 16, 16, false, 80.0);
     let anim = riff(&[
         vp8x_chunk(0x02, 16, 16),

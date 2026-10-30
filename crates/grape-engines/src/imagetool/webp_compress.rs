@@ -17,8 +17,8 @@
 //!   exact, the color under fully transparent pixels free to change; a
 //!   picture with transparency is scaled premultiplied ([`scale`]). The
 //!   qualities are JPEG's, so a preset means the same across formats.
-//!   Kept when it's at most 90 % of the source's size; "Try Small" unless
-//!   it was Small.
+//!   Kept when it's at most 90 % of the source's size; "Try Small" only
+//!   when Small would do more ([`small_does_more`]).
 //! - **Lossless:** at every preset, never scaled, libwebp's lossless
 //!   preset [`LOSSLESS_LEVEL`] with every pixel's color kept (`exact`),
 //!   even under full transparency. The output is decoded again and must
@@ -101,6 +101,31 @@ fn plan(preset: CompressPreset) -> (f32, Option<u32>) {
     }
 }
 
+/// Whether Small would do more than another preset to the lossy WebP
+/// `scan` found, a file of `before` bytes (D26): it scales the picture (a
+/// side over 2048), or the source's quality ([`webp::quality`]) is finer
+/// than Small's 70 and its `VP8 ` data holds detail a coarser quality
+/// drops (2 bytes a macroblock or more: a flat or fully transparent
+/// picture takes about half a byte, whatever its quality); and either way
+/// its image data (`ALPH` and `VP8 `) is a fifth of the file or more, so
+/// that what Small drops can bring the file under 90 %. Small's method 6
+/// at q70 made Pillow's q70 to q75 photos (method 4) 11 to 23 % smaller,
+/// and some of its q60 to q68 ones too; a q55 one it couldn't.
+fn small_does_more(scan: &Scan, before: u64) -> bool {
+    let (quality, cap) = plan(CompressPreset::Small);
+    let (w, h) = scan.size;
+    let scales = cap.is_some_and(|cap| w.max(h) > cap);
+    let macroblocks = u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16));
+    let detail = scan.image_bytes >= macroblocks.saturating_mul(2);
+    let finer = detail && scan.quality.is_some_and(|q| f32::from(q) > quality);
+    let share = scan
+        .image_bytes
+        .saturating_add(scan.alpha_bytes)
+        .saturating_mul(5)
+        >= before;
+    share && (scales || finer)
+}
+
 /// What Compress holds at its peak for a `width`×`height` decoded picture
 /// of `bpp` bytes a pixel ([`scale::peak`]): to encode, the picture and
 /// libwebp's buffers; a lossy one scaled to fit `cap`, a lossless one as
@@ -176,6 +201,7 @@ pub(crate) fn run(
 
     let (quality, cap) = plan(preset);
     let lossless = scan.lossless;
+    let try_small = !lossless && preset != CompressPreset::Small && small_does_more(&scan, before);
     // The metadata is held throughout, and again in the file written.
     let metadata = scan.carried.len().saturating_mul(2);
     let tool_peak = |width: u32, height: u32, color: ColorType| {
@@ -271,13 +297,10 @@ pub(crate) fn run(
     }
     let after = out.len() as u64;
     // 90 % lossy, 95 % exact (D26).
-    let (most, try_small) = if lossless {
-        (before.saturating_mul(19) / 20, false)
+    let most = if lossless {
+        before.saturating_mul(19) / 20
     } else {
-        (
-            before.saturating_mul(9) / 10,
-            preset != CompressPreset::Small,
-        )
+        before.saturating_mul(9) / 10
     };
     if after > most {
         let detail = format!("{after} bytes from {before} in {}", src.display());
@@ -551,6 +574,105 @@ mod tests {
     }
 
     #[test]
+    fn the_quality_is_read_back_from_libwebps_files() {
+        // A photo-like picture and flat colors, at methods 4 (Pillow's and
+        // cwebp's) and 6: within 2 points of the quality libwebp was given.
+        let flat = RgbImage::from_fn(320, 240, |x, y| {
+            if (x / 40 + y / 40) % 2 == 0 {
+                Rgb([200, 40, 40])
+            } else {
+                Rgb([30, 30, 160])
+            }
+        });
+        for src in [photo(320, 240), flat] {
+            for quality in [30.0, 50.0, 70.0, 75.0, 80.0, 90.0] {
+                for method in [4, 6] {
+                    let opts = Options {
+                        mode: Mode::Lossy { quality, method },
+                        threads: false,
+                    };
+                    let file = encoded(&DynamicImage::ImageRgb8(src.clone()), &opts);
+                    let scan = webp::scan(&mut Cursor::new(&file)).unwrap();
+                    let estimate = f32::from(scan.quality.unwrap());
+                    assert!((estimate - quality).abs() <= 2.0, "{quality}: {estimate}");
+                    assert_eq!(scan.image_bytes as usize, file.len() - 20);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn try_small_only_when_small_does_more() {
+        // 1600 × 900, 5,700 macroblocks: a q90 photo of 200 KB.
+        let photo = Scan {
+            size: (1600, 900),
+            quality: Some(90),
+            image_bytes: 200_000,
+            ..Scan::default()
+        };
+        assert!(small_does_more(&photo, 200_100));
+        assert!(small_does_more(
+            &Scan {
+                quality: Some(71),
+                ..photo.clone()
+            },
+            200_100
+        ));
+        // Its quality Small's 70 or coarser (q50, q30), or unread: no.
+        for quality in [Some(70), Some(50), Some(30), None] {
+            let coarse = Scan {
+                quality,
+                ..photo.clone()
+            };
+            assert!(!small_does_more(&coarse, 200_100), "{quality:?}");
+        }
+        // Flat (a fully transparent picture's VP8 takes about half a byte
+        // a macroblock): no, at any quality.
+        let flat = Scan {
+            image_bytes: 2_636,
+            alpha_bytes: 75,
+            ..photo.clone()
+        };
+        assert!(!small_does_more(&flat, 2_758));
+        // From 2 bytes a macroblock, yes.
+        assert!(!small_does_more(
+            &Scan {
+                image_bytes: 11_399,
+                ..flat.clone()
+            },
+            11_500
+        ));
+        assert!(small_does_more(
+            &Scan {
+                image_bytes: 11_400,
+                ..flat.clone()
+            },
+            11_500
+        ));
+        // Metadata over four times the image: no.
+        assert!(!small_does_more(&photo, 1_000_001));
+        assert!(small_does_more(&photo, 1_000_000));
+        // A side over 2048, whatever its quality and detail, but not when
+        // outweighed.
+        let wide = Scan {
+            size: (2049, 100),
+            quality: Some(30),
+            image_bytes: 300,
+            alpha_bytes: 100,
+            ..Scan::default()
+        };
+        assert!(small_does_more(&wide, 2_000));
+        assert!(!small_does_more(&wide, 2_001));
+        assert!(!small_does_more(
+            &Scan {
+                size: (2048, 100),
+                ..wide
+            },
+            400
+        ));
+    }
+
+    #[test]
     fn alpha_libwebp_and_image_webp_read_differently_is_refused() {
         let scan = |flags: u8, lossless: bool, alpha: bool, late_alpha: bool| Scan {
             vp8x: Some(Vp8x {
@@ -561,8 +683,7 @@ mod tests {
             size: (9, 9),
             alpha,
             late_alpha,
-            animated: false,
-            carried: Carried::default(),
+            ..Scan::default()
         };
         // Agreed: none, or flagged and there.
         assert_eq!(alpha_disagrees(&scan(0, false, false, false)), None);

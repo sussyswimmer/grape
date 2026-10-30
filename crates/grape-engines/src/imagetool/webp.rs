@@ -50,6 +50,10 @@ const ICC_FLAG: u8 = 0x20;
 /// Where an extended file's VP8X flags are: [`scan`] wants `VP8X` first.
 pub(super) const VP8X_FLAGS_AT: u64 = 20;
 
+/// The most of a `VP8 ` frame's first partition [`quality`] reads: its
+/// frame header up to the quantizer index takes at most 186 bits.
+const VP8_HEADER: usize = 64;
+
 /// The largest `EXIF` or `XMP ` chunk Compress carries (D28). Compress
 /// keeps metadata, so a file with a larger one is refused rather than
 /// written without it.
@@ -303,6 +307,13 @@ pub(super) struct Scan {
     pub(super) late_alpha: bool,
     /// VP8X's animation flag: the walk stops there.
     pub(super) animated: bool,
+    /// The quality, 0 to 100, a lossy image reads as on libwebp's scale,
+    /// from its frame header ([`quality`]).
+    pub(super) quality: Option<u8>,
+    /// The size of the image chunk, `VP8 ` or `VP8L`.
+    pub(super) image_bytes: u64,
+    /// The size of the `ALPH` chunk libwebp reads with a `VP8 `.
+    pub(super) alpha_bytes: u64,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
 }
@@ -407,6 +418,7 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
                             )));
                         }
                         image = Some(head.fourcc);
+                        found.image_bytes = head.size;
                         bitstream(r, body, &head, &mut found)?;
                     }
                     Some(fourcc) if fourcc != head.fourcc => {
@@ -427,6 +439,7 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
             b"ALPH" => {
                 if image.is_none() {
                     found.alpha = true;
+                    found.alpha_bytes = head.size;
                     alph += 1;
                 } else {
                     found.late_alpha = true;
@@ -480,6 +493,7 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
     if &fourcc == b"VP8L" {
         // An ALPH chunk is the lossy image's.
         found.late_alpha = false;
+        found.alpha_bytes = 0;
     }
     Ok(found)
 }
@@ -516,8 +530,159 @@ fn bitstream(r: &mut dyn In, at: u64, head: &Head, found: &mut Scan) -> Result<(
         }
         let side = |lo: u8, hi: u8| u32::from(u16::from_le_bytes([lo, hi]) & 0x3FFF);
         found.size = (side(b[6], b[7]), side(b[8], b[9]));
+        // The frame header's first bytes, unread (None) when the file is
+        // cut before they end.
+        let take = usize::try_from(head.size - 10).map_or(VP8_HEADER, |n| n.min(VP8_HEADER));
+        let mut header = vec![0; take];
+        found.quality = match read_at(r, at + 10, &mut header) {
+            Ok(()) => Some(quality(&header)),
+            Err(Error::Broken(_)) => None,
+            Err(e) => return Err(e),
+        };
     }
     Ok(())
+}
+
+/// The quality, 0 to 100, a VP8 key frame reads as on libwebp's scale,
+/// from the frame header that starts its first partition, `header` (RFC
+/// 6386 9.3 to 9.6, 19.2). libwebp's encoder maps a quality q to a
+/// quantizer index 127·(1 − c), where c is the cube root of q·2/3 below
+/// 0.75 and of 2q − 1 above (`QualityToCompression`), and gives each of
+/// its segments c raised to a power about 1 whose mean, weighted by the
+/// segments' shares of the picture, is 1. So c is the weighted geometric
+/// mean of the segments' (1 − index/127), the shares read from the
+/// segment map's tree probabilities. Within about a point of the quality
+/// libwebp was given, at any method, for photos and drawings alike.
+pub(super) fn quality(header: &[u8]) -> u8 {
+    let mut b = BoolReader::new(header);
+    b.literal(2); // Color space, clamping.
+    let mut segments = None;
+    if b.flag() {
+        let map = b.flag();
+        let mut quant = [0; 4];
+        let mut absolute = true;
+        if b.flag() {
+            absolute = b.flag();
+            for q in &mut quant {
+                *q = b.signed(7);
+            }
+            for _ in 0..4 {
+                b.signed(6); // Loop filter levels.
+            }
+        }
+        // A key frame's probabilities are 255 unless it sets them.
+        let mut tree = [255; 3];
+        if map {
+            for p in &mut tree {
+                if b.flag() {
+                    *p = b.literal(8);
+                }
+            }
+        }
+        segments = Some((quant, absolute, tree));
+    }
+    b.literal(1 + 6 + 3); // Filter type, level, sharpness.
+    if b.flag() && b.flag() {
+        for _ in 0..8 {
+            b.signed(6); // Loop filter deltas.
+        }
+    }
+    b.literal(2); // Token partitions.
+    let base = b.literal(7);
+    let c = |index: i32| 1.0 - f64::from(index.clamp(0, 126)) / 127.0;
+    let c = match segments {
+        None => c(base),
+        Some((quant, absolute, tree)) => {
+            let [p0, p1, p2] = tree.map(|p| f64::from(p) / 255.0);
+            let shares = [
+                p0 * p1,
+                p0 * (1.0 - p1),
+                (1.0 - p0) * p2,
+                (1.0 - p0) * (1.0 - p2),
+            ];
+            let log: f64 = quant
+                .iter()
+                .zip(shares)
+                .map(|(&q, share)| share * c(if absolute { q } else { base + q }).ln())
+                .sum();
+            log.exp()
+        }
+    };
+    let linear = c * c * c;
+    let quality = if linear < 0.5 {
+        linear * 1.5
+    } else {
+        (linear + 1.0) / 2.0
+    };
+    (quality * 100.0).round().clamp(0.0, 100.0) as u8
+}
+
+/// VP8's boolean decoder (RFC 6386 7.3), for fixed-probability bits only;
+/// past the end of its data it reads zeros, as libwebp's does.
+struct BoolReader<'a> {
+    data: &'a [u8],
+    at: usize,
+    value: u32,
+    range: u32,
+    bits: u32,
+}
+
+impl<'a> BoolReader<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        let byte = |i: usize| u32::from(data.get(i).copied().unwrap_or(0));
+        BoolReader {
+            data,
+            at: 2,
+            value: byte(0) << 8 | byte(1),
+            range: 255,
+            bits: 0,
+        }
+    }
+
+    fn bit(&mut self, probability: u32) -> bool {
+        let split = 1 + (((self.range - 1) * probability) >> 8);
+        let big = split << 8;
+        let one = self.value >= big;
+        if one {
+            self.range -= split;
+            self.value -= big;
+        } else {
+            self.range = split;
+        }
+        while self.range < 128 {
+            self.value <<= 1;
+            self.range <<= 1;
+            self.bits += 1;
+            if self.bits == 8 {
+                self.bits = 0;
+                self.value |= u32::from(self.data.get(self.at).copied().unwrap_or(0));
+                self.at = self.at.saturating_add(1);
+            }
+        }
+        one
+    }
+
+    fn flag(&mut self) -> bool {
+        self.bit(128)
+    }
+
+    /// `n` bits, the first the highest.
+    fn literal(&mut self, n: u32) -> i32 {
+        (0..n).fold(0, |v, _| v << 1 | i32::from(self.flag()))
+    }
+
+    /// A flag, then if it's set `n` bits and a sign; 0 if not.
+    fn signed(&mut self, n: u32) -> i32 {
+        if !self.flag() {
+            return 0;
+        }
+        let v = self.literal(n);
+        if self.flag() {
+            -v
+        } else {
+            v
+        }
+    }
 }
 
 /// Reads the chunk `head` (its body at `at`) into `slot`, unless an
@@ -972,6 +1137,8 @@ mod tests {
             found,
             Scan {
                 size: (300, 200),
+                quality: Some(100),
+                image_bytes: 11,
                 ..Scan::default()
             }
         );
@@ -1016,6 +1183,9 @@ mod tests {
                 alpha: true,
                 late_alpha: false,
                 animated: false,
+                quality: Some(100),
+                image_bytes: 11,
+                alpha_bytes: 2,
                 carried: Carried {
                     flags: 0x2C,
                     iccp: Some(b"profile".to_vec()),
