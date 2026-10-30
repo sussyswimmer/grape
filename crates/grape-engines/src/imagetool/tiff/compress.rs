@@ -2131,6 +2131,21 @@ mod tests {
     }
 
     #[test]
+    fn jpeg_tables_of_no_bytes_are_kept_as_they_are() {
+        // libtiff ignores a JPEGTables of count 0; Compress keeps every
+        // tag, that one too.
+        let samples = smooth(16 * 16);
+        let mut page = gray(16, 16, 16, vec![B::data(&lzw(&samples))]);
+        page.tags
+            .extend([(259, V::Short(vec![5])), (347, V::Bytes(7, Vec::new()))]);
+        let file = Builder::new(b'I', false, vec![page]).build();
+        let out = compressed(&file);
+        let tables = read(&out).pages[0].get(347).cloned().unwrap();
+        assert_eq!((tables.kind, tables.count), (7, 0));
+        assert_eq!(decoded(&out), decoded(&file));
+    }
+
+    #[test]
     fn an_entry_typed_ifd_that_isnt_followed_is_refused() {
         // A GlobalParametersIFD (400) typed IFD, on a page and in an Exif
         // IFD.

@@ -378,11 +378,11 @@ impl Plan {
             return Err(Error::Refused(unchecked(kind)));
         }
         // JPEG and WebP data, and JPEGTables in any IFD: libtiff hands any
-        // IFD's to whoever asks for them.
+        // IFD's to whoever asks for them. Tables of no bytes are none.
         let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))) || ifd.get(347).is_some())
+            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))) || tables_of(ifd).is_some())
             .collect();
         if !scanned.is_empty() {
             let shared = tiff.shared();
@@ -636,7 +636,7 @@ impl Scan<'_> {
     /// can't read as bytes can't be seen through.
     fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<(Seen, &'static str), Error> {
         let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
-        if let Some(entry) = ifd.get(347).filter(fresh) {
+        if let Some(entry) = tables_of(ifd).filter(fresh) {
             let Some((tables, whole)) = tables(r, entry, self.order, MAX_SCAN, &mut self.left)?
             else {
                 return Ok((Seen::Unseen, "JPEG"));
@@ -781,6 +781,13 @@ impl Window {
         let start = (at - self.from) as usize;
         Ok(&self.bytes[start..start + want as usize])
     }
+}
+
+/// `ifd`'s JPEGTables, unless they hold no bytes: libtiff ignores those
+/// (`JPEGVSetField` refuses a count of 0), as if they weren't there, and
+/// Remove Metadata drops them unsaid ([`shape`]).
+fn tables_of(ifd: &Ifd) -> Option<&Entry> {
+    ifd.get(347).filter(|e| e.count > 0)
 }
 
 /// The first `max` bytes of the JPEGTables `entry` holds as libtiff 4.5
@@ -2091,6 +2098,26 @@ mod tests {
         // Metadata among the tables is said to be so.
         let inside = [&soi[..], &dqt, &app1, &eoi].concat();
         assert_eq!(why(inside).as_deref(), Some(IN_DATA));
+    }
+
+    #[test]
+    fn jpeg_tables_of_no_bytes_are_none() {
+        // libtiff ignores a JPEGTables of count 0 (`JPEGVSetField` refuses
+        // it), on JPEG data as on any: it's none, and goes unsaid, where
+        // it was refused as JPEG data Grape can't check.
+        let data = jpeg(&[]);
+        for compression in [7, 5] {
+            let mut page = gray(8, 8, 8, vec![B::Data(data.clone())]);
+            page.tags.extend([
+                (259, V::Short(vec![compression])),
+                (347, V::Bytes(7, Vec::new())),
+            ]);
+            let file = Builder::new(b'I', false, vec![page]).build();
+            assert_eq!(read(&file).pages[0].get(347).unwrap().count, 0);
+            let (out, found) = strip(&file);
+            assert!(found.is_empty(), "{compression}: {found:?}");
+            assert!(read(&out).pages[0].get(347).is_none(), "{compression}");
+        }
     }
 
     #[test]
