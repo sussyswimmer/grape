@@ -9,7 +9,8 @@
 //! - **Kept:** resolution (1005), alpha channel names and ids (1006, 1045,
 //!   1053), display info (1007, 1077), halftone (1013), transfer (1016),
 //!   guides (1032), pixel aspect ratio (1064), paths (2000–2997), the
-//!   clipping path's name (2999) and the origin path (3000). Each goes
+//!   clipping path's name, flatness and fill rule (2999; what follows them
+//!   goes, as Other) and the origin path (3000). Each goes
 //!   back with no name, as its Pascal name may hold anything, but for
 //!   paths, which the clipping path names: they're named `Path 1`,
 //!   `Path 2`… in order, and the clipping path names its path's new name
@@ -27,6 +28,10 @@ use crate::MetaField;
 
 /// The most resources read from one block; one with more is dropped whole.
 const MAX_RESOURCES: usize = 4_096;
+
+/// What follows the clipping path's (2999) name, as GIMP reads it: its
+/// flatness, 16.16 fixed point, and its fill rule. Bytes past them go.
+const CLIP_TAIL: usize = 6;
 
 /// What [`filter`] kept and found.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -94,7 +99,7 @@ impl Names<'_> {
         if id != 2999 {
             return Some((Vec::new(), None));
         }
-        // A Pascal name, then the flatness and the rest, as they are.
+        // A Pascal name, then the flatness and the fill rule, as they are.
         let len = usize::from(*data.first()?);
         let old = data.get(1..1 + len)?;
         let new = match self.paths.get(old) {
@@ -102,6 +107,7 @@ impl Names<'_> {
             None => Vec::new(),
         };
         let rest = &data[1 + len..];
+        let rest = &rest[..rest.len().min(CLIP_TAIL)];
         let mut clip = Vec::with_capacity(1 + new.len() + rest.len());
         clip.push(new.len() as u8);
         clip.extend(new);
@@ -142,6 +148,9 @@ pub(super) fn filter(irb: &[u8]) -> Filtered {
         match names.of(r.id, r.data) {
             Some((name, clip)) => {
                 size += length(name.len(), clip.as_ref().map_or(r.data.len(), Vec::len));
+                if r.id == 2999 && !exif::is_empty(0, 7, past_clip(r.data)) {
+                    fields.insert(MetaField::Other);
+                }
             }
             None => {
                 fields.insert(MetaField::Other);
@@ -165,6 +174,13 @@ pub(super) fn filter(irb: &[u8]) -> Filtered {
         }
     });
     Filtered { kept: held, fields }
+}
+
+/// What the clipping path's `data` holds past its name, flatness and fill
+/// rule ([`CLIP_TAIL`]), which goes.
+fn past_clip(data: &[u8]) -> &[u8] {
+    let name = usize::from(data.first().copied().unwrap_or_default());
+    data.get(1 + name + CLIP_TAIL..).unwrap_or_default()
 }
 
 /// The bytes a resource takes with a name of `name` bytes and `data`
@@ -329,6 +345,41 @@ pub(super) mod tests {
         let broken = filter(&res(2999, "", b"\x09Path"));
         assert!(broken.kept.is_empty());
         assert_eq!(broken.fields, [Other].into());
+    }
+
+    #[test]
+    fn the_clipping_path_keeps_its_name_flatness_and_fill_rule_alone() {
+        // A review's: bytes after the clipping path's flatness and fill
+        // rule, which GIMP reads and no reader shows, were kept whole.
+        let irb = [
+            res(2000, "A", &[1; 26]),
+            res(2999, "", b"\x01A\0\x01\0\0\0\x01SECRET shot by John"),
+        ]
+        .concat();
+        let filtered = filter(&irb);
+        let want = [
+            res(2000, "Path 1", &[1; 26]),
+            res(2999, "", b"\x06Path 1\0\x01\0\0\0\x01"),
+        ];
+        assert_eq!(filtered.kept, want.concat());
+        assert_eq!(filtered.fields, [Other].into());
+        // Blank bytes after them go unsaid; fewer than six stay as they
+        // are.
+        for (data, kept) in [
+            (
+                &b"\x01A\0\x01\0\0\0\x01\0\0"[..],
+                &b"\x06Path 1\0\x01\0\0\0\x01"[..],
+            ),
+            (b"\x01A\0\x01", b"\x06Path 1\0\x01"),
+        ] {
+            let irb = [res(2000, "A", &[1; 26]), res(2999, "", data)].concat();
+            let filtered = filter(&irb);
+            assert_eq!(
+                filtered.kept,
+                [want[0].clone(), res(2999, "", kept)].concat()
+            );
+            assert!(filtered.fields.is_empty(), "{data:?}");
+        }
     }
 
     #[test]
