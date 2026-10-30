@@ -565,6 +565,130 @@ fn both_tiff_tools_refuse_counts_libtiff_reads_for_other_strips() {
     }
 }
 
+/// The bytes of `n`, little-endian, `size` of them.
+fn le(n: u64, size: usize) -> Vec<u8> {
+    n.to_le_bytes()[..size].to_vec()
+}
+
+/// An entry for [`typed_tiff`]: its tag, type and value.
+type Change = (u16, u16, Vec<u8>);
+
+/// [`listed_tiff`]'s gray 300 × 100 picture, its ten strips 3,000 bytes
+/// apart counted `counts`, with no RowsPerStrip, classic or BigTIFF (the
+/// picture at 16 there), with `changes` to its entries: each
+/// `(tag, type, value)` takes the place of the entry for its tag, or is
+/// added; a value its entry can't hold goes after the IFD.
+fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
+    let (header, word, number) = if big { (16, 8, 16) } else { (8, 4, 4) };
+    let mut entries: Vec<Change> = vec![
+        (256, 4, le(300, 4)),
+        (257, 4, le(100, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+    ];
+    for (tag, kind, value) in changes {
+        entries.retain(|e| e.0 != *tag);
+        entries.push((*tag, *kind, value.clone()));
+    }
+    let offsets = (0..10).flat_map(|i| le(header + 3_000 * i, word)).collect();
+    entries.push((273, number, offsets));
+    entries.push((
+        279,
+        number,
+        counts.iter().flat_map(|&c| le(c, word)).collect(),
+    ));
+    entries.sort_by_key(|e| e.0);
+    let size = |kind: u16| match kind {
+        1 | 2 | 6 | 7 => 1,
+        3 | 8 => 2,
+        4 | 9 | 13 => 4,
+        _ => 8,
+    };
+    let ifd = header + 30_000;
+    let (count_len, entry_len) = if big { (8, 20) } else { (2, 12) };
+    let mut value_at = ifd + count_len + entry_len * entries.len() as u64 + word as u64;
+    let mut file = if big {
+        [&b"II+\0\x08\0\0\0"[..], &le(ifd, 8)].concat()
+    } else {
+        [&b"II*\0"[..], &le(ifd, 4)].concat()
+    };
+    file.extend((0..30_000).map(|i| (i % 251) as u8));
+    file.extend(le(entries.len() as u64, count_len as usize));
+    let mut values: Vec<u8> = Vec::new();
+    for (tag, kind, value) in &entries {
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(le(value.len() as u64 / size(*kind), word));
+        if value.len() <= word {
+            let mut field = value.clone();
+            field.resize(word, 0);
+            file.extend(field);
+        } else {
+            file.extend(le(value_at, word));
+            value_at += value.len() as u64;
+            values.extend(value);
+        }
+    }
+    file.extend(le(0, word));
+    file.extend(values);
+    file
+}
+
+#[test]
+fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
+    // The round-2 review's file: ten strips listed, the fourth counted 10,
+    // where libtiff with no RowsPerStrip reads one, short of the picture,
+    // and reads the whole picture from it. Its layout tags in types
+    // libtiff reads too (signed but not negative, or a LONG8 a classic
+    // file holds out of line), or with an ImageDepth, which strips don't
+    // count, it reads the same: refused, as the plain file is. So is one
+    // whose layout libtiff can't read, an ImageWidth typed IFD, as which
+    // strips it would read can't be told.
+    let mut short = [3_000; 10];
+    short[3] = 10;
+    let cases: [(&str, bool, Vec<Change>); 10] = [
+        ("plain.tif", false, vec![]),
+        ("depth.tif", false, vec![(32997, 4, le(1, 4))]),
+        ("slong-length.tif", false, vec![(257, 9, le(100, 4))]),
+        ("sshort-width.tif", false, vec![(256, 8, le(300, 2))]),
+        ("long8-length.tif", false, vec![(257, 16, le(100, 8))]),
+        ("sshort-rows.tif", false, vec![(278, 8, le(100, 2))]),
+        ("sbyte-rows.tif", false, vec![(278, 6, le(100, 1))]),
+        ("sshort-planar.tif", false, vec![(284, 8, le(1, 2))]),
+        ("slong8-planar.tif", true, vec![(284, 17, le(1, 8))]),
+        ("ifd-width.tif", false, vec![(256, 13, le(300, 4))]),
+    ];
+    let dir = TestDir::new("tiff-typed");
+    for (name, big, changes) in cases {
+        let bytes = typed_tiff(big, &short, &changes);
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+    // Ten whole strips of 10 rows, RowsPerStrip a SSHORT: libtiff reads
+    // the ten listed, and so both tools take them.
+    let bytes = typed_tiff(false, &[3_000; 10], &[(278, 8, le(10, 2))]);
+    strip(&dir, "rows.tif", &bytes).unwrap();
+    let op = compress_op(grape_core::CompressPreset::High);
+    run(&dir, "rows.tif", &bytes, op).unwrap();
+}
+
 #[test]
 fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
     // A gray 300 × 100 page of one strip counted 0, which libtiff works

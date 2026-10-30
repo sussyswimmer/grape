@@ -33,7 +33,7 @@ use std::io::Write;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
 use super::super::strip::{read_at, Error, In};
-use super::read::{read_value, Block, Entry, Ifd, Order, Value};
+use super::read::{read_value, Block, Dims, Entry, Ifd, Order, Value};
 
 /// The most decoded bytes handed on at once, unless a row is longer: what
 /// the caller's cancel check is between.
@@ -103,34 +103,31 @@ pub(crate) struct Geometry {
 }
 
 impl Geometry {
-    /// The layout `ifd` says its blocks have once decoded, or why it can't
-    /// be told; reads BitsPerSample and YCbCrSubsampling from `r` when they
-    /// aren't inline, taking what's read from `left` (what's left of the
-    /// bytes it may read for that: past it, the file is too large).
+    /// The layout `ifd` says its blocks have once decoded, its size, planes
+    /// and strips or tiles as libtiff reads them ([`Dims`]), or why it
+    /// can't be told; reads BitsPerSample and YCbCrSubsampling from `r`
+    /// when they aren't inline, taking what's read from `left` (what's left
+    /// of the bytes it may read for that: past it, the file is too large).
     pub(crate) fn of(
         r: &mut dyn In,
         ifd: &Ifd,
         order: Order,
         left: &mut u64,
     ) -> Result<Result<Geometry, Why>, Error> {
-        let get = |tag| ifd.uint(tag, order);
-        // A tag's one number, or `default` when it's absent; `None` when
-        // it's there but can't be read, which isn't the default.
-        let or = |tag, default| ifd.get(tag).map_or(Some(default), |e| e.uint(order));
         let not = |why: String| Ok(Err(why));
         let unread = |name: &str| not(format!("its {name} can't be read"));
-        let (Some(width), Some(height)) = (get(256), get(257)) else {
-            return not("it has no size".into());
+        // The layout as libtiff reads it.
+        let dims = match Dims::of(r, ifd, order)? {
+            Ok(dims) => dims,
+            Err(why) => return not(why),
         };
-        if width == 0 || height == 0 {
-            return not(format!("it's {width} × {height}"));
-        }
-        let Some(samples) = or(277, 1) else {
-            return unread("SamplesPerPixel");
-        };
-        if samples == 0 || samples > MAX_SAMPLES {
-            return not(format!("its SamplesPerPixel is {samples}"));
-        }
+        let Dims {
+            width,
+            height,
+            samples,
+            planar,
+            ..
+        } = dims;
         let bits = match ifd.get(258) {
             None => vec![1],
             Some(entry) => match numbers(r, entry, order, MAX_SAMPLES, left)? {
@@ -151,12 +148,6 @@ impl Geometry {
         if bits == 0 || bits > 64 {
             return not(format!("its BitsPerSample is {bits}"));
         }
-        let planar = match or(284, 1) {
-            Some(1) => false,
-            Some(2) => true,
-            Some(n) => return not(format!("its PlanarConfiguration is {n}")),
-            None => return unread("PlanarConfiguration"),
-        };
         let photometric = ifd.get(262).map(|e| e.uint(order));
         if photometric == Some(None) {
             return unread("PhotometricInterpretation");
@@ -179,24 +170,10 @@ impl Geometry {
             return not("its subsampled YCbCr isn't three samples in one plane".into());
         }
         let past = || not("its sizes are past any number".into());
-        let (tiled, across, rows, per_plane) = match (ifd.tiled, get(322), get(323)) {
-            (true, Some(tw), Some(tl)) if tw > 0 && tl > 0 => {
-                let Some(per_plane) = width.div_ceil(tw).checked_mul(height.div_ceil(tl)) else {
-                    return past();
-                };
-                (true, tw, tl, per_plane)
-            }
-            (true, _, _) => return not("it has no tile size".into()),
-            (false, _, _) => {
-                let Some(rows) = or(278, height) else {
-                    return unread("RowsPerStrip");
-                };
-                let rows = rows.min(height);
-                if rows == 0 {
-                    return not("its RowsPerStrip is 0".into());
-                }
-                (false, width, rows, height.div_ceil(rows))
-            }
+        let (tiled, across, rows, per_plane) = match (ifd.tiled, dims.tile()) {
+            (true, Some((tw, tl))) => (true, tw, tl, dims.per_plane()),
+            (true, None) => return not("it has no tile size".into()),
+            (false, _) => (false, width, dims.rows(), dims.strips_per_plane()),
         };
         let planes = if planar { samples } else { 1 };
         // A row's bits: of its pixels' samples, of one plane's, or of
@@ -1286,9 +1263,15 @@ mod tests {
             (322, V::Short(vec![16])),
             (323, V::Short(vec![16])),
         ];
-        let g = sized(page(tiles, 6, true)).unwrap();
+        let g = sized(page(tiles.clone(), 6, true)).unwrap();
         assert_eq!((g.blocks(), g.row), (6, 32));
         assert!((0..6).all(|n| g.expected(n) == 512));
+        // Two deep (ImageDepth), as libtiff counts them: twice the tiles.
+        let mut deep = tiles;
+        deep.push((32997, V::Long(vec![2])));
+        let g = sized(page(deep, 12, true)).unwrap();
+        assert_eq!(g.blocks(), 12);
+        assert!((0..12).all(|n| g.expected(n) == 512));
         // YCbCr subsampled 2 × 2 by default: 5 × 3 is 3 sampling units of
         // 6 samples a row, in 2 rows of them.
         let mut ycbcr = rgb.clone();
@@ -1332,15 +1315,17 @@ mod tests {
         two_counts[4] = (277, V::Short(vec![3, 3]));
         let mut rows_rational = rgb.clone();
         rows_rational[5] = (278, V::Rational(vec![(3, 1)]));
+        // Where libtiff can't read the layout, the reader refuses more than
+        // one block, so each of those has one.
         for (tags, blocks, why) in [
-            (two_counts, 3, "SamplesPerPixel can't be read"),
-            (rows_rational, 3, "RowsPerStrip can't be read"),
+            (two_counts, 1, "SamplesPerPixel can't be read"),
+            (rows_rational, 1, "RowsPerStrip can't be read"),
             (planes_apart, 3, "subsampled"),
             (odd, 1, "YCbCrSubsampling"),
             (mixed, 3, "different sizes"),
-            (no_rows, 3, "RowsPerStrip"),
+            (no_rows, 1, "RowsPerStrip is 0"),
             (huge, 1, "past any number"),
-            (rgb[1..].to_vec(), 3, "no size"),
+            (rgb[1..].to_vec(), 1, "0 × 7"),
         ] {
             let got = sized(page(tags, blocks, false)).unwrap_err();
             assert!(got.contains(why), "{why}: {got}");
