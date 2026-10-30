@@ -597,6 +597,15 @@ fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
         number,
         counts.iter().flat_map(|&c| le(c, word)).collect(),
     ));
+    let picture: Vec<u8> = (0..30_000).map(|i| (i % 251) as u8).collect();
+    laid_out(big, &picture, entries)
+}
+
+/// A TIFF, classic or BigTIFF, of `data` right after its header, then one
+/// IFD of `entries` (each `(tag, type, value)`, sorted here), then the
+/// values its entries can't hold.
+fn laid_out(big: bool, data: &[u8], mut entries: Vec<Change>) -> Vec<u8> {
+    let (header, word) = if big { (16, 8) } else { (8, 4) };
     entries.sort_by_key(|e| e.0);
     let size = |kind: u16| match kind {
         1 | 2 | 6 | 7 => 1,
@@ -604,7 +613,7 @@ fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
         4 | 9 | 13 => 4,
         _ => 8,
     };
-    let ifd = header + 30_000;
+    let ifd = header + data.len() as u64;
     let (count_len, entry_len) = if big { (8, 20) } else { (2, 12) };
     let mut value_at = ifd + count_len + entry_len * entries.len() as u64 + word as u64;
     let mut file = if big {
@@ -612,7 +621,7 @@ fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
     } else {
         [&b"II*\0"[..], &le(ifd, 4)].concat()
     };
-    file.extend((0..30_000).map(|i| (i % 251) as u8));
+    file.extend_from_slice(data);
     file.extend(le(entries.len() as u64, count_len as usize));
     let mut values: Vec<u8> = Vec::new();
     for (tag, kind, value) in &entries {
@@ -634,20 +643,45 @@ fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
     file
 }
 
+/// A TIFF, classic or BigTIFF, of `data` as one strip right after its
+/// header, counted as long as it is, and `entries` ([`laid_out`]).
+fn one_strip(big: bool, data: &[u8], mut entries: Vec<Change>) -> Vec<u8> {
+    let (header, word, number) = if big { (16, 8, 16) } else { (8, 4, 4) };
+    entries.push((273, number, le(header, word)));
+    entries.push((279, number, le(data.len() as u64, word)));
+    laid_out(big, data, entries)
+}
+
 #[test]
 fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
     // The round-2 review's file: ten strips listed, the fourth counted 10,
     // where libtiff with no RowsPerStrip reads one, short of the picture,
-    // and reads the whole picture from it. Its layout tags in types
-    // libtiff reads too (signed but not negative, or a LONG8 a classic
-    // file holds out of line), or with an ImageDepth, which strips don't
-    // count, it reads the same: refused, as the plain file is. So is one
-    // whose layout libtiff can't read, an ImageWidth typed IFD, as which
-    // strips it would read can't be told.
+    // and reads the whole picture from it. Its layout tags, Compression
+    // (1) and BitsPerSample in types libtiff reads too (signed but not
+    // negative, a LONG8 a classic file holds out of line, or a value for
+    // each sample), or with an ImageDepth, which strips don't count, it
+    // reads the same: refused, as the plain file is. So is one whose
+    // layout libtiff can't read, an ImageWidth typed IFD, as which strips
+    // it would read can't be told.
     let mut short = [3_000; 10];
     short[3] = 10;
-    let cases: [(&str, bool, Vec<Change>); 10] = [
+    let cases: [(&str, bool, Vec<Change>); 21] = [
         ("plain.tif", false, vec![]),
+        ("sshort-none.tif", false, vec![(259, 8, le(1, 2))]),
+        ("slong-none.tif", false, vec![(259, 9, le(1, 4))]),
+        ("sbyte-none.tif", false, vec![(259, 6, le(1, 1))]),
+        ("long8-none.tif", false, vec![(259, 16, le(1, 8))]),
+        ("slong8-none.tif", true, vec![(259, 17, le(1, 8))]),
+        (
+            "each-none.tif",
+            false,
+            vec![(259, 3, [le(1, 2), le(1, 2)].concat())],
+        ),
+        ("byte-bits.tif", false, vec![(258, 1, le(8, 1))]),
+        ("sbyte-bits.tif", false, vec![(258, 6, le(8, 1))]),
+        ("sshort-bits.tif", false, vec![(258, 8, le(8, 2))]),
+        ("slong-bits.tif", false, vec![(258, 9, le(8, 4))]),
+        ("slong8-bits.tif", true, vec![(258, 17, le(8, 8))]),
         ("depth.tif", false, vec![(32997, 4, le(1, 4))]),
         ("slong-length.tif", false, vec![(257, 9, le(100, 4))]),
         ("sshort-width.tif", false, vec![(256, 8, le(300, 2))]),
@@ -681,6 +715,11 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
             fs::remove_file(dir.join(name)).unwrap();
         }
     }
+    // In strips of 10 rows, BitsPerSample a BYTE, the fourth strip short:
+    // refused too, as libtiff reads it short.
+    let rows = [(278, 3, le(10, 2)), (258, 1, le(8, 1))];
+    let err = strip(&dir, "bits.tif", &typed_tiff(false, &short, &rows)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
     // Ten whole strips of 10 rows, RowsPerStrip a SSHORT: libtiff reads
     // the ten listed, and so both tools take them.
     let bytes = typed_tiff(false, &[3_000; 10], &[(278, 8, le(10, 2))]);
@@ -758,6 +797,61 @@ fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
             "packet.tif says the wrong size for some of its image data, which Grape can't rewrite yet."
         );
         fs::remove_file(dir.join("packet.tif")).unwrap();
+    }
+}
+
+#[test]
+fn remove_metadata_refuses_metadata_in_a_jpeg_strip_whatever_type_says_so() {
+    // A 16 × 16 gray JPEG strip with an Exif APP1 that holds a GPS IFD,
+    // its Compression (7) in each integer type libtiff reads, and as a
+    // value for each sample: refused, as the SHORT is. An old-style JPEG
+    // (6) in those types is refused as one.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let data = with(&jpeg, &[exif(1)], b"");
+    let tags = |compression: Change| {
+        vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            compression,
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+        ]
+    };
+    let dir = TestDir::new("strip-tiff-typed-jpeg");
+    for (n, message) in [
+        (7, "has metadata inside its image data"),
+        (6, "uses an old kind of TIFF compression"),
+    ] {
+        for (name, big, value) in [
+            ("short.tif", false, (259, 3, le(n, 2))),
+            ("byte.tif", false, (259, 1, le(n, 1))),
+            ("sbyte.tif", false, (259, 6, le(n, 1))),
+            ("sshort.tif", false, (259, 8, le(n, 2))),
+            ("long.tif", false, (259, 4, le(n, 4))),
+            ("slong.tif", false, (259, 9, le(n, 4))),
+            ("long8.tif", false, (259, 16, le(n, 8))),
+            ("slong8.tif", true, (259, 17, le(n, 8))),
+            ("each.tif", false, (259, 3, [le(n, 2), le(n, 2)].concat())),
+        ] {
+            let bytes = one_strip(big, &data, tags(value));
+            let err = strip(&dir, name, &bytes).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{n} {name}: {}",
+                err.detail
+            );
+            assert!(
+                err.user_message.starts_with(&format!("{name} {message}")),
+                "{n} {name}: {}",
+                err.user_message
+            );
+        }
     }
 }
 

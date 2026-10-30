@@ -8,7 +8,9 @@
 //!
 //! - **Recoded:** IFDs of compression 1 (None), 5 (LZW), 8 or 32946
 //!   (Deflate) or 32773 (PackBits), with a FillOrder of 1 or none, whose
-//!   blocks [`Geometry`] can size. Only their Compression (to 8), their
+//!   blocks [`Geometry`] can size, every tag it decides on read as libtiff
+//!   reads it ([`read`](super::read)): one libtiff can't read, and the IFD
+//!   is copied as it is. Only their Compression (to 8), their
 //!   Predictor and their blocks' offsets and counts change: RowsPerStrip,
 //!   the tiles and the planes stay.
 //! - **Copied as they are**, with their tags ([`How::Copy`]): JPEG, fax,
@@ -70,8 +72,10 @@ use std::path::Path;
 use grape_core::{Format, Job};
 
 use super::super::strip::{self as strips, Error, In, Out};
-use super::codec::{numbers, Codec, Codecs, Fail, Geometry, Predictor, Recipe, Why, MAX_SAMPLES};
-use super::read::{repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff};
+use super::codec::{Codec, Codecs, Fail, Geometry, Predictor, Recipe, Why};
+use super::read::{
+    number, per_sample, repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff, SHORT,
+};
 use super::write::{self, Blocks, Data, Dir, Field, Image, Sink, Written};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
@@ -428,20 +432,23 @@ pub(crate) enum Stopped {
     Failed(Error),
 }
 
-/// How `ifd`'s blocks are written ([module docs](self)).
+/// How `ifd`'s blocks are written ([module docs](self)), from its tags as
+/// libtiff reads them ([`number`]; the walk read its Compression, and
+/// refused one libtiff can't read): one libtiff can't read, that other
+/// readers might read otherwise, and the IFD is copied as it is.
 fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, Error> {
     let copy = |why: String| Ok(How::Copy(why));
-    let Some(compression) = ifd.get(259).map_or(Some(1), |e| e.uint(order)) else {
-        return copy("its Compression can't be read".into());
-    };
+    let compression = ifd.compression;
     let Some(codec) = Codec::of(compression) else {
         return copy(format!("its compression is {compression}"));
     };
     // FillOrder 2: libtiff reverses the compressed bytes' bits.
-    match ifd.get(266).map(|e| e.uint(order)) {
-        None | Some(Some(1)) => {}
-        Some(Some(fill)) => return copy(format!("its FillOrder is {fill}")),
-        Some(None) => return copy("its FillOrder can't be read".into()),
+    if let Some(entry) = ifd.get(266) {
+        match number(r, entry, order, SHORT)? {
+            Some(1) => {}
+            Some(fill) => return copy(format!("its FillOrder is {fill}")),
+            None => return copy("its FillOrder can't be read".into()),
+        }
     }
     let geometry = match Geometry::of(r, ifd, order, left)? {
         Ok(geometry) => geometry,
@@ -461,7 +468,7 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
     }
     let own = match ifd.get(317) {
         None => 1,
-        Some(entry) => match entry.uint(order) {
+        Some(entry) => match number(r, entry, order, SHORT)? {
             Some(own) => own,
             None => return copy("its Predictor can't be read".into()),
         },
@@ -502,7 +509,10 @@ fn added(
     geometry: &Geometry,
     left: &mut u64,
 ) -> Result<Option<Predictor>, Error> {
-    let photometric = ifd.uint(262, order);
+    let photometric = match ifd.get(262) {
+        Some(entry) => number(r, entry, order, SHORT)?,
+        None => None,
+    };
     if !matches!(photometric, Some(0 | 1 | 2 | 5))
         || geometry.subsampled
         || !matches!(geometry.bits, 8 | 16)
@@ -510,11 +520,11 @@ fn added(
     {
         return Ok(None);
     }
-    let formats = match ifd.get(339) {
-        None => vec![1],
-        Some(entry) => numbers(r, entry, order, MAX_SAMPLES, left)?.unwrap_or_default(),
+    let format = match ifd.get(339) {
+        None => Some(1),
+        Some(entry) => per_sample(r, entry, order, Some(geometry.samples), left)?,
     };
-    if formats.is_empty() || formats.iter().any(|f| !matches!(f, 1 | 2)) {
+    if !matches!(format, Some(1 | 2)) {
         return Ok(None);
     }
     let stride = if geometry.planar {
@@ -1527,6 +1537,106 @@ mod tests {
             let o = back.layout.order;
             assert_eq!(back.pages[0].uint(317, o), Some(2));
             assert_eq!(back.pages[1].uint(317, o), Some(1));
+        }
+    }
+
+    #[test]
+    fn every_tag_compress_decides_on_is_read_as_libtiff_reads_it() {
+        // A gray 32 × 8 page whose Compression, BitsPerSample,
+        // PhotometricInterpretation, FillOrder, Predictor and SampleFormat
+        // are in types libtiff reads (signed but not negative, a LONG8 a
+        // classic file holds out of line, a value for each sample):
+        // recoded, its predictor added, as when they're SHORTs.
+        let bytes = |kind: u16, n: u64| {
+            let size = super::super::read::type_size(kind).unwrap() as usize;
+            V::Bytes(kind, n.to_le_bytes()[..size].to_vec())
+        };
+        let samples = smooth(32 * 8);
+        for (big, typed) in [
+            (
+                false,
+                vec![
+                    (258, bytes(8, 8)),
+                    (259, bytes(16, 1)),
+                    (262, bytes(9, 1)),
+                    (266, bytes(6, 1)),
+                    (317, bytes(1, 1)),
+                    (339, V::Short(vec![1, 1])),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    (258, bytes(17, 8)),
+                    (259, V::Short(vec![1, 1])),
+                    (262, bytes(16, 1)),
+                    (266, bytes(8, 1)),
+                    (317, bytes(9, 1)),
+                    (339, bytes(17, 1)),
+                ],
+            ),
+        ] {
+            let mut gray = page(32, 8, 8, 8, &samples);
+            gray.tags
+                .retain(|t| !typed.iter().any(|(tag, _)| *tag == t.0));
+            gray.tags.extend(typed);
+            let file = Builder::new(b'I', big, vec![gray]).build();
+            let plan = plan(&file);
+            assert!(
+                matches!(
+                    plan.hows[..],
+                    [How::Recode {
+                        predictor: Some(_),
+                        ..
+                    }]
+                ),
+                "{:?}",
+                plan.hows
+            );
+            let out = compressed(&file);
+            let back = read(&out);
+            assert_eq!(back.pages[0].uint(317, back.layout.order), Some(2));
+        }
+        // Where libtiff can't read one, and other readers might read it
+        // otherwise, the page is copied as it is: PackBits, so that the
+        // walk doesn't size its strip.
+        let packbits: Vec<u8> = samples
+            .chunks(128)
+            .flat_map(|run| [&[run.len() as u8 - 1][..], run].concat())
+            .collect();
+        for (tag, value, why) in [
+            (258, V::Short(vec![8, 16]), "BitsPerSample can't be read"),
+            (
+                262,
+                bytes(8, 0xFFFF),
+                "PhotometricInterpretation can't be read",
+            ),
+            (266, V::Short(vec![1, 1]), "FillOrder can't be read"),
+            (317, V::Rational(vec![(2, 1)]), "Predictor can't be read"),
+            (
+                530,
+                V::Short(vec![2, 2, 2]),
+                "YCbCrSubsampling can't be read",
+            ),
+        ] {
+            let mut gray = page(32, 8, 8, 8, &samples);
+            gray.blocks = vec![B::Data(packbits.clone())];
+            gray.tags.retain(|t| t.0 != tag);
+            gray.tags
+                .extend([(259, V::Short(vec![32773])), (tag, value)]);
+            if tag == 530 {
+                gray.tags[3] = (262, V::Short(vec![6]));
+                gray.tags.extend([(277, V::Short(vec![3]))]);
+                gray.tags[2] = (258, V::Short(vec![8, 8, 8]));
+            }
+            if tag == 258 {
+                gray.tags.push((277, V::Short(vec![2])));
+            }
+            let file = Builder::new(b'I', false, vec![gray]).build();
+            let Planned::Nothing(log) = planned(&file).unwrap() else {
+                panic!("{tag} planned")
+            };
+            assert!(log.contains(why), "{tag}: {log}");
         }
     }
 

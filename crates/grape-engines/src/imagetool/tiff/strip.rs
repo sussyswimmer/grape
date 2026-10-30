@@ -17,8 +17,9 @@
 //! - **Written back:** the DCF Adobe RGB Exif (ColorSpace uncalibrated,
 //!   Interop `R03`), when that's how an IFD with no ICC profile said its
 //!   color: each such IFD gets its own, even when they shared one.
-//! - **Refused:** DNG and old-style JPEG (both tools); metadata inside
-//!   JPEG data (an APP1, APP13 or COM in its JPEGTables, or in a block:
+//! - **Refused:** DNG, old-style JPEG and a Compression libtiff can't read
+//!   (both tools); metadata inside JPEG data (Compression 7 as libtiff
+//!   reads it; an APP1, APP13 or COM in its JPEGTables, or in a block:
 //!   up to its first scan when that's a sequential frame's only one, and
 //!   through every scan otherwise), and JPEG data Grape can't check, whose
 //!   segments or scans run past the first [`MAX_SCAN`] bytes read before
@@ -33,7 +34,7 @@ use std::sync::Arc;
 use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
-use super::read::{read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value};
+use super::read::{number, read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT};
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
 
@@ -140,7 +141,7 @@ impl Plan {
         let jpegs: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| ifd.uint(259, order) == Some(7))
+            .filter(|ifd| ifd.compression == 7)
             .collect();
         if !jpegs.is_empty() {
             let shared = tiff.shared();
@@ -634,11 +635,10 @@ impl Walk<'_> {
     /// Whether the Exif IFD `exif` says the picture is Adobe RGB the DCF
     /// way: ColorSpace uncalibrated, and Interop `R03`.
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
-        let uncalibrated = exif
-            .entries
-            .iter()
-            .find(|e| e.tag == 0xA001)
-            .is_some_and(|e| e.kind == 3 && e.uint(self.order) == Some(0xFFFF));
+        let uncalibrated = match exif.entries.iter().find(|e| e.tag == 0xA001) {
+            Some(space) => number(self.r, space, self.order, SHORT)? == Some(0xFFFF),
+            None => false,
+        };
         let Some(index) = exif
             .interop
             .as_deref()
