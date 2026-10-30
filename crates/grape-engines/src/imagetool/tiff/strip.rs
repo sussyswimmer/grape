@@ -1176,18 +1176,20 @@ impl Walk<'_> {
 
     /// Whether the Exif IFD `exif` says the picture is Adobe RGB the DCF
     /// way: ColorSpace uncalibrated, and Interop `R03`. ColorSpace is read
-    /// as libtiff 4.5 reads an Exif IFD's (`TIFFReadCustomDirectory`), and
-    /// Grape's Exif walker for JPEG: a SHORT of one value, another type
-    /// ignored ("Wrong data type"); its entries all agree, or the file was
-    /// refused ([`twice_kept`]).
+    /// as libtiff 4.5.1 reads an Exif IFD's (`TIFFReadCustomDirectory`): a
+    /// SHORT, another type ignored ("Wrong data type"), and of more than
+    /// one value the first ("tag trimmed"), as Pillow reads the first of
+    /// them, when they're in the entry; of more than it holds, libtiff
+    /// reads the entry's offset as the value, so such a one says nothing.
+    /// Its entries all agree, or the file was refused ([`twice_kept`]).
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
         let uncalibrated = exif
             .entries
             .iter()
             .find(|e| e.tag == 0xA001)
             .is_some_and(|e| {
-                matches!((e.kind, e.count, e.value), (3, 1, Value::Inline { bytes, .. })
-                if self.order.uint(&bytes[..2]) == 0xFFFF)
+                matches!((e.kind, e.value), (3, Value::Inline { bytes, len })
+                if len >= 2 && self.order.uint(&bytes[..2]) == 0xFFFF)
             });
         let Some(index) = exif
             .interop
@@ -1847,16 +1849,30 @@ mod tests {
 
     #[test]
     fn the_exif_color_space_is_read_as_libtiff_reads_it() {
-        // libtiff reads an Exif IFD's ColorSpace only as a SHORT ("Wrong
-        // data type 4 for \"ColorSpace\"; tag ignored"), as Grape's Exif
-        // walker reads it for JPEG: one typed LONG or SSHORT says nothing,
-        // and the DCF Exif doesn't go back, where it did.
-        for space in [V::Long(vec![0xFFFF]), V::Bytes(8, vec![0xFF, 0xFF])] {
+        // libtiff 4.5.1 reads an Exif IFD's ColorSpace only as a SHORT
+        // ("Wrong data type 4 for \"ColorSpace\"; tag ignored"): one typed
+        // LONG or SSHORT says nothing, and the DCF Exif doesn't go back,
+        // where it did. Of more than one value it reads the first ("tag
+        // trimmed"), as Pillow reads (65535, 1), when they're in the entry
+        // (two in a classic file, four in a BigTIFF); of more, it reads the
+        // entry's offset as the value (130 for values at 130), which isn't
+        // a ColorSpace: such a one says nothing.
+        for (big, space, back) in [
+            (false, V::Long(vec![0xFFFF]), false),
+            (false, V::Bytes(8, vec![0xFF, 0xFF]), false),
+            (false, V::Short(vec![0xFFFF]), true),
+            (false, V::Short(vec![0xFFFF, 1]), true),
+            (false, V::Short(vec![1, 0xFFFF]), false),
+            (false, V::Short(vec![0xFFFF, 1, 1]), false),
+            (true, V::Short(vec![0xFFFF, 1, 1]), true),
+            (true, V::Short(vec![0xFFFF, 1, 1, 1, 1]), false),
+        ] {
             let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
             page.exif = Some(vec![(0xA001, space.clone())]);
             page.interop = Some(vec![(1, V::Ascii("R03"))]);
-            let (out, _) = strip(&Builder::new(b'I', false, vec![page]).build());
-            assert!(read(&out).pages[0].exif.is_none(), "{space:?}");
+            let (out, _) = strip(&Builder::new(b'I', big, vec![page]).build());
+            let exif = read(&out).pages[0].exif.clone();
+            assert_eq!(exif.is_some(), back, "{big} {space:?}");
         }
     }
 
