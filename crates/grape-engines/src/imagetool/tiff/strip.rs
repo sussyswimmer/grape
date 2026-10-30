@@ -44,7 +44,7 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, read_value, twice, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, TWICE,
+    integer, read_value, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, TWICE,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -164,15 +164,26 @@ fn kept(tag: u16) -> bool {
 
 /// Whether `ifd` lists a tag Remove Metadata keeps (Photoshop's resources
 /// among them), or the Exif ColorSpace or Interop index that decide the
-/// DCF Exif, twice or more, its entries not all the same ([`twice`]): the
-/// output would hold only the first, which readers that take the last
-/// (Pillow; libtiff in an Exif IFD) don't read in the source.
-fn twice_kept(ifd: &Ifd) -> bool {
+/// DCF Exif, twice or more, its entries not all the same value
+/// ([`Alike::twice`]): the output would hold only the first, which readers
+/// that take the last (Pillow; libtiff in an Exif IFD) don't read in the
+/// source.
+fn twice_kept(r: &mut dyn In, ifd: &Ifd, order: Order, alike: &mut Alike) -> Result<bool, Error> {
     let exif = ifd.exif.as_ref();
     let interop = exif.and_then(|exif| exif.interop.as_deref());
-    twice(&ifd.entries, |tag| kept(tag) || tag == 34377).is_some()
-        || exif.is_some_and(|exif| twice(&exif.entries, |tag| tag == 0xA001).is_some())
-        || interop.is_some_and(|interop| twice(&interop.entries, |tag| tag == 1).is_some())
+    let mut lists = vec![(&ifd.entries, 0)];
+    lists.extend(exif.map(|exif| (&exif.entries, 0xA001)));
+    lists.extend(interop.map(|interop| (&interop.entries, 1)));
+    for (entries, decides) in lists {
+        let picks = |tag| match decides {
+            0 => kept(tag) || tag == 34377,
+            decides => tag == decides,
+        };
+        if alike.twice(r, entries, order, picks)?.is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Whether the writer makes `tag` afresh: the blocks and the SubIFDs.
@@ -220,6 +231,7 @@ impl Plan {
         let mut left = len;
         // A description that IFDs share is read once.
         let mut descriptions = HashSet::new();
+        let mut alike = Alike::new(len);
         for ifd in tiff.ifds() {
             // Every one: tifffile writes two, and ImageJ's may be either.
             let all = ifd.entries.iter().filter(|e| e.tag == 270);
@@ -230,7 +242,7 @@ impl Plan {
                     return Err(Error::Refused(DESCRIBED.into()));
                 }
             }
-            if twice_kept(ifd) {
+            if twice_kept(r, ifd, order, &mut alike)? {
                 return Err(Error::Refused(TWICE.into()));
             }
         }
@@ -1615,6 +1627,11 @@ mod tests {
                 V::Bytes(7, res(2000, "", &[0; 26])),
             ),
             (274, V::Short(vec![1]), V::Short(vec![6])),
+            (
+                34675,
+                V::Bytes(7, vec![0; 200]),
+                V::Bytes(7, [&[1][..], &[0; 199]].concat()),
+            ),
         ] {
             let mut page = gray(8, 8, 8, vec![B::data(&[7; 64])]);
             page.tags.extend([(tag, first), (tag, second)]);
@@ -1632,25 +1649,32 @@ mod tests {
         ] {
             assert_eq!(refused(page).as_deref(), Some(TWICE));
         }
-        // The same entry twice is one, kept once; a dropped tag twice goes.
+        // The same entry twice is one, kept once, and so is the same value
+        // twice, in another type or another place (two profiles of 200
+        // zeros); a dropped tag twice goes.
         let mut page = exif(&[0xFFFF, 0xFFFF], &["R03", "R03"]);
         page.tags.extend([
             (274, V::Short(vec![6])),
             (274, V::Short(vec![6])),
+            (296, V::Short(vec![2])),
+            (296, V::Long(vec![2])),
             (305, V::Ascii("secret one")),
             (305, V::Ascii("secret two")),
         ]);
-        let (out, found) = strip(&Builder::new(b'I', false, vec![page]).build());
+        let mut profiled = gray(8, 8, 8, vec![B::data(&[7; 64])]);
+        profiled.tags.extend([
+            (34675, V::Bytes(7, vec![0; 200])),
+            (34675, V::Bytes(7, vec![0; 200])),
+        ]);
+        let file = Builder::new(b'I', false, vec![page, profiled]).build();
+        let (out, found) = strip(&file);
         assert_eq!(found, [Software].into());
         let tiff = read(&out);
-        assert_eq!(
-            tiff.pages[0]
-                .entries
-                .iter()
-                .filter(|e| e.tag == 274)
-                .count(),
-            1
-        );
+        for (page, tag) in [(0, 274), (0, 296), (1, 34675)] {
+            let all = tiff.pages[page].entries.iter().filter(|e| e.tag == tag);
+            assert_eq!(all.count(), 1, "{tag}");
+        }
+        assert_eq!(value(&out, &tiff.pages[1], 34675).unwrap(), [0; 200]);
         assert!(dcf_only(tiff.pages[0].exif.as_ref().unwrap()));
     }
 
