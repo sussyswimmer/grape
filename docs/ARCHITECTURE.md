@@ -52,7 +52,7 @@
 ### `grape-webp` (libwebp's encoder, D28)
 - `encode(Pixels, &Options, keep_going) -> Result<Vec<u8>, Error>` and `version()`: 8-bit RGB or RGBA in, libwebp's whole RIFF file out, lossy (VP8 at a quality and method, alpha lossless) or lossless (VP8L at a preset level, exact). `keep_going(percent)` is libwebp's progress hook, run inside `catch_unwind`; false cancels. Sides of 1 to 16,383 and data of exactly the pixels' size are checked before libwebp sees them.
 - libwebp 1.6.0, vendored by libwebp-sys `=0.14.4` and compiled by its build script with the system's C compiler, links into Grape itself: no sidecar. Encode only, so no file a user dropped ever reaches libwebp; Grape reads WebP with image-webp.
-- It holds the only `unsafe` code for images, so `grape-engines` keeps `#![forbid(unsafe_code)]`. Every libwebp allocation has a drop guard. It's for Compress on WebP (D28); nothing calls it yet.
+- It holds the only `unsafe` code for images, so `grape-engines` keeps `#![forbid(unsafe_code)]`. Every libwebp allocation has a drop guard. `grape-engines`' `imagetool/webp_compress.rs` calls it for Compress on WebP (D28).
 
 ### `grape-platform` (OS glue, `#[cfg(target_os)]` modules)
 - `DragMonitor` (`start(SyncSender<DragSignal>)`, `stop()`): emits `DragSignal::{Started{modifiers}, Moved{x,y}, Modifiers(Modifiers), Escape, Ended}` on a bounded channel, and drops signals rather than block. `Started` carries the keys already held, which don't open a wheel (`DECISIONS.md` D14). The pure `tracker::DragTracker` holds the drag rules; the Windows hook thread and worker feed it. `drag_monitor()` returns the one for this OS. `mock::ScriptedMonitor` replays scripts for tests.

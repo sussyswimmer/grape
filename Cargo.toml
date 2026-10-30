@@ -21,6 +21,7 @@ grape-core = { path = "crates/grape-core" }
 grape-engines = { path = "crates/grape-engines" }
 grape-heif-proto = { path = "crates/grape-heif-proto" }
 grape-platform = { path = "crates/grape-platform" }
+grape-webp = { path = "crates/grape-webp" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.21"

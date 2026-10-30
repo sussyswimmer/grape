@@ -2,7 +2,7 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
-- **376 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **377 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **libarchive**, whose `bsdtar` program Grape reads RAR archives with. It ships as a separate program, with its license texts in the `licenses/libarchive` folder.
@@ -4118,7 +4118,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4), [profiling-procmacros 1.0.18](https://crates.io/crates/profiling-procmacros/1.0.18), [profiling 1.0.18](https://crates.io/crates/profiling/1.0.18), [simd_helpers 0.1.0](https://crates.io/crates/simd_helpers/0.1.0)
+Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [libwebp-sys 0.14.4](https://crates.io/crates/libwebp-sys/0.14.4), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4), [profiling-procmacros 1.0.18](https://crates.io/crates/profiling-procmacros/1.0.18), [profiling 1.0.18](https://crates.io/crates/profiling/1.0.18), [simd_helpers 0.1.0](https://crates.io/crates/simd_helpers/0.1.0)
 
 *The standard text, because these crates don't ship it. The copyright holders are the authors named on each crate's page.*
 
@@ -5538,6 +5538,42 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+~~~
+
+Used by: [libwebp-sys 0.14.4](https://crates.io/crates/libwebp-sys/0.14.4)
+
+~~~text
+Copyright (c) 2010, Google Inc. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of Google nor the names of its contributors may
+    be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 
 ~~~
 

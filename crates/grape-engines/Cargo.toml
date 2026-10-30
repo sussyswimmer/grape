@@ -51,6 +51,9 @@ serde.workspace = true
 serde_json.workspace = true
 # HEIC (D33): the protocol with Grape's HEIC helper, a separate process.
 grape-heif-proto.workspace = true
+# WebP Compress (D28): libwebp's encoder, behind grape-webp's safe API, so
+# this crate keeps `forbid(unsafe_code)`.
+grape-webp.workspace = true
 # SVG (D39): parsed and drawn only inside the SVG worker process.
 # Never turn on `svgz` (unbounded gunzip) or resvg's default features.
 resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }

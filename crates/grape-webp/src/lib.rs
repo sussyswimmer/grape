@@ -63,7 +63,10 @@ pub enum Mode {
     Lossy {
         /// libwebp's quality, 0 to 100.
         quality: f32,
-        /// libwebp's method, 0 to 6 (6 is the slowest and smallest).
+        /// libwebp's method, 0 to 6 (6 is the slowest and smallest). libwebp
+        /// encodes the alpha plane at the same effort: at 6, with quality
+        /// 100's lossless search for each of its filters, that takes many
+        /// times as long as the rest, with no progress report.
         method: u8,
     },
     /// VP8L, the lossless format: every pixel kept exactly, the RGB under

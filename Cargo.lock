@@ -1901,6 +1901,7 @@ dependencies = [
  "grape-core",
  "grape-heif-proto",
  "grape-platform",
+ "grape-webp",
  "image",
  "imagesize",
  "lopdf",

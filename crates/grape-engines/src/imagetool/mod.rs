@@ -26,7 +26,12 @@ mod png_compress;
 mod scale;
 mod strip;
 mod tiff;
+// Compress's scan and assemble are dispatched next.
+#[allow(dead_code)]
 mod webp;
+// Dispatched next.
+#[allow(dead_code)]
+mod webp_compress;
 
 use std::fs::File;
 use std::io::Read;
