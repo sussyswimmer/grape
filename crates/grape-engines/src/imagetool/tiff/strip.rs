@@ -351,7 +351,9 @@ impl Plan {
         let mut descriptions = HashSet::new();
         let mut alike = Alike::new(len);
         for ifd in tiff.ifds() {
-            // Every one: tifffile writes two, and ImageJ's may be either.
+            // Every one: tifffile writes a description it's given and then
+            // its own (the picture's shape, or ImageJ's alone in an ImageJ
+            // file), and reads ImageJ's from either of a page's first two.
             for entry in ifd.entries.iter().filter(|e| e.tag == 270) {
                 let at = matches!(entry.value, Value::At { .. });
                 if at && descriptions.contains(&entry.value) {
@@ -2012,7 +2014,8 @@ mod tests {
 
     #[test]
     fn every_description_is_read_for_imagej_and_ome() {
-        // tifffile writes two descriptions, and ImageJ's may be the second.
+        // tifffile reads ImageJ's description from either of a page's
+        // first two, the second too.
         for second in [
             "ImageJ=1.54f\nimages=3\n",
             "<?xml version=\"1.0\"?><OME xmlns=\"x\">",
