@@ -38,8 +38,8 @@
 //!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
 //!   files, whose layout is in their description (any of an IFD's); a
 //!   tag it keeps listed twice with different values ([`twice_kept`]);
-//!   and a tag a page's layout or samples are read from, or a palette
-//!   page's ColorMap, in a type or count libtiff doesn't read
+//!   and a tag a page's layout or samples are read from, its Orientation,
+//!   or a palette page's ColorMap, in a type or count libtiff doesn't read
 //!   ([`LAID_OUT`]), which can't go as other fields.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
@@ -164,10 +164,10 @@ fn kept(tag: u16) -> bool {
 /// each field's `set_field_type` in `tif_dirinfo.c` and the codecs'), which
 /// is all it keeps of it: an entry of another type or count, which
 /// libtiff ignores ("Incorrect value", "incorrect count … tag ignored") or
-/// fails on and other readers may show (Pillow shows an ASCII Orientation
-/// as its text), goes, as other fields ([`Walk::keeps`]). Values aren't
-/// checked, but bytes' of a wider type ([`Walk::bytes`]): a number out of
-/// its range is a number still.
+/// fails on and other readers may show (Pillow shows an ASCII XResolution
+/// as its text), goes, as other fields ([`Walk::keeps`]), or refuses the
+/// file ([`LAID_OUT`]). Values aren't checked, but bytes' of a wider type
+/// ([`Walk::bytes`]): a number out of its range is a number still.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// Integers of any type but IFD and IFD8 ([`integer`]), as
@@ -317,15 +317,16 @@ fn twice_kept(r: &mut dyn In, ifd: &Ifd, order: Order, alike: &mut Alike) -> Res
 /// The tags Remove Metadata keeps that say how a page's data is laid out
 /// or what its samples are: those either TIFF tool decides on to read its
 /// blocks but the ones the walk read already (Compression, the blocks and
-/// the SubIFDs), and ExtraSamples. An entry of one that libtiff can't read
-/// ([`shape`]; it fails on most, and ignores FillOrder, Predictor and
-/// YCbCrSubsampling) can't go as other fields: readers that read it
-/// (Pillow reads a SampleFormat of FLOAT 3.0 as float samples) would read
-/// the output as another picture. The file is refused instead
-/// ([`UNREAD_LAYOUT`]), and so for a palette page's ColorMap
-/// ([`Walk::lays_out`]).
-const LAID_OUT: [u16; 16] = [
-    256, 257, 258, 262, 266, 277, 278, 284, 317, 322, 323, 338, 339, 530, 32997, 32998,
+/// the SubIFDs), and ExtraSamples; and Orientation, which says how it's
+/// turned. An entry of one that libtiff can't read ([`shape`]; it fails on
+/// most, and ignores FillOrder, Orientation, Predictor and
+/// YCbCrSubsampling) can't go as other fields: readers that read it would
+/// read the output as another picture (Pillow reads a SampleFormat of
+/// FLOAT 3.0 as float samples, and turns a page by an Orientation of FLOAT
+/// 6.0). The file is refused instead ([`UNREAD_LAYOUT`]), and so for a
+/// palette page's ColorMap ([`Walk::lays_out`]).
+const LAID_OUT: [u16; 17] = [
+    256, 257, 258, 262, 266, 274, 277, 278, 284, 317, 322, 323, 338, 339, 530, 32997, 32998,
 ];
 
 /// Refuses an ImageJ or OME file by its description `entry`, the first
@@ -1256,9 +1257,10 @@ impl Walk<'_> {
         Ok(bits.filter(|&bits| bits <= 24))
     }
 
-    /// Whether the tag `tag` of `ifd` says how the page's data is laid out
-    /// or what its samples are ([`LAID_OUT`]; a palette page's ColorMap),
-    /// so that an entry of it that isn't kept ([`Walk::keeps`]) can't go.
+    /// Whether the tag `tag` of `ifd` says how the page's data is laid out,
+    /// what its samples are or how it's turned ([`LAID_OUT`]; a palette
+    /// page's ColorMap), so that an entry of it that isn't kept
+    /// ([`Walk::keeps`]) can't go.
     fn lays_out(&mut self, ifd: &Ifd, tag: u16) -> Result<bool, Error> {
         Ok(LAID_OUT.contains(&tag)
             || (tag == 320
@@ -1900,23 +1902,21 @@ mod tests {
                 gone(file, tag);
             }
         }
-        // A review's: an Orientation, an XResolution and a LercParameters
-        // as text, eight LONGs of LercParameters on an uncompressed page,
-        // InkNames on a gray one, and a no-data value of words.
+        // A review's: an XResolution and a LercParameters as text, eight
+        // LONGs of LercParameters on an uncompressed page, InkNames on a
+        // gray one, and a no-data value of words.
         let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W".to_vec();
         let longs = secret
             .chunks(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()));
         for (compression, tag, value) in [
-            (1, 274, V::Ascii("SECRET_IN_ORIENTATION_51.5N_0.1W")),
             (1, 282, V::Ascii("secret resolution")),
             (1, 50674, V::Ascii("secret parameters")),
             (1, 50674, V::Long(longs.collect())),
             (1, 333, V::Ascii("shot by John at home")),
             (1, 42113, V::Ascii("shot by John at home")),
-            // Counts libtiff ignores: two Orientations, one PageNumber, an
-            // SMinSampleValue for two samples of one.
-            (1, 274, V::Short(vec![1, 6])),
+            // Counts libtiff ignores: one PageNumber, an SMinSampleValue
+            // for two samples of one.
             (1, 297, V::Short(vec![1])),
             (1, 340, V::Rational(vec![(1, 1), (2, 1)])),
             // Words after a no-data value's NUL.
@@ -2070,6 +2070,31 @@ mod tests {
         let (out, found) = strip(&mapped(3, V::Short(vec![7; 768])));
         assert!(found.is_empty(), "{found:?}");
         assert_eq!(read(&out).pages[0].get(320).unwrap().count, 768);
+        // A review's: an Orientation libtiff can't read ("Incompatible
+        // type", "Incorrect count"), which Pillow turns the picture by
+        // (FLOAT 6.0, the first of two SHORTs) or shows (text): refused.
+        let turned = |value: V| {
+            let mut page = gray(4, 2, 2, vec![B::data(&[0, 32, 64, 96, 128, 160, 192, 224])]);
+            page.tags.push((274, value));
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        for value in [
+            V::Bytes(11, 6.0_f32.to_le_bytes().to_vec()),
+            V::Bytes(12, 6.0_f64.to_le_bytes().to_vec()),
+            V::Rational(vec![(6, 1)]),
+            V::Bytes(10, [6_i32.to_le_bytes(), 1_i32.to_le_bytes()].concat()),
+            V::Short(vec![6, 6]),
+            V::Short(vec![1, 6]),
+            V::Ascii("SECRET_IN_ORIENTATION_51.5N_0.1W"),
+        ] {
+            assert!(refused(&turned(value.clone())), "{value:?}");
+        }
+        // As a SHORT or a LONG, it stays.
+        for value in [V::Short(vec![6]), V::Long(vec![6])] {
+            let (out, found) = strip(&turned(value));
+            assert!(found.is_empty(), "{found:?}");
+            assert_eq!(read(&out).pages[0].uint(274, Order::Little), Some(6));
+        }
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
