@@ -3175,6 +3175,80 @@ fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
 }
 
 #[test]
+fn compress_keeps_a_hard_edged_webps_thin_strokes_whole_and_their_color() {
+    use grape_core::CompressPreset::Small;
+    // A signature: 1 and 2 px curves, alpha only 0 and 255, blue over black
+    // under the transparency, 6000 px wide at q90. Small scales it by 2.93:
+    // every new pixel a stroke covered less than half of went transparent,
+    // so the 1 px curve vanished, and the black under the transparency put
+    // a color step at every stroke edge (the file came out 2.2 times as
+    // large as with the strokes' own color there).
+    let dir = TestDir::new("compress-webp-strokes");
+    let (w, h) = (6000u32, 600u32);
+    let curve = |x: f32, base: f32| base + 80.0 * (x / 90.0).sin() + 30.0 * (x / 23.0).sin();
+    let mut img = image::RgbaImage::new(w, h);
+    for (base, width) in [(150.0, 1.0), (430.0, 2.0)] {
+        for x in 0..w {
+            let (y0, y1) = (curve(x as f32, base), curve(x as f32 + 1.0, base));
+            let top = y0.min(y1).floor() as u32;
+            let bottom = (y0.max(y1) + width).floor() as u32;
+            for y in top..bottom.max(top + width as u32) {
+                img.put_pixel(x, y, image::Rgba([20, 20, 160, 255]));
+            }
+        }
+    }
+    let src = lossy_webp(img.as_raw(), w, h, true, 90.0);
+    let outcome = compress(&dir, "signature.webp", &src, Small).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(
+        out.len() * 10 <= src.len() * 9,
+        "{} from {}",
+        out.len(),
+        src.len()
+    );
+    let back = image::load_from_memory(&out).unwrap().to_rgba8();
+    assert_eq!(back.dimensions(), (2048, 205));
+    let r = 6000.0 / 2048.0;
+    for (base, width) in [(150.0, 1.0), (430.0, 2.0)] {
+        // At each new column, a visible pixel within a pixel of the curve.
+        for nx in 2..2046 {
+            let y = curve((nx as f32 + 0.5) * r, base) / r;
+            let near = (y.floor() as u32 - 1)..=((y + width / r).ceil() as u32 + 1);
+            assert!(
+                near.clone().any(|ny| back.get_pixel(nx, ny).0[3] > 0),
+                "the {width} px curve at {nx}, {near:?}"
+            );
+        }
+    }
+    // Hard edges stay hard, and the visible pixels as near the strokes'
+    // blue as the source's own (libwebp's q90 over black left them 16 off
+    // on average, 41 at most): with black under the transparency again,
+    // they came out 45 off on average, 92 at most.
+    let source = image::load_from_memory(&src).unwrap().to_rgba8();
+    let off = |img: &image::RgbaImage| {
+        let offs: Vec<u8> = img
+            .pixels()
+            .filter(|p| p.0[3] == 255)
+            .map(|p| {
+                let off = p.0[..3]
+                    .iter()
+                    .zip([20, 20, 160])
+                    .map(|(&a, b)| a.abs_diff(b));
+                off.max().unwrap()
+            })
+            .collect();
+        let mean = offs.iter().map(|&o| f64::from(o)).sum::<f64>() / offs.len() as f64;
+        (mean, offs.iter().copied().max().unwrap())
+    };
+    let (was, is) = (off(&source), off(&back));
+    assert!(
+        is.0 <= was.0 + 2.0 && is.1 <= was.1,
+        "{is:?} against {was:?}"
+    );
+    assert!(back.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+}
+
+#[test]
 fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     use grape_core::CompressPreset::{Balanced, High, Small};
     let dir = TestDir::new("compress-webp-none");
