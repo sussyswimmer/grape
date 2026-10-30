@@ -853,12 +853,36 @@ jobs:
           $null = $grape.Handle
           try {
             # Setup's last line (lib.rs). A tray icon that can't be made
-            # ends setup before it, with a panic.
+            # ends setup before it, with a panic. It usually comes 4-7 s
+            # after the start. Tauri builds the windows in tauri.conf.json,
+            # WebView2 first, before setup logs anything, and one first
+            # launch here once logged nothing in 45 s, so the wait is 120 s
+            # and a slow start is a warning, with the WebView2 processes
+            # listed so the next one says whether WebView2 was still
+            # starting.
             $running = '\]\[grape_app\]\[INFO\] Grape \S+ is running$'
-            if (-not (Wait-Log $running 45)) {
+            $launched = [DateTime]::UtcNow
+            function Show-Webviews {
+              try {
+                $views = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.CreationDate -and $_.CreationDate.ToUniversalTime() -ge $launched.AddSeconds(-1) })
+                Write-Output "WebView2 processes started since Grape: $($views.Count) (Grape's own children: $(@($views | Where-Object { $_.ParentProcessId -eq $grape.Id }).Count))."
+                $grape.Refresh()
+                if (-not $grape.HasExited) { Write-Output "Grape: $($grape.Threads.Count) threads, $([int]$grape.TotalProcessorTime.TotalSeconds) s of CPU." }
+              } catch {
+                Write-Output "Couldn't list the WebView2 processes: $_"
+              }
+            }
+            if (-not (Wait-Log $running 120)) {
               if ($grape.HasExited) { Fail "Grape exited with code $($grape.ExitCode) before setup finished." }
-              if (-not (Test-Path -LiteralPath $log)) { Fail "No log at $log after 45 s: Grape never got as far as starting its logger." }
-              Fail "The log never said 'Grape <version> is running' in 45 s: setup didn't finish."
+              Show-Webviews
+              if (-not (Test-Path -LiteralPath $log)) { Fail "No log at $log after 120 s: Grape never got as far as starting its logger." }
+              Fail "The log never said 'Grape <version> is running' in 120 s: setup didn't finish."
+            }
+            $took = [int]([DateTime]::UtcNow - $launched).TotalSeconds
+            if ($took -gt 45) {
+              Write-Output "::warning::Grape took $took s to finish setup on this launch (usually 4-7 s)."
+              Show-Webviews
             }
             Start-Sleep -Seconds 10
             if ($grape.HasExited) { Fail "Grape exited with code $($grape.ExitCode) within 10 s of finishing setup." }
