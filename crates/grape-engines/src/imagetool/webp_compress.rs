@@ -31,7 +31,8 @@
 //!   to turn them, as for JPEG.
 //! - **Refused:** an animation; a file whose alpha libwebp and image-webp
 //!   read differently (VP8X's flag against `VP8L`'s alpha bit or the
-//!   `ALPH` chunks), whose transparency Compress can't keep for both.
+//!   `ALPH` chunks, past the RIFF's end too), whose transparency Compress
+//!   can't keep for both; and what [`webp::scan`] finds broken.
 //! - **Memory:** what the steps hold is checked against D16's limit
 //!   before decoding ([`peak`]), with libwebp's share measured
 //!   ([`LOSSY_BYTES`], [`LOSSY_ALPHA_BYTES`], [`LOSSLESS_BYTES`]).
@@ -296,8 +297,9 @@ pub(crate) fn run(
 }
 
 /// Why `scan`'s alpha reads differently in libwebp (by the chunks) and
-/// image-webp (by VP8X's flag, then the first `ALPH` anywhere), if it
-/// does: Compress would make one of them see a change.
+/// image-webp (by VP8X's flag, then the first `ALPH` anywhere it looks,
+/// past the RIFF's end too), if it does: Compress would make one of them
+/// see a change.
 fn alpha_disagrees(scan: &Scan) -> Option<&'static str> {
     let flagged = scan.vp8x?.flags & ALPHA_FLAG != 0;
     if !flagged && scan.alpha {

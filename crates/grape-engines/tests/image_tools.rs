@@ -3160,6 +3160,31 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     let err = compress(&dir, "flag.webp", &unflagged, High).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
     assert_eq!(err.user_message, "flag.webp isn't a readable WEBP image.");
+    // An ALPH chunk just past the RIFF's end, which image-webp reads and
+    // libwebp (so Pillow and ImageMagick) doesn't: they show the picture
+    // opaque, and Compress would have made it half transparent.
+    let alph = webp_chunk(&alpha, b"ALPH").unwrap();
+    let opaque = riff(&[
+        vp8x_chunk(0x10, 8, 8),
+        riff_chunk(b"VP8 ", &webp_chunk(&alpha, b"VP8 ").unwrap()),
+    ]);
+    let late = [opaque, riff_chunk(b"ALPH", &alph)].concat();
+    let err = compress(&dir, "late.webp", &late, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "late.webp isn't a readable WEBP image.");
+    // Two ALPH chunks before the VP8: libwebp reads the last, image-webp
+    // the first.
+    // (The second is uncompressed: its header byte 0, then 8 × 8 values.)
+    let half = [[0u8].as_slice(), &[0x80; 64]].concat();
+    let two = riff(&[
+        vp8x_chunk(0x10, 8, 8),
+        riff_chunk(b"ALPH", &alph),
+        riff_chunk(b"ALPH", &half),
+        riff_chunk(b"VP8 ", &webp_chunk(&alpha, b"VP8 ").unwrap()),
+    ]);
+    let err = compress(&dir, "two.webp", &two, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "two.webp isn't a readable WEBP image.");
 }
 
 #[test]

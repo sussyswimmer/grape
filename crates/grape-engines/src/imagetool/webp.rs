@@ -295,7 +295,8 @@ pub(super) struct Scan {
     /// alpha bit, or an `ALPH` chunk before the `VP8 ` one.
     pub(super) alpha: bool,
     /// An `ALPH` chunk after the `VP8 ` one, which libwebp never reads and
-    /// image-webp does when none comes before it.
+    /// image-webp does when none comes before it: in the RIFF, or past its
+    /// end where image-webp still looks ([`scan`]).
     pub(super) late_alpha: bool,
     /// VP8X's animation flag: the walk stops there.
     pub(super) animated: bool,
@@ -341,25 +342,37 @@ impl Carried {
 ///   chunks, and its first `ICCP`, `EXIF` and `XMP `, up to
 ///   [`crate::image::MAX_ICC`] bytes for the profile and [`MAX_CARRIED`]
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
-///   metadata). It stops at an animation (VP8X's flag), and an `ANIM` or
-///   `ANMF` chunk in a still file is broken;
-///   Its canvas must be its image's size, as libwebp has it;
+///   metadata). It stops at an animation (VP8X's flag). An `ANIM` or
+///   `ANMF` chunk in a still file is broken, as are two `ALPH` chunks
+///   before a `VP8 ` (libwebp reads the last, image-webp the first) and a
+///   canvas other than the image's size (libwebp refuses it). Past the
+///   RIFF's end, it walks on as image-webp does, for an `ALPH` chunk only
+///   image-webp reads ([`Scan::late_alpha`]): from the end of `VP8X` as far
+///   again as the RIFF's size less 12 bytes, the file allowing;
 /// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
 ///   image-webp read nothing after it, so nothing after it is carried.
 pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
     let mut header = [0; 12];
     read_at(r, 0, &mut header)?;
     let mut left = riff(&header)?;
+    let riff_size = left + 4;
     let mut at = 12;
+    // Where image-webp's walk is: past each chunk's pad byte, even the
+    // last one's when it's missing.
+    let mut padded_at = 12;
+    // Where image-webp's walk of an extended file ends.
+    let mut walk_end = 0;
     let mut chunks = 0;
     let mut found = Scan::default();
     let mut image = None;
+    let mut alph = 0;
     while left > 0 {
         let mut raw = [0; 8];
         read_at(r, at, &mut raw)?;
         let head = next(raw, &mut left, &mut chunks)?;
         let body = at + 8;
         at = body + head.body;
+        padded_at = body + head.size + (head.size & 1);
         let first = chunks == 1;
         match &head.fourcc {
             b"VP8X" if first => {
@@ -379,10 +392,17 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
                     found.animated = true;
                     return Ok(found);
                 }
+                walk_end = padded_at.saturating_add(riff_size.saturating_sub(12));
             }
             b"VP8 " | b"VP8L" => {
                 match image {
                     None => {
+                        if alph > 1 && &head.fourcc == b"VP8 " {
+                            // libwebp reads the last, image-webp the first.
+                            return Err(Error::Broken(format!(
+                                "{alph} ALPH chunks before its VP8"
+                            )));
+                        }
                         image = Some(head.fourcc);
                         bitstream(r, body, &head, &mut found)?;
                     }
@@ -404,6 +424,7 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
             b"ALPH" => {
                 if image.is_none() {
                     found.alpha = true;
+                    alph += 1;
                 } else {
                     found.late_alpha = true;
                 }
@@ -425,6 +446,26 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
     let Some(fourcc) = image else {
         return Err(Error::Broken("no image data".into()));
     };
+    // image-webp's walk past the RIFF's end, to the end of the file at
+    // most: an ALPH chunk there is one libwebp never reads.
+    let mut at = padded_at;
+    while at < walk_end {
+        let mut raw = [0; 8];
+        match read_at(r, at, &mut raw) {
+            Ok(()) => {}
+            Err(Error::Broken(_)) => break,
+            Err(e) => return Err(e),
+        }
+        chunks += 1;
+        if chunks > MAX_CHUNKS {
+            return Err(Error::Broken("too many chunks".into()));
+        }
+        found.late_alpha |= &raw[..4] == b"ALPH";
+        let size = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+        at = at
+            .saturating_add(8)
+            .saturating_add(u64::from(size.saturating_add(size & 1)));
+    }
     if let Some(vp8x) = found.vp8x.filter(|vp8x| vp8x.canvas != found.size) {
         // libwebp refuses such a still file, and image-webp decodes the
         // whole frame, whatever its size, before it compares them.
@@ -1003,6 +1044,78 @@ mod tests {
             scanned(&webp(&[canvas(0, 9, 9), vp8(9, 9), chunk(b"XMP ", b"x")])).unwrap();
         assert_eq!(unflagged.carried.flags, 0);
         assert_eq!(unflagged.carried.xmp.as_deref(), Some(&b"x"[..]));
+    }
+
+    #[test]
+    fn scan_reads_alph_chunks_as_libwebp_and_image_webp_do() {
+        // Two before the VP8: libwebp reads the last, image-webp the first.
+        let two = webp(&[
+            canvas(0x10, 9, 9),
+            chunk(b"ALPH", b"a"),
+            chunk(b"ALPH", b"b"),
+            vp8(9, 9),
+        ]);
+        assert!(matches!(scanned(&two), Err(Error::Broken(_))));
+        // Before a VP8L, neither reads them.
+        let lossless = webp(&[
+            canvas(0, 9, 9),
+            chunk(b"ALPH", b"a"),
+            chunk(b"ALPH", b"b"),
+            vp8l(9, 9, false),
+        ]);
+        assert!(!scanned(&lossless).unwrap().alpha);
+        // One before and one after: both read the one before.
+        let both = scanned(&webp(&[
+            canvas(0x10, 9, 9),
+            chunk(b"ALPH", b"a"),
+            vp8(9, 9),
+            chunk(b"ALPH", b"b"),
+        ]))
+        .unwrap();
+        assert!(both.alpha && both.late_alpha);
+        // Past the RIFF's end, image-webp walks on, chunk by chunk, from
+        // the end of VP8X as far again as the RIFF's size less 12: here the
+        // 10 bytes VP8X takes. An ALPH chunk it finds there is one only it
+        // reads.
+        let file = webp(&[canvas(0x10, 9, 9), vp8(9, 9)]);
+        let after = [&file[..], &chunk(b"ALPH", b"al")].concat();
+        assert!(scanned(&after).unwrap().late_alpha);
+        // After an empty chunk (8 bytes) it's within reach; after one of 1
+        // or 2 bytes (10 with the pad), past it.
+        let empty = [
+            &file[..],
+            b"JUNK\0\0\0\0".as_slice(),
+            &chunk(b"ALPH", b"al"),
+        ]
+        .concat();
+        assert!(scanned(&empty).unwrap().late_alpha);
+        for junk in [&b"x"[..], b"xy"] {
+            let beyond = [&file[..], &chunk(b"JUNK", junk), &chunk(b"ALPH", b"al")].concat();
+            assert!(!scanned(&beyond).unwrap().late_alpha, "{junk:?}");
+        }
+        // The last chunk's missing pad byte counts in its walk: here the
+        // ALPH chunk starts one byte past where the walk goes on.
+        let odd = webp(&[
+            canvas(0x10, 9, 9),
+            chunk(b"VP8 ", &[0x10, 2, 0, 0x9D, 1, 0x2A, 9, 0, 9, 0, 7]),
+        ]);
+        let mut cut = odd[..odd.len() - 1].to_vec();
+        let riff = u32::try_from(cut.len() - 8).unwrap().to_le_bytes();
+        cut[4..8].copy_from_slice(&riff);
+        let pad = [&cut[..], &[0], &chunk(b"ALPH", b"al")].concat();
+        assert!(scanned(&pad).unwrap().late_alpha);
+        let no_pad = [&cut[..], &chunk(b"ALPH", b"al")].concat();
+        assert!(!scanned(&no_pad).unwrap().late_alpha);
+        // A simple file has no walk past its end, and a lossless image no
+        // late alpha.
+        let simple = [&webp(&[vp8(9, 9)])[..], &chunk(b"ALPH", b"al")].concat();
+        assert!(!scanned(&simple).unwrap().late_alpha);
+        let lossless = [
+            &webp(&[canvas(0x10, 9, 9), vp8l(9, 9, true)])[..],
+            &chunk(b"ALPH", b"al"),
+        ]
+        .concat();
+        assert!(!scanned(&lossless).unwrap().late_alpha);
     }
 
     #[test]
