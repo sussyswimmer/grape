@@ -2117,6 +2117,117 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
     );
 }
 
+/// A classic TIFF of `pages`, each its entries ([`Change`]s, sorted here,
+/// its strip's offset and count added) and its one strip: each strip,
+/// then its IFD and the values its entries can't hold, the IFDs chained.
+fn paged(pages: &[(Vec<Change>, Vec<u8>)]) -> Vec<u8> {
+    let mut file = b"II*\0\0\0\0\0".to_vec();
+    // Where the offset of the next IFD goes.
+    let mut link = 4;
+    for (entries, strip) in pages {
+        let at = file.len() as u64;
+        file.extend(strip);
+        file.resize(file.len().next_multiple_of(2), 0);
+        let mut entries = entries.clone();
+        entries.extend([(273, 4, le(at, 4)), (279, 4, le(strip.len() as u64, 4))]);
+        entries.sort_by_key(|e| e.0);
+        let ifd = file.len() as u64;
+        file[link..link + 4].copy_from_slice(&le(ifd, 4));
+        let mut value_at = ifd + 2 + 12 * entries.len() as u64 + 4;
+        file.extend(le(entries.len() as u64, 2));
+        let mut values: Vec<u8> = Vec::new();
+        for (tag, kind, value) in &entries {
+            let size = match kind {
+                3 | 8 => 2,
+                4 | 9 => 4,
+                _ => 1,
+            };
+            file.extend(tag.to_le_bytes());
+            file.extend(kind.to_le_bytes());
+            file.extend(le(value.len() as u64 / size, 4));
+            if value.len() <= 4 {
+                let mut field = value.clone();
+                field.resize(4, 0);
+                file.extend(field);
+            } else {
+                file.extend(le(value_at, 4));
+                value_at += value.len() as u64;
+                values.extend(value);
+            }
+        }
+        link = file.len();
+        file.extend([0; 4]);
+        file.extend(values);
+        file.resize(file.len().next_multiple_of(2), 0);
+    }
+    file
+}
+
+#[test]
+fn compress_says_first_which_tiff_pages_it_took_back_when_the_file_passes_95_percent() {
+    // The review's files: twenty pages of 64 × 48 gray JPEG, then one of
+    // uncompressed noise; and that noise first, then twenty of 16 × 16
+    // JPEG. The noise grows recoded and is copied as it is, and the
+    // finished file passes 95 % of the source: the detail said why each
+    // JPEG page was copied, the first 16, and the one useful line was one
+    // of "… and 5 more". It comes first now, whole.
+    let jpeg_page = |w: u32, h: u32| {
+        let gray = image::GrayImage::from_fn(w, h, |x, y| image::Luma([(x * 3 + y * 5) as u8]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&gray)
+            .unwrap();
+        let entries = vec![
+            (256, 4, le(u64::from(w), 4)),
+            (257, 4, le(u64::from(h), 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(u64::from(h), 4)),
+        ];
+        (entries, jpeg)
+    };
+    let mut x: u32 = 0x1234_5678;
+    let noise: Vec<u8> = (0..64 * 48)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 24) as u8
+        })
+        .collect();
+    let noisy = (
+        vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(48, 4)),
+        ],
+        noise,
+    );
+    let last = [vec![jpeg_page(64, 48); 20], vec![noisy.clone()]].concat();
+    let first = [vec![noisy], vec![jpeg_page(16, 16); 20]].concat();
+    let dir = TestDir::new("compress-tiff-taken-back");
+    for (name, pages, n) in [("last.tif", last, 20), ("first.tif", first, 0)] {
+        let err =
+            compress(&dir, name, &paged(&pages), grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        let (head, log) = err.detail.split_once("; ").unwrap();
+        assert!(head.contains(" bytes from "), "{}", err.detail);
+        assert!(
+            log.starts_with(&format!("IFD {n} copied as it is: its blocks came to ")),
+            "{}",
+            err.detail
+        );
+        assert!(
+            log.ends_with("its compression is 7; and 4 more"),
+            "{}",
+            err.detail
+        );
+    }
+}
+
 #[test]
 fn compress_says_a_tiff_page_passed_95_percent_recoded_and_copied() {
     use tiff::encoder::{colortype, Compression, DeflateLevel, TiffEncoder};

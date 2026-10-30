@@ -175,15 +175,25 @@ pub(crate) struct Plan {
 }
 
 /// Reasons for the log: the line that ended the job, if one did, first
-/// and always kept; then the first [`MAX_LOG`] others, and how many more.
+/// and always kept; then why each IFD Compress recoded, or tried to, was
+/// taken back and copied as it is, every one (at most one an IFD), which
+/// says why the output came to what it did, at the 95 % stop while it's
+/// written or when it's done; then the first [`MAX_LOG`] others, and how
+/// many more.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Log {
     end: Option<String>,
+    back: Vec<String>,
     lines: Vec<String>,
     more: usize,
 }
 
 impl Log {
+    /// Adds why an IFD was taken back and copied as it is: never cut.
+    fn back(&mut self, line: String) {
+        self.back.push(line);
+    }
+
     fn add(&mut self, line: String) {
         if self.lines.len() < MAX_LOG {
             self.lines.push(line);
@@ -208,7 +218,7 @@ impl Log {
 
     /// `detail`, then what the log holds, if anything.
     pub(crate) fn after(&self, detail: String) -> String {
-        if self.end.is_none() && self.lines.is_empty() {
+        if self.end.is_none() && self.back.is_empty() && self.lines.is_empty() {
             detail
         } else {
             format!("{detail}; {self}")
@@ -221,6 +231,7 @@ impl std::fmt::Display for Log {
         let all: Vec<&str> = self
             .end
             .iter()
+            .chain(&self.back)
             .chain(&self.lines)
             .map(String::as_str)
             .collect();
@@ -1143,7 +1154,7 @@ impl Blocks for Recoder<'_> {
                                 );
                                 self.log.end(line, None);
                             }
-                            _ => self.log.add(format!("IFD {n} copied as it is: {why}")),
+                            _ => self.log.back(format!("IFD {n} copied as it is: {why}")),
                         }
                         copied?
                     }
@@ -2255,6 +2266,29 @@ mod tests {
             ) && log.ends_with("IFD 15 copied as it is: its compression is 7; and 4 more"),
             "{log}"
         );
+    }
+
+    #[test]
+    fn the_lines_of_ifds_taken_back_come_first_and_are_never_cut() {
+        // Twenty pages copied as they are (JPEG: twenty lines, four past
+        // the log's 16) and a page of noise, which grows recoded and is
+        // taken back, last or first: its line comes first, whole, and the
+        // copies' follow.
+        let jpegs = || (0..20).map(|n| coded(7, format!("JPEG data {n:02}").into_bytes()));
+        let noisy = || page(64, 48, 48, 8, &noise(64 * 48));
+        for (pages, n) in [
+            (jpegs().chain([noisy()]).collect::<Vec<_>>(), 20),
+            ([noisy()].into_iter().chain(jpegs()).collect(), 0),
+        ] {
+            let file = Builder::new(b'I', false, pages).build();
+            let plan = plan(&file);
+            let (_, wrote) =
+                written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+            let log = wrote.log.to_string();
+            let back = format!("IFD {n} copied as it is: its blocks came to ");
+            assert!(log.starts_with(&back), "{log}");
+            assert!(log.ends_with("its compression is 7; and 4 more"), "{log}");
+        }
     }
 
     #[test]
