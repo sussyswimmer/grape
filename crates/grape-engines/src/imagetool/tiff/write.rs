@@ -19,9 +19,12 @@
 //!
 //! Nothing else from the source reaches the output. A classic file that
 //! would need an offset past 4 GiB is [`Error::TooLarge`], and so is one
-//! whose blocks and fields' values, each counted once, would come to more
-//! bytes than the source has (values that overlap): so an output outgrows
-//! its source only by the offsets, counts, IFDs and padding Grape writes.
+//! whose blocks and the values it copies from the source, each counted
+//! once, would come to more bytes than the source has (values that
+//! overlap): so an output outgrows its source only by the offsets, counts,
+//! IFDs and padding Grape writes, and by the values a tool makes, within
+//! its own caps (Photoshop's resources Remove Metadata filters, whose
+//! paths' new names may be longer than their old).
 //! Reads and writes go through the caller's `Cancellable` source and temp
 //! file, and the [`Copier`] checks the token before each block.
 
@@ -384,7 +387,7 @@ pub(crate) fn write_with(
                 if let Some(key) = key {
                     copied.insert(key, pos);
                 }
-                if field.is_some() {
+                if matches!(field.map(|f| &f.value), Some(Data::Source { .. })) {
                     taken = sum(taken, len)?;
                 }
                 pos = sum(pos, len)?;
@@ -393,9 +396,9 @@ pub(crate) fn write_with(
         node.values = values;
     }
     fits(layout, pos)?;
-    // Blocks never overlap, and each block and value is counted once, so
-    // only values that overlap each other or a block could take more than
-    // the source holds: a file made to grow.
+    // Blocks never overlap, and each block and value copied from the
+    // source is counted once, so only values that overlap each other or a
+    // block could take more than the source holds: a file made to grow.
     if taken > layout.len {
         return Err(Error::TooLarge(format!(
             "values that copy {taken} bytes of a {}-byte file",

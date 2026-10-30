@@ -1555,6 +1555,32 @@ mod tests {
     }
 
     #[test]
+    fn photoshop_paths_named_longer_than_they_were_are_written() {
+        // A review's file: a 1 × 1 page whose resources hold a resolution,
+        // 40 paths named a to n, and a clipping path naming a. Each path's
+        // new name is longer than its old, so what's kept outgrew the
+        // source, and the writer took the file for one made to grow ("too
+        // large"): only the bytes it copies from the source count now.
+        let names = b"abcdefghijklmn";
+        let mut irb = res(1005, "", &[0, 72, 0, 0, 0, 1, 0, 1]);
+        for n in 0..40 {
+            let name = char::from(names[n % names.len()]).to_string();
+            irb.extend(res(2000 + n as u16, &name, &[7; 26]));
+        }
+        irb.extend(res(2999, "", b"\x01a\0\0"));
+        let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+        page.tags.push((34377, V::Bytes(7, irb.clone())));
+        let file = Builder::new(b'I', false, vec![page]).build();
+        let (out, found) = strip(&file);
+        assert!(found.is_empty(), "{found:?}");
+        let kept = value(&out, &read(&out).pages[0], 34377).unwrap();
+        assert!(kept.len() > irb.len(), "{} {}", kept.len(), irb.len());
+        assert!(out.len() > file.len(), "{} {}", out.len(), file.len());
+        assert!(kept.windows(7).any(|w| w == b"Path 40"));
+        assert!(kept.ends_with(&res(2999, "", b"\x06Path 1\0\0")));
+    }
+
+    #[test]
     fn photoshop_resources_that_overlap_are_read_up_to_the_files_size() {
         // Three pages whose resources are one block of a 6 MiB thumbnail,
         // which goes, with padding after it: named the same way, it's
