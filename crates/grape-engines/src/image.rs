@@ -92,7 +92,7 @@ const MIB: u64 = 1024 * 1024;
 /// segments of 65,519 profile bytes each (the encoder refuses more). Real
 /// profiles are far smaller; a larger one is dropped for every target, and
 /// the conversion goes ahead without it.
-const MAX_ICC: usize = 255 * 65_519;
+pub(crate) const MAX_ICC: usize = 255 * 65_519;
 
 /// The most memory one conversion may hold at its peak (see
 /// [`working_set`]). The decoded image alone is also held to the `image`

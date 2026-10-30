@@ -291,7 +291,7 @@ pub fn supports(op: &Operation, from: Option<Format>) -> bool {
 /// M4A, WAV, FLAC, MP4, MOV and MKV, and Audio Channels and Normalize
 /// Volume on MP3, M4A, WAV and FLAC; with no sidecar (D26, D28), Remove
 /// Metadata on JPG, PNG, WebP, GIF, TIFF and HEIC and Compress on JPG,
-/// PNG and TIFF.
+/// PNG, WebP and TIFF.
 /// Pure: it doesn't check that the sidecar files are there; [`run_job`]
 /// fails cleanly if one is missing.
 pub fn supports_with(op: &Operation, formats: &[Option<Format>], sidecars: &SidecarPaths) -> bool {

@@ -9,6 +9,7 @@ Grape is free and open source, under the MIT License in `LICENSE`. It's built wi
 - **grape-heif**, the program Grape converts HEIC and AVIF images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
 - **FFmpeg and ffprobe**, the programs Grape converts audio and video with, and the libraries built into them. They ship as separate programs under the GPL, with their license texts and where their source is in the `licenses/ffmpeg` folder.
 - **rav1e's patent license and notices**: Grape for macOS writes AVIF images with rav1e, one of the Rust crates. Its AV1 patent license, and the notices of the code it took from libaom and dav1d, have a section of their own.
+- **libwebp's patent grant**: Grape compresses WebP images with libwebp, which is compiled into Grape through one of the Rust crates, libwebp-sys. Its license text is with the Rust crates, and Google's patent grant for it has a section of its own.
 - **Not here yet:** the other helper programs Grape will ship as separate files. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -372,6 +373,38 @@ Alliance for Open Media Patent License 1.0
 ~~~
 
 This section is written by hand: check it again when `Cargo.lock` changes rav1e's version, or when `crates/grape-platform/Cargo.toml` changes ravif's features.
+
+## libwebp (WebP Compress)
+
+Grape compresses WebP images with [libwebp](https://chromium.googlesource.com/webm/libwebp) 1.6.0, Google's WebP library, and uses only its encoder: Grape reads WebP files with image-webp, one of the Rust crates. libwebp is compiled into Grape itself on Windows and macOS, from the copy that the [libwebp-sys](https://crates.io/crates/libwebp-sys/0.14.4) 0.14.4 crate carries (its `vendor` folder, libwebp's `v1.6.0` tag unchanged), through Grape's own `grape-webp` crate. Its BSD 3-Clause text, libwebp's `COPYING`, is with the Rust crates below, under libwebp-sys. This is libwebp's `PATENTS` file, Google's patent grant for it:
+
+~~~text
+Additional IP Rights Grant (Patents)
+------------------------------------
+
+"These implementations" means the copyrightable works that implement the WebM
+codecs distributed by Google as part of the WebM Project.
+
+Google hereby grants to you a perpetual, worldwide, non-exclusive, no-charge,
+royalty-free, irrevocable (except as stated in this section) patent license to
+make, have made, use, offer to sell, sell, import, transfer, and otherwise
+run, modify and propagate the contents of these implementations of WebM, where
+such license applies only to those patent claims, both currently owned by
+Google and acquired in the future, licensable by Google that are necessarily
+infringed by these implementations of WebM. This grant does not include claims
+that would be infringed only as a consequence of further modification of these
+implementations. If you or your agent or exclusive licensee institute or order
+or agree to the institution of patent litigation or any other patent
+enforcement activity against any entity (including a cross-claim or
+counterclaim in a lawsuit) alleging that any of these implementations of WebM
+or any code incorporated within any of these implementations of WebM
+constitute direct or contributory patent infringement, or inducement of
+patent infringement, then any patent rights granted to you under this License
+for these implementations of WebM shall terminate as of the date such
+litigation is filed.
+~~~
+
+This section is written by hand: check it again when `Cargo.lock` changes libwebp-sys's version.
 
 ## Rust crates
 

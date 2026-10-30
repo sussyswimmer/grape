@@ -216,7 +216,7 @@ A version tag makes a draft release. `.github/workflows/release.yml` builds the 
    - `Cargo.toml` → `[workspace.package]` → `version` (Grape's crates inherit it, except `grape-heif-proto`, whose version follows its protocol and stays as it is)
    - `apps/desktop/package.json` → `"version"`
    - `apps/desktop/ui/package.json` → `"version"`
-2. Run `cargo update --workspace`. It moves Grape's own crates that inherit the version (`grape`, `grape-core`, `grape-engines`, `grape-platform`) to the new version in `Cargo.lock` and leaves every other crate alone, `grape-heif-proto` included.
+2. Run `cargo update --workspace`. It moves Grape's own crates that inherit the version (`grape`, `grape-core`, `grape-engines`, `grape-platform`, `grape-webp`) to the new version in `Cargo.lock` and leaves every other crate alone, `grape-heif-proto` included.
 3. Commit the five files (`git commit -am "Release X.Y.Z"`) and push. Wait for CI to pass on that commit.
 4. Tag the commit and push that one tag:
 

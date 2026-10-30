@@ -1,0 +1,26 @@
+[package]
+name = "grape-webp"
+description = "libwebp's encoder for WebP Compress: the only unsafe code for images (D28)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# libwebp 1.6.0, vendored, compiled by the build script with the system's C
+# compiler; the bindings are pre-generated (no bindgen). The pin is exact, so
+# a bump is deliberate (D9, D28). `std` keeps WEBP_USE_THREAD; leaving out
+# the default `parallel` keeps cc's jobserver out. Never turn on
+# `system-dylib` (a system libwebp, of any version) or `generate-bindings`.
+# Its build script passes `-march=$TARGET_CPU` when that variable is set:
+# never set it for a build that ships.
+libwebp-sys = { version = "=0.14.4", default-features = false, features = ["std"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+# Decodes what the tests encode (already in Cargo.lock through image).
+image-webp = "0.2.4"
+
+[lints]
+workspace = true

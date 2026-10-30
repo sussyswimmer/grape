@@ -2883,6 +2883,309 @@ fn compress_leaves_an_optimal_png_alone_and_refuses_an_animated_one() {
     );
 }
 
+/// libwebp's file of `px` (`w`×`h`, RGB or RGBA), lossy at `quality`.
+fn lossy_webp(px: &[u8], w: u32, h: u32, alpha: bool, quality: f32) -> Vec<u8> {
+    let px = if alpha {
+        grape_webp::Pixels::Rgba {
+            data: px,
+            width: w,
+            height: h,
+        }
+    } else {
+        grape_webp::Pixels::Rgb {
+            data: px,
+            width: w,
+            height: h,
+        }
+    };
+    let opts = grape_webp::Options {
+        mode: grape_webp::Mode::Lossy { quality, method: 4 },
+        threads: false,
+    };
+    grape_webp::encode(px, &opts, &mut |_| true).unwrap()
+}
+
+/// A WebP's top-level chunks, each its fourcc and data.
+fn webp_chunks(file: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let riff = u32::from_le_bytes(file[4..8].try_into().unwrap()) as usize;
+    assert_eq!(riff + 8, file.len());
+    let mut at = 12;
+    let mut out = Vec::new();
+    while at < file.len() {
+        let size = u32::from_le_bytes(file[at + 4..at + 8].try_into().unwrap()) as usize;
+        out.push((
+            file[at..at + 4].try_into().unwrap(),
+            file[at + 8..at + 8 + size].to_vec(),
+        ));
+        at += 8 + size + (size & 1);
+    }
+    assert_eq!(at, file.len());
+    out
+}
+
+/// The data of `file`'s `fourcc` chunk.
+fn webp_chunk(file: &[u8], fourcc: &[u8; 4]) -> Option<Vec<u8>> {
+    webp_chunks(file)
+        .into_iter()
+        .find(|(f, _)| f == fourcc)
+        .map(|(_, data)| data)
+}
+
+/// A VP8X chunk with `flags` and a `w`×`h` canvas.
+fn vp8x_chunk(flags: u8, w: u32, h: u32) -> Vec<u8> {
+    let (w, h) = ((w - 1).to_le_bytes(), (h - 1).to_le_bytes());
+    riff_chunk(
+        b"VP8X",
+        &[flags, 0, 0, 0, w[0], w[1], w[2], h[0], h[1], h[2]],
+    )
+}
+
+/// The pixel dimensions in a little-endian TIFF's Exif IFD, the second
+/// entry of IFD0 pointing to it (as [`camera_exif`] writes it).
+fn tiff_dimensions(tiff: &[u8]) -> (u32, u32) {
+    let u32le = |i: usize| u32::from_le_bytes(tiff[i..i + 4].try_into().unwrap());
+    let exif_ifd = usize::try_from(u32le(8 + 2 + 12 + 8)).unwrap();
+    (u32le(exif_ifd + 2 + 8), u32le(exif_ifd + 2 + 12 + 8))
+}
+
+#[test]
+fn compress_shrinks_a_lossy_webp_and_carries_its_metadata() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let dir = TestDir::new("compress-webp");
+    // Wide, so Small scales it, and small, as libwebp is slow unoptimized.
+    let img = photo(2560, 400);
+    let lossy = lossy_webp(img.as_raw(), 2560, 400, false, 95.0);
+    let vp8 = lossy[12..].to_vec();
+    assert_eq!(&vp8[..4], b"VP8 ");
+    let exif = camera_exif(2560, 400);
+    let xmp = b"<x:xmpmeta>kept</x:xmpmeta>".to_vec();
+    // (name, where the EXIF starts in `camera_exif`'s segment: after its
+    // `Exif\0\0` or not, the presets)
+    for (name, prefix, presets) in [
+        ("photo.webp", 4, &[Small][..]),
+        ("bare.webp", 10, &[Small, Balanced, High]),
+    ] {
+        let exif = &exif[prefix..];
+        let mut src = riff(&[
+            vp8x_chunk(0x2C, 2560, 400),
+            riff_chunk(b"ICCP", b"an odd profile"),
+            vp8.clone(),
+            riff_chunk(b"EXIF", exif),
+            riff_chunk(b"XMP ", &xmp),
+            riff_chunk(b"JUNK", b"dropped"),
+        ]);
+        src.extend_from_slice(b"after the RIFF");
+        for &preset in presets {
+            let (w, h) = if preset == Small {
+                (2048, 320)
+            } else {
+                (2560, 400)
+            };
+            let outcome = compress(&dir, name, &src, preset).unwrap();
+            let stem = name.trim_end_matches(".webp");
+            assert_eq!(
+                outcome.outputs,
+                [dir.join(&format!("{stem} Compressed.webp"))]
+            );
+            let out = fs::read(&outcome.outputs[0]).unwrap();
+            assert_eq!(
+                outcome.notes,
+                [Note::Compressed {
+                    before: src.len() as u64,
+                    after: out.len() as u64
+                }],
+                "{preset:?}"
+            );
+            assert!(out.len() * 10 <= src.len() * 9, "{preset:?}");
+            let kinds: Vec<[u8; 4]> = webp_chunks(&out).into_iter().map(|(f, _)| f).collect();
+            assert_eq!(kinds, [*b"VP8X", *b"ICCP", *b"VP8 ", *b"EXIF", *b"XMP "]);
+            // Its flags as the source's, its canvas the new size.
+            let vp8x = webp_chunk(&out, b"VP8X").unwrap();
+            assert_eq!(vp8x[0], 0x2C);
+            let decoded = image::load_from_memory(&out).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (w, h), "{preset:?}");
+            // Stored as it was: the EXIF still turns it (image reads it
+            // only without `Exif\0\0`), and says its size.
+            let carried = webp_chunk(&out, b"EXIF").unwrap();
+            assert_eq!(carried.len(), exif.len());
+            assert_eq!(carried[..10 - prefix], exif[..10 - prefix]);
+            assert_eq!(tiff_dimensions(&carried[10 - prefix..]), (w, h));
+            if prefix == 10 {
+                assert_eq!(orientation(&out), Orientation::Rotate90);
+            }
+            assert_eq!(webp_chunk(&out, b"ICCP").unwrap(), b"an odd profile");
+            assert_eq!(webp_chunk(&out, b"XMP ").unwrap(), xmp);
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn compress_keeps_a_lossless_webp_exactly() {
+    let dir = TestDir::new("compress-webp-lossless");
+    // A photo with transparency, colors under its fully transparent
+    // pixels, from image-webp's lossless encoder.
+    let rgb = photo(300, 200);
+    let shot = image::RgbaImage::from_fn(300, 200, |x, y| {
+        let [r, g, b] = rgb.get_pixel(x, y).0;
+        let a = if x < 40 {
+            0
+        } else {
+            255 - u8::try_from(y).unwrap() / 2
+        };
+        image::Rgba([r, g, b, a])
+    });
+    let mut simple = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut simple)
+        .write_image(shot.as_raw(), 300, 200, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    // An extended one too, with an EXIF that has no `Exif\0\0`.
+    let extended = riff(&[
+        vp8x_chunk(0x18, 300, 200),
+        simple[12..].to_vec(),
+        riff_chunk(b"EXIF", &camera_exif(300, 200)[10..]),
+    ]);
+    for (name, src) in [("shot.webp", &simple), ("tagged.webp", &extended)] {
+        for preset in [
+            grape_core::CompressPreset::Small,
+            grape_core::CompressPreset::High,
+        ] {
+            let outcome = compress(&dir, name, src, preset).unwrap();
+            let out = fs::read(&outcome.outputs[0]).unwrap();
+            assert!(out.len() * 20 <= src.len() * 19, "{name}");
+            // Every pixel, the color under the transparent ones too.
+            let back = image::load_from_memory(&out).unwrap().to_rgba8();
+            assert_eq!(back.as_raw(), shot.as_raw(), "{name}");
+            let vp8l = webp_chunk(&out, b"VP8L").unwrap();
+            assert_eq!(vp8l[0], 0x2F);
+            if src == &extended {
+                assert_eq!(webp_chunk(&out, b"VP8X").unwrap()[0], 0x18);
+                let exif = webp_chunk(&out, b"EXIF").unwrap();
+                assert_eq!(tiff_dimensions(&exif), (300, 200));
+            }
+            fs::remove_file(dir.join(name)).unwrap();
+            if preset == grape_core::CompressPreset::High {
+                // Its own output can't be made 5 % smaller again, and
+                // Small wouldn't do more.
+                let err = compress(
+                    &dir,
+                    "again.webp",
+                    &out,
+                    grape_core::CompressPreset::Balanced,
+                )
+                .unwrap_err();
+                assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+                assert_eq!(
+                    err.user_message,
+                    "again.webp is already as small as Grape makes it."
+                );
+                fs::remove_file(dir.join("again.webp")).unwrap();
+            }
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        }
+    }
+}
+
+#[test]
+fn compress_keeps_a_lossy_webps_alpha_exactly() {
+    let dir = TestDir::new("compress-webp-alpha");
+    let rgb = photo(640, 480);
+    let rgba = image::RgbaImage::from_fn(640, 480, |x, y| {
+        let [r, g, b] = rgb.get_pixel(x, y).0;
+        let a = if x < 100 {
+            0
+        } else {
+            u8::try_from(y * 255 / 480).unwrap() | 0x40
+        };
+        image::Rgba([r, g, b, a])
+    });
+    let src = lossy_webp(rgba.as_raw(), 640, 480, true, 95.0);
+    let source = image::load_from_memory(&src).unwrap().to_rgba8();
+    let outcome = compress(&dir, "sticker.webp", &src, grape_core::CompressPreset::High).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(out.len() * 10 <= src.len() * 9);
+    // libwebp's own file: VP8X with its alpha flag, ALPH, VP8.
+    let kinds: Vec<[u8; 4]> = webp_chunks(&out).into_iter().map(|(f, _)| f).collect();
+    assert_eq!(kinds, [*b"VP8X", *b"ALPH", *b"VP8 "]);
+    assert_eq!(webp_chunk(&out, b"VP8X").unwrap()[0], 0x10);
+    let back = image::load_from_memory(&out).unwrap().to_rgba8();
+    assert!(back
+        .pixels()
+        .zip(source.pixels())
+        .all(|(a, b)| a.0[3] == b.0[3]));
+}
+
+#[test]
+fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let dir = TestDir::new("compress-webp-none");
+    let small = lossy_webp(photo(800, 600).as_raw(), 800, 600, false, 40.0);
+    for (preset, message) in [
+        (Small, "pic.webp is already as small as Grape makes it."),
+        (Balanced, "pic.webp is already compact. Try Small."),
+        (High, "pic.webp is already compact. Try Small."),
+    ] {
+        let err = compress(&dir, "pic.webp", &small, preset).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        assert_eq!(err.user_message, message);
+        fs::remove_file(dir.join("pic.webp")).unwrap();
+    }
+    let frame = lossy_webp(&[9; 16 * 16 * 3], 16, 16, false, 80.0);
+    let anim = riff(&[
+        vp8x_chunk(0x02, 16, 16),
+        riff_chunk(b"ANIM", &[0; 6]),
+        riff_chunk(b"ANMF", &[[0; 16].as_slice(), &frame[12..]].concat()),
+    ]);
+    let err = compress(&dir, "anim.webp", &anim, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "anim.webp is animated. Compress works on still WebP images for now."
+    );
+    // Alpha only libwebp reads (VP8X says none): refused, nothing written.
+    let alpha = lossy_webp(&[200; 8 * 8 * 4], 8, 8, true, 80.0);
+    let mut unflagged = alpha.clone();
+    unflagged[20] = 0;
+    let err = compress(&dir, "flag.webp", &unflagged, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "flag.webp isn't a readable WEBP image.");
+}
+
+#[test]
+fn compress_refuses_a_webp_too_large_before_decoding_it() {
+    let dir = TestDir::new("compress-webp-huge");
+    // A lossless header of 16,383 × 16,383 and no image data: refused for
+    // the memory its encode would take, before anything is decoded.
+    let bits = 16_382u32 | 16_382 << 14;
+    let src = riff(&[riff_chunk(
+        b"VP8L",
+        &[[0x2F].as_slice(), &bits.to_le_bytes()].concat(),
+    )]);
+    let err = compress(&dir, "big.webp", &src, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "big.webp is too large to convert.");
+    // An EXIF over 16 MiB, which Compress would have to drop: refused by
+    // its header, before it's read (so it needn't be there).
+    let mut big_exif = riff(&[
+        vp8x_chunk(0x08, 16, 16),
+        lossy_webp(&[9; 16 * 16 * 3], 16, 16, false, 80.0)[12..].to_vec(),
+    ]);
+    let size = (16u32 << 20) + 2;
+    big_exif.extend_from_slice(b"EXIF");
+    big_exif.extend_from_slice(&size.to_le_bytes());
+    let riff_size = u32::try_from(big_exif.len() - 8).unwrap() + size;
+    big_exif[4..8].copy_from_slice(&riff_size.to_le_bytes());
+    let err = compress(
+        &dir,
+        "tags.webp",
+        &big_exif,
+        grape_core::CompressPreset::High,
+    )
+    .unwrap_err();
+    assert_eq!(err.user_message, "tags.webp is too large to convert.");
+}
+
 /// Runs `op` on `bytes` named `name`, cancelling at the `nth` progress
 /// report: it must say Cancelled and leave nothing.
 fn cancelled_at(name: &str, bytes: &[u8], op: Operation, nth: usize) {
@@ -2953,6 +3256,16 @@ fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
             nth,
         );
     }
+    // A WebP: before it's read, and while libwebp encodes it.
+    let webp = lossy_webp(photo(600, 600).as_raw(), 600, 600, false, 95.0);
+    for nth in [1, 5] {
+        cancelled_at(
+            "photo.webp",
+            &webp,
+            compress_op(grape_core::CompressPreset::High),
+            nth,
+        );
+    }
     // A HEIC: before it's read, and while its mdat is copied.
     let (heic, _) = heif(b"heic", &LIBHEIF, &vec![0xA1; 600_000], b"");
     for nth in [1, 4] {
@@ -3011,8 +3324,13 @@ fn the_content_decides_what_each_tool_reads() {
     .unwrap();
     assert!(out.outputs[0].to_string_lossy().ends_with(".png"));
     assert!(fs::read(&out.outputs[0]).unwrap().starts_with(b"II*\0"));
-    // Compress reads only JPEG, PNG and TIFF: a GIF named .jpg can't be
-    // read.
+    // A WebP named .jpg is compressed as a WebP, and keeps its name.
+    let webp = lossy_webp(photo(600, 400).as_raw(), 600, 400, false, 95.0);
+    let out = compress(&dir, "shot.jpg", &webp, grape_core::CompressPreset::High).unwrap();
+    assert!(out.outputs[0].to_string_lossy().ends_with(".jpg"));
+    assert!(fs::read(&out.outputs[0]).unwrap().starts_with(b"RIFF"));
+    // Compress reads only JPEG, PNG, TIFF and WebP: a GIF named .jpg
+    // can't be read.
     let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\0\0\0\xff\xff\xff,\0\0\0\0\x01\0\x01\0\0\x02\x02\x44\x01\0;";
     let err = compress(&dir, "anim.jpg", gif, grape_core::CompressPreset::Small).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);

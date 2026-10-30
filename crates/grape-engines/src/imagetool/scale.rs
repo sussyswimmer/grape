@@ -5,11 +5,14 @@
 //! Lanczos3 takes it the rest of the way, so that step holds and takes no
 //! more than for a picture of twice the long side. [`peak`] says what the
 //! steps hold together, so a tool can check it against D16's limit before
-//! decoding.
+//! decoding. A picture with transparency is scaled premultiplied, as both
+//! steps assume, in place, so the color under its transparent pixels
+//! doesn't bleed into their neighbors.
 
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, GrayImage, RgbImage, RgbaImage};
 
+use crate::image::CANCEL_CHECK_ROWS;
 use crate::CancelToken;
 
 /// The whole factor a picture with a `long` side is averaged down by
@@ -81,12 +84,67 @@ pub(super) fn scale(
     let Some(cap) = cap.filter(|&cap| long > cap) else {
         return Some(img);
     };
+    let (img, straight) = match img {
+        DynamicImage::ImageRgba8(mut rgba) if transparent(&rgba) => {
+            alpha(&mut rgba, premultiply, cancel)?;
+            (DynamicImage::ImageRgba8(rgba), true)
+        }
+        other => (other, false),
+    };
     let k = u32::try_from(shrink_factor(u64::from(long), u64::from(cap))).unwrap_or(u32::MAX);
     let img = if k > 1 { shrink(img, k, cancel)? } else { img };
     if cancel.is_cancelled() {
         return None;
     }
-    Some(img.resize(cap, cap, FilterType::Lanczos3))
+    match img.resize(cap, cap, FilterType::Lanczos3) {
+        DynamicImage::ImageRgba8(mut rgba) if straight => {
+            alpha(&mut rgba, unpremultiply, cancel)?;
+            Some(DynamicImage::ImageRgba8(rgba))
+        }
+        other => Some(other),
+    }
+}
+
+/// Whether any pixel of `img` isn't opaque.
+fn transparent(img: &RgbaImage) -> bool {
+    img.as_raw()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .any(|p| p[3] != u8::MAX)
+}
+
+/// Runs `f` on every pixel of `img`, in place; `None` if cancelled, which
+/// is checked every [`CANCEL_CHECK_ROWS`] rows.
+fn alpha(img: &mut RgbaImage, f: fn(&mut [u8; 4]), cancel: &CancelToken) -> Option<()> {
+    let row = img.width() as usize * 4;
+    for (y, line) in img.chunks_mut(row.max(4)).enumerate() {
+        if y % CANCEL_CHECK_ROWS == 0 && cancel.is_cancelled() {
+            return None;
+        }
+        line.as_chunks_mut::<4>().0.iter_mut().for_each(f);
+    }
+    Some(())
+}
+
+/// A straight-alpha pixel premultiplied, rounded.
+fn premultiply(p: &mut [u8; 4]) {
+    let a = u32::from(p[3]);
+    for c in &mut p[..3] {
+        *c = ((u32::from(*c) * a + 127) / 255) as u8;
+    }
+}
+
+/// A premultiplied pixel back to straight alpha, rounded: black where
+/// it's fully transparent, and a color Lanczos3 rang past its alpha held
+/// at 255.
+fn unpremultiply(p: &mut [u8; 4]) {
+    let a = u32::from(p[3]);
+    for c in &mut p[..3] {
+        *c = (u32::from(*c) * 255 + a / 2)
+            .checked_div(a)
+            .map_or(0, |v| v.min(255) as u8);
+    }
 }
 
 /// `src`, `w`×`h` pixels of `ch` 8-bit channels, with each `k`×`k` block
@@ -200,6 +258,50 @@ mod tests {
         assert_eq!(out.as_rgb8().unwrap().get_pixel(25, 8).0, [9, 8, 7]);
         cancel.cancel();
         assert!(scale(img, Some(50), &cancel).is_none());
+    }
+
+    #[test]
+    fn transparency_is_scaled_premultiplied() {
+        let cancel = CancelToken::default();
+        // White, opaque, beside black under full transparency: scaled
+        // straight, the edge would come out gray.
+        let edge = RgbaImage::from_fn(300, 100, |x, _| {
+            if x < 150 {
+                image::Rgba([255, 255, 255, 255])
+            } else {
+                image::Rgba([0, 0, 0, 0])
+            }
+        });
+        // By 3 and Lanczos3, and by Lanczos3 alone.
+        for cap in [50, 200] {
+            let out = scale(DynamicImage::ImageRgba8(edge.clone()), Some(cap), &cancel).unwrap();
+            for p in out.as_rgba8().unwrap().pixels() {
+                if p.0[3] > 8 {
+                    assert!(p.0[..3].iter().all(|&c| c >= 250), "{cap}: {p:?}");
+                }
+            }
+        }
+        // Opaque RGBA is scaled as it is.
+        let opaque = RgbaImage::from_pixel(4, 2, image::Rgba([10, 200, 30, 255]));
+        let out = scale(DynamicImage::ImageRgba8(opaque), Some(2), &cancel).unwrap();
+        assert_eq!(
+            out.as_rgba8().unwrap().get_pixel(0, 0).0,
+            [10, 200, 30, 255]
+        );
+        // The round trip of one pixel, and a cancel.
+        let mut p = [200, 100, 3, 128];
+        premultiply(&mut p);
+        assert_eq!(p, [100, 50, 2, 128]);
+        unpremultiply(&mut p);
+        assert_eq!(p, [199, 100, 4, 128]);
+        let mut gone = [9, 9, 9, 0];
+        unpremultiply(&mut gone);
+        assert_eq!(gone, [0, 0, 0, 0]);
+        let mut rung = [90, 0, 0, 80];
+        unpremultiply(&mut rung);
+        assert_eq!(rung, [255, 0, 0, 80]);
+        cancel.cancel();
+        assert!(scale(DynamicImage::ImageRgba8(edge), Some(50), &cancel).is_none());
     }
 
     #[test]

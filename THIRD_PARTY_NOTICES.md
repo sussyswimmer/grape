@@ -2,13 +2,14 @@
 
 Grape is free and open source, under the MIT License in `LICENSE`. It's built with open-source code that other people wrote, and their licenses ask for their notices to travel with it. This file holds them, and the `licenses` folder next to it holds the texts of the libraries Grape ships as separate files.
 
-- **376 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
+- **377 Rust crates** that Grape for Windows (x64) and macOS (Apple silicon and Intel) is built from, grouped by license. Each license's full text follows the crates that use it.
 - **JavaScript** that Vite bundles into Grape's windows.
 - **PDFium**, the library Grape reads PDFs with. It ships as a separate file, with its license texts in the `licenses/pdfium` folder.
 - **libarchive**, whose `bsdtar` program Grape reads RAR archives with. It ships as a separate program, with its license texts in the `licenses/libarchive` folder.
 - **grape-heif**, the program Grape converts HEIC and AVIF images with on Windows. It ships as a separate program under the GPL, with its license texts and where its source is in the `licenses/grape-heif` folder.
 - **FFmpeg and ffprobe**, the programs Grape converts audio and video with, and the libraries built into them. They ship as separate programs under the GPL, with their license texts and where their source is in the `licenses/ffmpeg` folder.
 - **rav1e's patent license and notices**: Grape for macOS writes AVIF images with rav1e, one of the Rust crates. Its AV1 patent license, and the notices of the code it took from libaom and dav1d, have a section of their own.
+- **libwebp's patent grant**: Grape compresses WebP images with libwebp, which is compiled into Grape through one of the Rust crates, libwebp-sys. Its license text is with the Rust crates, and Google's patent grant for it has a section of its own.
 - **Not here yet:** the other helper programs Grape will ship as separate files. Each one will come with its license text in the `licenses` folder and an entry here.
 
 When a crate offers a choice of licenses, Grape takes MIT where it can, so only that text is listed. A few crates don't ship the text of the license Grape takes. For those, this file shows the license's standard text and says so.
@@ -371,6 +372,38 @@ Alliance for Open Media Patent License 1.0
 ~~~
 
 This section is written by hand: check it again when `Cargo.lock` changes rav1e's version, or when `crates/grape-platform/Cargo.toml` changes ravif's features.
+
+## libwebp (WebP Compress)
+
+Grape compresses WebP images with [libwebp](https://chromium.googlesource.com/webm/libwebp) 1.6.0, Google's WebP library, and uses only its encoder: Grape reads WebP files with image-webp, one of the Rust crates. libwebp is compiled into Grape itself on Windows and macOS, from the copy that the [libwebp-sys](https://crates.io/crates/libwebp-sys/0.14.4) 0.14.4 crate carries (its `vendor` folder, libwebp's `v1.6.0` tag unchanged), through Grape's own `grape-webp` crate. Its BSD 3-Clause text, libwebp's `COPYING`, is with the Rust crates below, under libwebp-sys. This is libwebp's `PATENTS` file, Google's patent grant for it:
+
+~~~text
+Additional IP Rights Grant (Patents)
+------------------------------------
+
+"These implementations" means the copyrightable works that implement the WebM
+codecs distributed by Google as part of the WebM Project.
+
+Google hereby grants to you a perpetual, worldwide, non-exclusive, no-charge,
+royalty-free, irrevocable (except as stated in this section) patent license to
+make, have made, use, offer to sell, sell, import, transfer, and otherwise
+run, modify and propagate the contents of these implementations of WebM, where
+such license applies only to those patent claims, both currently owned by
+Google and acquired in the future, licensable by Google that are necessarily
+infringed by these implementations of WebM. This grant does not include claims
+that would be infringed only as a consequence of further modification of these
+implementations. If you or your agent or exclusive licensee institute or order
+or agree to the institution of patent litigation or any other patent
+enforcement activity against any entity (including a cross-claim or
+counterclaim in a lawsuit) alleging that any of these implementations of WebM
+or any code incorporated within any of these implementations of WebM
+constitute direct or contributory patent infringement, or inducement of
+patent infringement, then any patent rights granted to you under this License
+for these implementations of WebM shall terminate as of the date such
+litigation is filed.
+~~~
+
+This section is written by hand: check it again when `Cargo.lock` changes libwebp-sys's version.
 
 ## Rust crates
 
@@ -4085,7 +4118,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ~~~
 
-Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4), [profiling-procmacros 1.0.18](https://crates.io/crates/profiling-procmacros/1.0.18), [profiling 1.0.18](https://crates.io/crates/profiling/1.0.18), [simd_helpers 0.1.0](https://crates.io/crates/simd_helpers/0.1.0)
+Used by: [block2 0.6.2](https://crates.io/crates/block2/0.6.2), [chrono 0.4.45](https://crates.io/crates/chrono/0.4.45), [dispatch2 0.3.1](https://crates.io/crates/dispatch2/0.3.1), [libwebp-sys 0.14.4](https://crates.io/crates/libwebp-sys/0.14.4), [objc2-app-kit 0.3.2](https://crates.io/crates/objc2-app-kit/0.3.2), [objc2-core-foundation 0.3.2](https://crates.io/crates/objc2-core-foundation/0.3.2), [objc2-core-graphics 0.3.2](https://crates.io/crates/objc2-core-graphics/0.3.2), [objc2-encode 4.1.0](https://crates.io/crates/objc2-encode/4.1.0), [objc2-exception-helper 0.1.1](https://crates.io/crates/objc2-exception-helper/0.1.1), [objc2-foundation 0.3.2](https://crates.io/crates/objc2-foundation/0.3.2), [objc2-image-io 0.3.2](https://crates.io/crates/objc2-image-io/0.3.2), [objc2-quartz-core 0.3.2](https://crates.io/crates/objc2-quartz-core/0.3.2), [objc2-security 0.3.2](https://crates.io/crates/objc2-security/0.3.2), [objc2-service-management 0.3.2](https://crates.io/crates/objc2-service-management/0.3.2), [objc2-web-kit 0.3.2](https://crates.io/crates/objc2-web-kit/0.3.2), [objc2 0.6.5](https://crates.io/crates/objc2/0.6.5), [pdfium-render 0.9.4](https://crates.io/crates/pdfium-render/0.9.4), [profiling-procmacros 1.0.18](https://crates.io/crates/profiling-procmacros/1.0.18), [profiling 1.0.18](https://crates.io/crates/profiling/1.0.18), [simd_helpers 0.1.0](https://crates.io/crates/simd_helpers/0.1.0)
 
 *The standard text, because these crates don't ship it. The copyright holders are the authors named on each crate's page.*
 
@@ -5505,6 +5538,42 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+~~~
+
+Used by: [libwebp-sys 0.14.4](https://crates.io/crates/libwebp-sys/0.14.4)
+
+~~~text
+Copyright (c) 2010, Google Inc. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are
+met:
+
+  * Redistributions of source code must retain the above copyright
+    notice, this list of conditions and the following disclaimer.
+
+  * Redistributions in binary form must reproduce the above copyright
+    notice, this list of conditions and the following disclaimer in
+    the documentation and/or other materials provided with the
+    distribution.
+
+  * Neither the name of Google nor the names of its contributors may
+    be used to endorse or promote products derived from this software
+    without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 
 ~~~
 
