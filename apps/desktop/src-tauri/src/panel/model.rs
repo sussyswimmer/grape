@@ -838,8 +838,13 @@ mod tests {
         let bare = |op: &Operation, items: &[SelectionItem]| {
             jobs::check_runnable(op, items, &SidecarPaths::default())
         };
-        // Compress on JPG, PNG and TIFF needs no helper (D26, D28).
-        let images = files(&["/a/photo.jpg", "/a/beach.png", "/a/scan.tiff"]);
+        // Compress on JPG, PNG, TIFF and WebP needs no helper (D26, D28).
+        let images = files(&[
+            "/a/photo.jpg",
+            "/a/beach.png",
+            "/a/scan.tiff",
+            "/a/sticker.webp",
+        ]);
         assert_eq!(
             route(WheelEntry::Tool(ToolKey::Compress), &images, V1, bare),
             Route::Panel(ToolKey::Compress)
