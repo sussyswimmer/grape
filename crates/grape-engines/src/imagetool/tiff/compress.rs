@@ -18,7 +18,11 @@
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
 //!   out wrong); layouts that can't be sized; blocks listed as strips
 //!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
-//!   TileLength, or as tiles it reads as strips; tiles more than one slice
+//!   TileLength, or as tiles it reads as strips; strips whose RowsPerStrip
+//!   is 2^31 or more but isn't 2^32 − 1 (Pillow reads them uncompressed
+//!   and fails on them as Deflate), and a
+//!   PhotometricInterpretation libtiff doesn't know ([`known`]), which
+//!   readers read by guesswork; tiles more than one slice
 //!   deep (TileDepth), whose slices after the first libtiff's tile size
 //!   leaves out and a recode would lose; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
@@ -496,6 +500,28 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
             geometry.blocks()
         ));
     }
+    // A RowsPerStrip of 2^31 or more, but for 2^32 - 1: Pillow 12.3 reads
+    // such a page uncompressed and fails on it compressed ("decoder error
+    // -9"). Fewer past the picture's rows it reads, as libtiff and
+    // ImageMagick read any, and the tiff crate writes them for any picture
+    // of under 1 MB.
+    if let Some(rows) = geometry.rows_past() {
+        return copy(format!(
+            "its RowsPerStrip is {rows}, more than readers take"
+        ));
+    }
+    // A PhotometricInterpretation libtiff doesn't know: readers read such
+    // a page by guesswork, which may not hold once it's Deflate. One that
+    // can't be read, the geometry refused.
+    let photometric = match ifd.get(262) {
+        Some(entry) => number(r, entry, order, SHORT)?,
+        None => None,
+    };
+    if let Some(photometric) = photometric.filter(|&n| !known(n)) {
+        return copy(format!(
+            "its PhotometricInterpretation is {photometric}, which libtiff doesn't know"
+        ));
+    }
     // An empty block (GDAL's sparse tiles) isn't Deflate data: the tiff
     // crate and Pillow fail on it once the IFD says Deflate.
     if ifd.blocks.iter().any(|b| b.len == 0) {
@@ -519,7 +545,7 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
         // Already in the decoded bytes, which stay as they are.
         None
     } else {
-        let added = added(r, ifd, order, &geometry, left)?;
+        let added = added(r, ifd, order, photometric, &geometry, left)?;
         if added.is_some() {
             fields.push(short(317, 2));
         } else if ifd.get(317).is_some() {
@@ -535,19 +561,23 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
     })
 }
 
-/// The predictor Compress adds to `ifd`'s unpredicted samples, if it adds
-/// one ([module docs](self)).
+/// The PhotometricInterpretations libtiff 4.5 knows
+/// (`_TIFFGetMaxColorChannels`): 0 to 6, 8 to 10, CFA (32803), LogL and
+/// LogLuv (32844, 32845).
+fn known(photometric: u64) -> bool {
+    matches!(photometric, 0..=6 | 8..=10 | 32803 | 32844 | 32845)
+}
+
+/// The predictor Compress adds to `ifd`'s unpredicted samples, of
+/// `photometric`, if it adds one ([module docs](self)).
 fn added(
     r: &mut dyn In,
     ifd: &Ifd,
     order: Order,
+    photometric: Option<u64>,
     geometry: &Geometry,
     left: &mut u64,
 ) -> Result<Option<Predictor>, Error> {
-    let photometric = match ifd.get(262) {
-        Some(entry) => number(r, entry, order, SHORT)?,
-        None => None,
-    };
     if !matches!(photometric, Some(0 | 1 | 2 | 5))
         || geometry.subsampled
         || !matches!(geometry.bits, 8 | 16)
@@ -1755,6 +1785,48 @@ mod tests {
             let start = source.offset as usize;
             let want = crc32fast::hash(&file[start..start + 1_024]);
             assert_eq!(crc, want, "tile {n}");
+        }
+    }
+
+    #[test]
+    fn a_page_readers_may_fail_on_once_deflated_is_copied_as_it_is() {
+        // Gray 40 × 24 in one uncompressed strip.
+        let plain = |rows: u32, photometric: u16| {
+            let mut page = gray(40, 24, rows, vec![B::Data(smooth(40 * 24))]);
+            page.tags[3] = (262, V::Short(vec![photometric]));
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let copied = |file: &[u8]| match planned(file).unwrap() {
+            Planned::Nothing(why) => Some(why),
+            Planned::Plan(_) => None,
+        };
+        // A RowsPerStrip of 2^31 or more: Pillow 12.3 reads such a page
+        // uncompressed, and fails on it as Deflate ("decoder error -9").
+        // 2^32 - 1, the whole picture, is recoded, and so are fewer past
+        // its rows, which every reader reads (the tiff crate writes them).
+        for rows in [1 << 31, 0xFF00_0018] {
+            let why = copied(&plain(rows, 1));
+            let want = format!("its RowsPerStrip is {rows}, more than readers take");
+            assert!(
+                why.as_ref().is_some_and(|why| why.contains(&want)),
+                "{rows}: {why:?}"
+            );
+        }
+        for rows in [24, 25, (1 << 31) - 1, u32::MAX] {
+            assert_eq!(copied(&plain(rows, 1)), None, "{rows}");
+        }
+        // A PhotometricInterpretation libtiff doesn't know: ImageMagick
+        // reads such a page by guesswork, which a recode may not keep.
+        for photometric in [7, 11, 255, 34892, 65535] {
+            let why = copied(&plain(24, photometric));
+            let want = format!("its PhotometricInterpretation is {photometric}");
+            assert!(
+                why.as_ref().is_some_and(|why| why.contains(&want)),
+                "{photometric}: {why:?}"
+            );
+        }
+        for photometric in [0, 1, 2, 3, 4, 5, 8, 9, 10, 32803, 32844, 32845] {
+            assert_eq!(copied(&plain(24, photometric)), None, "{photometric}");
         }
     }
 

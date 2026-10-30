@@ -2229,6 +2229,34 @@ fn compress_says_first_which_tiff_pages_it_took_back_when_the_file_passes_95_per
 }
 
 #[test]
+fn compress_copies_a_tiff_page_pillow_would_fail_on_once_deflated() {
+    // RGB 40 × 24 in one uncompressed strip, its RowsPerStrip 2^31: Pillow
+    // 12.3 reads it, and failed on Compress's Deflate output of it
+    // ("decoder error -9"), where libtiff reads both. It's copied as it
+    // is, so there's nothing to recode.
+    let picture: Vec<u8> = (0..40 * 24 * 3).map(|i| (i % 251) as u8).collect();
+    let entries = vec![
+        (256, 4, le(40, 4)),
+        (257, 4, le(24, 4)),
+        (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+        (262, 3, le(2, 2)),
+        (277, 3, le(3, 2)),
+        (278, 4, le(1 << 31, 4)),
+    ];
+    let dir = TestDir::new("compress-tiff-rows");
+    let bytes = one_strip(false, &picture, entries);
+    let err = compress(&dir, "rows.tif", &bytes, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert!(
+        err.detail.contains(
+            "IFD 0 copied as it is: its RowsPerStrip is 2147483648, more than readers take"
+        ),
+        "{}",
+        err.detail
+    );
+}
+
+#[test]
 fn compress_says_a_tiff_page_passed_95_percent_recoded_and_copied() {
     use tiff::encoder::{colortype, Compression, DeflateLevel, TiffEncoder};
     // One page of noise, Deflate already: recoded, it passes 95 % of the

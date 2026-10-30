@@ -873,6 +873,11 @@ impl Dims {
         self.rows.min(self.height)
     }
 
+    /// RowsPerStrip as the IFD says it, [`LONG`] when it's absent.
+    pub(crate) fn rows_per_strip(&self) -> u64 {
+        self.rows
+    }
+
     /// A tile's width and length, for tiles: TileWidth and TileLength, the
     /// picture's for [`LONG`].
     pub(crate) fn tile(&self) -> Option<(u64, u64)> {
