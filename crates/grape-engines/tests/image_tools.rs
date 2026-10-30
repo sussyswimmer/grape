@@ -1477,19 +1477,30 @@ fn remove_metadata_keeps_the_tags_a_tiffs_codec_needs() {
 #[test]
 fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
     // The review's files: tags Remove Metadata keeps, in a type libtiff
-    // ignores and Pillow shows (an Orientation and an XResolution as
-    // text, LercParameters as eight LONGs on an uncompressed page, InkNames
-    // on an RGB page, GDAL's no-data value as words), were published with
-    // nothing said. They go now, as other fields.
+    // ignores and Pillow shows (an XResolution as text, LercParameters as
+    // eight LONGs on an uncompressed page, InkNames on an RGB page, GDAL's
+    // no-data value as words), were published with nothing said. They go
+    // now, as other fields; an Orientation as text is refused
+    // (`remove_metadata_refuses_an_orientation_libtiff_cant_read`).
     let dir = TestDir::new("strip-tiff-types");
     let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W".to_vec();
     let words = b"shot by John at home\0".to_vec();
     for (name, tag, kind, value) in [
-        ("orientation.tif", 274, 2, [&secret[..], b"\0"].concat()),
         ("resolution.tif", 282, 2, [&secret[..], b"\0"].concat()),
         ("lerc.tif", 50674, 4, secret.clone()),
         ("inks.tif", 333, 2, words.clone()),
         ("nodata.tif", 42113, 2, words.clone()),
+        // An ICC profile of SHORTs and a CFAPattern of LONGs past a byte
+        // (libtiff doesn't know CFAPattern, and shows it whole).
+        ("icc.tif", 34675, 3, secret.clone()),
+        ("cfa.tif", 33422, 4, secret.clone()),
+        // A ColorMap of 64 SHORTs, where libtiff reads 3 × 256 or none.
+        (
+            "colormap.tif",
+            320,
+            3,
+            [&b"SECRET shot by John at home 51.5N 0.1W"[..], &[0; 90]].concat(),
+        ),
     ] {
         let entries = vec![
             (256, 4, le(1, 4)),
@@ -1510,6 +1521,72 @@ fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
         for text in [&b"SECRET"[..], b"John"] {
             assert!(!out.windows(text.len()).any(|w| w == text), "{name}");
         }
+    }
+}
+
+#[test]
+fn remove_metadata_refuses_a_layout_tag_libtiff_cant_read() {
+    // The review's file: an 8 × 8 page of 32-bit float gray whose
+    // SampleFormat is FLOAT 3.0, which libtiff can't load and Pillow reads
+    // as float. Dropped, both read integers: it's refused instead.
+    let dir = TestDir::new("strip-tiff-layout");
+    let samples: Vec<u8> = (0..64)
+        .flat_map(|i| (i as f32 / 4.0).to_le_bytes())
+        .collect();
+    let entries = vec![
+        (256, 4, le(8, 4)),
+        (257, 4, le(8, 4)),
+        (258, 3, le(32, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(8, 4)),
+        (339, 11, 3.0_f32.to_le_bytes().to_vec()),
+    ];
+    let err = strip(&dir, "float.tif", &one_strip(false, &samples, entries)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "float.tif says how its image data is laid out in a way Grape can't read yet."
+    );
+}
+
+#[test]
+fn remove_metadata_refuses_an_orientation_libtiff_cant_read() {
+    // The review's file: a 4 × 2 gray page whose Orientation is FLOAT 6.0,
+    // which libtiff ignores ("Incompatible type for Orientation") and
+    // Pillow turns the picture by (its first row 192, 128, 64, 0). Dropped,
+    // Pillow read it unturned (0, 32, 64, 96). Refused now, and so is one
+    // in a DOUBLE, a RATIONAL, an SRATIONAL, two SHORTs or text.
+    let dir = TestDir::new("strip-tiff-orientation");
+    let samples: Vec<u8> = (0..8).map(|i| i * 32).collect();
+    let rational = [le(6, 4), le(1, 4)].concat();
+    let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W\0".to_vec();
+    for (name, kind, value) in [
+        ("float.tif", 11, 6.0_f32.to_le_bytes().to_vec()),
+        ("double.tif", 12, 6.0_f64.to_le_bytes().to_vec()),
+        ("rational.tif", 5, rational.clone()),
+        ("srational.tif", 10, rational),
+        ("shorts.tif", 3, [le(6, 2), le(6, 2)].concat()),
+        ("text.tif", 2, secret),
+    ] {
+        let entries = vec![
+            (256, 3, le(4, 2)),
+            (257, 3, le(2, 2)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (274, kind, value),
+            (278, 3, le(2, 2)),
+        ];
+        let err = strip(&dir, name, &one_strip(false, &samples, entries)).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} says how its image data is laid out in a way Grape can't read yet.")
+        );
     }
 }
 

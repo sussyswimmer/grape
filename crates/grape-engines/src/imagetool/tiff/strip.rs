@@ -18,16 +18,17 @@
 //!   unsaid: a value that entries share is read once, and at most
 //!   [`JUDGE_BUDGET`] in all, past which a value is reported unread.
 //! - **Written back:** the DCF Adobe RGB Exif (ColorSpace uncalibrated,
-//!   Interop `R03`), when that's how an IFD with no ICC profile said its
-//!   color: each such IFD gets its own, even when they shared one.
+//!   Interop `R03`), when that's how an IFD with no ICC profile kept said
+//!   its color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG, old-style JPEG and a Compression libtiff can't read
 //!   (both tools); data of a Compression whose stream may hold metadata
 //!   that Grape doesn't read ([`coded`]: JPEG 2000, JPEG XL, JPEG XR, PNG,
 //!   and every code it doesn't know); metadata inside JPEG data (the codes
 //!   that hold JPEG streams, as libtiff reads Compression; an APP1, APP13
-//!   or COM in a block, or in a JPEGTables, any IFD's, read as libtiff
-//!   reads it ([`tables`]): up to its first scan when that's a sequential
-//!   frame's only one, and through every scan otherwise), and JPEG data
+//!   or COM in a block, or in a JPEG page's JPEGTables, read as libtiff
+//!   reads it ([`tables`]; another page's go unread): up to its first
+//!   scan when that's a sequential frame's only one, and through every
+//!   scan otherwise), and JPEG data
 //!   Grape can't check, whose segments or scans run past the first
 //!   [`MAX_SCAN`] bytes read before that, that's hierarchical, or
 //!   JPEGTables libtiff can't read as bytes, or that are more than tables
@@ -35,8 +36,11 @@
 //!   EXIF or XMP chunk, [`chunks`]), and WebP data Grape can't check: not
 //!   a RIFF container that covers its block, nor a bare bitstream, or
 //!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
-//!   files, whose layout is in their description (any of an IFD's); and a
-//!   tag it keeps listed twice with different values ([`twice_kept`]).
+//!   files, whose layout is in their description (any of an IFD's); a
+//!   tag it keeps listed twice with different values ([`twice_kept`]);
+//!   and a tag a page's layout or samples are read from, its Orientation,
+//!   or a palette page's ColorMap, in a type or count libtiff doesn't read
+//!   ([`LAID_OUT`]), which can't go as other fields.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -47,8 +51,8 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, number, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff,
-    Value, SHORT, TWICE,
+    integer, number, per_sample, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta,
+    Order, Tiff, Value, SHORT, TWICE, UNREAD_LAYOUT,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -64,11 +68,6 @@ const JUDGE_BUDGET: u64 = 16 << 20;
 /// The most values judged blank that the report remembers, so that one
 /// that entries share is read once.
 const MAX_BLANKS: usize = 4_096;
-
-/// The most descriptions out of line remembered as read for ImageJ's and
-/// OME's, so that one that IFDs share is read once: past them, one is read
-/// again each time, from what the file holds.
-const MAX_DESCRIPTIONS: usize = 4_096;
 
 /// The most bytes of Photoshop's resources the plan holds, filtered, each
 /// block once however many IFDs name it; and the longest block it reads.
@@ -165,9 +164,10 @@ fn kept(tag: u16) -> bool {
 /// each field's `set_field_type` in `tif_dirinfo.c` and the codecs'), which
 /// is all it keeps of it: an entry of another type or count, which
 /// libtiff ignores ("Incorrect value", "incorrect count … tag ignored") or
-/// fails on and other readers may show (Pillow shows an ASCII Orientation
-/// as its text), goes, as other fields ([`Walk::keeps`]). Values aren't
-/// checked: a number out of its range is a number still.
+/// fails on and other readers may show (Pillow shows an ASCII XResolution
+/// as its text), goes, as other fields ([`Walk::keeps`]), or refuses the
+/// file ([`LAID_OUT`]). Values aren't checked, but bytes' of a wider type
+/// ([`Walk::bytes`]): a number out of its range is a number still.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// Integers of any type but IFD and IFD8 ([`integer`]), as
@@ -178,7 +178,8 @@ enum Shape {
     /// integers, RATIONAL, SRATIONAL, FLOAT and DOUBLE.
     Reals(Count),
     /// Bytes as `TIFFReadDirEntryByteArray` reads them: BYTE, ASCII,
-    /// UNDEFINED and the other integer types.
+    /// UNDEFINED and the other integer types, each value of those from 0
+    /// to 255.
     Bytes(Count),
     /// Text: ASCII alone.
     Text(Count),
@@ -199,30 +200,41 @@ enum Count {
     PerSample,
     /// One for each sample.
     Samples,
+    /// At most one for each sample, none included, as `setExtraSamples`
+    /// takes them.
+    UpToSamples,
+    /// Three for each value a sample can take, 2^BitsPerSample, or one
+    /// for each too when it says so: as `TIFFReadDirectory` reads ColorMap
+    /// and TransferFunction, of a BitsPerSample of at most 24 listed
+    /// before them ([`Walk::bits`]), and ignores them otherwise.
+    Table(bool),
 }
 
 /// The [`Shape`] of a tag Remove Metadata keeps, or `None` for one it
-/// drops. A tag libtiff doesn't know (TransferRange, GDAL's no-data value)
-/// takes the type TIFF 6 or GDAL gives it.
+/// drops. A tag libtiff 4.5.1 doesn't know (TransferRange, CFAPattern and
+/// CFARepeatPatternDim, GDAL's no-data value), which it reads in any type
+/// and shows whole, takes the type TIFF 6, TIFF/EP or GDAL gives it.
 fn shape(tag: u16) -> Option<Shape> {
     use Count::*;
     use Shape::*;
     // libtiff's arrays of 2^32 − 1 values at most, or 65,535.
     let (c32, c16) = (u64::from(u32::MAX), u64::from(u16::MAX));
     Some(match tag {
-        // One number: NewSubfileType, SubfileType, the size,
-        // PhotometricInterpretation, Threshholding, CellWidth, CellLength,
-        // FillOrder, Orientation, SamplesPerPixel, RowsPerStrip,
-        // PlanarConfiguration, GrayResponseUnit, the fax options,
-        // ResolutionUnit, Predictor, the tile size, InkSet, NumberOfInks,
-        // YCbCrPositioning, Matteing, ImageDepth and TileDepth.
-        254..=257
+        // One number: NewSubfileType, the size, PhotometricInterpretation,
+        // Threshholding, CellWidth, CellLength, FillOrder, Orientation,
+        // SamplesPerPixel, RowsPerStrip, PlanarConfiguration, the fax
+        // options, ResolutionUnit, Predictor, the tile size, InkSet,
+        // NumberOfInks, YCbCrPositioning, Matteing, ImageDepth and
+        // TileDepth. SubfileType, GrayResponseUnit and GrayResponseCurve
+        // libtiff never reads (`FIELD_IGNORE`): they go.
+        254
+        | 256
+        | 257
         | 262..=266
         | 274
         | 277
         | 278
         | 284
-        | 290
         | 292
         | 293
         | 296
@@ -242,11 +254,11 @@ fn shape(tag: u16) -> Option<Shape> {
         // CFARepeatPatternDim; TransferRange's six.
         297 | 321 | 336 | 530 | 33421 => Ints(Is(2)),
         342 => Ints(Is(6)),
-        // Tables: GrayResponseCurve, TransferFunction and ColorMap, and
-        // ExtraSamples; LercParameters, its version and what's inside at
-        // least.
-        291 | 301 | 320 => Ints(Within(1, c32)),
-        338 => Ints(Within(1, c16)),
+        // Tables: TransferFunction and ColorMap; ExtraSamples;
+        // LercParameters, its version and what's inside at least.
+        301 => Ints(Table(true)),
+        320 => Ints(Table(false)),
+        338 => Ints(UpToSamples),
         50674 => Ints(Within(2, c32)),
         // The resolution and position; WhitePoint, the primaries, the
         // YCbCr coefficients and ReferenceBlackWhite; SMinSampleValue and
@@ -303,6 +315,32 @@ fn twice_kept(r: &mut dyn In, ifd: &Ifd, order: Order, alike: &mut Alike) -> Res
     Ok(false)
 }
 
+/// The tags Remove Metadata keeps that say how a page's data is laid out
+/// or what its samples are: those either TIFF tool decides on to read its
+/// blocks but the ones the walk read already (Compression, the blocks and
+/// the SubIFDs), and ExtraSamples; and Orientation, which says how it's
+/// turned. An entry of one that libtiff can't read ([`shape`]; it fails on
+/// most, and ignores FillOrder, Orientation, Predictor and
+/// YCbCrSubsampling) can't go as other fields: readers that read it would
+/// read the output as another picture (Pillow reads a SampleFormat of
+/// FLOAT 3.0 as float samples, and turns a page by an Orientation of FLOAT
+/// 6.0). The file is refused instead ([`UNREAD_LAYOUT`]), and so for a
+/// palette page's ColorMap ([`Walk::lays_out`]).
+const LAID_OUT: [u16; 17] = [
+    256, 257, 258, 262, 266, 274, 277, 278, 284, 317, 322, 323, 338, 339, 530, 32997, 32998,
+];
+
+/// Refuses an ImageJ or OME file by its description `entry`, the first
+/// [`MAX_JUDGED`] bytes of it, read as [`look`] reads them.
+fn described(r: &mut dyn In, entry: &Entry, left: &mut u64) -> Result<(), Error> {
+    let text = look(r, entry, MAX_JUDGED, left)?.map(|(text, _)| text);
+    let text = text.unwrap_or_default();
+    if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
+        return Err(Error::Refused(DESCRIBED.into()));
+    }
+    Ok(())
+}
+
 /// Whether the writer makes `tag` afresh: the blocks and the SubIFDs.
 fn rebuilt(tag: u16) -> bool {
     matches!(tag, 273 | 279 | 324 | 325 | 330)
@@ -346,28 +384,40 @@ impl Plan {
         // may come to what the file holds: only values that overlap come
         // to more.
         let mut left = len;
-        // A description that IFDs share is read once, while it's
-        // remembered ([`MAX_DESCRIPTIONS`]); one in its entry isn't.
-        let mut descriptions = HashSet::new();
-        let mut alike = Alike::new(len);
-        for ifd in tiff.ifds() {
-            // Every one: tifffile writes a description it's given and then
-            // its own (the picture's shape, or ImageJ's alone in an ImageJ
-            // file), and reads ImageJ's from either of a page's first two.
-            for entry in ifd.entries.iter().filter(|e| e.tag == 270) {
-                let at = matches!(entry.value, Value::At { .. });
-                if at && descriptions.contains(&entry.value) {
-                    continue;
-                }
-                let text = look(r, entry, MAX_JUDGED, &mut left)?.map(|(text, _)| text);
-                let text = text.unwrap_or_default();
-                if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
-                    return Err(Error::Refused(DESCRIBED.into()));
-                }
-                if at && descriptions.len() < MAX_DESCRIPTIONS {
-                    descriptions.insert(entry.value);
-                }
+        let ifds = tiff.ifds();
+        // Every description of every IFD: tifffile writes a description
+        // it's given and then its own (the picture's shape, or ImageJ's
+        // alone in an ImageJ file), and reads ImageJ's from either of a
+        // page's first two. One in its entry is read there; those out of
+        // line once each, however many IFDs list them, by where they are,
+        // sorted: 16 bytes each.
+        let all = || {
+            ifds.iter()
+                .flat_map(|ifd| &ifd.entries)
+                .filter(|e| e.tag == 270)
+        };
+        let out_of_line = |e: &&Entry| matches!(e.value, Value::At { .. });
+        let mut places = Vec::with_capacity(all().filter(out_of_line).count());
+        for entry in all() {
+            match entry.value {
+                Value::At { offset, len } => places.push((offset, len)),
+                _ => described(r, entry, &mut left)?,
             }
+        }
+        places.sort_unstable();
+        places.dedup();
+        for (offset, len) in places {
+            let value = Value::At { offset, len };
+            let entry = Entry {
+                tag: 270,
+                kind: 2,
+                count: len,
+                value,
+            };
+            described(r, &entry, &mut left)?;
+        }
+        let mut alike = Alike::new(len);
+        for ifd in ifds {
             if twice_kept(r, ifd, order, &mut alike)? {
                 return Err(Error::Refused(TWICE.into()));
             }
@@ -379,12 +429,12 @@ impl Plan {
         {
             return Err(Error::Refused(unchecked(kind)));
         }
-        // JPEG and WebP data, and JPEGTables in any IFD: libtiff hands any
-        // IFD's to whoever asks for them. Tables of no bytes are none.
+        // JPEG and WebP data, and a JPEG page's JPEGTables: another page's
+        // go, as other fields, unread ([`Walk::keeps`]).
         let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))) || tables_of(ifd).is_some())
+            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))))
             .collect();
         if !scanned.is_empty() {
             let shared = tiff.shared();
@@ -415,6 +465,7 @@ impl Plan {
             irb_read: len,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
+            values_left: len,
         };
         let pages = pages
             .into_iter()
@@ -482,6 +533,7 @@ impl Plan {
             irb_read: u64::MAX,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
+            values_left: u64::MAX,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -631,14 +683,18 @@ struct Scan<'s> {
 }
 
 impl Scan<'_> {
-    /// What the JPEG or WebP data of `ifd` holds: its JPEGTables, as
-    /// libtiff reads them ([`tables`]), as [`segments`] reads them; then
-    /// each of its blocks, as the [`Kind`] of its Compression. The first
-    /// that isn't clean, with the kind of data it is; JPEGTables libtiff
-    /// can't read as bytes can't be seen through.
+    /// What the JPEG or WebP data of `ifd` holds: a JPEG page's
+    /// JPEGTables, as libtiff reads them ([`tables`]), as [`segments`]
+    /// reads them; then each of its blocks, as the [`Kind`] of its
+    /// Compression. The first that isn't clean, with the kind of data it
+    /// is; JPEGTables libtiff can't read as bytes can't be seen through.
     fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<(Seen, &'static str), Error> {
+        let Ok(Some(kind)) = coded(ifd.compression) else {
+            return Ok((Seen::Clean, "JPEG"));
+        };
         let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
-        if let Some(entry) = tables_of(ifd).filter(fresh) {
+        let jpeg = tables_of(ifd).filter(|_| kind == Kind::Jpeg);
+        if let Some(entry) = jpeg.filter(fresh) {
             let Some((tables, whole)) = tables(r, entry, self.order, MAX_SCAN, &mut self.left)?
             else {
                 return Ok((Seen::Unseen, "JPEG"));
@@ -653,9 +709,6 @@ impl Scan<'_> {
                 return Ok((seen, "JPEG"));
             }
         }
-        let Ok(Some(kind)) = coded(ifd.compression) else {
-            return Ok((Seen::Clean, "JPEG"));
-        };
         let mut buf = Vec::new();
         for block in ifd.blocks.iter().filter(|b| b.len > 0) {
             // A block IFDs share is read once as each kind they list it as.
@@ -1016,6 +1069,11 @@ struct Walk<'r> {
     /// What's left of the bytes it may read to judge values blank
     /// ([`JUDGE_BUDGET`]).
     judge_left: u64,
+    /// What's left of the bytes of kept values it may read out of line to
+    /// check them: BitsPerSample, to size ColorMaps and TransferFunctions
+    /// ([`Walk::bits`]), and bytes of a wider type ([`Walk::bytes`]). What
+    /// the file holds, which only values that overlap come to more than.
+    values_left: u64,
 }
 
 impl Walk<'_> {
@@ -1038,7 +1096,10 @@ impl Walk<'_> {
                         fields.push(field);
                     } else if first {
                         // Not as libtiff reads it: other readers may show
-                        // what it holds.
+                        // what it holds, or read the picture by it.
+                        if self.lays_out(&ifd, tag)? {
+                            return Err(Error::Refused(UNREAD_LAYOUT.into()));
+                        }
                         self.report(MetaField::Other, entry)?;
                     }
                 }
@@ -1055,7 +1116,9 @@ impl Walk<'_> {
             if let Some(interop) = &exif.interop {
                 self.meta(interop, exif::Ifd::Interop)?;
             }
-            if ifd.get(34675).is_none() && self.adobe_rgb(exif)? {
+            // An ICC profile libtiff ignores goes, and isn't one.
+            let icc = fields.iter().any(|field| field.tag == 34675);
+            if !icc && self.adobe_rgb(exif)? {
                 children.push((34665, dcf(self.order)));
             }
         }
@@ -1121,12 +1184,94 @@ impl Walk<'_> {
             return Ok(false);
         }
         let n = entry.count;
-        Ok(match count {
+        let counted = match count {
             Count::Is(want) => n == want,
             Count::Within(least, most) => (least..=most).contains(&n),
             Count::PerSample => n == 1 || samples(self.r, ifd, self.order)?.is_some_and(|s| n >= s),
             Count::Samples => samples(self.r, ifd, self.order)? == Some(n),
-        })
+            Count::UpToSamples => samples(self.r, ifd, self.order)?.is_some_and(|s| n <= s),
+            Count::Table(once) => match self.bits(ifd, entry.tag)? {
+                Some(bits) => n == 3 << bits || (once && n == 1 << bits),
+                None => false,
+            },
+        };
+        // JPEGTables were read whole as bytes, or the file was refused
+        // ([`Scan::seen`]).
+        let bytes = matches!(shape, Shape::Bytes(_)) && entry.tag != 347;
+        Ok(counted && (!bytes || self.bytes(entry)?))
+    }
+
+    /// Whether each value of `entry`, of a tag kept as bytes (ICC, which
+    /// libtiff reads so, and CFAPattern, which TIFF/EP types so), is one as
+    /// libtiff reads ICC (`TIFFReadDirEntryByteArray`): of BYTE, ASCII or
+    /// UNDEFINED it is; of a wider integer type when it's from 0 to 255, as
+    /// libtiff ignores an ICC profile otherwise ("Incorrect value"), and a
+    /// tag dump shows the values whole (libtiff doesn't know CFAPattern,
+    /// and shows it whole in any type). Those are read to see,
+    /// [`MAX_SCAN`] bytes at a time, from what the walk may read of them.
+    fn bytes(&mut self, entry: &Entry) -> Result<bool, Error> {
+        let Some((size, signed)) = integer(entry.kind).filter(|_| entry.kind != 1) else {
+            return Ok(true);
+        };
+        let order = self.order;
+        let byte = |b: &[u8]| {
+            let v = order.uint(b);
+            !(signed && v >> (8 * size - 1) == 1) && v <= 0xFF
+        };
+        let (offset, len) = match entry.value {
+            Value::Inline { bytes, len } => {
+                return Ok(bytes[..usize::from(len)].chunks_exact(size).all(byte));
+            }
+            Value::At { offset, len } => (offset, len),
+            Value::Unread => return Ok(false),
+        };
+        self.values_left = self.values_left.checked_sub(len).ok_or_else(|| {
+            Error::TooLarge("kept values that overlap, more to read than it holds".into())
+        })?;
+        let mut buf = vec![0; len.min(MAX_SCAN) as usize];
+        let mut at = 0;
+        while at < len {
+            let n = (len - at).min(MAX_SCAN) as usize;
+            read_at(self.r, offset + at, &mut buf[..n])?;
+            if !buf[..n].chunks_exact(size).all(byte) {
+                return Ok(false);
+            }
+            at += n as u64;
+        }
+        Ok(true)
+    }
+
+    /// BitsPerSample as libtiff reads it ([`per_sample`]) by the time it
+    /// reads `ifd`'s first entry for `tag`, when that's at most 24: `None`
+    /// where it isn't listed before it ("Ignoring … since BitsPerSample tag
+    /// not found"), is more ("Ignoring … because BitsPerSample=…>24"), or
+    /// can't be read, as libtiff can't load the page then. What's read out
+    /// of line is taken from what the walk may read of them.
+    fn bits(&mut self, ifd: &Ifd, tag: u16) -> Result<Option<u64>, Error> {
+        let first = |tag| ifd.entries.iter().position(|e| e.tag == tag);
+        let (Some(bits), Some(at)) = (first(258), first(tag)) else {
+            return Ok(None);
+        };
+        if bits > at {
+            return Ok(None);
+        }
+        let samples = samples(self.r, ifd, self.order)?;
+        let entry = &ifd.entries[bits];
+        let bits = per_sample(self.r, entry, self.order, samples, &mut self.values_left)?;
+        Ok(bits.filter(|&bits| bits <= 24))
+    }
+
+    /// Whether the tag `tag` of `ifd` says how the page's data is laid out,
+    /// what its samples are or how it's turned ([`LAID_OUT`]; a palette
+    /// page's ColorMap), so that an entry of it that isn't kept
+    /// ([`Walk::keeps`]) can't go.
+    fn lays_out(&mut self, ifd: &Ifd, tag: u16) -> Result<bool, Error> {
+        Ok(LAID_OUT.contains(&tag)
+            || (tag == 320
+                && match ifd.get(262) {
+                    Some(photometric) => number(self.r, photometric, self.order, SHORT)? == Some(3),
+                    None => false,
+                }))
     }
 
     /// Reports `found` for the dropped `entry`, unless it's reported
@@ -1182,7 +1327,11 @@ impl Walk<'_> {
     /// SHORT, another type ignored ("Wrong data type"), and of more than
     /// one value the first ("tag trimmed"), as Pillow reads the first of
     /// them, when they're in the entry; of more than it holds, libtiff
-    /// reads the entry's offset as the value, so such a one says nothing.
+    /// reads the first two bytes of the entry's offset field, in the file's
+    /// byte order (65535 for values at an offset whose low 16 bits are
+    /// 0xFFFF in a little-endian file, 0xFFFF or 0x1FFFF, and 0 for values
+    /// at 0xFFFF in a big-endian one), where Pillow reads the first value:
+    /// such a one says nothing.
     /// Its entries all agree, or the file was refused ([`twice_kept`]).
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
         let uncalibrated = exif
@@ -1742,40 +1891,91 @@ mod tests {
         };
         // Every tag it keeps, in a type libtiff doesn't read it in: text,
         // or for those it reads as bytes (text too), two FLOATs. The page
-        // is compressed, one strip, so that no layout tag need be read.
+        // is compressed, one strip, so that no layout tag need be read;
+        // one that says how the picture is laid out is refused instead.
         for tag in (0..=u16::MAX).filter(|&tag| kept(tag) && !matches!(tag, 259 | 347)) {
             let wrong = match shape(tag) {
                 Some(Shape::Bytes(_)) => V::Bytes(11, b"secrets!".to_vec()),
                 _ => V::Ascii("secret value"),
             };
-            gone(page(8, vec![(tag, wrong)]), tag);
+            let file = page(8, vec![(tag, wrong)]);
+            if LAID_OUT.contains(&tag) {
+                let refused =
+                    matches!(plan(&file), Err(Error::Refused(why)) if why == UNREAD_LAYOUT);
+                assert!(refused, "{tag}");
+            } else {
+                gone(file, tag);
+            }
         }
-        // A review's: an Orientation, an XResolution and a LercParameters
-        // as text, eight LONGs of LercParameters on an uncompressed page,
-        // InkNames on a gray one, and a no-data value of words.
+        // A review's: an XResolution and a LercParameters as text, eight
+        // LONGs of LercParameters on an uncompressed page, InkNames on a
+        // gray one, and a no-data value of words.
         let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W".to_vec();
         let longs = secret
             .chunks(4)
             .map(|c| u32::from_le_bytes(c.try_into().unwrap()));
         for (compression, tag, value) in [
-            (1, 274, V::Ascii("SECRET_IN_ORIENTATION_51.5N_0.1W")),
             (1, 282, V::Ascii("secret resolution")),
             (1, 50674, V::Ascii("secret parameters")),
             (1, 50674, V::Long(longs.collect())),
             (1, 333, V::Ascii("shot by John at home")),
             (1, 42113, V::Ascii("shot by John at home")),
-            // Counts libtiff ignores: two Orientations, one PageNumber, an
-            // SMinSampleValue for two samples of one.
-            (1, 274, V::Short(vec![1, 6])),
+            // Counts libtiff ignores: one PageNumber, an SMinSampleValue
+            // for two samples of one.
             (1, 297, V::Short(vec![1])),
             (1, 340, V::Rational(vec![(1, 1), (2, 1)])),
             // Words after a no-data value's NUL.
             (1, 42113, V::Bytes(2, b"-9999\0secret\0".to_vec())),
             // JPEGTables on LZW data, which libtiff doesn't read.
             (5, 347, V::Bytes(7, b"\xFF\xD8\xFF\xD9".to_vec())),
+            // A review's: a ColorMap of 64 SHORTs on an 8-bit page, where
+            // libtiff reads 3 × 256 ("Incorrect count"); a TransferFunction
+            // of 100.
+            (1, 320, V::Bytes(3, secret.repeat(4))),
+            (1, 301, V::Short(vec![7; 100])),
+            // SubfileType, GrayResponseUnit and GrayResponseCurve, which
+            // libtiff never reads.
+            (1, 255, V::Short(vec![1])),
+            (1, 290, V::Short(vec![2])),
+            (1, 291, V::Short(vec![7; 256])),
+            // An ICC profile in a wider type, past a byte, which libtiff
+            // ignores, a CFAPattern so, which it shows whole, and a
+            // negative SSHORT; one of 40,000 SHORTs, its last past a byte.
+            (
+                1,
+                34675,
+                V::Bytes(3, b"SECRET shot by John at home!".to_vec()),
+            ),
+            (1, 33422, V::Long(vec![0, 1, 0x5345_4352])),
+            (1, 34675, V::Bytes(8, vec![1, 0, 0xFF, 0xFF])),
+            (1, 34675, V::Short([vec![200; 39_999], vec![256]].concat())),
         ] {
             gone(page(compression, vec![(tag, value)]), tag);
         }
+        // A ColorMap of 32-bit samples, which libtiff ignores past 24.
+        let deep = page(
+            8,
+            vec![(258, V::Short(vec![32])), (320, V::Short(vec![7; 3]))],
+        );
+        gone(deep, 320);
+        // And one listed before BitsPerSample, which libtiff ignores too
+        // ("since BitsPerSample tag not found").
+        let mut early = page(1, vec![(320, V::Short(vec![7; 768]))]);
+        let at = read(&early).pages[0].at as usize;
+        let entry = |file: &[u8], tag: u16| {
+            (0..usize::from(u16::from_le_bytes([file[at], file[at + 1]])))
+                .map(|n| at + 2 + 12 * n)
+                .find(|&e| u16::from_le_bytes([file[e], file[e + 1]]) == tag)
+                .unwrap()
+        };
+        let (bits, map) = (entry(&early, 258), entry(&early, 320));
+        let (a, b) = (
+            early[bits..bits + 12].to_vec(),
+            early[map..map + 12].to_vec(),
+        );
+        early[bits..bits + 12].copy_from_slice(&b);
+        early[map..map + 12].copy_from_slice(&a);
+        gone(early, 320);
         // And kept as libtiff reads them: an Orientation typed LONG, an
         // XResolution typed SHORT, a no-data value that's a number, eight
         // LONGs of LercParameters on LERC data, InkNames on a separated
@@ -1792,6 +1992,15 @@ mod tests {
             ),
             (34887, 50674, V::Long(vec![4, 1, 0, 0, 0, 0, 0, 0])),
             (1, 340, V::Rational(vec![(1, 1)])),
+            // A ColorMap of 3 × 256, a TransferFunction of 256 or 3 × 256,
+            // on an 8-bit page.
+            (1, 320, V::Short(vec![7; 768])),
+            (1, 301, V::Short(vec![7; 256])),
+            (1, 301, V::Short(vec![7; 768])),
+            // Bytes in a wider type, each one.
+            (1, 34675, V::Short(vec![1, 2, 3, 255])),
+            (1, 33422, V::Long(vec![0, 1, 1, 2])),
+            (1, 34675, V::Short(vec![200; 40_000])),
         ] {
             stays(page(compression, vec![(tag, value)]), tag);
         }
@@ -1803,6 +2012,94 @@ mod tests {
             ],
         );
         stays(separated, 333);
+    }
+
+    #[test]
+    fn a_layout_tag_libtiff_cant_read_is_refused_not_dropped() {
+        // The review's file: an 8 × 8 page of 32-bit float gray whose
+        // SampleFormat is FLOAT 3.0, or DOUBLE or RATIONAL 3. libtiff
+        // can't load it ("Incompatible type for SampleFormat"), Pillow
+        // reads it as float (0.25 at (1, 0)); its SampleFormat dropped,
+        // both read integers (1048576000). It's refused, as a layout Grape
+        // can't read.
+        let float = |kind: u16, value: Vec<u8>, extra: Vec<(u16, V)>| {
+            let samples: Vec<u8> = (0..64)
+                .flat_map(|i| (i as f32 / 4.0).to_le_bytes())
+                .collect();
+            let mut page = gray(8, 8, 8, vec![B::data(&samples)]);
+            page.tags.retain(|t| t.0 != 258);
+            page.tags
+                .extend([(258, V::Short(vec![32])), (339, V::Bytes(kind, value))]);
+            page.tags.extend(extra);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let refused =
+            |file: &[u8]| matches!(plan(file), Err(Error::Refused(why)) if why == UNREAD_LAYOUT);
+        for (kind, value) in [
+            (11, 3.0_f32.to_le_bytes().to_vec()),
+            (12, 3.0_f64.to_le_bytes().to_vec()),
+            (5, [3_u32.to_le_bytes(), 1_u32.to_le_bytes()].concat()),
+        ] {
+            assert!(refused(&float(kind, value, vec![])), "{kind}");
+        }
+        // As a SHORT, it stays.
+        let (out, found) = strip(&float(3, 3_u16.to_le_bytes().to_vec(), vec![]));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].uint(339, Order::Little), Some(3));
+        // ExtraSamples: none, or as many as the samples, stay; more go
+        // with the file, as libtiff can't load the page.
+        let two = |extra: V| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"xy")]);
+            page.tags.extend([(277, V::Short(vec![2])), (338, extra)]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        for extra in [V::Short(vec![]), V::Short(vec![2]), V::Short(vec![2, 0])] {
+            let (out, found) = strip(&two(extra.clone()));
+            assert!(found.is_empty(), "{extra:?}: {found:?}");
+            assert!(read(&out).pages[0].get(338).is_some());
+        }
+        assert!(refused(&two(V::Short(vec![2, 0, 0]))));
+        // A palette page's ColorMap libtiff can't read, which it reads as
+        // gray: refused; a gray page's goes.
+        let mapped = |photometric: u16, map: V| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags.retain(|t| t.0 != 262);
+            page.tags
+                .extend([(262, V::Short(vec![photometric])), (320, map)]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        assert!(refused(&mapped(3, V::Ascii("SECRET shot by John"))));
+        assert!(refused(&mapped(3, V::Short(vec![7; 64]))));
+        let (_, found) = strip(&mapped(1, V::Ascii("SECRET shot by John")));
+        assert_eq!(found, [Other].into());
+        let (out, found) = strip(&mapped(3, V::Short(vec![7; 768])));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].get(320).unwrap().count, 768);
+        // A review's: an Orientation libtiff can't read ("Incompatible
+        // type", "Incorrect count"), which Pillow turns the picture by
+        // (FLOAT 6.0, the first of two SHORTs) or shows (text): refused.
+        let turned = |value: V| {
+            let mut page = gray(4, 2, 2, vec![B::data(&[0, 32, 64, 96, 128, 160, 192, 224])]);
+            page.tags.push((274, value));
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        for value in [
+            V::Bytes(11, 6.0_f32.to_le_bytes().to_vec()),
+            V::Bytes(12, 6.0_f64.to_le_bytes().to_vec()),
+            V::Rational(vec![(6, 1)]),
+            V::Bytes(10, [6_i32.to_le_bytes(), 1_i32.to_le_bytes()].concat()),
+            V::Short(vec![6, 6]),
+            V::Short(vec![1, 6]),
+            V::Ascii("SECRET_IN_ORIENTATION_51.5N_0.1W"),
+        ] {
+            assert!(refused(&turned(value.clone())), "{value:?}");
+        }
+        // As a SHORT or a LONG, it stays.
+        for value in [V::Short(vec![6]), V::Long(vec![6])] {
+            let (out, found) = strip(&turned(value));
+            assert!(found.is_empty(), "{found:?}");
+            assert_eq!(read(&out).pages[0].uint(274, Order::Little), Some(6));
+        }
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
@@ -1847,6 +2144,27 @@ mod tests {
             let (out, _) = strip(&file);
             assert!(read(&out).pages[0].exif.is_none());
         }
+        // A review's: a profile libtiff ignores ("Incorrect value for ICC
+        // Profile"), SHORTs one past a byte, which goes, isn't one: libtiff
+        // reads the source as Adobe RGB the DCF way, and the Exif goes
+        // back. One it reads stays, and none goes back.
+        let profiled = |icc: Vec<u16>| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags.push((34675, V::Short(icc)));
+            page.exif = Some(vec![(0xA001, V::Short(vec![0xFFFF]))]);
+            page.interop = Some(vec![(1, V::Ascii("R03"))]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let (out, found) = strip(&profiled(vec![256, 1, 2, 3]));
+        assert_eq!(found, [Other].into());
+        let tiff = read(&out);
+        assert!(tiff.pages[0].get(34675).is_none());
+        assert!(dcf_only(tiff.pages[0].exif.as_ref().unwrap()));
+        let (out, found) = strip(&profiled(vec![255, 1, 2, 3]));
+        assert!(found.is_empty(), "{found:?}");
+        let tiff = read(&out);
+        assert_eq!(tiff.pages[0].get(34675).unwrap().count, 4);
+        assert!(tiff.pages[0].exif.is_none());
     }
 
     #[test]
@@ -1857,8 +2175,9 @@ mod tests {
         // where it did. Of more than one value it reads the first ("tag
         // trimmed"), as Pillow reads (65535, 1), when they're in the entry
         // (two in a classic file, four in a BigTIFF); of more, it reads the
-        // entry's offset as the value (130 for values at 130), which isn't
-        // a ColorSpace: such a one says nothing.
+        // first two bytes of the entry's offset field (130 for values at 130
+        // in a little-endian file), which aren't a ColorSpace: such a one
+        // says nothing.
         for (big, space, back) in [
             (false, V::Long(vec![0xFFFF]), false),
             (false, V::Bytes(8, vec![0xFF, 0xFF]), false),
@@ -2218,8 +2537,10 @@ mod tests {
     fn jpeg_tables_are_read_as_libtiff_reads_them_whatever_their_type() {
         // Tables of SOI, an Exif APP1 and EOI, each byte a value of a type
         // libtiff reads JPEGTables in (`TIFFReadDirEntryByteArray`), which
-        // hands libjpeg, and TIFFGetField, the stream: refused, in a JPEG
-        // page or any other; tables of SOI and EOI alone are kept.
+        // hands libjpeg, and TIFFGetField, the stream: refused in a JPEG
+        // page; tables of SOI and EOI alone are kept. Another page's go,
+        // unread, as other fields: the review's LZW page, whose tables
+        // held an APP1, was refused as metadata in its image data.
         let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
         let stream = [&b"\xFF\xD8"[..], app1, b"\xFF\xD9"].concat();
         let clean = b"\xFF\xD8\xFF\xD9";
@@ -2239,11 +2560,15 @@ mod tests {
             (true, 16),
             (true, 17),
         ] {
-            for compression in [7, 1] {
+            let file = with_tables(big, 7, each_as(kind, &stream));
+            assert_eq!(why(&file).as_deref(), Some(IN_DATA), "{kind}");
+            let file = with_tables(big, 7, each_as(kind, clean));
+            assert_eq!(why(&file), None, "{kind}");
+            for compression in [1, 5] {
                 let file = with_tables(big, compression, each_as(kind, &stream));
-                assert_eq!(why(&file).as_deref(), Some(IN_DATA), "{kind} {compression}");
-                let file = with_tables(big, compression, each_as(kind, clean));
-                assert_eq!(why(&file), None, "{kind} {compression}");
+                let (out, found) = strip(&file);
+                assert_eq!(found, [Other].into(), "{kind} {compression}");
+                assert!(read(&out).pages[0].get(347).is_none());
             }
         }
         // Where libtiff can't read them as bytes, what readers take from
@@ -2266,14 +2591,14 @@ mod tests {
             V::Bytes(11, vec![0; 8]),
             V::Bytes(13, vec![0xFF, 0xD8, 0xFF, 0xD9]),
         ] {
-            for compression in [7, 1] {
-                let file = with_tables(false, compression, tables.clone());
-                assert_eq!(
-                    why(&file).as_deref(),
-                    Some(unchecked("JPEG").as_str()),
-                    "{tables:?}"
-                );
-            }
+            let file = with_tables(false, 7, tables.clone());
+            assert_eq!(
+                why(&file).as_deref(),
+                Some(unchecked("JPEG").as_str()),
+                "{tables:?}"
+            );
+            let (out, _) = strip(&with_tables(false, 1, tables.clone()));
+            assert!(read(&out).pages[0].get(347).is_none(), "{tables:?}");
         }
     }
 
@@ -2965,6 +3290,36 @@ mod tests {
             "{read} bytes read of {}",
             file.len()
         );
+    }
+
+    #[test]
+    fn bytes_of_a_wider_type_are_read_up_to_the_files_size() {
+        // 40 pages whose ICC profiles are 30,000 SHORTs at one place, each
+        // a byte: 2.4 MB to read to see so, from a file of 60 KB.
+        let pages = (0..40)
+            .map(|n| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                let icc = if n == 0 { vec![7; 30_000] } else { vec![7] };
+                page.tags.push((34675, V::Short(icc)));
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'I', false, pages).build();
+        let tiff = read(&file);
+        let Value::At { offset, .. } = tiff.pages[0].get(34675).unwrap().value else {
+            panic!("an inline profile")
+        };
+        for page in &tiff.pages[1..] {
+            set_entry(&mut file, page.at, 34675, 30_000, offset);
+        }
+        assert!(file.len() < 100_000);
+        assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
+        // On one page, it's kept.
+        let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+        page.tags.push((34675, V::Short(vec![7; 30_000])));
+        let (out, found) = strip(&Builder::new(b'I', false, vec![page]).build());
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].get(34675).unwrap().count, 30_000);
     }
 
     #[test]
