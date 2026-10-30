@@ -28,9 +28,10 @@
 //!   Grape can't check, whose segments or scans run past the first
 //!   [`MAX_SCAN`] bytes read before that, that's hierarchical, or
 //!   JPEGTables libtiff can't read as bytes; metadata inside WebP data (an
-//!   EXIF or XMP chunk, [`chunks`]), and WebP data whose chunks run on past
-//!   the first [`MAX_CHUNKS`]; ImageJ and OME files, whose layout is in
-//!   their description.
+//!   EXIF or XMP chunk, [`chunks`]), and WebP data Grape can't check: not
+//!   a RIFF container that covers its block, nor a bare bitstream, or
+//!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
+//!   files, whose layout is in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -518,42 +519,107 @@ impl Scan<'_> {
     }
 }
 
-/// What the WebP data at `block` holds ([`Seen`]), as libwebp reads its
-/// RIFF container: an EXIF or XMP chunk is metadata. The chunks are read by
-/// their headers alone, one after the other to the container's end (or
-/// the block's, when that's sooner: what's past either isn't read), at
-/// most [`MAX_CHUNKS`] of them: past them, what follows can't be seen. A
-/// block that isn't a RIFF container (a bare VP8 or VP8L bitstream, which
-/// libwebp reads too) has no chunks, and is clean.
+/// What the WebP data at `block` holds ([`Seen`]), as libwebp reads it.
+/// Grape checks two forms, which libtiff's writer and libwebp's make:
+///
+/// - **A RIFF container** that covers the block, or all of it but a last
+///   byte (a pad): its chunks are read by their headers, one after the
+///   other to its end, at most [`MAX_CHUNKS`] of them; an EXIF or XMP
+///   chunk is metadata, and one that runs past the container's end, or
+///   chunks past [`MAX_CHUNKS`], can't be seen through.
+/// - **A bare VP8 or VP8L bitstream** ([`bare`]), which libwebp reads too,
+///   and which has no chunks.
+///
+/// Anything else can't be seen through: a container that ends before the
+/// block does, with chunks after it, or chunks with no RIFF header, which
+/// libwebp walks too when the first is an ALPH. The headers are read from
+/// one read of the block's first [`MAX_SCAN`] bytes, and one past them
+/// from a read of the [`HOP`] bytes it starts ([`Window`]).
 fn chunks(r: &mut dyn In, block: Block) -> Result<Seen, Error> {
     let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
-    let mut head = [0; 12];
-    if block.len < head.len() as u64 {
-        return Ok(Seen::Clean);
+    let mut window = Window::new(r, block)?;
+    let head = window.at(r, 0, 12)?;
+    if head.len() < 12 || &head[..4] != b"RIFF" || &head[8..] != b"WEBP" {
+        let bare = bare(window.at(r, 0, 10)?);
+        return Ok(if bare { Seen::Clean } else { Seen::Unseen });
     }
-    read_at(r, block.offset, &mut head)?;
-    if &head[..4] != b"RIFF" || &head[8..] != b"WEBP" {
-        return Ok(Seen::Clean);
+    let end = 8 + le(&head[4..8]);
+    if end != block.len && end + 1 != block.len {
+        return Ok(Seen::Unseen);
     }
-    let end = block.len.min(8 + le(&head[4..8]));
     let mut at = 12;
     for _ in 0..MAX_CHUNKS {
-        if at + 8 > end {
+        if at >= end {
             return Ok(Seen::Clean);
         }
-        let mut chunk = [0; 8];
-        read_at(r, block.offset + at, &mut chunk)?;
+        if at + 8 > end {
+            return Ok(Seen::Unseen);
+        }
+        let chunk = window.at(r, at, 8)?;
         if matches!(&chunk[..4], b"EXIF" | b"XMP ") {
             return Ok(Seen::Metadata);
         }
         let size = le(&chunk[4..]);
+        if at + 8 + size > end {
+            return Ok(Seen::Unseen);
+        }
+        // A pad byte after an odd chunk, which the last may leave out.
         at += 8 + size + (size & 1);
     }
-    Ok(if at + 8 > end {
-        Seen::Clean
-    } else {
-        Seen::Unseen
-    })
+    Ok(if at >= end { Seen::Clean } else { Seen::Unseen })
+}
+
+/// Whether `data` starts a bare VP8L bitstream (its signature, 0x2F, and
+/// version 0) or a bare VP8 key frame (its frame tag's key-frame bit clear,
+/// then its start code), as libwebp tells them (`VP8LCheckSignature`,
+/// `VP8GetInfo`).
+fn bare(data: &[u8]) -> bool {
+    let vp8l = data.len() >= 5 && data[0] == 0x2F && data[4] >> 5 == 0;
+    let vp8 = data.len() >= 10 && data[0] & 1 == 0 && data[3..6] == [0x9D, 0x01, 0x2A];
+    vp8l || vp8
+}
+
+/// How much of a block is read at a header past what's been read of it.
+const HOP: u64 = 4 * 1024;
+
+/// What's been read of a block whose headers are walked: its first
+/// [`MAX_SCAN`] bytes, then [`HOP`] bytes from a header past them, so that
+/// headers close together cost one read.
+struct Window {
+    block: Block,
+    /// Where in the block what's read starts.
+    from: u64,
+    bytes: Vec<u8>,
+}
+
+impl Window {
+    /// The first [`MAX_SCAN`] bytes of `block`, read.
+    fn new(r: &mut dyn In, block: Block) -> Result<Window, Error> {
+        let mut bytes = vec![0; block.len.min(MAX_SCAN) as usize];
+        read_at(r, block.offset, &mut bytes)?;
+        Ok(Window {
+            block,
+            from: 0,
+            bytes,
+        })
+    }
+
+    /// The `n` bytes at `at` in the block, or as many as it holds: from
+    /// what's read, or from [`HOP`] bytes read from `at` when they aren't
+    /// all in it.
+    fn at(&mut self, r: &mut dyn In, at: u64, n: usize) -> Result<&[u8], Error> {
+        let len = self.block.len;
+        let want = (n as u64).min(len.saturating_sub(at));
+        let end = self.from + self.bytes.len() as u64;
+        if at < self.from || at + want > end {
+            self.bytes
+                .resize(HOP.max(want).min(len.saturating_sub(at)) as usize, 0);
+            read_at(r, self.block.offset + at, &mut self.bytes)?;
+            self.from = at;
+        }
+        let start = (at - self.from) as usize;
+        Ok(&self.bytes[start..start + want as usize])
+    }
 }
 
 /// The first `max` bytes of the JPEGTables `entry` holds as libtiff 4.5
@@ -1672,19 +1738,37 @@ mod tests {
             let want = metadata.then_some(IN_DATA.to_string());
             assert_eq!(refused(&file), want, "{chunks:?}");
         }
-        // A bare bitstream, which libwebp reads too, has no chunks; a
-        // chunk past the container's end, or past the strip's, isn't read.
+        // A bare bitstream, which libwebp reads too, has no chunks: VP8L's
+        // (its signature) or a VP8 key frame's (its start code).
         assert_eq!(refused(&coded_page(50001, vp8l[8..].to_vec())), None);
+        let key_frame = [0x50, 0x02, 0, 0x9D, 0x01, 0x2A, 8, 0, 8, 0, 0x55, 0x55];
+        assert_eq!(refused(&coded_page(50001, key_frame.to_vec())), None);
+        // One pad byte after the container is fine.
+        let mut padded = webp(&[vp8x.clone(), vp8l.clone()]);
+        padded.push(0);
+        assert_eq!(refused(&coded_page(50001, padded)), None);
+        // Anything else can't be checked: the review's container whose
+        // size covers only its VP8L, its EXIF and XMP after it in the
+        // strip; its ALPH, EXIF and VP8L chunks with no RIFF header, which
+        // libwebp walks too; a chunk past the container's end; two bytes
+        // past it; a JPEG stream; a VP8 frame that isn't a key frame.
+        let unseen = "has WebP data Grape can't check for metadata yet.";
         let mut short = webp(std::slice::from_ref(&vp8l));
-        short.extend(&exif);
-        assert_eq!(refused(&coded_page(50001, short)), None);
+        short.extend([exif.clone(), xmp.clone()].concat());
+        let headless = [chunk(b"ALPH", &[0; 9]), exif.clone(), vp8l.clone()].concat();
         let mut cut = webp(&[vp8l.clone(), exif.clone()]);
         cut[16..20].copy_from_slice(&1_000u32.to_le_bytes());
-        assert_eq!(refused(&coded_page(50001, cut)), None);
+        let mut two = webp(std::slice::from_ref(&vp8l));
+        two.extend([0, 0]);
+        let mut inter = key_frame;
+        inter[0] |= 1;
+        for data in [short, headless, cut, two, jpeg(b""), inter.to_vec()] {
+            let file = coded_page(50001, data.clone());
+            assert_eq!(refused(&file).as_deref(), Some(unseen), "{data:?}");
+        }
         // 64 chunks, read by their headers, then an EXIF: past what's read.
         let many = [vec![chunk(b"ABCD", b"x"); 64], vec![exif.clone()]].concat();
         let file = coded_page(50001, webp(&many));
-        let unseen = "has WebP data Grape can't check for metadata yet.";
         assert_eq!(refused(&file).as_deref(), Some(unseen));
         let fewer = [vec![chunk(b"ABCD", b"x"); 63], vec![exif]].concat();
         let file = coded_page(50001, webp(&fewer));
@@ -1699,11 +1783,16 @@ mod tests {
         // A strip a WebP page and a JPEG page list: a JPEG with an Exif
         // APP1, read first as WebP; and a WebP with an EXIF chunk, read
         // first as JPEG (not a stream it knows). Each block was read once,
-        // as the first IFD's kind, and passed the other's check.
+        // as the first IFD's kind, and passed the other's check. (A JPEG
+        // stream isn't WebP data Grape can check, now, either.)
         let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
         let vp8l = chunk(b"VP8L", &[0x2F, 7, 0xC0, 0x01, 0, 0x55, 0x55, 0x55]);
         let exif = chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0");
-        for (data, first, second) in [(jpeg(app1), 50001, 7), (webp(&[vp8l, exif]), 7, 50001)] {
+        let unseen = unchecked("WebP");
+        for (data, first, second, want) in [
+            (jpeg(app1), 50001, 7, unseen.as_str()),
+            (webp(&[vp8l, exif]), 7, 50001, IN_DATA),
+        ] {
             let page = |compression: u16| {
                 let mut page = gray(8, 8, 8, vec![B::Data(data.clone())]);
                 page.tags.push((259, V::Short(vec![compression])));
@@ -1716,7 +1805,7 @@ mod tests {
             let Err(Error::Refused(why)) = plan(&file) else {
                 panic!("{first} then {second} not refused")
             };
-            assert_eq!(why, IN_DATA, "{first} then {second}");
+            assert_eq!(why, want, "{first} then {second}");
         }
     }
 
@@ -1993,24 +2082,59 @@ mod tests {
         assert_eq!(segments(b"\xFF\xD8\xFF\xDA\0\x02", false), Seen::Clean);
     }
 
-    /// A source that counts the bytes read from it.
+    /// A source that counts the bytes read from it, and its reads and
+    /// seeks: what reach the file.
+    #[derive(Default)]
     struct Tally<'f> {
         file: Cursor<&'f [u8]>,
         read: u64,
+        calls: u64,
     }
 
     impl std::io::Read for Tally<'_> {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             let n = self.file.read(buf)?;
             self.read += n as u64;
+            self.calls += 1;
             Ok(n)
         }
     }
 
     impl std::io::Seek for Tally<'_> {
         fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+            self.calls += 1;
             self.file.seek(pos)
         }
+    }
+
+    #[test]
+    fn a_webp_blocks_chunks_are_read_from_one_read_of_it() {
+        // 2,000 WebP strips of 64 chunks each: each chunk's header was read
+        // alone, a seek and a read of the file each (1.32 million of each
+        // at 20,000 strips); a block's first 64 KiB are read once now, and
+        // its chunks walked in them.
+        let vp8l = chunk(b"VP8L", &[0x2F, 7, 0xC0, 0x01, 0, 0x55, 0x55, 0x55]);
+        let strip = webp(&[vec![chunk(b"ABCD", b"x"); 63], vec![vp8l]].concat());
+        let mut page = gray(
+            8,
+            2_000,
+            1,
+            (0..2_000).map(|_| B::Data(strip.clone())).collect(),
+        );
+        page.tags.push((259, V::Short(vec![50001])));
+        let file = Builder::new(b'I', false, vec![page]).build();
+        let mut r = std::io::BufReader::with_capacity(
+            64 * 1024,
+            Tally {
+                file: Cursor::new(&file),
+                ..Tally::default()
+            },
+        );
+        Plan::new(&mut r, file.len() as u64).unwrap();
+        // A seek to each block and a read of it (and the reader's own
+        // asks for where it is), and the IFD's.
+        let calls = r.get_ref().calls;
+        assert!(calls < 4 * 2_000 + 1_000, "{calls} reads and seeks");
     }
 
     #[test]
@@ -2053,7 +2177,7 @@ mod tests {
             64 * 1024,
             Tally {
                 file: Cursor::new(&file),
-                read: 0,
+                ..Tally::default()
             },
         );
         let plan = Plan::new(&mut r, file.len() as u64).unwrap();
@@ -2101,7 +2225,7 @@ mod tests {
             64 * 1024,
             Tally {
                 file: Cursor::new(file),
-                read: 0,
+                ..Tally::default()
             },
         );
         let plan = Plan::new(&mut r, file.len() as u64).unwrap();
@@ -2196,7 +2320,7 @@ mod tests {
                 64 * 1024,
                 Tally {
                     file: Cursor::new(&file),
-                    read: 0,
+                    ..Tally::default()
                 },
             );
             let plan = Plan::new(&mut r, file.len() as u64).unwrap();

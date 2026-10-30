@@ -1173,6 +1173,27 @@ fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
         err.user_message,
         "tagged.tif has metadata inside its image data, which Grape can't remove yet."
     );
+    // The review's other two: a container whose size covers only its
+    // VP8L, its EXIF and XMP chunks after it in the strip; and its ALPH,
+    // EXIF and VP8L chunks with no RIFF header, which libtiff decodes as
+    // libwebp walks them. Both were published with their Exif.
+    let mut short = riff(std::slice::from_ref(&vp8l));
+    short.extend(riff_chunk(b"EXIF", &exif(1)[10..]));
+    short.extend(riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"));
+    let headless = [
+        riff_chunk(b"ALPH", &[0; 9]),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        vp8l.clone(),
+    ]
+    .concat();
+    for (name, data) in [("short.tif", short), ("headless.tif", headless)] {
+        let err = strip(&dir, name, &tiff(50001, &data)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            format!("{name} has WebP data Grape can't check for metadata yet.")
+        );
+    }
     // Without them, it's stripped, the strip byte for byte.
     let plain = riff(&[vp8x(0), vp8l]);
     let outcome = strip(&dir, "plain.tif", &tiff(50001, &plain)).unwrap();
@@ -1282,9 +1303,22 @@ fn remove_metadata_reads_a_strip_a_webp_and_a_jpeg_page_share_as_both() {
         entries
     };
     let dir = TestDir::new("strip-tiff-shared-kinds");
-    for (name, data, first, second) in [
-        ("webp-then-jpeg.tif", &jpeg, 50001, 7),
-        ("jpeg-then-webp.tif", &webp, 7, 50001),
+    // (A JPEG stream isn't WebP data Grape can check, now, either.)
+    for (name, data, first, second, why) in [
+        (
+            "webp-then-jpeg.tif",
+            &jpeg,
+            50001,
+            7,
+            "has WebP data Grape can't check for metadata yet.",
+        ),
+        (
+            "jpeg-then-webp.tif",
+            &webp,
+            7,
+            50001,
+            "has metadata inside its image data, which Grape can't remove yet.",
+        ),
     ] {
         // The second page lists the first's strip, at 8.
         let mut shared = tags(second);
@@ -1297,10 +1331,7 @@ fn remove_metadata_reads_a_strip_a_webp_and_a_jpeg_page_share_as_both() {
             "{name}: {}",
             err.detail
         );
-        assert_eq!(
-            err.user_message,
-            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
-        );
+        assert_eq!(err.user_message, format!("{name} {why}"));
     }
 }
 
