@@ -12,7 +12,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use common::{plan_one, TestDir};
 use grape_core::{CompressPreset, Job, Operation, ToolKey, ToolParams};
-use grape_engines::{run_job, EngineCtx, GrapeError, JobOutcome};
+use grape_engines::{run_job, EngineCtx, ErrorKind, GrapeError, JobOutcome};
 
 /// The bytes held now, and the most held since the last reset.
 static HELD: AtomicUsize = AtomicUsize::new(0);
@@ -376,11 +376,70 @@ fn pages(n: u32) -> Vec<u8> {
 }
 
 #[test]
-fn compress_on_a_tiff_of_65536_pages_holds_128_mib_at_most() {
-    // About 1.9 KB a page: its entries, fields and plan, and the writer's.
+fn compress_on_a_tiff_of_65536_pages_holds_112_mib_at_most() {
+    // About 1.7 KB a page: its entries, fields and plan, and the writer's
+    // (1.9 KB, 119.6 MiB, while the writer grew each IFD's entries by
+    // doubling and looked up every value out of line in a map).
     let _turn = turn();
     let dir = TestDir::new("tiff-heap-compress-pages");
     let (_, job) = plan_one(&dir, "pages.tif", &pages(65_536), compress());
     let mib = peak(&job) as f64 / f64::from(1 << 20);
-    assert!(mib < 128.0, "{mib:.2} MiB");
+    assert!(mib < 112.0, "{mib:.2} MiB");
+}
+
+/// A classic TIFF of `n` gray 8 × 8 pages, a chain, one 64-byte strip
+/// each, and `extra` RATIONAL tags each (from 1000 on), every one out of
+/// line after its IFD.
+fn rationals(n: u32, extra: u32) -> Vec<u8> {
+    let ifd = 2 + 12 * (7 + extra) + 4;
+    let page = ifd + 8 * extra + 64;
+    let mut file = b"II*\0\x08\0\0\0".to_vec();
+    for k in 0..n {
+        let at = 8 + k * page;
+        let values = at + ifd;
+        let strip = values + 8 * extra;
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 4, 1, 8),
+            (257, 4, 1, 8),
+            (258, 3, 1, 8),
+            (262, 3, 1, 1),
+            (273, 4, 1, strip),
+            (278, 4, 1, 8),
+            (279, 4, 1, 64),
+        ];
+        let tag = |i: u32| u16::try_from(1_000 + i).unwrap();
+        entries.extend((0..extra).map(|i| (tag(i), 5, 1, values + 8 * i)));
+        file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            file.extend(tag.to_le_bytes());
+            file.extend(kind.to_le_bytes());
+            file.extend(count.to_le_bytes());
+            file.extend(value.to_le_bytes());
+        }
+        let next = if k + 1 < n { at + page } else { 0 };
+        file.extend(next.to_le_bytes());
+        for i in 0..extra {
+            file.extend((i + 1).to_le_bytes());
+            file.extend(7u32.to_le_bytes());
+        }
+        file.extend((0..64).map(|i| (i * 3 + k) as u8));
+    }
+    file
+}
+
+#[test]
+fn compress_on_a_tiff_of_a_million_entries_holds_about_100_bytes_an_entry() {
+    // 256 pages of 4,096 entries, the cap, 1,046,784 of them RATIONALs
+    // out of line, which Compress copies as they are, so it ends NoChange:
+    // each entry is held as a field to write, the writer's entry and where
+    // its value goes. Looking up every value out of line in a map, and
+    // growing each IFD's entries by doubling, it held 234 MiB.
+    let _turn = turn();
+    let dir = TestDir::new("tiff-heap-entries");
+    let (_, job) = plan_one(&dir, "entries.tif", &rationals(256, 4_089), compress());
+    let (peak, result) = peak_of(&job);
+    let err = result.unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    let mib = peak as f64 / f64::from(1 << 20);
+    assert!(mib < 112.0, "{mib:.2} MiB");
 }

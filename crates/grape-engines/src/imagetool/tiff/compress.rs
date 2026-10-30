@@ -14,7 +14,9 @@
 //! - **Copied as they are**, with their tags ([`How::Copy`]): JPEG, fax,
 //!   JBIG, JPEG 2000, LZMA, ZSTD, WebP and other codecs; FillOrder 2
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
-//!   out wrong); layouts that can't be sized; an IFD with an empty block
+//!   out wrong); layouts that can't be sized; blocks listed as strips
+//!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
+//!   TileLength, or as tiles it reads as strips; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
 //!   can't be decoded (old-style LZW, data that's broken or short), whose
@@ -531,7 +533,7 @@ fn added(
 /// writer makes or that would point at nothing, its Exif and GPS IFDs,
 /// and its SubIFDs.
 fn dir(ifd: Ifd, log: &mut Log) -> Result<Dir, Error> {
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(ifd.entries.len());
     for entry in &ifd.entries {
         match entry.tag {
             // Made again by the writer, or below.
@@ -573,7 +575,7 @@ fn meta_dir(meta: &Meta, log: &mut Log) -> Result<Option<Dir>, Error> {
         ));
         return Ok(None);
     }
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(meta.entries.len());
     for entry in &meta.entries {
         if entry.tag != 40965 {
             fields.extend(field(entry, log)?);
@@ -1026,16 +1028,9 @@ impl<'a> Recoder<'a> {
         Ok(())
     }
 
-    /// Takes back what was written of `image`, IFD `n`, from `start` on,
-    /// for `why`: the places its blocks went are forgotten.
-    fn take_back(
-        &mut self,
-        out: &mut Sink,
-        image: &Image,
-        start: u64,
-        n: usize,
-        why: &str,
-    ) -> Result<(), Error> {
+    /// Takes back what was written of `image` from `start` on: the places
+    /// its blocks went are forgotten.
+    fn take_back(&mut self, out: &mut Sink, image: &Image, start: u64) -> Result<(), Error> {
         out.rewind(start)?;
         self.pending.retain(|(block, ..)| block.offset < start);
         self.pending_bytes = self.pending.iter().map(|(block, ..)| block.len).sum();
@@ -1050,7 +1045,6 @@ impl<'a> Recoder<'a> {
         for key in self.more_now.drain(..) {
             self.more.remove(&key);
         }
-        self.log.add(format!("IFD {n} copied as it is: {why}"));
         Ok(())
     }
 }
@@ -1085,10 +1079,24 @@ impl Blocks for Recoder<'_> {
                         self.read_back(out)?;
                         written
                     }
-                    // Copied, held to the most too.
+                    // Copied, held to the most too; the log says why, or
+                    // that the copy passed the most as well.
                     Err(why) => {
-                        self.take_back(out, image, start, n, &why)?;
-                        self.copy(r, out, image)?
+                        self.take_back(out, image, start)?;
+                        let copied = self.copy(r, out, image);
+                        let line = match (&copied, &self.stop) {
+                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => format!(
+                                "IFD {n} took the output past 95 % of the source recoded, \
+                                 and copied as it is too"
+                            ),
+                            (Err(_), Some(Stopped::NotSmaller)) => format!(
+                                "IFD {n} took the output past 95 % of the source copied \
+                                 as it is, as it was to be: {why}"
+                            ),
+                            _ => format!("IFD {n} copied as it is: {why}"),
+                        };
+                        self.log.add(line);
+                        copied?
                     }
                 }
             }
@@ -1604,6 +1612,30 @@ mod tests {
                 wrote.log
             );
             assert_eq!(wrote.len, out.len() as u64);
+            // With the most a byte short of the copy, the log says the copy
+            // passed it, and why the page was to be copied.
+            let most = b.pages[0].blocks.iter().map(|b| b.offset + b.len).max();
+            let stopped = written(
+                &file,
+                &plan,
+                most.unwrap() - 1,
+                &CancelToken::new(),
+                &mut |_| {},
+            );
+            let Err(Halt {
+                why: Stopped::NotSmaller,
+                log,
+            }) = stopped
+            else {
+                panic!("{stopped:?}")
+            };
+            let log = log.to_string();
+            let past =
+                "IFD 0 took the output past 95 % of the source copied as it is, as it was to be: ";
+            assert!(
+                log.contains(past) && !log.contains("IFD 0 copied as it is"),
+                "{log}"
+            );
         }
     }
 
@@ -1942,17 +1974,22 @@ mod tests {
             log.contains(&format!("IFD 1 copied as it is: {PASSED}")),
             "{log}"
         );
-        // A byte less, and the copy doesn't fit either.
+        // A byte less, and the copy doesn't fit either, which the log says
+        // rather than that it was copied.
         let stopped = written(&file, &plan, most - 1, &CancelToken::new(), &mut |_| {});
+        let Err(Halt {
+            why: Stopped::NotSmaller,
+            log,
+        }) = stopped
+        else {
+            panic!("{stopped:?}")
+        };
+        let log = log.to_string();
         assert!(
-            matches!(
-                stopped,
-                Err(Halt {
-                    why: Stopped::NotSmaller,
-                    ..
-                })
-            ),
-            "{stopped:?}"
+            log.contains(
+                "IFD 1 took the output past 95 % of the source recoded, and copied as it is too"
+            ) && !log.contains("IFD 1 copied as it is"),
+            "{log}"
         );
     }
 

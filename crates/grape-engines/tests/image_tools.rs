@@ -565,6 +565,157 @@ fn both_tiff_tools_refuse_counts_libtiff_reads_for_other_strips() {
     }
 }
 
+/// The bytes of `n`, little-endian, `size` of them.
+fn le(n: u64, size: usize) -> Vec<u8> {
+    n.to_le_bytes()[..size].to_vec()
+}
+
+/// An entry for [`typed_tiff`]: its tag, type and value.
+type Change = (u16, u16, Vec<u8>);
+
+/// [`listed_tiff`]'s gray 300 × 100 picture, its ten strips 3,000 bytes
+/// apart counted `counts`, with no RowsPerStrip, classic or BigTIFF (the
+/// picture at 16 there), with `changes` to its entries: each
+/// `(tag, type, value)` takes the place of the entry for its tag, or is
+/// added; a value its entry can't hold goes after the IFD.
+fn typed_tiff(big: bool, counts: &[u64; 10], changes: &[Change]) -> Vec<u8> {
+    let (header, word, number) = if big { (16, 8, 16) } else { (8, 4, 4) };
+    let mut entries: Vec<Change> = vec![
+        (256, 4, le(300, 4)),
+        (257, 4, le(100, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+    ];
+    for (tag, kind, value) in changes {
+        entries.retain(|e| e.0 != *tag);
+        entries.push((*tag, *kind, value.clone()));
+    }
+    let offsets = (0..10).flat_map(|i| le(header + 3_000 * i, word)).collect();
+    entries.push((273, number, offsets));
+    entries.push((
+        279,
+        number,
+        counts.iter().flat_map(|&c| le(c, word)).collect(),
+    ));
+    entries.sort_by_key(|e| e.0);
+    let size = |kind: u16| match kind {
+        1 | 2 | 6 | 7 => 1,
+        3 | 8 => 2,
+        4 | 9 | 13 => 4,
+        _ => 8,
+    };
+    let ifd = header + 30_000;
+    let (count_len, entry_len) = if big { (8, 20) } else { (2, 12) };
+    let mut value_at = ifd + count_len + entry_len * entries.len() as u64 + word as u64;
+    let mut file = if big {
+        [&b"II+\0\x08\0\0\0"[..], &le(ifd, 8)].concat()
+    } else {
+        [&b"II*\0"[..], &le(ifd, 4)].concat()
+    };
+    file.extend((0..30_000).map(|i| (i % 251) as u8));
+    file.extend(le(entries.len() as u64, count_len as usize));
+    let mut values: Vec<u8> = Vec::new();
+    for (tag, kind, value) in &entries {
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(le(value.len() as u64 / size(*kind), word));
+        if value.len() <= word {
+            let mut field = value.clone();
+            field.resize(word, 0);
+            file.extend(field);
+        } else {
+            file.extend(le(value_at, word));
+            value_at += value.len() as u64;
+            values.extend(value);
+        }
+    }
+    file.extend(le(0, word));
+    file.extend(values);
+    file
+}
+
+#[test]
+fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
+    // The round-2 review's file: ten strips listed, the fourth counted 10,
+    // where libtiff with no RowsPerStrip reads one, short of the picture,
+    // and reads the whole picture from it. Its layout tags in types
+    // libtiff reads too (signed but not negative, or a LONG8 a classic
+    // file holds out of line), or with an ImageDepth, which strips don't
+    // count, it reads the same: refused, as the plain file is. So is one
+    // whose layout libtiff can't read, an ImageWidth typed IFD, as which
+    // strips it would read can't be told.
+    let mut short = [3_000; 10];
+    short[3] = 10;
+    let cases: [(&str, bool, Vec<Change>); 10] = [
+        ("plain.tif", false, vec![]),
+        ("depth.tif", false, vec![(32997, 4, le(1, 4))]),
+        ("slong-length.tif", false, vec![(257, 9, le(100, 4))]),
+        ("sshort-width.tif", false, vec![(256, 8, le(300, 2))]),
+        ("long8-length.tif", false, vec![(257, 16, le(100, 8))]),
+        ("sshort-rows.tif", false, vec![(278, 8, le(100, 2))]),
+        ("sbyte-rows.tif", false, vec![(278, 6, le(100, 1))]),
+        ("sshort-planar.tif", false, vec![(284, 8, le(1, 2))]),
+        ("slong8-planar.tif", true, vec![(284, 17, le(1, 8))]),
+        ("ifd-width.tif", false, vec![(256, 13, le(300, 4))]),
+    ];
+    let dir = TestDir::new("tiff-typed");
+    for (name, big, changes) in cases {
+        let bytes = typed_tiff(big, &short, &changes);
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+    // Ten whole strips of 10 rows, RowsPerStrip a SSHORT: libtiff reads
+    // the ten listed, and so both tools take them.
+    let bytes = typed_tiff(false, &[3_000; 10], &[(278, 8, le(10, 2))]);
+    strip(&dir, "rows.tif", &bytes).unwrap();
+    let op = compress_op(grape_core::CompressPreset::High);
+    run(&dir, "rows.tif", &bytes, op).unwrap();
+}
+
+#[test]
+fn both_tiff_tools_size_rgb_by_the_bits_of_its_samples_alone() {
+    // RGB, 100 × 100 in ten strips of 3,000 bytes, its BitsPerSample of
+    // four values, as some writers leave it: libtiff reads the first three
+    // (SamplesPerPixel's), and so does Grape.
+    let rgb = [
+        (256, 4, le(100, 4)),
+        (
+            258,
+            3,
+            [8u16; 4].iter().flat_map(|b| b.to_le_bytes()).collect(),
+        ),
+        (262, 3, le(2, 2)),
+        (277, 3, le(3, 2)),
+        (278, 3, le(10, 2)),
+    ];
+    let bytes = typed_tiff(false, &[3_000; 10], &rgb);
+    let dir = TestDir::new("tiff-four-bits");
+    strip(&dir, "rgb.tif", &bytes).unwrap();
+    let op = compress_op(grape_core::CompressPreset::High);
+    let outcome = run(&dir, "rgb.tif", &bytes, op).unwrap();
+    assert!(
+        matches!(outcome.notes[..], [Note::Compressed { .. }]),
+        "{outcome:?}"
+    );
+}
+
 #[test]
 fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
     // A gray 300 × 100 page of one strip counted 0, which libtiff works
@@ -1420,6 +1571,78 @@ fn compress_leaves_a_tiff_it_cant_shrink_alone_and_refuses_what_it_cant_rewrite(
     }
 }
 
+/// A classic gray 64 × 64 TIFF, uncompressed, its picture at 8 as four
+/// 32 × 32 tiles of 1,024 bytes, listed under `tags` (StripOffsets and
+/// StripByteCounts, or TileOffsets and TileByteCounts), with RowsPerStrip
+/// 16 and `layout`'s entries besides.
+fn four_blocks(tags: (u16, u16), layout: &[(u16, u16, u32)]) -> Vec<u8> {
+    let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+        (256, 4, 1, 64),
+        (257, 4, 1, 64),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (278, 3, 1, 16),
+        (tags.0, 4, 4, 0),
+        (tags.1, 4, 4, 0),
+    ];
+    entries.extend(
+        layout
+            .iter()
+            .map(|&(tag, kind, value)| (tag, kind, 1, value)),
+    );
+    entries.sort_by_key(|e| e.0);
+    let ifd = 8 + 4_096;
+    let arrays = ifd + 2 + 12 * u32::try_from(entries.len()).unwrap() + 4;
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..4_096u32).map(|i| (i / 1_024 * 40 + i % 32 + i % 1_024 / 32) as u8));
+    file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        let value = match tag {
+            _ if tag == tags.0 => arrays,
+            _ if tag == tags.1 => arrays + 16,
+            _ => value,
+        };
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    file.extend((0..4u32).flat_map(|i| (8 + 1_024 * i).to_le_bytes()));
+    file.extend((0..4).flat_map(|_| 1_024u32.to_le_bytes()));
+    file
+}
+
+#[test]
+fn compress_copies_a_tiff_page_whose_blocks_libtiff_reads_as_the_other_kind() {
+    // libtiff tells tiles by a TileWidth or TileLength, whichever tags
+    // list the blocks: four blocks listed as strips with tile sizes are
+    // its four tiles, which a recode as strips of 16 rows would garble;
+    // four listed as tiles without them are its four strips. Both are
+    // copied as they are, and so nothing is left to recode.
+    let tiles = [(322, 3, 32), (323, 3, 32)];
+    let dir = TestDir::new("compress-tiff-kind");
+    for (name, bytes, why) in [
+        (
+            "strips.tif",
+            four_blocks((273, 279), &tiles),
+            "IFD 0 copied as it is: it lists strips where libtiff reads tiles",
+        ),
+        (
+            "tiles.tif",
+            four_blocks((324, 325), &[]),
+            "IFD 0 copied as it is: it lists tiles where libtiff reads strips",
+        ),
+    ] {
+        let err = compress(&dir, name, &bytes, grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{name}: {}", err.detail);
+        assert!(err.detail.contains(why), "{name}: {}", err.detail);
+        // Remove Metadata copies them as they are.
+        strip(&dir, name, &bytes).unwrap();
+    }
+}
+
 #[test]
 fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
     use tiff::encoder::{colortype, TiffEncoder};
@@ -1452,6 +1675,44 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
             && err
                 .detail
                 .contains("IFD 0 copied as it is: its compression is 7"),
+        "{}",
+        err.detail
+    );
+}
+
+#[test]
+fn compress_says_a_tiff_page_passed_95_percent_recoded_and_copied() {
+    use tiff::encoder::{colortype, Compression, DeflateLevel, TiffEncoder};
+    // One page of noise, Deflate already: recoded, it passes 95 % of the
+    // source, and copied as it is too, so nothing is made of it.
+    let mut x: u32 = 0x1234_5678;
+    let noise: Vec<u8> = (0..128 * 128)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 24) as u8
+        })
+        .collect();
+    let mut out = Cursor::new(Vec::new());
+    TiffEncoder::new(&mut out)
+        .unwrap()
+        .with_compression(Compression::Deflate(DeflateLevel::Best))
+        .write_image::<colortype::Gray8>(128, 128, &noise)
+        .unwrap();
+    let dir = TestDir::new("compress-tiff-both");
+    let err = compress(
+        &dir,
+        "noise.tif",
+        &out.into_inner(),
+        grape_core::CompressPreset::High,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert!(
+        err.detail.contains(
+            "bytes; IFD 0 took the output past 95 % of the source recoded, and copied as it is too"
+        ) && !err.detail.contains("copied as it is:"),
         "{}",
         err.detail
     );
