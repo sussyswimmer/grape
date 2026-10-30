@@ -44,8 +44,7 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, number, read_value, twice, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT,
-    TWICE,
+    integer, read_value, twice, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, TWICE,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -978,12 +977,20 @@ impl Walk<'_> {
     }
 
     /// Whether the Exif IFD `exif` says the picture is Adobe RGB the DCF
-    /// way: ColorSpace uncalibrated, and Interop `R03`.
+    /// way: ColorSpace uncalibrated, and Interop `R03`. ColorSpace is read
+    /// as libtiff 4.5 reads an Exif IFD's (`TIFFReadCustomDirectory`), and
+    /// Grape's Exif walker for JPEG: a SHORT of one value, another type
+    /// ignored ("Wrong data type"); its entries all agree, or the file was
+    /// refused ([`twice_kept`]).
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
-        let uncalibrated = match exif.entries.iter().find(|e| e.tag == 0xA001) {
-            Some(space) => number(self.r, space, self.order, SHORT)? == Some(0xFFFF),
-            None => false,
-        };
+        let uncalibrated = exif
+            .entries
+            .iter()
+            .find(|e| e.tag == 0xA001)
+            .is_some_and(|e| {
+                matches!((e.kind, e.count, e.value), (3, 1, Value::Inline { bytes, .. })
+                if self.order.uint(&bytes[..2]) == 0xFFFF)
+            });
         let Some(index) = exif
             .interop
             .as_deref()
@@ -1507,6 +1514,21 @@ mod tests {
         ] {
             let (out, _) = strip(&file);
             assert!(read(&out).pages[0].exif.is_none());
+        }
+    }
+
+    #[test]
+    fn the_exif_color_space_is_read_as_libtiff_reads_it() {
+        // libtiff reads an Exif IFD's ColorSpace only as a SHORT ("Wrong
+        // data type 4 for \"ColorSpace\"; tag ignored"), as Grape's Exif
+        // walker reads it for JPEG: one typed LONG or SSHORT says nothing,
+        // and the DCF Exif doesn't go back, where it did.
+        for space in [V::Long(vec![0xFFFF]), V::Bytes(8, vec![0xFF, 0xFF])] {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.exif = Some(vec![(0xA001, space.clone())]);
+            page.interop = Some(vec![(1, V::Ascii("R03"))]);
+            let (out, _) = strip(&Builder::new(b'I', false, vec![page]).build());
+            assert!(read(&out).pages[0].exif.is_none(), "{space:?}");
         }
     }
 
