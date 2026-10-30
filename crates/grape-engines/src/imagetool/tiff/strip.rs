@@ -18,8 +18,8 @@
 //!   unsaid: a value that entries share is read once, and at most
 //!   [`JUDGE_BUDGET`] in all, past which a value is reported unread.
 //! - **Written back:** the DCF Adobe RGB Exif (ColorSpace uncalibrated,
-//!   Interop `R03`), when that's how an IFD with no ICC profile said its
-//!   color: each such IFD gets its own, even when they shared one.
+//!   Interop `R03`), when that's how an IFD with no ICC profile kept said
+//!   its color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG, old-style JPEG and a Compression libtiff can't read
 //!   (both tools); data of a Compression whose stream may hold metadata
 //!   that Grape doesn't read ([`coded`]: JPEG 2000, JPEG XL, JPEG XR, PNG,
@@ -1115,7 +1115,9 @@ impl Walk<'_> {
             if let Some(interop) = &exif.interop {
                 self.meta(interop, exif::Ifd::Interop)?;
             }
-            if ifd.get(34675).is_none() && self.adobe_rgb(exif)? {
+            // An ICC profile libtiff ignores goes, and isn't one.
+            let icc = fields.iter().any(|field| field.tag == 34675);
+            if !icc && self.adobe_rgb(exif)? {
                 children.push((34665, dcf(self.order)));
             }
         }
@@ -2139,6 +2141,27 @@ mod tests {
             let (out, _) = strip(&file);
             assert!(read(&out).pages[0].exif.is_none());
         }
+        // A review's: a profile libtiff ignores ("Incorrect value for ICC
+        // Profile"), SHORTs one past a byte, which goes, isn't one: libtiff
+        // reads the source as Adobe RGB the DCF way, and the Exif goes
+        // back. One it reads stays, and none goes back.
+        let profiled = |icc: Vec<u16>| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags.push((34675, V::Short(icc)));
+            page.exif = Some(vec![(0xA001, V::Short(vec![0xFFFF]))]);
+            page.interop = Some(vec![(1, V::Ascii("R03"))]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let (out, found) = strip(&profiled(vec![256, 1, 2, 3]));
+        assert_eq!(found, [Other].into());
+        let tiff = read(&out);
+        assert!(tiff.pages[0].get(34675).is_none());
+        assert!(dcf_only(tiff.pages[0].exif.as_ref().unwrap()));
+        let (out, found) = strip(&profiled(vec![255, 1, 2, 3]));
+        assert!(found.is_empty(), "{found:?}");
+        let tiff = read(&out);
+        assert_eq!(tiff.pages[0].get(34675).unwrap().count, 4);
+        assert!(tiff.pages[0].exif.is_none());
     }
 
     #[test]
