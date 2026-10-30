@@ -1256,6 +1256,36 @@ fn remove_metadata_reads_a_strip_a_webp_and_a_jpeg_page_share_as_both() {
 }
 
 #[test]
+fn remove_metadata_keeps_the_tags_a_tiffs_codec_needs() {
+    // The review's files: LERC strips with Deflate or ZSTD inside
+    // (`tiffcp -c lerc:s1` or `lerc:s2`), which libtiff decodes as
+    // LercParameters (50674) says. It went, reported as other fields, and
+    // the output couldn't be decoded ("lerc_getBlobInfo() failed").
+    let dir = TestDir::new("strip-tiff-lerc");
+    for (name, inside) in [("deflate.tif", 1), ("zstd.tif", 2)] {
+        let params = [le(4, 4), le(inside, 4)].concat();
+        let entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(34887, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (50674, 4, params.clone()),
+        ];
+        let outcome = strip(&dir, name, &one_strip(false, &[9; 40], entries)).unwrap();
+        assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])], "{name}");
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        // Its entry: LONG, 2, then where its 8 bytes are.
+        let entry = [&50674_u16.to_le_bytes()[..], &le(4, 2), &le(2, 4)].concat();
+        let at = out.windows(8).position(|w| w == entry).unwrap();
+        let value =
+            usize::try_from(u32::from_le_bytes(out[at + 8..at + 12].try_into().unwrap())).unwrap();
+        assert_eq!(out[value..value + 8], params, "{name}");
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

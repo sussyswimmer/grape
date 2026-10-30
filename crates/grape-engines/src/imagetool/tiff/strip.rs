@@ -91,7 +91,10 @@ fn unread(n: u64) -> Option<&'static str> {
 const DESCRIBED: &str = "keeps its layout in its description, so Remove Metadata would break it.";
 
 /// Whether `tag` is kept as it is: the picture's layout, color,
-/// resolution and pages, with ICC and Orientation (D28's whitelist).
+/// resolution and pages, with ICC and Orientation (D28's whitelist), and
+/// every tag a codec libtiff 4.5 has reads to decode (`tif_dirinfo.c` and
+/// each codec's own fields): Predictor, the fax options, JPEG's tables and
+/// LERC's parameters, which say whether Deflate or ZSTD is inside it.
 fn kept(tag: u16) -> bool {
     matches!(
         tag,
@@ -101,8 +104,8 @@ fn kept(tag: u16) -> bool {
         | 282 | 283 | 286 | 287 | 296 | 297 | 290..=293
         // Color.
         | 301 | 318..=321 | 332..=334 | 336 | 529..=532 | 34675
-        // The tile size, JPEG's tables.
-        | 322 | 323 | 347
+        // The tile size, JPEG's tables, LERC's parameters.
+        | 322 | 323 | 347 | 50674
         // SGI, TIFF/EP's CFA, GDAL's no-data value.
         | 32995..=32998 | 33421 | 33422 | 42113
     )
@@ -1272,6 +1275,27 @@ mod tests {
         let (out, found) = strip(&file);
         assert!(found.is_empty());
         assert!(out.len() < file.len());
+    }
+
+    #[test]
+    fn the_tags_a_codec_needs_to_decode_are_kept() {
+        // LERC with Deflate or ZSTD inside (`tiffcp -c lerc:s1`): libtiff
+        // reads which from LercParameters (50674), and without it can't
+        // decode the strips ("lerc_getBlobInfo() failed"). It went, as
+        // other fields.
+        let mut page = gray(8, 8, 8, vec![B::data(&[7; 64])]);
+        page.tags
+            .extend([(259, V::Short(vec![34887])), (50674, V::Long(vec![4, 1]))]);
+        let file = Builder::new(b'M', false, vec![page]).build();
+        let (out, found) = strip(&file);
+        assert!(found.is_empty(), "{found:?}");
+        let tiff = read(&out);
+        let entry = tiff.pages[0].get(50674).unwrap();
+        assert_eq!((entry.kind, entry.count), (4, 2));
+        assert_eq!(
+            value(&out, &tiff.pages[0], 50674).unwrap(),
+            [0, 0, 0, 4, 0, 0, 0, 1]
+        );
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
