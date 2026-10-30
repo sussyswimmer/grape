@@ -553,10 +553,28 @@ fn repeated_values(nodes: &[Node], word: u64) -> Vec<(u64, u64)> {
     repeated
 }
 
+/// The tags an IFD's own fields aren't written for: the blocks' and the
+/// SubIFDs', whichever the writer makes, and the ones it makes (`made`).
+fn remade(made: impl IntoIterator<Item = u16>) -> HashSet<u16> {
+    let mut tags: HashSet<u16> = [273, 279, 324, 325, 330].into();
+    tags.extend(made);
+    tags
+}
+
+/// How many entries [`entries`] gives an IFD whose writer makes the tags
+/// `made`, whose blocks' writing gives fields for `written`, and whose own
+/// fields are for `own`: so that a tool keeps each IFD within the 4,096
+/// entries libtiff reads (`read::MAX_ENTRIES`).
+pub(crate) fn count(made: &[u16], written: &[u16], own: impl Iterator<Item = u16>) -> usize {
+    let mut tags = remade(made.iter().copied());
+    let written = written.iter().filter(|&&tag| tags.insert(tag)).count();
+    made.len() + written + own.filter(|tag| !tags.contains(tag)).count()
+}
+
 /// `node`'s entries, sorted by tag, once its blocks are written: the ones
 /// the writer makes, the fields its blocks' writing gave, each tag once,
 /// then its own for the other tags, a tag's in their order (the sort
-/// keeps it); held at their number, never grown past it.
+/// keeps it); held at their number, never grown past it ([`count`]).
 fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
     fn fields(
         fields: &[Field],
@@ -566,8 +584,7 @@ fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
         fields.map(move |(n, f)| (f.tag, f.kind, f.count, made(n)))
     }
     let made = std::mem::take(&mut node.made);
-    let mut tags: HashSet<u16> = [273, 279, 324, 325, 330].into();
-    tags.extend(made.iter().map(|m| m.0));
+    let mut tags = remade(made.iter().map(|m| m.0));
     let (written, own) = (&node.written.fields, &node.dir.fields);
     let mut entries = Vec::with_capacity(written.len() + own.len() + made.len());
     entries.extend(fields(written, Made::Written).filter(|e| tags.insert(e.0)));
