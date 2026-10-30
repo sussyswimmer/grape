@@ -1490,6 +1490,13 @@ fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
         ("lerc.tif", 50674, 4, secret.clone()),
         ("inks.tif", 333, 2, words.clone()),
         ("nodata.tif", 42113, 2, words.clone()),
+        // A ColorMap of 64 SHORTs, where libtiff reads 3 × 256 or none.
+        (
+            "colormap.tif",
+            320,
+            3,
+            [&b"SECRET shot by John at home 51.5N 0.1W"[..], &[0; 90]].concat(),
+        ),
     ] {
         let entries = vec![
             (256, 4, le(1, 4)),

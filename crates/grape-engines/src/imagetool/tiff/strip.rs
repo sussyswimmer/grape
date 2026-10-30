@@ -50,8 +50,8 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, number, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff,
-    Value, SHORT, TWICE, UNREAD_LAYOUT,
+    integer, number, per_sample, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta,
+    Order, Tiff, Value, SHORT, TWICE, UNREAD_LAYOUT,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -205,6 +205,11 @@ enum Count {
     /// At most one for each sample, none included, as `setExtraSamples`
     /// takes them.
     UpToSamples,
+    /// Three for each value a sample can take, 2^BitsPerSample, or one
+    /// for each too when it says so: as `TIFFReadDirectory` reads ColorMap
+    /// and TransferFunction, of a BitsPerSample of at most 24 listed
+    /// before them ([`Walk::bits`]), and ignores them otherwise.
+    Table(bool),
 }
 
 /// The [`Shape`] of a tag Remove Metadata keeps, or `None` for one it
@@ -216,19 +221,21 @@ fn shape(tag: u16) -> Option<Shape> {
     // libtiff's arrays of 2^32 − 1 values at most, or 65,535.
     let (c32, c16) = (u64::from(u32::MAX), u64::from(u16::MAX));
     Some(match tag {
-        // One number: NewSubfileType, SubfileType, the size,
-        // PhotometricInterpretation, Threshholding, CellWidth, CellLength,
-        // FillOrder, Orientation, SamplesPerPixel, RowsPerStrip,
-        // PlanarConfiguration, GrayResponseUnit, the fax options,
-        // ResolutionUnit, Predictor, the tile size, InkSet, NumberOfInks,
-        // YCbCrPositioning, Matteing, ImageDepth and TileDepth.
-        254..=257
+        // One number: NewSubfileType, the size, PhotometricInterpretation,
+        // Threshholding, CellWidth, CellLength, FillOrder, Orientation,
+        // SamplesPerPixel, RowsPerStrip, PlanarConfiguration, the fax
+        // options, ResolutionUnit, Predictor, the tile size, InkSet,
+        // NumberOfInks, YCbCrPositioning, Matteing, ImageDepth and
+        // TileDepth. SubfileType, GrayResponseUnit and GrayResponseCurve
+        // libtiff never reads (`FIELD_IGNORE`): they go.
+        254
+        | 256
+        | 257
         | 262..=266
         | 274
         | 277
         | 278
         | 284
-        | 290
         | 292
         | 293
         | 296
@@ -248,10 +255,10 @@ fn shape(tag: u16) -> Option<Shape> {
         // CFARepeatPatternDim; TransferRange's six.
         297 | 321 | 336 | 530 | 33421 => Ints(Is(2)),
         342 => Ints(Is(6)),
-        // Tables: GrayResponseCurve, TransferFunction and ColorMap;
-        // ExtraSamples; LercParameters, its version and what's inside at
-        // least.
-        291 | 301 | 320 => Ints(Within(1, c32)),
+        // Tables: TransferFunction and ColorMap; ExtraSamples;
+        // LercParameters, its version and what's inside at least.
+        301 => Ints(Table(true)),
+        320 => Ints(Table(false)),
         338 => Ints(UpToSamples),
         50674 => Ints(Within(2, c32)),
         // The resolution and position; WhitePoint, the primaries, the
@@ -435,6 +442,7 @@ impl Plan {
             irb_read: len,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
+            bits_left: len,
         };
         let pages = pages
             .into_iter()
@@ -502,6 +510,7 @@ impl Plan {
             irb_read: u64::MAX,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
+            bits_left: u64::MAX,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -1036,6 +1045,11 @@ struct Walk<'r> {
     /// What's left of the bytes it may read to judge values blank
     /// ([`JUDGE_BUDGET`]).
     judge_left: u64,
+    /// What's left of the bytes of BitsPerSample it may read out of line
+    /// to size ColorMaps and TransferFunctions ([`Walk::bits`]): what the
+    /// file holds, which only pages that all point at one array come to
+    /// more than.
+    bits_left: u64,
 }
 
 impl Walk<'_> {
@@ -1150,7 +1164,31 @@ impl Walk<'_> {
             Count::PerSample => n == 1 || samples(self.r, ifd, self.order)?.is_some_and(|s| n >= s),
             Count::Samples => samples(self.r, ifd, self.order)? == Some(n),
             Count::UpToSamples => samples(self.r, ifd, self.order)?.is_some_and(|s| n <= s),
+            Count::Table(once) => match self.bits(ifd, entry.tag)? {
+                Some(bits) => n == 3 << bits || (once && n == 1 << bits),
+                None => false,
+            },
         })
+    }
+
+    /// BitsPerSample as libtiff reads it ([`per_sample`]) by the time it
+    /// reads `ifd`'s first entry for `tag`, when that's at most 24: `None`
+    /// where it isn't listed before it ("Ignoring … since BitsPerSample tag
+    /// not found"), is more ("Ignoring … because BitsPerSample=…>24"), or
+    /// can't be read, as libtiff can't load the page then. What's read out
+    /// of line is taken from what the walk may read of them.
+    fn bits(&mut self, ifd: &Ifd, tag: u16) -> Result<Option<u64>, Error> {
+        let first = |tag| ifd.entries.iter().position(|e| e.tag == tag);
+        let (Some(bits), Some(at)) = (first(258), first(tag)) else {
+            return Ok(None);
+        };
+        if bits > at {
+            return Ok(None);
+        }
+        let samples = samples(self.r, ifd, self.order)?;
+        let entry = &ifd.entries[bits];
+        let bits = per_sample(self.r, entry, self.order, samples, &mut self.bits_left)?;
+        Ok(bits.filter(|&bits| bits <= 24))
     }
 
     /// Whether the tag `tag` of `ifd` says how the page's data is laid out
@@ -1817,9 +1855,43 @@ mod tests {
             (1, 42113, V::Bytes(2, b"-9999\0secret\0".to_vec())),
             // JPEGTables on LZW data, which libtiff doesn't read.
             (5, 347, V::Bytes(7, b"\xFF\xD8\xFF\xD9".to_vec())),
+            // A review's: a ColorMap of 64 SHORTs on an 8-bit page, where
+            // libtiff reads 3 × 256 ("Incorrect count"); a TransferFunction
+            // of 100.
+            (1, 320, V::Bytes(3, secret.repeat(4))),
+            (1, 301, V::Short(vec![7; 100])),
+            // SubfileType, GrayResponseUnit and GrayResponseCurve, which
+            // libtiff never reads.
+            (1, 255, V::Short(vec![1])),
+            (1, 290, V::Short(vec![2])),
+            (1, 291, V::Short(vec![7; 256])),
         ] {
             gone(page(compression, vec![(tag, value)]), tag);
         }
+        // A ColorMap of 32-bit samples, which libtiff ignores past 24.
+        let deep = page(
+            8,
+            vec![(258, V::Short(vec![32])), (320, V::Short(vec![7; 3]))],
+        );
+        gone(deep, 320);
+        // And one listed before BitsPerSample, which libtiff ignores too
+        // ("since BitsPerSample tag not found").
+        let mut early = page(1, vec![(320, V::Short(vec![7; 768]))]);
+        let at = read(&early).pages[0].at as usize;
+        let entry = |file: &[u8], tag: u16| {
+            (0..usize::from(u16::from_le_bytes([file[at], file[at + 1]])))
+                .map(|n| at + 2 + 12 * n)
+                .find(|&e| u16::from_le_bytes([file[e], file[e + 1]]) == tag)
+                .unwrap()
+        };
+        let (bits, map) = (entry(&early, 258), entry(&early, 320));
+        let (a, b) = (
+            early[bits..bits + 12].to_vec(),
+            early[map..map + 12].to_vec(),
+        );
+        early[bits..bits + 12].copy_from_slice(&b);
+        early[map..map + 12].copy_from_slice(&a);
+        gone(early, 320);
         // And kept as libtiff reads them: an Orientation typed LONG, an
         // XResolution typed SHORT, a no-data value that's a number, eight
         // LONGs of LercParameters on LERC data, InkNames on a separated
@@ -1836,6 +1908,11 @@ mod tests {
             ),
             (34887, 50674, V::Long(vec![4, 1, 0, 0, 0, 0, 0, 0])),
             (1, 340, V::Rational(vec![(1, 1)])),
+            // A ColorMap of 3 × 256, a TransferFunction of 256 or 3 × 256,
+            // on an 8-bit page.
+            (1, 320, V::Short(vec![7; 768])),
+            (1, 301, V::Short(vec![7; 256])),
+            (1, 301, V::Short(vec![7; 768])),
         ] {
             stays(page(compression, vec![(tag, value)]), tag);
         }
@@ -1896,18 +1973,20 @@ mod tests {
         assert!(refused(&two(V::Short(vec![2, 0, 0]))));
         // A palette page's ColorMap libtiff can't read, which it reads as
         // gray: refused; a gray page's goes.
-        let mapped = |photometric: u16| {
+        let mapped = |photometric: u16, map: V| {
             let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
             page.tags.retain(|t| t.0 != 262);
-            page.tags.extend([
-                (262, V::Short(vec![photometric])),
-                (320, V::Ascii("SECRET shot by John")),
-            ]);
+            page.tags
+                .extend([(262, V::Short(vec![photometric])), (320, map)]);
             Builder::new(b'I', false, vec![page]).build()
         };
-        assert!(refused(&mapped(3)));
-        let (_, found) = strip(&mapped(1));
+        assert!(refused(&mapped(3, V::Ascii("SECRET shot by John"))));
+        assert!(refused(&mapped(3, V::Short(vec![7; 64]))));
+        let (_, found) = strip(&mapped(1, V::Ascii("SECRET shot by John")));
         assert_eq!(found, [Other].into());
+        let (out, found) = strip(&mapped(3, V::Short(vec![7; 768])));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].get(320).unwrap().count, 768);
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
