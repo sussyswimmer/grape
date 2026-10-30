@@ -59,7 +59,10 @@ pub enum Mode {
     /// VP8, the lossy format. The pixels go straight to YUV 4:2:0 (no ARGB
     /// copy and no sharp YUV). Alpha, when any pixel isn't opaque, is kept
     /// exactly in an `ALPH` chunk (lossless, filtered); the RGB under fully
-    /// transparent pixels may change.
+    /// transparent pixels may change. Over about 16.7 MP, libwebp starts
+    /// from fewer bits for a macroblock's 4×4 modes (its
+    /// `partition_limit`), so that it encodes the picture again fewer times
+    /// to fit the first partition's 512 KiB.
     Lossy {
         /// libwebp's quality, 0 to 100.
         quality: f32,
@@ -85,6 +88,9 @@ pub struct Options {
     pub mode: Mode,
     /// libwebp's `thread_level`: one more thread for parts of the encode
     /// (the alpha plane, half the analysis, a second lossless attempt).
+    /// That thread reports no progress: a cancel waits until libwebp has
+    /// finished the alpha plane, and in a lossless encode until the second
+    /// attempt has (libwebp waits for it, cancelled or not).
     pub threads: bool,
 }
 
@@ -115,10 +121,16 @@ pub enum Error {
 ///
 /// `keep_going(percent)` is called on this thread whenever libwebp's percent
 /// (0 to 100) changes; false cancels the encode. libwebp reports a lossy
-/// encode about once per macroblock row, ending in the 90s (it reports 100
-/// only when built without its statistics), and a lossless one coarsely.
-/// Once it has returned false, or panicked (which counts as false), it isn't
-/// called again.
+/// encode about 20 times while it analyses the picture and 20 while it
+/// encodes it, whatever its size, then a few times as it writes it, ending
+/// in the 90s (it reports 100 only when built without its statistics).
+/// When the first partition would come out over 512 KiB (a large, heavily
+/// grained picture), it encodes the whole picture again, reporting half as
+/// often each time: 10 times, 5, 2, then once or not at all. It doesn't
+/// report while it finishes an alpha plane, and it reports a lossless
+/// encode coarsely, its percent now and then going down. Once
+/// `keep_going` has returned false, or panicked (which counts as false),
+/// it isn't called again.
 pub fn encode(
     px: Pixels<'_>,
     opts: &Options,
@@ -148,7 +160,7 @@ pub fn encode(
     if data.len() != stride * height as usize {
         return Err(Error::BadInput);
     }
-    let config = config(opts)?;
+    let config = config(opts, width, height)?;
 
     let mut picture = Picture::new()?;
     picture.0.use_argb = c_int::from(matches!(opts.mode, Mode::Lossless { .. }));
@@ -200,8 +212,9 @@ pub fn version() -> (u8, u8, u8) {
     ((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
-/// libwebp's settings for `opts`, validated by libwebp.
-fn config(opts: &Options) -> Result<sys::WebPConfig, Error> {
+/// libwebp's settings for `opts` and a `width`×`height` picture, validated
+/// by libwebp.
+fn config(opts: &Options, width: u32, height: u32) -> Result<sys::WebPConfig, Error> {
     let quality = match opts.mode {
         Mode::Lossy { quality, method } => {
             if !(0.0..=100.0).contains(&quality) || method > 6 {
@@ -241,6 +254,7 @@ fn config(opts: &Options) -> Result<sys::WebPConfig, Error> {
             cfg.alpha_compression = 1;
             cfg.alpha_filtering = 2;
             cfg.alpha_quality = 100;
+            cfg.partition_limit = partition_limit(width, height);
         }
         Mode::Lossless { level } => {
             // SAFETY: `cfg` was set up above, and `level` is at most 9.
@@ -258,6 +272,37 @@ fn config(opts: &Options) -> Result<sys::WebPConfig, Error> {
         ));
     }
     Ok(cfg)
+}
+
+/// The macroblocks' share of VP8's first partition, which holds their modes
+/// and may take at most 512 KiB, in libwebp's units (1/256 bit):
+/// `PARTITION0_SIZE_LIMIT` in its `frame_enc.c`.
+const PARTITION0_LIMIT: u64 = (512 * 1024 - 2048) << 11;
+
+/// The cap on a macroblock's 4×4 mode bits libwebp starts from at no
+/// `partition_limit`: `max_i4_header_bits` in its `webp_enc.c`.
+const I4_HEADER_BITS: u64 = 256 * 16 * 16;
+
+/// libwebp's `partition_limit` for a lossy `width`×`height` picture: none
+/// (0), unless the cap it starts each macroblock's 4×4 mode bits from
+/// (`max_i4_header_bits`) is over 4 times the first partition's share a
+/// macroblock, over about 16.7 MP; then the least that brings it to 4
+/// times. libwebp halves that cap and encodes the whole picture again
+/// while the first partition comes out over 512 KiB, and reports less and
+/// less progress on each pass. A heavily grained 6500² picture took 5
+/// passes, 89 s, with 14.5 s between reports, and 4 at this limit (37),
+/// 65 s and 6.0 s, its file 0.4 % smaller; a real photo and a picture of
+/// many sharp shapes of that size came out byte for byte the same, as no
+/// macroblock of theirs reached the cap (release build, 4 vCPUs). A limit
+/// at twice the share took 43 s (3.7 s) but cost them 0.3 and 1 %.
+fn partition_limit(width: u32, height: u32) -> std::ffi::c_int {
+    let macroblocks = u64::from(width.div_ceil(16)) * u64::from(height.div_ceil(16));
+    let cap = PARTITION0_LIMIT.saturating_mul(4) / macroblocks.max(1);
+    // libwebp's cap at a limit of 100 - `left`.
+    let left = (0..=100u64)
+        .find(|left| I4_HEADER_BITS * left * left / (100 * 100) >= cap)
+        .unwrap_or(100);
+    (100 - left) as std::ffi::c_int
 }
 
 /// A `WebPPicture` set up by `WebPPictureInitInternal`, whose buffers are
