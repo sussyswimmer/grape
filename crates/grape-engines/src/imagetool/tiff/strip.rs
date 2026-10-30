@@ -68,11 +68,6 @@ const JUDGE_BUDGET: u64 = 16 << 20;
 /// that entries share is read once.
 const MAX_BLANKS: usize = 4_096;
 
-/// The most descriptions out of line remembered as read for ImageJ's and
-/// OME's, so that one that IFDs share is read once: past them, one is read
-/// again each time, from what the file holds.
-const MAX_DESCRIPTIONS: usize = 4_096;
-
 /// The most bytes of Photoshop's resources the plan holds, filtered, each
 /// block once however many IFDs name it; and the longest block it reads.
 const MAX_IRB: u64 = 16 << 20;
@@ -332,6 +327,17 @@ const LAID_OUT: [u16; 16] = [
     256, 257, 258, 262, 266, 277, 278, 284, 317, 322, 323, 338, 339, 530, 32997, 32998,
 ];
 
+/// Refuses an ImageJ or OME file by its description `entry`, the first
+/// [`MAX_JUDGED`] bytes of it, read as [`look`] reads them.
+fn described(r: &mut dyn In, entry: &Entry, left: &mut u64) -> Result<(), Error> {
+    let text = look(r, entry, MAX_JUDGED, left)?.map(|(text, _)| text);
+    let text = text.unwrap_or_default();
+    if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
+        return Err(Error::Refused(DESCRIBED.into()));
+    }
+    Ok(())
+}
+
 /// Whether the writer makes `tag` afresh: the blocks and the SubIFDs.
 fn rebuilt(tag: u16) -> bool {
     matches!(tag, 273 | 279 | 324 | 325 | 330)
@@ -375,28 +381,40 @@ impl Plan {
         // may come to what the file holds: only values that overlap come
         // to more.
         let mut left = len;
-        // A description that IFDs share is read once, while it's
-        // remembered ([`MAX_DESCRIPTIONS`]); one in its entry isn't.
-        let mut descriptions = HashSet::new();
-        let mut alike = Alike::new(len);
-        for ifd in tiff.ifds() {
-            // Every one: tifffile writes a description it's given and then
-            // its own (the picture's shape, or ImageJ's alone in an ImageJ
-            // file), and reads ImageJ's from either of a page's first two.
-            for entry in ifd.entries.iter().filter(|e| e.tag == 270) {
-                let at = matches!(entry.value, Value::At { .. });
-                if at && descriptions.contains(&entry.value) {
-                    continue;
-                }
-                let text = look(r, entry, MAX_JUDGED, &mut left)?.map(|(text, _)| text);
-                let text = text.unwrap_or_default();
-                if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
-                    return Err(Error::Refused(DESCRIBED.into()));
-                }
-                if at && descriptions.len() < MAX_DESCRIPTIONS {
-                    descriptions.insert(entry.value);
-                }
+        let ifds = tiff.ifds();
+        // Every description of every IFD: tifffile writes a description
+        // it's given and then its own (the picture's shape, or ImageJ's
+        // alone in an ImageJ file), and reads ImageJ's from either of a
+        // page's first two. One in its entry is read there; those out of
+        // line once each, however many IFDs list them, by where they are,
+        // sorted: 16 bytes each.
+        let all = || {
+            ifds.iter()
+                .flat_map(|ifd| &ifd.entries)
+                .filter(|e| e.tag == 270)
+        };
+        let out_of_line = |e: &&Entry| matches!(e.value, Value::At { .. });
+        let mut places = Vec::with_capacity(all().filter(out_of_line).count());
+        for entry in all() {
+            match entry.value {
+                Value::At { offset, len } => places.push((offset, len)),
+                _ => described(r, entry, &mut left)?,
             }
+        }
+        places.sort_unstable();
+        places.dedup();
+        for (offset, len) in places {
+            let value = Value::At { offset, len };
+            let entry = Entry {
+                tag: 270,
+                kind: 2,
+                count: len,
+                value,
+            };
+            described(r, &entry, &mut left)?;
+        }
+        let mut alike = Alike::new(len);
+        for ifd in ifds {
             if twice_kept(r, ifd, order, &mut alike)? {
                 return Err(Error::Refused(TWICE.into()));
             }
