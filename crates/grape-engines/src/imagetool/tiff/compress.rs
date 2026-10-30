@@ -41,8 +41,9 @@
 //!   sample is 8 or 16 bits, the sample format is 1 or 2 (or not given)
 //!   and a row is at most [`MAX_ROW`], a pixel's samples apart, or 1 when
 //!   the planes are; and 317 is 1 when it's given.
-//! - **Kept:** every other tag, with the Exif, GPS and Interop IFDs moved
-//!   with their values; XMP, IPTC, Photoshop's resources and layers,
+//! - **Kept:** every other tag, a tag listed more than once each time, in
+//!   the source's order, with the Exif, GPS and Interop IFDs moved with
+//!   their values; XMP, IPTC, Photoshop's resources and layers,
 //!   GeoTIFF, ICC, Orientation, a MakerNote (as bytes). FreeOffsets and
 //!   FreeByteCounts (288, 289) go, as they'd point at nothing; so does an
 //!   entry, or an Exif, GPS or Interop IFD, that can't be read. Any other
@@ -1977,6 +1978,48 @@ mod tests {
             assert_eq!(values(&file, &ga.entries), values(&out, &gb.entries));
             assert_eq!(decoded(&out), decoded(&file));
         }
+    }
+
+    #[test]
+    fn a_tag_listed_twice_is_written_twice_in_its_order() {
+        // tifffile writes the description it's given, then the picture's
+        // shape as a second ImageDescription, which it reads the series
+        // by; of a ColorMap listed twice libtiff reads the first and
+        // Pillow the last, and of a ColorSpace twice in an Exif IFD
+        // libtiff reads the last. Compress kept the first of each.
+        let mut first = page(32, 8, 4, 8, &smooth(256));
+        first.tags.extend([
+            (270, V::Ascii("a description of the scan")),
+            (270, V::Ascii("{\"shape\": [8, 32]}")),
+            (320, V::Short(vec![1; 768])),
+            (320, V::Short(vec![2; 768])),
+        ]);
+        first.exif = Some(vec![
+            (0xA001, V::Short(vec![1])),
+            (0xA001, V::Short(vec![0xFFFF])),
+        ]);
+        let file = Builder::new(b'M', false, vec![first]).build();
+        let out = compressed(&file);
+        let (a, b) = (read(&file), read(&out));
+        let listed = |file: &[u8], entries: &[Entry], tag: u16| -> Vec<Vec<u8>> {
+            let mut r = Cursor::new(file);
+            let all = entries.iter().filter(|e| e.tag == tag);
+            all.map(|e| read_value(&mut r, e, 1 << 20).unwrap().unwrap())
+                .collect()
+        };
+        let (pa, pb) = (&a.pages[0], &b.pages[0]);
+        for tag in [270, 320] {
+            let source = listed(&file, &pa.entries, tag);
+            assert_eq!(source.len(), 2);
+            assert_eq!(listed(&out, &pb.entries, tag), source, "{tag}");
+        }
+        let (ea, eb) = (pa.exif.as_ref().unwrap(), pb.exif.as_ref().unwrap());
+        assert_eq!(
+            listed(&out, &eb.entries, 0xA001),
+            listed(&file, &ea.entries, 0xA001)
+        );
+        assert_eq!(listed(&out, &eb.entries, 0xA001).len(), 2);
+        assert_eq!(decoded(&out), decoded(&file));
     }
 
     #[test]

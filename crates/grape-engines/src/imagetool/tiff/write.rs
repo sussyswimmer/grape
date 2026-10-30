@@ -87,7 +87,10 @@ impl Field {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dir {
     /// Its entries but the ones the writer makes; a field for one of
-    /// those tags, or a second field for a tag, is left out.
+    /// those tags, or for one its blocks' writing gives a field for, is
+    /// left out. Fields for one tag are each written, in their order, as
+    /// the source listed them: libtiff reads the first, Pillow the last,
+    /// tifffile each.
     pub(crate) fields: Vec<Field>,
     /// An image IFD's data; `None` for an Exif, GPS or Interop IFD.
     pub(crate) image: Option<Image>,
@@ -551,8 +554,9 @@ fn repeated_values(nodes: &[Node], word: u64) -> Vec<(u64, u64)> {
 }
 
 /// `node`'s entries, sorted by tag, once its blocks are written: the ones
-/// the writer makes, the fields its blocks' writing gave, then its own,
-/// each tag once; held at their number, never grown past it.
+/// the writer makes, the fields its blocks' writing gave, each tag once,
+/// then its own for the other tags, a tag's in their order (the sort
+/// keeps it); held at their number, never grown past it.
 fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
     fn fields(
         fields: &[Field],
@@ -566,11 +570,8 @@ fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
     tags.extend(made.iter().map(|m| m.0));
     let (written, own) = (&node.written.fields, &node.dir.fields);
     let mut entries = Vec::with_capacity(written.len() + own.len() + made.len());
-    entries.extend(
-        fields(written, Made::Written)
-            .chain(fields(own, Made::Field))
-            .filter(|e| tags.insert(e.0)),
-    );
+    entries.extend(fields(written, Made::Written).filter(|e| tags.insert(e.0)));
+    entries.extend(fields(own, Made::Field).filter(|e| !tags.contains(&e.0)));
     entries.extend(made);
     entries.sort_by_key(|e| e.0);
     entries
@@ -1070,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn fields_the_writer_makes_or_repeats_are_left_out() {
+    fn fields_the_writer_makes_are_left_out_and_a_tags_others_kept_in_order() {
         let tiff =
             read(&Builder::new(b'M', false, vec![gray(1, 1, 1, vec![B::data(b"x")])]).build());
         let mut dir = everything(&tiff.pages[0]);
@@ -1080,13 +1081,14 @@ mod tests {
             count: 1,
             value: Data::Bytes(vec![0, 0, 0, 8]),
         };
-        let twice = Field {
-            tag: 256,
-            kind: 3,
-            count: 1,
-            value: Data::Bytes(vec![0, 9]),
+        let software = |text: &[u8]| Field {
+            tag: 305,
+            kind: 2,
+            count: 2,
+            value: Data::Bytes(text.to_vec()),
         };
-        dir.fields.extend([stray, twice]);
+        dir.fields
+            .extend([software(b"b\0"), stray, software(b"a\0")]);
         let mut out = Cursor::new(Vec::new());
         let file = Builder::new(b'M', false, vec![gray(1, 1, 1, vec![B::data(b"x")])]).build();
         write(
@@ -1100,8 +1102,19 @@ mod tests {
         let back = read(&out.into_inner());
         let page = &back.pages[0];
         assert!(page.get(330).is_none());
-        assert_eq!(page.uint(256, back.layout.order), Some(1));
-        assert_eq!(page.entries.iter().filter(|e| e.tag == 256).count(), 1);
+        // Both, in the order given.
+        let software: Vec<Value> = page
+            .entries
+            .iter()
+            .filter(|e| e.tag == 305)
+            .map(|e| e.value)
+            .collect();
+        let inline = |text: &[u8]| {
+            let mut bytes = [0; 8];
+            bytes[..2].copy_from_slice(text);
+            Value::Inline { bytes, len: 2 }
+        };
+        assert_eq!(software, [inline(b"b\0"), inline(b"a\0")]);
     }
 
     #[test]

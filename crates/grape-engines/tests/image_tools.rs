@@ -2153,6 +2153,42 @@ fn scan_tiff(big: bool) -> Vec<u8> {
 }
 
 #[test]
+fn compress_keeps_both_of_a_tiffs_descriptions_in_their_order() {
+    // tifffile's file: RGB 64 × 48, uncompressed, its description, then
+    // its shape as a second ImageDescription, which tifffile reads the
+    // series by. Compress kept only the first.
+    let description = b"a description of the scan\0".to_vec();
+    let shape = b"{\"shape\": [48, 64, 3]}\0".to_vec();
+    let entries = vec![
+        (256, 4, le(64, 4)),
+        (257, 4, le(48, 4)),
+        (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+        (262, 3, le(2, 2)),
+        (270, 2, description.clone()),
+        (270, 2, shape.clone()),
+        (277, 3, le(3, 2)),
+        (278, 4, le(48, 4)),
+    ];
+    let dir = TestDir::new("compress-tiff-two-descriptions");
+    let file = one_strip(false, gradient().as_raw(), entries);
+    let outcome = compress(
+        &dir,
+        "shaped.tif",
+        &file,
+        grape_core::CompressPreset::Balanced,
+    )
+    .unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    let at = |value: &[u8]| out.windows(value.len()).position(|w| w == value);
+    // Both, the description first: written in the entries' order.
+    let (Some(first), Some(second)) = (at(&description), at(&shape)) else {
+        panic!("a description went")
+    };
+    assert!(first < second);
+    assert_eq!(tiff_pages(&out), tiff_pages(&file));
+}
+
+#[test]
 fn compress_deflates_every_page_of_a_tiff_and_keeps_its_tags() {
     use tiff::tags::Tag;
     let dir = TestDir::new("compress-tiff");
