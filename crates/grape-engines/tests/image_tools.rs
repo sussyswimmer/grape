@@ -1199,6 +1199,63 @@ fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
 }
 
 #[test]
+fn remove_metadata_reads_a_strip_a_webp_and_a_jpeg_page_share_as_both() {
+    // The review's files: two RGB 64 × 48 pages listing one strip, the
+    // first WebP (50001) and the second JPEG (7, YCbCr 1 × 1), the strip
+    // a JPEG with an Exif APP1 (a Make and a GPS IFD); and the other way
+    // round, the strip a lossless WebP with EXIF and XMP chunks. The strip
+    // was read once, as the first page's kind, and passed the second's
+    // check: published with its Exif, or its chunks.
+    let jpeg = with(&plain_jpeg(), &[exif(1)], b"");
+    let mut lossless = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let webp = riff(&[
+        riff_chunk(b"VP8X", &[0x0C, 0, 0, 0, 63, 0, 0, 47, 0, 0]),
+        lossless[12..].to_vec(),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    let tags = |compression: u64| {
+        let mut entries = vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+            (259, 3, le(compression, 2)),
+            (262, 3, le(if compression == 7 { 6 } else { 2 }, 2)),
+            (277, 3, le(3, 2)),
+            (278, 4, le(48, 4)),
+        ];
+        if compression == 7 {
+            entries.push((530, 3, [le(1, 2), le(1, 2)].concat()));
+        }
+        entries
+    };
+    let dir = TestDir::new("strip-tiff-shared-kinds");
+    for (name, data, first, second) in [
+        ("webp-then-jpeg.tif", &jpeg, 50001, 7),
+        ("jpeg-then-webp.tif", &webp, 7, 50001),
+    ] {
+        // The second page lists the first's strip, at 8.
+        let mut shared = tags(second);
+        shared.extend([(273, 4, le(8, 4)), (279, 4, le(data.len() as u64, 4))]);
+        let file = paged(&[(tags(first), data.clone()), (shared, Vec::new())]);
+        let err = strip(&dir, name, &file).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
+        );
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;
@@ -2118,8 +2175,9 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
 }
 
 /// A classic TIFF of `pages`, each its entries ([`Change`]s, sorted here,
-/// its strip's offset and count added) and its one strip: each strip,
-/// then its IFD and the values its entries can't hold, the IFDs chained.
+/// its strip's offset and count added unless they list them) and its one
+/// strip: each strip, then its IFD and the values its entries can't hold,
+/// the IFDs chained. The first strip is at 8.
 fn paged(pages: &[(Vec<Change>, Vec<u8>)]) -> Vec<u8> {
     let mut file = b"II*\0\0\0\0\0".to_vec();
     // Where the offset of the next IFD goes.
@@ -2129,7 +2187,9 @@ fn paged(pages: &[(Vec<Change>, Vec<u8>)]) -> Vec<u8> {
         file.extend(strip);
         file.resize(file.len().next_multiple_of(2), 0);
         let mut entries = entries.clone();
-        entries.extend([(273, 4, le(at, 4)), (279, 4, le(strip.len() as u64, 4))]);
+        if !entries.iter().any(|e| e.0 == 273) {
+            entries.extend([(273, 4, le(at, 4)), (279, 4, le(strip.len() as u64, 4))]);
+        }
         entries.sort_by_key(|e| e.0);
         let ifd = file.len() as u64;
         file[link..link + 4].copy_from_slice(&le(ifd, 4));

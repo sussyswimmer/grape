@@ -170,14 +170,14 @@ impl Plan {
         let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| matches!(ifd.compression, 7 | 50001) || ifd.get(347).is_some())
+            .filter(|ifd| Kind::of(ifd.compression).is_some() || ifd.get(347).is_some())
             .collect();
         if !scanned.is_empty() {
             let shared = tiff.shared();
             let mut scan = Scan {
                 order,
                 shared: &shared,
-                scanned: vec![false; shared.len()],
+                scanned: vec![0; shared.len()],
                 tables: HashSet::new(),
                 left,
             };
@@ -371,16 +371,54 @@ fn look(
     head(r, entry, max)
 }
 
+/// The kinds of image data Remove Metadata reads for metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Read as [`segments`] reads it.
+    Jpeg,
+    /// Read as [`chunks`] reads it.
+    Webp,
+}
+
+impl Kind {
+    /// The kind of data of Compression `n`, if Remove Metadata reads it.
+    fn of(n: u64) -> Option<Kind> {
+        match n {
+            7 => Some(Kind::Jpeg),
+            50001 => Some(Kind::Webp),
+            _ => None,
+        }
+    }
+
+    /// Its name, for the refusal.
+    fn name(self) -> &'static str {
+        match self {
+            Kind::Jpeg => "JPEG",
+            Kind::Webp => "WebP",
+        }
+    }
+
+    /// Its bit in [`Scan::scanned`].
+    fn bit(self) -> u8 {
+        match self {
+            Kind::Jpeg => 1,
+            Kind::Webp => 2,
+        }
+    }
+}
+
 /// The scan of JPEG and WebP data for metadata, which reads a block, or a
-/// JPEGTables value, once however many times IFDs list it: one that held
-/// metadata, or couldn't be seen through, ended the scan.
+/// JPEGTables value, once however many times IFDs list it: a block once
+/// as each kind of data IFDs list it as. One that held metadata, or
+/// couldn't be seen through, ended the scan.
 struct Scan<'s> {
     /// The file's byte order, which JPEGTables are read in.
     order: Order,
     /// The blocks listed more than once, sorted ([`Tiff::shared`]).
     shared: &'s [Block],
-    /// Which of them it has read.
-    scanned: Vec<bool>,
+    /// As which kinds it has read each of them: a bit for each
+    /// ([`Kind::bit`]).
+    scanned: Vec<u8>,
     /// The JPEGTables values it has read, by where they are and their type.
     tables: HashSet<(Value, u16)>,
     /// What's left of the bytes it may read of JPEGTables values ([`look`]).
@@ -390,10 +428,9 @@ struct Scan<'s> {
 impl Scan<'_> {
     /// What the JPEG or WebP data of `ifd` holds: its JPEGTables, as
     /// libtiff reads them ([`tables`]), as [`segments`] reads them; then
-    /// each of its blocks, of compression 7 as [`segments`] reads them, of
-    /// 50001 as [`chunks`] does. The first that isn't clean, with the kind
-    /// of data it is; JPEGTables libtiff can't read as bytes can't be seen
-    /// through.
+    /// each of its blocks, as the [`Kind`] of its Compression. The first
+    /// that isn't clean, with the kind of data it is; JPEGTables libtiff
+    /// can't read as bytes can't be seen through.
     fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<(Seen, &'static str), Error> {
         let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
         if let Some(entry) = ifd.get(347).filter(fresh) {
@@ -406,31 +443,32 @@ impl Scan<'_> {
                 return Ok((seen, "JPEG"));
             }
         }
-        let kind = match ifd.compression {
-            7 => "JPEG",
-            50001 => "WebP",
-            _ => return Ok((Seen::Clean, "JPEG")),
+        let Some(kind) = Kind::of(ifd.compression) else {
+            return Ok((Seen::Clean, "JPEG"));
         };
         let mut buf = Vec::new();
         for block in ifd.blocks.iter().filter(|b| b.len > 0) {
+            // A block IFDs share is read once as each kind they list it as.
             let shared = self.shared.binary_search(block).ok();
             if let Some(scanned) = shared.and_then(|n| self.scanned.get_mut(n)) {
-                if std::mem::replace(scanned, true) {
+                if *scanned & kind.bit() != 0 {
                     continue;
                 }
+                *scanned |= kind.bit();
             }
-            let seen = if ifd.compression == 50001 {
-                chunks(r, *block)?
-            } else {
-                buf.resize(block.len.min(MAX_SCAN) as usize, 0);
-                read_at(r, block.offset, &mut buf)?;
-                segments(&buf, block.len <= MAX_SCAN)
+            let seen = match kind {
+                Kind::Webp => chunks(r, *block)?,
+                Kind::Jpeg => {
+                    buf.resize(block.len.min(MAX_SCAN) as usize, 0);
+                    read_at(r, block.offset, &mut buf)?;
+                    segments(&buf, block.len <= MAX_SCAN)
+                }
             };
             if seen != Seen::Clean {
-                return Ok((seen, kind));
+                return Ok((seen, kind.name()));
             }
         }
-        Ok((Seen::Clean, kind))
+        Ok((Seen::Clean, kind.name()))
     }
 }
 
@@ -855,7 +893,7 @@ mod tests {
     use super::super::read::Order;
     use super::super::read::MISSIZED;
     use super::super::tests::{
-        gray, miscounted, picture, set_entry, shared_meta, Builder, Page, B, V,
+        gray, miscounted, picture, set_block, set_entry, shared_meta, Builder, Page, B, V,
     };
     use super::*;
     use MetaField::*;
@@ -1587,6 +1625,32 @@ mod tests {
         // Another codec's strip isn't read as WebP.
         let file = coded_page(50000, webp(&[vp8l, xmp]));
         assert_eq!(refused(&file), None);
+    }
+
+    #[test]
+    fn a_block_jpeg_and_webp_ifds_share_is_read_as_both() {
+        // A strip a WebP page and a JPEG page list: a JPEG with an Exif
+        // APP1, read first as WebP; and a WebP with an EXIF chunk, read
+        // first as JPEG (not a stream it knows). Each block was read once,
+        // as the first IFD's kind, and passed the other's check.
+        let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
+        let vp8l = chunk(b"VP8L", &[0x2F, 7, 0xC0, 0x01, 0, 0x55, 0x55, 0x55]);
+        let exif = chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0");
+        for (data, first, second) in [(jpeg(app1), 50001, 7), (webp(&[vp8l, exif]), 7, 50001)] {
+            let page = |compression: u16| {
+                let mut page = gray(8, 8, 8, vec![B::Data(data.clone())]);
+                page.tags.push((259, V::Short(vec![compression])));
+                page
+            };
+            let mut file = Builder::new(b'I', false, vec![page(first), page(second)]).build();
+            let tiff = read(&file);
+            let Block { offset, len } = tiff.pages[0].blocks[0];
+            set_block(&mut file, tiff.pages[1].at, 0, offset, len);
+            let Err(Error::Refused(why)) = plan(&file) else {
+                panic!("{first} then {second} not refused")
+            };
+            assert_eq!(why, IN_DATA, "{first} then {second}");
+        }
     }
 
     #[test]
