@@ -36,6 +36,7 @@ crates/grape-core/        Format registry, matrix, tools, naming, job plans (has
 crates/grape-engines/     Executes job plans: FFmpeg sidecar, image, PDF... (has CLAUDE.md)
 crates/grape-heif-proto/  The image helper protocol (HEIC, AVIF): pure, std only (D33, D41) (has CLAUDE.md)
 crates/grape-platform/    Drag detection, modifiers, file actions per OS    (has CLAUDE.md)
+crates/grape-webp/        libwebp's encoder for WebP Compress: the only unsafe for images (D28) (has CLAUDE.md)
 tools/grape-heif/         grape-heif.exe, the Windows image helper (HEIC, AVIF): its own workspace, GPL as built (D33, D41)
 docs/                     Specs — the source of truth for behavior
 .claude/commands/         Slash commands for recurring tasks

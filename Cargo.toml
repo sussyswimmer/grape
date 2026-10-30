@@ -6,6 +6,7 @@ members = [
     "crates/grape-engines",
     "crates/grape-heif-proto",
     "crates/grape-platform",
+    "crates/grape-webp",
 ]
 
 [workspace.package]
