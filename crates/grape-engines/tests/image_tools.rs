@@ -663,12 +663,10 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
     // (1) and BitsPerSample in types libtiff reads too (signed but not
     // negative, a LONG8 a classic file holds out of line, or a value for
     // each sample), or with an ImageDepth, which strips don't count, it
-    // reads the same: refused, as the plain file is. So is one whose
-    // layout libtiff can't read, an ImageWidth typed IFD, as which strips
-    // it would read can't be told.
+    // reads the same: refused, as the plain file is.
     let mut short = [3_000; 10];
     short[3] = 10;
-    let cases: [(&str, bool, Vec<Change>); 21] = [
+    let cases: [(&str, bool, Vec<Change>); 20] = [
         ("plain.tif", false, vec![]),
         ("sshort-none.tif", false, vec![(259, 8, le(1, 2))]),
         ("slong-none.tif", false, vec![(259, 9, le(1, 4))]),
@@ -693,7 +691,6 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
         ("sbyte-rows.tif", false, vec![(278, 6, le(100, 1))]),
         ("sshort-planar.tif", false, vec![(284, 8, le(1, 2))]),
         ("slong8-planar.tif", true, vec![(284, 17, le(1, 8))]),
-        ("ifd-width.tif", false, vec![(256, 13, le(300, 4))]),
     ];
     let dir = TestDir::new("tiff-typed");
     for (name, big, changes) in cases {
@@ -713,6 +710,46 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
                 err.user_message,
                 format!(
                     "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+    // One whose layout libtiff can't read, an ImageWidth typed IFD, as
+    // which strips it would read can't be told; and ten whole strips of 10
+    // rows, each counted right, with a PhotometricInterpretation libtiff
+    // can't read (a RATIONAL, which it ignores), as how other readers size
+    // them can't be told: refused as a layout Grape can't read.
+    let rows = (278, 3, le(10, 2));
+    for (name, bytes) in [
+        (
+            "ifd-width.tif",
+            typed_tiff(false, &short, &[(256, 13, le(300, 4))]),
+        ),
+        (
+            "rational-photometric.tif",
+            typed_tiff(
+                false,
+                &[3_000; 10],
+                &[rows.clone(), (262, 5, [le(1, 4), le(1, 4)].concat())],
+            ),
+        ),
+    ] {
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says how its image data is laid out in a way Grape can't read yet."
                 )
             );
             fs::remove_file(dir.join(name)).unwrap();
@@ -740,7 +777,8 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
     // which it reads as one tile of 304 × 100), or one tile of the picture
     // (a TileLength beside a RowsPerStrip): Pillow reads the whole picture
     // from it, and the 10 bytes copied would leave it no picture. Both
-    // tools refuse it.
+    // tools refuse it: as a layout Grape can't read where libtiff counts
+    // none, and as wrong-size where it reads one that's short.
     let picture: Vec<u8> = (0..30_000).map(|i| (i % 251) as u8).collect();
     let size = [
         (256, 4, le(300, 4)),
@@ -750,16 +788,20 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
         (279, 4, le(10, 4)),
     ];
     let dir = TestDir::new("tiff-lone-unsized");
-    for (name, layout) in [
-        ("rows.tif", vec![(278, 4, le(0xFFFF_FFFE, 4))]),
-        ("width.tif", vec![(322, 3, le(304, 2))]),
+    let unread = "says how its image data is laid out in a way Grape can't read yet.";
+    let missized = "says the wrong size for some of its image data, which Grape can't rewrite yet.";
+    for (name, layout, why) in [
+        ("rows.tif", vec![(278, 4, le(0xFFFF_FFFE, 4))], unread),
+        ("width.tif", vec![(322, 3, le(304, 2))], unread),
         (
             "rows-width.tif",
             vec![(278, 3, le(100, 2)), (322, 3, le(304, 2))],
+            missized,
         ),
         (
             "rows-length.tif",
             vec![(278, 3, le(100, 2)), (323, 3, le(100, 2))],
+            missized,
         ),
     ] {
         let bytes = one_strip(false, &picture, [&size[..], &layout].concat());
@@ -774,12 +816,7 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
                 "{name}: {}",
                 err.detail
             );
-            assert_eq!(
-                err.user_message,
-                format!(
-                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
-                )
-            );
+            assert_eq!(err.user_message, format!("{name} {why}"));
             fs::remove_file(dir.join(name)).unwrap();
         }
     }
