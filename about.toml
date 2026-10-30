@@ -263,6 +263,19 @@ path = "LICENSE"
 license = "BSD-2-Clause"
 checksum = "2dd0a109751e939dec3f80ddcfbc1ba91553f18c574399e85c159632182a2c0a"
 
+# libwebp-sys (D28) is MIT, and compiles in the libwebp 1.6.0 it vendors,
+# which is BSD-3-Clause: its text is the package's vendor/COPYING. libwebp's
+# patent grant, vendor/PATENTS, goes in about.hbs's hand-written libwebp
+# section. Neither the package nor its repository has an MIT text (not at
+# 3a40281f, the commit .cargo_vcs_info.json names, nor in any other), so the
+# notices show the standard one, as for the crates below.
+[libwebp-sys.clarify]
+license = "MIT AND BSD-3-Clause"
+[[libwebp-sys.clarify.files]]
+path = "vendor/COPYING"
+license = "BSD-3-Clause"
+checksum = "5aec868f669e384a22372a4e8a1a6cd7d44c64cd451f960ca69cc170d1e13acf"
+
 # Not clarified, because no license text exists to point at:
 # - objc2, block2, dispatch2 and the objc2-* framework crates (macOS only).
 #   Neither the packages nor the repository have one; its LICENSE.md only

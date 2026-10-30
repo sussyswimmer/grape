@@ -49,6 +49,15 @@ exceptions = [
     { crate = "selectors", allow = ["MPL-2.0"] },
 ]
 
+# libwebp-sys (D28) says MIT, but it compiles in the libwebp 1.6.0 it
+# vendors, which is BSD-3-Clause (vendor/COPYING; the hash is cargo-deny's
+# xxHash32 of it, so a changed file drops the clarification, and `cargo deny
+# list` shows MIT alone again). Keep it the same as about.toml's.
+[[licenses.clarify]]
+crate = "libwebp-sys"
+expression = "MIT AND BSD-3-Clause"
+license-files = [{ path = "vendor/COPYING", hash = 0x7272837f }]
+
 [licenses.private]
 # Grape's own crates are MIT (LICENSE) and never published.
 ignore = true
