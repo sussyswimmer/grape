@@ -15,10 +15,11 @@
 //!   long as at 5, for 0.05 % (a sticker's alpha) to 10 % (soft alpha)
 //!   less. Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
 //!   exact, the color under fully transparent pixels free to change; a
-//!   picture with transparency is scaled by area, its color weighed by its
-//!   alpha, its alpha kept to the values the source's has but its thin
-//!   strokes whole, and its fully transparent pixels colored as the visible
-//!   ones nearest them ([`scale`]). The qualities are JPEG's, so a preset
+//!   picture with transparency is scaled by area near its transparency,
+//!   its color weighed by its alpha, its alpha kept to the values the
+//!   source's has but its thin strokes whole, its fully transparent pixels
+//!   colored as the visible ones nearest them, and by Lanczos3 elsewhere
+//!   ([`scale`]). The qualities are JPEG's, so a preset
 //!   means the same across formats.
 //!   Kept when it's at most 90 % of the source's size; "Try Small" only
 //!   when Small's file is likely to be ([`small_does_more`]).

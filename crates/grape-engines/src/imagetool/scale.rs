@@ -27,6 +27,13 @@
 //! pixels take the color of the visible ones nearest them
 //! ([`fill_transparent`]): black there made libwebp's stroke edges steps
 //! of color, and its files of text and line art 2 to 4 times as large.
+//!
+//! Where Lanczos3 would read only opaque pixels, more than
+//! [`LANCZOS_REACH`] new pixels from every one the area found something
+//! see-through under ([`reach`]), the color is Lanczos3's after all, as
+//! without transparency: by area alone, a photo with rounded corners or
+//! one pixel at 254 came out of Small softer (38.2 and 38.1 dB against a
+//! Lanczos3-scaled reference, opaque 38.7), as did a cutout's inside.
 
 use std::collections::VecDeque;
 
@@ -65,9 +72,12 @@ pub(super) fn fit(w: u64, h: u64, cap: u64) -> (u64, u64) {
 /// - `encode(w, h, bpp)`: what encoding the `w`×`h` result holds, itself
 ///   included.
 ///
-/// A picture with transparency holds less: the picture, a row of 16 bytes
-/// a pixel and the result ([`area`]), which is colored in place
-/// ([`fill_transparent`]: at most 13 bytes for each 8 × 8 block of it).
+/// A picture with transparency (`bpp` 4) holds, through the first two
+/// steps, its area-averaged result and a byte a new pixel for where it's
+/// near transparency, and 2 more to work out where Lanczos3 reaches it
+/// ([`area`], [`reach`]): 7 bytes a new pixel; the result is then colored
+/// in place ([`fill_transparent`]: at most 13 bytes for each 8 × 8 block
+/// of it).
 pub(super) fn peak(
     width: u32,
     height: u32,
@@ -87,9 +97,16 @@ pub(super) fn peak(
     let from = if k > 1 { averaged } else { size(w, h) };
     let (nw, nh) = fit(sw, sh, cap);
     let lanczos = sw.saturating_mul(nh).saturating_mul(16);
+    let area = if bpp == 4 {
+        nw.saturating_mul(nh).saturating_mul(7)
+    } else {
+        0
+    };
     [
-        size(w, h).saturating_add(averaged),
-        from.saturating_add(lanczos).saturating_add(size(nw, nh)),
+        size(w, h).saturating_add(averaged).saturating_add(area),
+        from.saturating_add(lanczos)
+            .saturating_add(size(nw, nh))
+            .saturating_add(area),
         encode(nw, nh, bpp),
     ]
     .into_iter()
@@ -108,24 +125,84 @@ pub(super) fn scale(
     let Some(cap) = cap.filter(|&cap| long > cap) else {
         return Some(img);
     };
-    let img = match img {
+    match img {
         DynamicImage::ImageRgba8(rgba) if transparent(&rgba) => {
             let levels = Levels::of(&rgba);
             let (nw, nh) = scaled_size(rgba.width(), rgba.height(), cap);
             let keep = keep(rgba.dimensions(), (nw, nh));
-            let mut out = area(&rgba, nw, nh, cancel, |s| levels.finish(s, keep))?;
-            drop(rgba);
+            let (mut out, near) = area(&rgba, nw, nh, cancel, |s| levels.finish(s, keep))?;
+            let opaque = reach(near, nw as usize, LANCZOS_REACH);
+            if opaque.iter().any(|&o| o) {
+                // Lanczos3 where it sees only opaque pixels, as without
+                // transparency.
+                let sharp = lanczos(DynamicImage::ImageRgba8(rgba), cap, cancel)?.into_rgba8();
+                if sharp.dimensions() == out.dimensions() {
+                    let pixels = out.as_chunks_mut::<4>().0.iter_mut();
+                    let sharp = sharp.as_raw().as_chunks::<4>().0;
+                    for ((p, s), &o) in pixels.zip(sharp).zip(&opaque) {
+                        if o {
+                            p[..3].copy_from_slice(&s[..3]);
+                        }
+                    }
+                }
+            }
             fill_transparent(&mut out, cancel)?;
-            return Some(DynamicImage::ImageRgba8(out));
+            Some(DynamicImage::ImageRgba8(out))
         }
-        other => other,
-    };
+        other => lanczos(other, cap, cancel),
+    }
+}
+
+/// How many new pixels on each side of one Lanczos3 reads ([`lanczos`]):
+/// its kernel's 3, and one more for the whole-factor average before it.
+const LANCZOS_REACH: u8 = 4;
+
+/// `img`, over `cap` on its long side, averaged down by [`shrink_factor`]
+/// and then fitted inside `cap`×`cap` with Lanczos3; `None` if cancelled.
+fn lanczos(img: DynamicImage, cap: u32, cancel: &CancelToken) -> Option<DynamicImage> {
+    let long = img.width().max(img.height());
     let k = u32::try_from(shrink_factor(u64::from(long), u64::from(cap))).unwrap_or(u32::MAX);
     let img = if k > 1 { shrink(img, k, cancel)? } else { img };
     if cancel.is_cancelled() {
         return None;
     }
     Some(img.resize(cap, cap, FilterType::Lanczos3))
+}
+
+/// Which new pixels of a picture `width` wide are more than `by` pixels
+/// (across, down or both) from every one `near` marks. Holds 2 bytes a
+/// pixel besides `near`.
+fn reach(near: Vec<bool>, width: usize, by: u8) -> Vec<bool> {
+    if width == 0 {
+        return near;
+    }
+    // How far each is from a marked one along its row, up to past `by`,
+    // then whether that's past `by` in every row within `by`.
+    let past = by.saturating_add(1);
+    let mut across = vec![past; near.len()];
+    for (row, out) in near.chunks(width).zip(across.chunks_mut(width)) {
+        let mut to = past;
+        for (&n, d) in row.iter().zip(out.iter_mut()) {
+            to = if n { 0 } else { to.saturating_add(1).min(past) };
+            *d = to;
+        }
+        let mut to = past;
+        for (&n, d) in row.iter().zip(out.iter_mut()).rev() {
+            to = if n { 0 } else { to.saturating_add(1).min(past) };
+            *d = (*d).min(to);
+        }
+    }
+    drop(near);
+    let height = across.len() / width;
+    let by = usize::from(by);
+    let mut far = vec![false; across.len()];
+    for (y, row) in far.chunks_mut(width).enumerate() {
+        let rows = y.saturating_sub(by)..(y + by + 1).min(height);
+        for (x, f) in row.iter_mut().enumerate() {
+            *f = rows.clone().all(|r| across[r * width + x] == past);
+        }
+    }
+    far
 }
 
 /// The size [`scale`] makes a `width`×`height` picture for `cap`, the
@@ -310,47 +387,55 @@ type Sums = [f32; 4];
 /// `src` scaled to `width`×`height`, each new pixel `finish`ed from the
 /// [`Sums`] of the source pixels it covers (a box filter): no weight is
 /// negative, so no mean comes out past the values it's made of, and the
-/// color under a fully transparent pixel weighs nothing. Holds a row of 16
-/// bytes a source pixel besides the two pictures; `None` if cancelled,
-/// which is checked every new row.
+/// color under a fully transparent pixel weighs nothing. With it, which new
+/// pixels cover a source pixel that isn't opaque. Holds a row of 17 bytes
+/// a source pixel besides the two pictures and a byte a new pixel; `None`
+/// if cancelled, which is checked every new row.
 pub(super) fn area(
     src: &RgbaImage,
     width: u32,
     height: u32,
     cancel: &CancelToken,
     finish: impl Fn(&Sums) -> [u8; 4],
-) -> Option<RgbaImage> {
+) -> Option<(RgbaImage, Vec<bool>)> {
     let across = coverage(src.width(), width);
     let down = coverage(src.height(), height);
     let row = src.width() as usize * 4;
     let mut sum = vec![[0f32; 4]; src.width() as usize];
+    let mut seen = vec![false; src.width() as usize];
     let mut out = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut near = Vec::with_capacity(width as usize * height as usize);
     for (first, shares) in &down {
         if cancel.is_cancelled() {
             return None;
         }
         sum.fill([0.0; 4]);
+        seen.fill(false);
         for (y, &share) in (*first..).zip(shares) {
             let line = src.as_raw().get(y * row..(y + 1) * row)?;
-            for (s, p) in sum.iter_mut().zip(line.as_chunks::<4>().0) {
+            for ((s, p), seen) in sum.iter_mut().zip(line.as_chunks::<4>().0).zip(&mut seen) {
                 let a = share * f32::from(p[3]);
                 for (s, &c) in s.iter_mut().zip(&p[..3]) {
                     *s += a * f32::from(c);
                 }
                 s[3] += a;
+                *seen |= p[3] != u8::MAX;
             }
         }
         for (first, shares) in &across {
             let mut px = [0f32; 4];
+            let mut through = false;
             for (x, &share) in (*first..).zip(shares) {
                 for (c, &v) in px.iter_mut().zip(sum.get(x)?) {
                     *c += share * v;
                 }
+                through |= *seen.get(x)?;
             }
             out.extend(finish(&px));
+            near.push(through);
         }
     }
-    RgbaImage::from_raw(width, height, out)
+    Some((RgbaImage::from_raw(width, height, out)?, near))
 }
 
 /// `src`, `w`×`h` pixels of `ch` 8-bit channels, with each `k`×`k` block
@@ -447,6 +532,12 @@ mod tests {
             peak(20_000, 20_000, 3, Some(4096), &|_, _, _| 0),
             w * h * 3 + averaged
         );
+        // With transparency, the area's result and the map of where it's
+        // near transparency, 7 bytes a new pixel, beside both steps.
+        assert_eq!(
+            peak(4097, 1024, 4, Some(4096), &|_, _, _| 0),
+            4097 * 1024 * 4 + 4097 * 1024 * 16 + 4096 * 1024 * 4 + 4096 * 1024 * 7
+        );
         // A huge encode stage wins.
         assert_eq!(peak(10, 10, 1, Some(5), &|_, _, _| u64::MAX), u64::MAX);
     }
@@ -507,11 +598,12 @@ mod tests {
         });
         let levels = Levels::of(&half);
         let view = half.view(0, 0, 1, 1).to_image();
-        let out = area(&view, 1, 1, &cancel, |s| levels.finish(s, f32::MAX)).unwrap();
+        let (out, _) = area(&view, 1, 1, &cancel, |s| levels.finish(s, f32::MAX)).unwrap();
         assert_eq!(out.get_pixel(0, 0).0, [200, 100, 3, 128]);
-        let out = area(&half, 1, 1, &cancel, |s| levels.finish(s, 64.0)).unwrap();
+        let (out, near) = area(&half, 1, 1, &cancel, |s| levels.finish(s, 64.0)).unwrap();
+        assert_eq!(near, [true]);
         assert_eq!(out.get_pixel(0, 0).0, [200, 100, 3, 128]);
-        let out = area(&half, 1, 1, &cancel, |s| levels.finish(s, 64.5)).unwrap();
+        let (out, _) = area(&half, 1, 1, &cancel, |s| levels.finish(s, 64.5)).unwrap();
         assert_eq!(out.get_pixel(0, 0).0, [0, 0, 0, 0]);
         cancel.cancel();
         assert!(scale(DynamicImage::ImageRgba8(edge), Some(50), &cancel).is_none());
@@ -692,6 +784,78 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_with_a_little_transparency_stays_as_sharp_as_without() {
+        let cancel = CancelToken::default();
+        // Detail Lanczos3 keeps sharper than an area average, with one
+        // pixel at 254 in the middle, or transparent corners.
+        let rgb = RgbImage::from_fn(300, 150, |x, y| {
+            let v = |a: u32, b: u32| ((a * 37 + b * 11) % 256) as u8;
+            image::Rgb([v(x, y), v(y, x), v(x + y, x * y % 7)])
+        });
+        let with = |alpha: &dyn Fn(u32, u32) -> u8| {
+            RgbaImage::from_fn(300, 150, |x, y| {
+                let [r, g, b] = rgb.get_pixel(x, y).0;
+                image::Rgba([r, g, b, alpha(x, y)])
+            })
+        };
+        let dot = with(&|x, y| if (x, y) == (150, 75) { 254 } else { 255 });
+        let corners = with(&|x, y| {
+            let (dx, dy) = (x.min(299 - x), y.min(149 - y));
+            if dx + dy < 12 {
+                0
+            } else {
+                255
+            }
+        });
+        // By 1.5, and by 3 (averaged by 2 first).
+        for cap in [200, 100] {
+            let plain = scale(DynamicImage::ImageRgb8(rgb.clone()), Some(cap), &cancel).unwrap();
+            let plain = plain.as_rgb8().unwrap();
+            let r = 300.0 / f64::from(cap);
+            let near_dot = |x: u32, y: u32| x.abs_diff(cap / 2) <= 6 && y.abs_diff(cap / 4) <= 6;
+            let near_corner = |x: u32, y: u32| {
+                let (w, h) = (cap, cap / 2);
+                let d = x.min(w - 1 - x) + y.min(h - 1 - y);
+                f64::from(d) <= 12.0 / r + 10.0
+            };
+            type Near<'a> = &'a dyn Fn(u32, u32) -> bool;
+            let cases: [(&RgbaImage, Near); 2] = [(&dot, &near_dot), (&corners, &near_corner)];
+            for (img, near) in cases {
+                let out = scale(DynamicImage::ImageRgba8(img.clone()), Some(cap), &cancel).unwrap();
+                let out = out.as_rgba8().unwrap();
+                assert_eq!(out.dimensions(), plain.dimensions());
+                let (mut same, mut far) = (0, 0);
+                for (x, y, p) in out.enumerate_pixels() {
+                    if !near(x, y) {
+                        far += 1;
+                        assert_eq!(p.0[..3], plain.get_pixel(x, y).0, "{cap}: ({x}, {y})");
+                        assert_eq!(p.0[3], 255);
+                    }
+                    same += usize::from(p.0[..3] == plain.get_pixel(x, y).0);
+                }
+                assert!(far > 0 && same < out.pixels().len(), "{cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn reach_marks_what_is_far_from_every_marked_pixel() {
+        // 7 × 3, one marked at (3, 1): within 1 of it, all but the outer
+        // columns; within 0, all but it; nothing marked, all far.
+        let mut near = vec![false; 21];
+        near[7 + 3] = true;
+        let far = reach(near.clone(), 7, 1);
+        let rows: Vec<Vec<bool>> = far.chunks(7).map(<[bool]>::to_vec).collect();
+        let row = [true, true, false, false, false, true, true];
+        assert_eq!(rows, [row; 3]);
+        let far = reach(near, 7, 0);
+        assert_eq!(far.iter().filter(|&&f| !f).count(), 1);
+        assert!(!far[10]);
+        assert!(reach(vec![false; 21], 7, 4).iter().all(|&f| f));
+        assert!(reach(Vec::new(), 0, 4).is_empty());
+    }
+
+    #[test]
     fn an_area_average_weighs_each_pixel_by_how_much_it_covers() {
         let cancel = CancelToken::default();
         // Opaque: each channel's mean, and the alpha's.
@@ -706,19 +870,21 @@ mod tests {
             })
         };
         // 3 to 2: (a + b/2) / 1.5 and (b/2 + c) / 1.5.
-        let out = area(&px([30, 60, 90]), 2, 1, &cancel, mean).unwrap();
+        let (out, near) = area(&px([30, 60, 90]), 2, 1, &cancel, mean).unwrap();
+        assert_eq!(near, [false, false]);
         assert_eq!(out.get_pixel(0, 0).0, [40, 40, 40, 255]);
         assert_eq!(out.get_pixel(1, 0).0, [80, 80, 80, 255]);
         // 3 to 1, and as it is.
         assert_eq!(
             area(&px([30, 60, 90]), 1, 1, &cancel, mean)
                 .unwrap()
+                .0
                 .get_pixel(0, 0)
                 .0,
             [60, 60, 60, 255]
         );
         assert_eq!(
-            area(&px([30, 60, 90]), 3, 1, &cancel, mean).unwrap(),
+            area(&px([30, 60, 90]), 3, 1, &cancel, mean).unwrap().0,
             px([30, 60, 90])
         );
         // Down too: 1 × 3 to 1 × 2.
@@ -726,7 +892,7 @@ mod tests {
             let v = [30, 60, 90][y as usize];
             image::Rgba([v, v, v, 255])
         });
-        let out = area(&tall, 1, 2, &cancel, mean).unwrap();
+        let (out, _) = area(&tall, 1, 2, &cancel, mean).unwrap();
         assert_eq!(
             (out.get_pixel(0, 0).0[0], out.get_pixel(0, 1).0[0]),
             (40, 80)
@@ -739,7 +905,8 @@ mod tests {
                 [0, 200, 0, 0]
             })
         });
-        let out = area(&clear, 1, 1, &cancel, mean).unwrap();
+        let (out, near) = area(&clear, 1, 1, &cancel, mean).unwrap();
+        assert_eq!(near, [true]);
         assert_eq!(out.get_pixel(0, 0).0, [90, 0, 0, 128]);
         // 4 to 3: the middle one covers the second half of the second
         // pixel and the first half of the third.
