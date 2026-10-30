@@ -491,6 +491,125 @@ fn miscounted_tiff() -> Vec<u8> {
     file
 }
 
+/// A classic gray 300 × 100 TIFF, uncompressed, every byte of its picture
+/// at 8, that lists strips 3,000 bytes apart with `counts`, in strips of
+/// `rows` rows or with no RowsPerStrip: libtiff reads as many strips as its
+/// rows make (one with none), whatever's listed, and checks their counts.
+fn listed_tiff(rows: Option<u32>, counts: &[u32]) -> Vec<u8> {
+    let n = u32::try_from(counts.len()).unwrap();
+    let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+        (256, 4, 1, 300),
+        (257, 4, 1, 100),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (273, 4, n, 0),
+    ];
+    entries.extend(rows.map(|rows| (278, 4, 1, rows)));
+    entries.push((279, 4, n, 0));
+    let ifd = 8 + 30_000;
+    let offsets = ifd + 2 + 12 * u32::try_from(entries.len()).unwrap() + 4;
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..30_000).map(|i| (i % 251) as u8));
+    file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        let value = match tag {
+            273 => offsets,
+            279 => offsets + 4 * n,
+            _ => value,
+        };
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    file.extend((0..n).flat_map(|i| (8 + 3_000 * i).to_le_bytes()));
+    file.extend(counts.iter().flat_map(|c| c.to_le_bytes()));
+    file
+}
+
+#[test]
+fn both_tiff_tools_refuse_counts_libtiff_reads_for_other_strips() {
+    // Ten listed where libtiff, with no RowsPerStrip, reads one strip, and
+    // reads the whole picture from it, its count short ("Bogus"); and two
+    // listed where it reads ten of 10 rows, the eight missing at 0, and
+    // ignores counts whose first two differ ("Wrong").
+    let mut more = [3_000; 10];
+    more[3] = 10;
+    let dir = TestDir::new("tiff-listed");
+    for (name, bytes) in [
+        ("more.tif", listed_tiff(None, &more)),
+        ("fewer.tif", listed_tiff(Some(10), &[3_000, 1_500])),
+    ] {
+        let ops = [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ];
+        for op in ops {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
+    // A gray 300 × 100 page of one strip counted 0, which libtiff works
+    // out to the whole picture, but only 20,000 bytes of it, then an XMP
+    // packet (700), then the IFD: libtiff reads the packet as pixels.
+    let xmp = b"<x:xmpmeta>a secret</x:xmpmeta>".repeat(450);
+    let at = 8 + 20_000;
+    let ifd = at + u32::try_from(xmp.len()).unwrap();
+    let entries: [(u16, u16, u32, u32); 8] = [
+        (256, 4, 1, 300),
+        (257, 4, 1, 100),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (273, 4, 1, 8),
+        (278, 4, 1, 100),
+        (279, 4, 1, 0),
+        (700, 1, u32::try_from(xmp.len()).unwrap(), at),
+    ];
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..20_000).map(|i| (i % 251) as u8));
+    file.extend(&xmp);
+    file.extend(8u16.to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    let dir = TestDir::new("tiff-into-xmp");
+    for op in [
+        Operation::tool(ToolKey::RemoveMetadata),
+        compress_op(grape_core::CompressPreset::High),
+    ] {
+        let err = run(&dir, "packet.tif", &file, op).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "packet.tif says the wrong size for some of its image data, which Grape can't rewrite yet."
+        );
+        fs::remove_file(dir.join("packet.tif")).unwrap();
+    }
+}
+
 #[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
@@ -1336,6 +1455,47 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
         "{}",
         err.detail
     );
+}
+
+#[test]
+fn compress_says_why_it_copied_a_tiff_page_when_it_cant_make_its_output() {
+    use grape_core::JobOutput;
+    use tiff::encoder::{colortype, TiffEncoder};
+    use tiff::tags::Tag;
+    // A page of JPEG data, which the plan copies as it is, and one it
+    // recodes.
+    let mut out = Cursor::new(Vec::new());
+    let mut e = TiffEncoder::new(&mut out).unwrap();
+    let mut jpeg = e.new_image::<colortype::Gray8>(8, 8).unwrap();
+    jpeg.encoder().write_tag(Tag::Compression, 7u16).unwrap();
+    jpeg.write_data(&[7; 64]).unwrap();
+    e.write_image::<colortype::Gray8>(64, 64, &[9; 64 * 64])
+        .unwrap();
+    let bytes = out.into_inner();
+    let dir = TestDir::new("compress-tiff-log-made");
+    fs::write(dir.join("file"), b"not a folder").unwrap();
+    // A folder gone since planning, where the temp file can't be made; and
+    // a fallback folder that can't be, under a file.
+    for (folder, fallback) in [("gone", false), ("file", true)] {
+        let (src, mut job) = plan_one(
+            &dir,
+            "two.tif",
+            &bytes,
+            compress_op(grape_core::CompressPreset::High),
+        );
+        job.output = JobOutput::File(dir.join(folder).join("sub").join("two.tif"));
+        job.used_fallback = fallback;
+        let before = SourceState::of(&src);
+        let err = run_job(&job, &EngineCtx::default(), &mut |_| {}).unwrap_err();
+        before.assert_unchanged();
+        assert_eq!(err.kind, ErrorKind::WriteFailed, "{}", err.detail);
+        assert!(
+            err.detail
+                .contains("IFD 0 copied as it is: its compression is 7"),
+            "{folder}: {}",
+            err.detail
+        );
+    }
 }
 
 /// `samples` as bytes in native order, as image's encoder takes 16-bit

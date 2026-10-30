@@ -908,7 +908,8 @@ mod tests {
     }
 
     /// Three pages whose ICC profiles are the first page's 4,000 bytes,
-    /// read from `step` bytes further on for each page after it.
+    /// read from `step` bytes further back for each page after it (into
+    /// the IFDs and values before it, as a value may reach, not a block).
     fn one_profile(big: bool, step: u64) -> (Vec<u8>, Vec<u8>) {
         let profile: Vec<u8> = (0..4000).map(|i| (i % 251) as u8 + 1).collect();
         let mut first = gray(1, 1, 1, vec![B::data(b"x")]);
@@ -929,7 +930,7 @@ mod tests {
             panic!("an inline profile")
         };
         for (n, page) in (1..).zip(&tiff.pages[1..]) {
-            set_entry(&mut file, page.at, 34675, 4000, offset + n * step);
+            set_entry(&mut file, page.at, 34675, 4000, offset - n * step);
         }
         (file, profile)
     }
@@ -958,7 +959,7 @@ mod tests {
 
     #[test]
     fn an_output_that_would_copy_more_than_the_source_holds_is_too_large() {
-        // Each page's profile starts 8 bytes after the one before: three
+        // Each page's profile starts 8 bytes before the one before: three
         // values, so 12,000 bytes to copy from a file of about 4,500.
         for big in [false, true] {
             let (file, _) = one_profile(big, 8);
