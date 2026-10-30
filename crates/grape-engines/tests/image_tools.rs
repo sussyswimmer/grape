@@ -1520,6 +1520,50 @@ fn remove_metadata_refuses_a_tag_it_keeps_listed_twice_differently() {
 }
 
 #[test]
+fn both_tiff_tools_refuse_two_exif_pointers_that_disagree() {
+    // Both tools follow the first entry, where Pillow follows the last:
+    // Compress moved the first's Exif IFD alone, and Remove Metadata
+    // read only it for the DCF Exif and the report.
+    let entries = vec![
+        (256, 4, le(4, 4)),
+        (257, 4, le(4, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (34665, 4, le(0, 4)),
+        (34665, 4, le(8, 4)),
+    ];
+    let file = one_strip(false, &[9; 16], entries);
+    let dir = TestDir::new("tiff-two-exif-pointers");
+    for (name, result) in [
+        ("strip.tif", strip(&dir, "strip.tif", &file)),
+        (
+            "compress.tif",
+            compress(
+                &dir,
+                "compress.tif",
+                &file,
+                grape_core::CompressPreset::Balanced,
+            ),
+        ),
+    ] {
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!(
+                "{name} lists a tag twice with different values, which Grape can't rewrite yet."
+            )
+        );
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

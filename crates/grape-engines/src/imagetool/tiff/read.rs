@@ -37,7 +37,9 @@
 //!   that IFD, before its strips or tiles, which an old-style JPEG may not
 //!   have; entries for a tag the tools decide on that disagree, of which
 //!   libtiff reads the first and Pillow the last ([`UNREAD_COMPRESSION`]
-//!   for Compression, [`UNREAD_LAYOUT`] for the others); a layout libtiff
+//!   for Compression, [`UNREAD_LAYOUT`] for the others), and so for an
+//!   Exif, GPS or Interop pointer, as the walk follows the first
+//!   ([`TWICE`]); a layout libtiff
 //!   can't read where Grape needs it to size or pick the blocks
 //!   ([`UNREAD_LAYOUT`]); and byte counts
 //!   libtiff takes at their word that readers which size data themselves
@@ -1196,6 +1198,10 @@ impl Walk<'_> {
             };
             return Err(Error::Refused(why.into()));
         }
+        // So would they an Exif or GPS IFD: the tools follow the first.
+        if twice(&ifd.entries, |tag| matches!(tag, 34665 | 34853)).is_some() {
+            return Err(Error::Refused(TWICE.into()));
+        }
         self.blocks(&mut ifd)?;
         if let Some(subs) = ifd.get(330).cloned() {
             if depth >= MAX_DEPTH {
@@ -1266,6 +1272,10 @@ impl Walk<'_> {
         self.seen.insert(at, Seen::Meta(kind, Meta::unread(at)));
         let meta = match self.raw(at) {
             Ok(Some((entries, _))) => {
+                // An Interop IFD too.
+                if kind == exif::Ifd::Exif && twice(&entries, |tag| tag == 40965).is_some() {
+                    return Err(Error::Refused(TWICE.into()));
+                }
                 let interop = if kind == exif::Ifd::Exif {
                     let entry = entries.iter().find(|e| e.tag == 40965).cloned();
                     self.meta(entry, exif::Ifd::Interop)?.map(Box::new)
@@ -2939,6 +2949,32 @@ mod tests {
         // A tag no tool decides on may be there twice, whatever it says.
         let other = file(305, V::Ascii("one"), V::Ascii("another"));
         assert!(read(&other).is_ok());
+    }
+
+    #[test]
+    fn pointers_to_exif_gps_or_interop_ifds_that_disagree_are_refused() {
+        // Both tools follow a pointer's first entry, where Pillow follows
+        // the last: a page's Exif or GPS pointer listed twice, the second
+        // pointing nowhere, and an Exif IFD's Interop pointer so too.
+        let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+        page.exif = Some(vec![(0x9003, V::Ascii("2024:05:01 10:20:30"))]);
+        page.interop = Some(vec![(1, V::Ascii("R03"))]);
+        page.gps = Some(vec![(1, V::Ascii("N"))]);
+        let twice = |page: &Page| {
+            let file = Builder::new(b'I', false, vec![page.clone()]).build();
+            matches!(read(&file), Err(Error::Refused(why)) if why == TWICE)
+        };
+        assert!(!twice(&page));
+        for tag in [34665, 34853] {
+            let mut doubled = page.clone();
+            doubled.tags.push((tag, V::Long(vec![0])));
+            assert!(twice(&doubled), "{tag}");
+        }
+        let mut doubled = page.clone();
+        if let Some(exif) = doubled.exif.as_mut() {
+            exif.push((40965, V::Long(vec![0])));
+        }
+        assert!(twice(&doubled));
     }
 
     /// `file` with the type of the entry for `tag` in the IFD at `at` set to
