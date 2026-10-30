@@ -1216,6 +1216,12 @@ impl Walk<'_> {
             }
             None => vec![1],
         };
+        // libtiff reads one value, or the first SamplesPerPixel of more.
+        let bps = match (bps.len(), bps.get(..spp as usize)) {
+            (1, _) => bps,
+            (_, Some(first)) => first.to_vec(),
+            (n, None) => return Ok(Err(format!("its BitsPerSample has {n} values"))),
+        };
         // YCbCr's chroma is subsampled 2 × 2 unless it says otherwise, in
         // sampling units of h × v luma samples and two chroma samples
         // (TIFF 6 §21), when its three samples are in one plane.
@@ -2079,6 +2085,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn bits_per_sample_counts_as_many_values_as_samples() {
+        // RGB, 10 × 7 in strips of 3 rows, its BitsPerSample of four
+        // values: libtiff reads the first three, 30 bytes a row, so the
+        // strips are 90, 90 and 30 bytes, counted or worked out.
+        let mut page = gray(
+            10,
+            7,
+            3,
+            vec![B::data(&[1; 90]), B::data(&[2; 90]), B::data(&[3; 30])],
+        );
+        page.tags[1] = (257, V::Long(vec![7]));
+        page.tags[2] = (258, V::Short(vec![8; 4]));
+        page.tags[3] = (262, V::Short(vec![2]));
+        page.tags.push((277, V::Short(vec![3])));
+        for counts in [None, Some(Vec::new())] {
+            let mut page = page.clone();
+            page.counts = counts;
+            let tiff = read(&Builder::new(b'I', false, vec![page]).build()).unwrap();
+            assert_eq!(lens(&tiff), [90, 90, 30]);
+        }
+        // Fewer than the samples, but for one, can't be read.
+        page.tags[2] = (258, V::Short(vec![8, 8]));
+        page.counts = Some(Vec::new());
+        let file = Builder::new(b'I', false, vec![page]).build();
+        assert!(matches!(read(&file), Err(Error::Broken(why)) if why.contains("BitsPerSample")));
     }
 
     #[test]

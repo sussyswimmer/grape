@@ -10,10 +10,11 @@
 //!   MSB-first codes it could come out as other bytes without an error.
 //! - **Cut** at the block's size ([`Geometry`]): its rows times a row's
 //!   bytes (a plane's, when the planes are stored apart; a row of YCbCr
-//!   sampling units when the chroma is subsampled, TIFF 6 §21), the last
-//!   strip of each plane holding what's left of the picture, a tile always
-//!   full size. Bytes after that are dropped, as readers drop them; data
-//!   that ends before it can't be decoded.
+//!   sampling units when the chroma is subsampled, TIFF 6 §21; of the
+//!   first SamplesPerPixel sizes of BitsPerSample, as libtiff reads it),
+//!   the last strip of each plane holding what's left of the picture, a
+//!   tile always full size. Bytes after that are dropped, as readers drop
+//!   them; data that ends before it can't be decoded.
 //! - **Predicted** ([`Predictor`]): horizontal differencing (TIFF's
 //!   predictor 2) over each row of 8 or 16-bit samples, in the file's byte
 //!   order, and its inverse.
@@ -135,11 +136,13 @@ impl Geometry {
                 None => return not("its BitsPerSample can't be read".into()),
             },
         };
-        let bits = match bits.as_slice() {
-            [one] => *one,
-            [first, rest @ ..] if bits.len() as u64 == samples => {
-                if rest.iter().any(|b| b != first) {
-                    return not(format!("its samples have different sizes: {bits:?}"));
+        // One value, or the first SamplesPerPixel of more, as libtiff
+        // reads them.
+        let bits = match (bits.as_slice(), bits.get(..samples as usize)) {
+            ([one], _) => *one,
+            (_, Some(used @ [first, ..])) => {
+                if used.iter().any(|b| b != first) {
+                    return not(format!("its samples have different sizes: {used:?}"));
                 }
                 *first
             }
@@ -1257,6 +1260,11 @@ mod tests {
         let mut twelve = rgb.clone();
         twelve[2] = (258, V::Short(vec![12, 12, 12]));
         assert_eq!(sized(page(twelve, 3, false)).unwrap().row, 45);
+        // A BitsPerSample of more values than samples: the first three, as
+        // libtiff reads them.
+        let mut four = rgb.clone();
+        four[2] = (258, V::Short(vec![8, 8, 8, 16]));
+        assert_eq!(sized(page(four, 3, false)).unwrap().row, 30);
         // Tiles of 16 × 16 over 40 × 20: 3 × 2 of them, all full size.
         let tiles = vec![
             (256, V::Long(vec![40])),

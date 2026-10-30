@@ -690,6 +690,33 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
 }
 
 #[test]
+fn both_tiff_tools_size_rgb_by_the_bits_of_its_samples_alone() {
+    // RGB, 100 × 100 in ten strips of 3,000 bytes, its BitsPerSample of
+    // four values, as some writers leave it: libtiff reads the first three
+    // (SamplesPerPixel's), and so does Grape.
+    let rgb = [
+        (256, 4, le(100, 4)),
+        (
+            258,
+            3,
+            [8u16; 4].iter().flat_map(|b| b.to_le_bytes()).collect(),
+        ),
+        (262, 3, le(2, 2)),
+        (277, 3, le(3, 2)),
+        (278, 3, le(10, 2)),
+    ];
+    let bytes = typed_tiff(false, &[3_000; 10], &rgb);
+    let dir = TestDir::new("tiff-four-bits");
+    strip(&dir, "rgb.tif", &bytes).unwrap();
+    let op = compress_op(grape_core::CompressPreset::High);
+    let outcome = run(&dir, "rgb.tif", &bytes, op).unwrap();
+    assert!(
+        matches!(outcome.notes[..], [Note::Compressed { .. }]),
+        "{outcome:?}"
+    );
+}
+
+#[test]
 fn both_tiff_tools_refuse_a_strip_libtiff_reads_into_a_value() {
     // A gray 300 × 100 page of one strip counted 0, which libtiff works
     // out to the whole picture, but only 20,000 bytes of it, then an XMP
