@@ -3296,6 +3296,36 @@ fn cancelled_at(name: &str, bytes: &[u8], op: Operation, nth: usize) {
 }
 
 #[test]
+fn a_cancel_at_webp_compress_last_report_is_a_cancel() {
+    // A compact file, which would end NoChange: cancelled at the report
+    // after libwebp's (0.9), it says Cancelled.
+    let dir = TestDir::new("cancel-webp-late");
+    let small = lossy_webp(photo(800, 600).as_raw(), 800, 600, false, 40.0);
+    let (src, job) = plan_one(
+        &dir,
+        "pic.webp",
+        &small,
+        compress_op(grape_core::CompressPreset::High),
+    );
+    let before = SourceState::of(&src);
+    let ctx = EngineCtx::default();
+    let cancel = ctx.cancel.clone();
+    let mut seen = Vec::new();
+    let err = run_job(&job, &ctx, &mut |p| {
+        seen.push(p);
+        if p >= 0.9 {
+            cancel.cancel();
+        }
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled, "{}: {seen:?}", err.detail);
+    assert_eq!(seen.iter().filter(|&&p| p >= 0.9).count(), 1, "{seen:?}");
+    before.assert_unchanged();
+    assert!(!planned_file(&job).exists());
+    assert_no_leftovers(&dir.path);
+}
+
+#[test]
 fn a_cancel_midway_says_cancelled_and_leaves_nothing() {
     let big = jpeg_of(&photo(1200, 900), 95);
     assert!(big.len() > 2 * 64 * 1024);

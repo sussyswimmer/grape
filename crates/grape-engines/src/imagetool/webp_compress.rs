@@ -265,6 +265,10 @@ pub(crate) fn run(
         names.encode_failed(format!("assemble {}: {why}", src.display()))
     })?;
     drop(carried);
+    // A cancel during the last report is a cancel, not a verdict on size.
+    if cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
     let after = out.len() as u64;
     // 90 % lossy, 95 % exact (D26).
     let (most, try_small) = if lossless {
