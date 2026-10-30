@@ -18,17 +18,19 @@
 //!   Interop `R03`), when that's how an IFD with no ICC profile said its
 //!   color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG, old-style JPEG and a Compression libtiff can't read
-//!   (both tools); metadata inside JPEG data (Compression 7 as libtiff
-//!   reads it; an APP1, APP13 or COM in a block, or in a JPEGTables, any
-//!   IFD's, read as libtiff reads it ([`tables`]): up to its first scan
-//!   when that's a sequential frame's only one, and through every scan
-//!   otherwise), and JPEG data Grape can't check, whose segments or scans
-//!   run past the first [`MAX_SCAN`] bytes read before that, that's
-//!   hierarchical, or JPEGTables libtiff can't read as bytes; metadata
-//!   inside WebP data (Compression 50001: an EXIF or XMP chunk, [`chunks`]),
-//!   and WebP data whose chunks run on past the first [`MAX_CHUNKS`];
-//!   JPEG 2000 and JPEG XL data, which Grape can't check yet ([`unread`]);
-//!   ImageJ and OME files, whose layout is in their description.
+//!   (both tools); data of a Compression whose stream may hold metadata
+//!   that Grape doesn't read ([`coded`]: JPEG 2000, JPEG XL, JPEG XR, PNG,
+//!   and every code it doesn't know); metadata inside JPEG data (the codes
+//!   that hold JPEG streams, as libtiff reads Compression; an APP1, APP13
+//!   or COM in a block, or in a JPEGTables, any IFD's, read as libtiff
+//!   reads it ([`tables`]): up to its first scan when that's a sequential
+//!   frame's only one, and through every scan otherwise), and JPEG data
+//!   Grape can't check, whose segments or scans run past the first
+//!   [`MAX_SCAN`] bytes read before that, that's hierarchical, or
+//!   JPEGTables libtiff can't read as bytes; metadata inside WebP data (an
+//!   EXIF or XMP chunk, [`chunks`]), and WebP data whose chunks run on past
+//!   the first [`MAX_CHUNKS`]; ImageJ and OME files, whose layout is in
+//!   their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -70,20 +72,66 @@ const MAX_CHUNKS: usize = 64;
 /// Why a file with metadata inside its JPEG data is refused.
 const IN_DATA: &str = "has metadata inside its image data, which Grape can't remove yet.";
 
-/// Why a file whose `kind` of data (JPEG, WebP, JPEG 2000, JPEG XL) runs on
-/// past what's read of it, or isn't read at all, is refused.
+/// Why a file whose `kind` of data (JPEG, WebP, JPEG 2000, …, or "image"
+/// for a Compression Grape doesn't know) runs on past what's read of it,
+/// or isn't read at all, is refused.
 fn unchecked(kind: &str) -> String {
     format!("has {kind} data Grape can't check for metadata yet.")
 }
 
-/// The kind of data of Compression `n` that Grape can't check for metadata
-/// yet, whose boxes may hold Exif and XMP: JPEG 2000 (Aperio's 33003 to
-/// 33005, and 34712) and JPEG XL (50002).
-fn unread(n: u64) -> Option<&'static str> {
+/// What Remove Metadata makes of the data of Compression `n`, an allowlist:
+/// `Ok(None)` for a stream that holds nothing a reader reads but the
+/// picture, copied as it is; `Ok(Some(kind))` for one Grape reads for
+/// metadata; `Err(kind)` for any other, whose kind of data, where it's
+/// known, the refusal names ([`unchecked`]).
+///
+/// - **Nothing but the picture:** None (1); CCITT's run codes (2, 3, 4 and
+///   32771, T.4 and T.6, which hold only runs and EOLs); LZW (5); Deflate
+///   (8, 32946, and PixTIFF's 50013, which tifffile reads as Deflate: a
+///   zlib stream, whose header holds no name or comment, as gzip's does);
+///   PackBits (32773), NeXT (32766) and ThunderScan (32809), runs and codes
+///   of the samples; PixarLog (32909, zlib of the samples); SGILog (34676,
+///   34677, runs of LogLuv samples); LERC (34887, a Lerc2 blob of the
+///   samples' sizes, masks and values, in Deflate or ZSTD as its
+///   parameters say); LZMA (34925, an .xz stream, whose headers hold only
+///   flags, sizes and checks); ZSTD (50000, and GDAL's first code, 34926)
+///   and JBIG (34661): a ZSTD stream's skippable frames and a JBIG
+///   stream's COMMENT segments are skipped by their decoders, which no
+///   reader shows, as bytes past any stream's end are.
+/// - **Read:** JPEG streams ([`Kind::Jpeg`]): JPEG (7), DNG's lossy JPEG
+///   (34892, in a file that isn't a DNG, which is refused), Bio-Formats'
+///   (33007, which tifffile reads as JPEG) and Leaf's lossless JPEG (99);
+///   WebP ([`Kind::Webp`]): 50001, and GDAL's first code, 34927.
+/// - **Refused:** JPEG 2000 (Aperio's 33003 to 33005, and 34712), JPEG XL
+///   (GDAL's 50002, and 52546 as DNG 1.7 numbers it), JPEG XR (34934, and
+///   NDPI's 22610) and PNG (34933), whose boxes and chunks may hold Exif,
+///   XMP and text; and every other code, camera raws among them, as
+///   "image" data.
+fn coded(n: u64) -> Result<Option<Kind>, &'static str> {
     match n {
-        33003..=33005 | 34712 => Some("JPEG 2000"),
-        50002 => Some("JPEG XL"),
-        _ => None,
+        1..=5
+        | 8
+        | 32766
+        | 32771
+        | 32773
+        | 32809
+        | 32909
+        | 32946
+        | 34661
+        | 34676
+        | 34677
+        | 34887
+        | 34925
+        | 34926
+        | 50000
+        | 50013 => Ok(None),
+        7 | 99 | 33007 | 34892 => Ok(Some(Kind::Jpeg)),
+        50001 | 34927 => Ok(Some(Kind::Webp)),
+        33003..=33005 | 34712 => Err("JPEG 2000"),
+        50002 | 52546 => Err("JPEG XL"),
+        22610 | 34934 => Err("JPEG XR"),
+        34933 => Err("PNG"),
+        _ => Err("image"),
     }
 }
 
@@ -165,7 +213,11 @@ impl Plan {
                 }
             }
         }
-        if let Some(kind) = tiff.ifds().iter().find_map(|ifd| unread(ifd.compression)) {
+        if let Some(kind) = tiff
+            .ifds()
+            .iter()
+            .find_map(|ifd| coded(ifd.compression).err())
+        {
             return Err(Error::Refused(unchecked(kind)));
         }
         // JPEG and WebP data, and JPEGTables in any IFD: libtiff hands any
@@ -173,7 +225,7 @@ impl Plan {
         let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| Kind::of(ifd.compression).is_some() || ifd.get(347).is_some())
+            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))) || ifd.get(347).is_some())
             .collect();
         if !scanned.is_empty() {
             let shared = tiff.shared();
@@ -384,15 +436,6 @@ enum Kind {
 }
 
 impl Kind {
-    /// The kind of data of Compression `n`, if Remove Metadata reads it.
-    fn of(n: u64) -> Option<Kind> {
-        match n {
-            7 => Some(Kind::Jpeg),
-            50001 => Some(Kind::Webp),
-            _ => None,
-        }
-    }
-
     /// Its name, for the refusal.
     fn name(self) -> &'static str {
         match self {
@@ -446,7 +489,7 @@ impl Scan<'_> {
                 return Ok((seen, "JPEG"));
             }
         }
-        let Some(kind) = Kind::of(ifd.compression) else {
+        let Ok(Some(kind)) = coded(ifd.compression) else {
             return Ok((Seen::Clean, "JPEG"));
         };
         let mut buf = Vec::new();
@@ -1685,6 +1728,22 @@ mod tests {
             (33005, "JPEG 2000"),
             (34712, "JPEG 2000"),
             (50002, "JPEG XL"),
+            // JPEG XL as DNG 1.7 numbers it.
+            (52546, "JPEG XL"),
+            (22610, "JPEG XR"),
+            (34934, "JPEG XR"),
+            (34933, "PNG"),
+            // Codes Grape doesn't know: camera raws, GoPro's, Pixar's
+            // film, Kodak's DCS, TIFF/IT, JBIG2.
+            (9, "image"),
+            (32767, "image"),
+            (32908, "image"),
+            (32947, "image"),
+            (32895, "image"),
+            (34713, "image"),
+            (34715, "image"),
+            (65000, "image"),
+            (65535, "image"),
         ] {
             let file = coded_page(compression, b"\0\0\0\x0CjP  \r\n\x87\n".to_vec());
             let Err(Error::Refused(why)) = plan(&file) else {
@@ -1694,6 +1753,50 @@ mod tests {
                 why,
                 format!("has {kind} data Grape can't check for metadata yet.")
             );
+        }
+    }
+
+    #[test]
+    fn only_data_that_cant_hold_metadata_or_that_grape_reads_goes_through() {
+        // Codecs whose streams hold nothing a reader reads but the
+        // picture are copied as they are, whatever their bytes say.
+        let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
+        for compression in [
+            1, 2, 3, 4, 5, 8, 32766, 32771, 32773, 32809, 32909, 32946, 34661, 34676, 34677, 34887,
+            34925, 34926, 50000, 50013,
+        ] {
+            let file = coded_page(compression, jpeg(app1));
+            assert!(plan(&file).is_ok(), "{compression}");
+        }
+        // The codes that hold JPEG streams are read as JPEG: DNG's lossy
+        // JPEG (34892), Bio-Formats' (33007) and Leaf's lossless (99)
+        // too; WebP's old code (34927) as WebP.
+        let vp8l = chunk(b"VP8L", &[0x2F, 7, 0xC0, 0x01, 0, 0x55, 0x55, 0x55]);
+        let exif = chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0");
+        for (compression, plain, tagged) in [
+            (7, jpeg(b""), jpeg(app1)),
+            (99, jpeg(b""), jpeg(app1)),
+            (33007, jpeg(b""), jpeg(app1)),
+            (34892, jpeg(b""), jpeg(app1)),
+            (
+                50001,
+                webp(std::slice::from_ref(&vp8l)),
+                webp(&[vp8l.clone(), exif.clone()]),
+            ),
+            (
+                34927,
+                webp(std::slice::from_ref(&vp8l)),
+                webp(&[vp8l.clone(), exif.clone()]),
+            ),
+        ] {
+            assert!(
+                plan(&coded_page(compression, plain)).is_ok(),
+                "{compression}"
+            );
+            let Err(Error::Refused(why)) = plan(&coded_page(compression, tagged)) else {
+                panic!("{compression} not refused")
+            };
+            assert_eq!(why, IN_DATA, "{compression}");
         }
     }
 

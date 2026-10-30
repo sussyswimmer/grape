@@ -1178,11 +1178,17 @@ fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
     let outcome = strip(&dir, "plain.tif", &tiff(50001, &plain)).unwrap();
     let out = fs::read(&outcome.outputs[0]).unwrap();
     assert!(out.windows(plain.len()).any(|w| w == plain));
-    // JPEG 2000 and JPEG XL data, whose boxes Grape doesn't read yet.
+    // JPEG 2000, JPEG XL, JPEG XR and PNG data, whose boxes and chunks
+    // Grape doesn't read yet, and data of a code it doesn't know.
     for (name, compression, kind) in [
         ("j2k.tif", 34712, "JPEG 2000"),
         ("aperio.tif", 33005, "JPEG 2000"),
         ("jxl.tif", 50002, "JPEG XL"),
+        ("dng-jxl.tif", 52546, "JPEG XL"),
+        ("jxr.tif", 34934, "JPEG XR"),
+        ("ndpi-jxr.tif", 22610, "JPEG XR"),
+        ("png.tif", 34933, "PNG"),
+        ("raw.tif", 34713, "image"),
     ] {
         let err = strip(&dir, name, &tiff(compression, b"\0\0\0\x0CjP  ")).unwrap_err();
         assert_eq!(
@@ -1195,6 +1201,49 @@ fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
             err.user_message,
             format!("{name} has {kind} data Grape can't check for metadata yet.")
         );
+    }
+}
+
+#[test]
+fn remove_metadata_reads_jpeg_data_under_any_code_that_holds_it() {
+    // The review's file: a 16 × 16 gray JPEG strip holding an Exif APP1
+    // (a Make and a GPS IFD), under DNG's lossy JPEG code (34892) in a
+    // TIFF that isn't a DNG, or Bio-Formats' (33007): published with
+    // them, as only Compression 7 was read.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let tagged = with(&jpeg, &[exif(1)], b"");
+    let dir = TestDir::new("strip-tiff-jpeg-codes");
+    for (name, compression) in [("lossy.tif", 34892), ("alt.tif", 33007), ("leaf.tif", 99)] {
+        let entries = |compression: u64| {
+            vec![
+                (256, 4, le(16, 4)),
+                (257, 4, le(16, 4)),
+                (258, 3, le(8, 2)),
+                (259, 3, le(compression, 2)),
+                (262, 3, le(1, 2)),
+                (278, 4, le(16, 4)),
+            ]
+        };
+        let err = strip(&dir, name, &one_strip(false, &tagged, entries(compression))).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
+        );
+        // A plain one is stripped, its strip byte for byte.
+        let plain = format!("plain-{name}");
+        let outcome = strip(&dir, &plain, &one_strip(false, &jpeg, entries(compression))).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert!(out.windows(jpeg.len()).any(|w| w == jpeg), "{name}");
     }
 }
 
