@@ -3117,6 +3117,64 @@ fn compress_keeps_a_lossy_webps_alpha_exactly() {
 }
 
 #[test]
+fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
+    use grape_core::CompressPreset::{Balanced, Small};
+    // The review's picture: a white and a red disc with hard edges on
+    // transparent black, 2600 × 1300, at q95. Scaled with Lanczos3, its
+    // alpha rang, libwebp stored that losslessly, and Small came out
+    // larger than its source: NoChange.
+    let dir = TestDir::new("compress-webp-disc");
+    let disc = image::RgbaImage::from_fn(2600, 1300, |x, y| {
+        let inside = |cx: f32, cy: f32, r: f32| {
+            let (dx, dy) = (x as f32 + 0.5 - cx, y as f32 + 0.5 - cy);
+            dx * dx + dy * dy < r * r
+        };
+        if inside(850.0, 650.0, 550.0) {
+            image::Rgba([255, 255, 255, 255])
+        } else if inside(2000.0, 600.0, 500.0) {
+            image::Rgba([255, 40, 40, 255])
+        } else {
+            image::Rgba([0, 0, 0, 0])
+        }
+    });
+    let src = lossy_webp(disc.as_raw(), 2600, 1300, true, 95.0);
+    let mut sizes = Vec::new();
+    for preset in [Small, Balanced] {
+        let outcome = compress(&dir, "disc.webp", &src, preset).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        sizes.push(out.len());
+        if preset == Small {
+            // Hard edges stay hard, and no edge darkens: each opaque pixel
+            // of the white disc beside a transparent one is white.
+            let back = image::load_from_memory(&out).unwrap().to_rgba8();
+            assert_eq!(back.dimensions(), (2048, 1024));
+            assert!(back.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+            let mut edges = 0;
+            for (x, y, p) in back.enumerate_pixels() {
+                let beside = |dx: i32, dy: i32| {
+                    let (x, y) = (x as i32 + dx, y as i32 + dy);
+                    x >= 0 && y >= 0 && back.get_pixel(x as u32, y as u32).0[3] == 0
+                };
+                let edge = beside(-1, 0) || beside(0, -1) || beside(1, 0) || beside(0, 1);
+                if x < 1100 && p.0[3] == 255 && edge {
+                    assert!(p.0[..3].iter().all(|&c| c >= 230), "({x}, {y}): {p:?}");
+                    edges += 1;
+                }
+            }
+            assert!(edges > 1000, "{edges}");
+        }
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join("disc.webp")).unwrap();
+    }
+    assert!(
+        sizes[0] < sizes[1],
+        "Small {} B, Balanced {} B",
+        sizes[0],
+        sizes[1]
+    );
+}
+
+#[test]
 fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     use grape_core::CompressPreset::{Balanced, High, Small};
     let dir = TestDir::new("compress-webp-none");
