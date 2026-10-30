@@ -47,13 +47,18 @@
 //!   libwebp's progress reports, which end the encode
 //!   ([`grape_webp::encode`] says when libwebp reports). At the largest
 //!   pictures [`peak`] admits, reports came at most this far apart (release
-//!   build, 4 vCPUs): lossy at 6500², 1 s for a real photo and 6.0 s for
+//!   builds, 4 vCPUs): lossy at 6500², 1 s for a real photo and 6.0 s for
 //!   one under heavy grain (±32), which libwebp encodes 4 times over to fit
 //!   VP8's first partition (5 times and 14.5 s before `grape-webp` set its
-//!   partition limit); lossy with alpha at 3700², 9.3 s while libwebp
-//!   finished a soft alpha plane with noise (0.1 s for a sticker's);
-//!   lossless at 4096², 4.2 s for a picture of many sharp shapes (3.0 s for
-//!   a real photo).
+//!   partition limit); lossy with alpha at 3734², the most High admits,
+//!   14.4 s while libwebp encoded the alpha plane of a radial gradient
+//!   with Gaussian grain (σ 24; 11.6 to 14.4 s on two machines, a cancel
+//!   2.5 s in returning after 12.1 to 13.8 s), 11.6 s for a photo's
+//!   luminance as alpha, 8.8 s for uniform noise and 0.1 s for a
+//!   sticker's; lossless at 4096², 4.2 s for a picture of many sharp shapes
+//!   (3.0 s for a real photo). The decode before them runs to its end once
+//!   started, with no report: a 9850² grained source took 6.3 s at Small,
+//!   and a cancel 1 s in returned after 5.3 s.
 
 use std::fs::File;
 use std::io::{BufReader, Cursor, Write};
