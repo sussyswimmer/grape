@@ -1,5 +1,7 @@
 //! Remove Metadata on WebP (D26): the image chunks are copied as they
-//! are, padding included; the rest are dropped and said what they were.
+//! are, padding included (a last chunk's missing pad byte is written, as
+//! libwebp refuses a file without it); the rest are dropped and said what
+//! they were.
 //!
 //! - **Kept:** `VP8 `, `VP8L`, `VP8X`, `ALPH`, `ANIM` and `ICCP`, and each
 //!   `ANMF` frame with its header and its `ALPH`, `VP8 ` or `VP8L`.
@@ -95,11 +97,13 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
                 flags = data[0];
                 write(w, &data, &mut written)?;
                 copy(r, w, body - 10, &mut written)?;
+                pad(w, size, body, &mut written)?;
             }
             b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
                 image |= matches!(&fourcc, b"VP8 " | b"VP8L");
                 write(w, &head, &mut written)?;
                 copy(r, w, body, &mut written)?;
+                pad(w, size, body, &mut written)?;
             }
             b"ANMF" => {
                 image = true;
@@ -256,6 +260,7 @@ fn frame(
             b"ALPH" | b"VP8 " | b"VP8L" => {
                 write(w, &head, written)?;
                 copy(r, w, body, written)?;
+                pad(w, inner, body, written)?;
             }
             b"EXIF" => {
                 read_exif(r, inner, found)?;
@@ -822,6 +827,16 @@ fn write_chunk(
     Ok(())
 }
 
+/// Writes the pad byte a chunk of `size` bytes whose `body` was copied
+/// lacked: the last chunk's may be missing in the source, but libwebp
+/// refuses a file without it.
+fn pad(w: &mut dyn Out, size: u64, body: u64, written: &mut u64) -> Result<(), Error> {
+    if body < size + (size & 1) {
+        write(w, &[0], written)?;
+    }
+    Ok(())
+}
+
 fn seek_write(w: &mut dyn Out, at: u64, bytes: &[u8]) -> Result<(), Error> {
     w.seek(SeekFrom::Start(at)).map_err(Error::Write)?;
     w.write_all(bytes).map_err(Error::Write)
@@ -1050,12 +1065,31 @@ mod tests {
         for n in 0..good.len() {
             assert!(run(&good[..n]).is_err(), "cut at {n}");
         }
-        // The last pad byte missing is fine.
+        // The last pad byte missing is fine, and it's written: libwebp
+        // refuses a chunk without its pad. In a frame too.
+        let unpadded = |file: Vec<u8>| {
+            let mut short = file[..file.len() - 1].to_vec();
+            let riff = u32::try_from(short.len() - 8).unwrap().to_le_bytes();
+            short[4..8].copy_from_slice(&riff);
+            short
+        };
         let odd = webp(&[chunk(b"VP8 ", b"odd")]);
-        let mut short = odd[..odd.len() - 1].to_vec();
-        let riff = u32::try_from(short.len() - 8).unwrap().to_le_bytes();
-        short[4..8].copy_from_slice(&riff);
-        assert!(run(&short).is_ok());
+        assert_eq!(run(&unpadded(odd.clone())).unwrap().0, odd);
+        let odd = webp(&[vp8x(0x10), chunk(b"ALPH", b"a"), chunk(b"VP8 ", b"odd")]);
+        assert_eq!(run(&unpadded(odd.clone())).unwrap().0, odd);
+        let frame = |inner: &[u8]| {
+            let mut frame = b"ANMF".to_vec();
+            frame.extend(u32::try_from(16 + inner.len()).unwrap().to_le_bytes());
+            frame.extend([3; 16]);
+            frame.extend(inner);
+            frame
+        };
+        let anim = |frame: Vec<u8>| webp(&[vp8x(0x02), chunk(b"ANIM", &[0; 6]), frame]);
+        // A frame whose image's pad is missing inside it, the frame's own
+        // size even.
+        let inner = b"VP8L\x03\0\0\0abc";
+        let (out, _) = run(&anim(frame(inner))).unwrap();
+        assert_eq!(out, anim(anmf(&[chunk(b"VP8L", b"abc")])));
         for bad in [
             webp(&[chunk(b"XMP ", b"no image")]),
             webp(&[chunk(b"VP8X", &[0; 4]), chunk(b"VP8 ", b"f")]),
