@@ -32,7 +32,8 @@
 //!   once, its whole size unless it's copied already, even when it's
 //!   recoded already, which costs the recode nothing), or whose recode
 //!   takes the output past 95 % of the source, whose blocks written
-//!   already are taken back ([`Recoder`]).
+//!   already are taken back ([`Recoder`]; the log says why for the first
+//!   [`MAX_BACK`] of them, first, and how many more).
 //! - **Predictor:** a source's own (2, 3 or another) on LZW or Deflate
 //!   stays, its decoded bytes deflated as they are. Otherwise (None and
 //!   PackBits, whatever their 317 says, since libtiff applies a predictor
@@ -99,6 +100,10 @@ const MAX_PENDING_BYTES: u64 = 4 << 20;
 
 /// The most reasons the log keeps.
 const MAX_LOG: usize = 16;
+
+/// The most reasons the log keeps of IFDs taken back: the app logs a
+/// detail as one line, and 65,536 of them came to 5.9 MB.
+const MAX_BACK: usize = 64;
 
 /// The most places kept of shared blocks written in a way other than the
 /// one they were first written in (another recipe's, or copied as they
@@ -181,22 +186,28 @@ pub(crate) struct Plan {
 
 /// Reasons for the log: the line that ended the job, if one did, first
 /// and always kept; then why each IFD Compress recoded, or tried to, was
-/// taken back and copied as it is, every one (at most one an IFD), which
-/// says why the output came to what it did, at the 95 % stop while it's
-/// written or when it's done; then the first [`MAX_LOG`] others, and how
-/// many more.
+/// taken back and copied as it is (at most one an IFD), which says why
+/// the output came to what it did, at the 95 % stop while it's written or
+/// when it's done, the first [`MAX_BACK`] and how many more; then the
+/// first [`MAX_LOG`] others, and how many more.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Log {
     end: Option<String>,
     back: Vec<String>,
+    back_more: usize,
     lines: Vec<String>,
     more: usize,
 }
 
 impl Log {
-    /// Adds why an IFD was taken back and copied as it is: never cut.
+    /// Adds why an IFD was taken back and copied as it is, ahead of the
+    /// others.
     fn back(&mut self, line: String) {
-        self.back.push(line);
+        if self.back.len() < MAX_BACK {
+            self.back.push(line);
+        } else {
+            self.back_more += 1;
+        }
     }
 
     fn add(&mut self, line: String) {
@@ -233,10 +244,13 @@ impl Log {
 
 impl std::fmt::Display for Log {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let back_more =
+            (self.back_more > 0).then(|| format!("and {} more taken back", self.back_more));
         let all: Vec<&str> = self
             .end
             .iter()
             .chain(&self.back)
+            .chain(&back_more)
             .chain(&self.lines)
             .map(String::as_str)
             .collect();
@@ -2384,7 +2398,7 @@ mod tests {
     }
 
     #[test]
-    fn the_lines_of_ifds_taken_back_come_first_and_are_never_cut() {
+    fn the_lines_of_ifds_taken_back_come_first_the_first_64_of_them() {
         // Twenty pages copied as they are (JPEG: twenty lines, four past
         // the log's 16) and a page of noise, which grows recoded and is
         // taken back, last or first: its line comes first, whole, and the
@@ -2404,6 +2418,24 @@ mod tests {
             assert!(log.starts_with(&back), "{log}");
             assert!(log.ends_with("its compression is 7; and 4 more"), "{log}");
         }
+        // At 65,536 pages taken back, every line made a 5.9 MB detail,
+        // which the app logs as one line: the first 64 are kept, and how
+        // many more.
+        let mut log = Log::default();
+        for n in 0..65_536 {
+            log.back(format!(
+                "IFD {n} copied as it is: its blocks came to 99 bytes recoded"
+            ));
+        }
+        log.add("IFD 70000 copied as it is: its compression is 7".into());
+        let text = log.to_string();
+        assert!(text.len() < 8 * 1024, "{}", text.len());
+        assert!(text.starts_with("IFD 0 copied as it is: "), "{text}");
+        assert!(
+            text.contains("IFD 63 copied as it is: its blocks came to 99 bytes recoded; and 65472 more taken back; IFD 70000 copied as it is: its compression is 7"),
+            "{text}"
+        );
+        assert!(!text.contains("IFD 64 "), "{text}");
     }
 
     #[test]
