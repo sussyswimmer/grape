@@ -3515,6 +3515,198 @@ fn compress_reads_a_webp_whose_vp8x_flags_a_chunk_it_lacks() {
     }
 }
 
+/// A WebP's image chunks (those a reader shows the picture from), in
+/// order, in its RIFF.
+fn webp_image_chunks(file: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+    let riff = u32::from_le_bytes(file[4..8].try_into().unwrap()) as usize;
+    webp_chunks(&file[..riff + 8])
+        .into_iter()
+        .filter(|(f, _)| [*b"VP8 ", *b"VP8L", *b"ALPH", *b"ANIM", *b"ANMF"].contains(f))
+        .collect()
+}
+
+#[test]
+fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
+    use grape_core::CompressPreset::High;
+    use grape_core::Format;
+    let dir = TestDir::new("webp-refusals");
+    let (w, h) = (256u32, 160u32);
+    // Pillow's q95 red and lossless blue, as the review made them.
+    let red = lossy_webp(&[200, 10, 10].repeat((w * h) as usize), w, h, false, 95.0);
+    let red_vp8 = riff_chunk(b"VP8 ", &webp_chunk(&red, b"VP8 ").unwrap());
+    let lossless = |px: &image::RgbaImage| {
+        let mut out = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .write_image(
+                px.as_raw(),
+                px.width(),
+                px.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        webp_chunk(&out, b"VP8L").unwrap()
+    };
+    let blue = lossless(&image::RgbaImage::from_pixel(
+        w,
+        h,
+        image::Rgba([10, 10, 220, 255]),
+    ));
+    let blue_vp8l = riff_chunk(b"VP8L", &blue);
+    let half = image::RgbaImage::from_fn(w, h, |x, _| {
+        image::Rgba([90, 90, 90, if x < w / 2 { 40 } else { 255 }])
+    });
+    // Its alpha bit turned off or on.
+    let bit = |on: bool| {
+        let mut vp8l = lossless(&half);
+        if on {
+            vp8l[4] |= 0x10;
+        } else {
+            vp8l[4] &= !0x10;
+        }
+        riff_chunk(b"VP8L", &vp8l)
+    };
+    let with_alpha = lossy_webp(half.as_raw(), w, h, true, 95.0);
+    let alph = riff_chunk(b"ALPH", &webp_chunk(&with_alpha, b"ALPH").unwrap());
+    let vp8 = riff_chunk(b"VP8 ", &webp_chunk(&with_alpha, b"VP8 ").unwrap());
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let frame = [u24(0), u24(0), u24(w - 1), u24(h - 1), u24(100), vec![0]].concat();
+    let anmf = |chunks: &[Vec<u8>]| riff_chunk(b"ANMF", &[frame.clone(), chunks.concat()].concat());
+    let canvas = |flags: u8| vp8x_chunk(flags, w, h);
+    for (name, file) in [
+        // A still file holding an animation's frame of blue, after or
+        // before the red picture: libwebp's still decoder showed red,
+        // Pillow refused it, and every conversion wrote blue.
+        (
+            "frame-after.webp",
+            riff(&[
+                canvas(0),
+                red_vp8.clone(),
+                anmf(std::slice::from_ref(&blue_vp8l)),
+            ]),
+        ),
+        (
+            "frame-first.webp",
+            riff(&[
+                canvas(0),
+                anmf(std::slice::from_ref(&blue_vp8l)),
+                red_vp8.clone(),
+            ]),
+        ),
+        // A frame's alpha: conversions applied it to the red picture.
+        (
+            "frame-alpha.webp",
+            riff(&[
+                canvas(0x10),
+                red_vp8.clone(),
+                anmf(&[alph.clone(), vp8.clone()]),
+            ]),
+        ),
+        (
+            "anim.webp",
+            riff(&[canvas(0), riff_chunk(b"ANIM", &[0; 6]), red_vp8.clone()]),
+        ),
+        // An ALPH before a VP8L: converted opaque, ImageMagick shows alpha.
+        (
+            "alph-vp8l.webp",
+            riff(&[canvas(0), alph.clone(), bit(false)]),
+        ),
+        (
+            "two-alph.webp",
+            riff(&[canvas(0x10), alph.clone(), alph.clone(), vp8.clone()]),
+        ),
+        (
+            "unflagged.webp",
+            riff(&[canvas(0), alph.clone(), vp8.clone()]),
+        ),
+        (
+            "late-alph.webp",
+            riff(&[canvas(0x10), vp8.clone(), alph.clone()]),
+        ),
+        ("vp8l-unflagged.webp", riff(&[canvas(0), bit(true)])),
+        // Transparent pixels in a VP8L whose bit says opaque, under
+        // VP8X's alpha flag: refused once decoded.
+        ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
+        (
+            "canvas.webp",
+            riff(&[vp8x_chunk(0, w + 1, h), red_vp8.clone()]),
+        ),
+    ] {
+        let message = format!("{name} isn't a readable WEBP image.");
+        let err = compress(&dir, name, &file, High).unwrap_err();
+        assert_eq!(err.user_message, message, "{}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+        for to in [Format::Png, Format::Jpg, Format::Bmp] {
+            let err = run(&dir, name, &file, Operation::convert(to)).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::DecodeFailed,
+                "{name} {to:?}: {}",
+                err.detail
+            );
+            assert_eq!(err.user_message, message, "{to:?}");
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+        // Remove Metadata changes no picture: its image chunks go on as
+        // they are, so each reader shows what it showed.
+        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(webp_image_chunks(&out), webp_image_chunks(&file), "{name}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    // Read as libwebp reads them: an EXIF flag whose chunk is past the
+    // RIFF's end, flags for chunks it lacks, and VP8X's alpha flag over an
+    // opaque VP8L whose bit says none. Conversions refused the first two
+    // ("An expected chunk was missing").
+    let opaque = riff_chunk(
+        b"VP8L",
+        &lossless(&image::RgbaImage::from_pixel(
+            w,
+            h,
+            image::Rgba([10, 10, 220, 255]),
+        )),
+    );
+    for (name, file, want) in [
+        (
+            "exif-after.webp",
+            [
+                riff(&[canvas(0x08), red_vp8.clone()]),
+                riff_chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0"),
+            ]
+            .concat(),
+            [200u8, 10, 10],
+        ),
+        (
+            "flags.webp",
+            riff(&[canvas(0x3C), red_vp8.clone(), riff_chunk(b"XMP ", b"<x/>")]),
+            [200, 10, 10],
+        ),
+        ("bit-off.webp", riff(&[canvas(0x10), opaque]), [10, 10, 220]),
+    ] {
+        let outcome = run(&dir, name, &file, Operation::convert(Format::Png))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+        assert_eq!((out.width(), out.height()), (w, h), "{name}");
+        for p in out.to_rgba8().pixels() {
+            let off = p.0[..3].iter().zip(want).map(|(&a, b)| a.abs_diff(b));
+            assert!(off.max().unwrap() <= 6 && p.0[3] == 255, "{name}: {p:?}");
+        }
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        // Compress reads them too (a flat picture is already compact).
+        match compress(&dir, name, &file, High) {
+            Ok(outcome) => fs::remove_file(&outcome.outputs[0]).unwrap(),
+            Err(e) => assert_eq!(e.kind, ErrorKind::NoChange, "{name}: {}", e.detail),
+        }
+        fs::remove_file(dir.join(name)).unwrap();
+        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert_eq!(webp_image_chunks(&out), webp_image_chunks(&file), "{name}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
 #[test]
 fn compress_refuses_a_webp_too_large_before_decoding_it() {
     let dir = TestDir::new("compress-webp-huge");

@@ -31,8 +31,11 @@
 //!     headers are read first ([`crate::headers`]).
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
 //!   its first frame or page.
-//! - **A WebP to its RIFF's end:** the decoder reads no further, as libwebp
-//!   doesn't ([`read_end`]), for Compress too.
+//! - **A WebP as libwebp reads it:** the decoder reads no further than its
+//!   RIFF's end, as libwebp doesn't ([`read_end`]), and its chunks are
+//!   walked first with Compress's scan, which refuses a file readers show
+//!   differently and reads its VP8X flags as its chunks bear them out
+//!   ([`crate::imagetool::webp_reading`]), for Compress too.
 //! - **Targets:** JPEG at quality 90 with any alpha flattened onto white;
 //!   PNG keeps the color type (float becomes 16-bit); WebP is lossless
 //!   (`image` has no lossy WebP encoder); BMP is 8-bit RGB or RGBA; TIFF
@@ -52,7 +55,6 @@
 //!   file before decoding, so a JPEG decode (like the `image` crate's own
 //!   pixel conversions and rotations) runs to its end once started.
 
-use std::convert;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
@@ -239,16 +241,7 @@ pub(crate) fn decode(
     names: &Names,
     cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(
-        src,
-        from,
-        to,
-        names,
-        cancel,
-        true,
-        &|_, _, _| 0,
-        convert::identity,
-    )
+    decode_as(src, from, to, names, cancel, true, &|_, _, _| 0)
 }
 
 /// What a tool holds at its peak for a `width`×`height` image of a
@@ -267,61 +260,28 @@ pub(crate) fn decode_stored(
     cancel: &CancelToken,
     tool_peak: ToolPeak,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(
-        src,
-        from,
-        to,
-        names,
-        cancel,
-        false,
-        tool_peak,
-        convert::identity,
-    )
+    decode_as(src, from, to, names, cancel, false, tool_peak)
 }
 
-/// [`decode_stored`], reading the byte at `patch.0` of the file as
-/// `patch.1`: for Compress on WebP (D28), which decodes an extended file
-/// with the VP8X flags its chunks bear out, as libwebp reads it. The file
-/// itself is only read.
-pub(crate) fn decode_stored_patched(
-    src: &Path,
-    from: Format,
-    to: Format,
-    names: &Names,
-    cancel: &CancelToken,
-    tool_peak: ToolPeak,
-    (at, byte): (u64, u8),
-) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(src, from, to, names, cancel, false, tool_peak, |file| {
-        Patched {
-            inner: file,
-            pos: 0,
-            at,
-            byte,
-        }
-    })
-}
-
-/// `inner`, a stream at its start, read with the byte at `at` as `byte`.
+/// `inner`, a stream at its start, read with the byte at `patch.0` as
+/// `patch.1`, if there's a patch: a WebP's VP8X flags as libwebp reads
+/// them ([`crate::imagetool::WebpReading`]). The file itself is only read.
 struct Patched<R> {
     inner: R,
     /// Where `inner` is.
     pos: u64,
-    at: u64,
-    byte: u8,
+    patch: Option<(u64, u8)>,
 }
 
 impl<R: Read> Read for Patched<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let n = self.inner.read(buf)?;
         let read = buf.get_mut(..n).unwrap_or_default();
-        if let Some(b) = self
-            .at
-            .checked_sub(self.pos)
-            .and_then(|i| usize::try_from(i).ok())
-            .and_then(|i| read.get_mut(i))
-        {
-            *b = self.byte;
+        if let Some((b, byte)) = self.patch.and_then(|(at, byte)| {
+            let i = usize::try_from(at.checked_sub(self.pos)?).ok()?;
+            Some((read.get_mut(i)?, byte))
+        }) {
+            *b = byte;
         }
         self.pos = self.pos.saturating_add(n as u64);
         Ok(n)
@@ -336,22 +296,23 @@ impl<R: Seek> Seek for Patched<R> {
 }
 
 /// Where a decoder should stop reading the file `file` (`len` bytes, read
-/// from its start, which it's left at): a WebP's RIFF end, 8 bytes past
-/// its size, or the file's end if that's sooner, as libwebp stops there;
-/// any other file's end. image-webp walks an extended file's chunks from
-/// the end of `VP8X` as far again as the RIFF's size less 12 bytes, so
-/// past the RIFF's end, and took an `ANMF` frame, a `VP8L` or an `ALPH`
-/// chunk it found there for the picture's (D28).
-fn read_end(file: &mut File, len: u64) -> io::Result<u64> {
+/// from its start, which it's left at), and whether it's a WebP, by the
+/// signature `image` sniffs: a WebP's RIFF end, 8 bytes past its size, or
+/// the file's end if that's sooner, as libwebp stops there; any other
+/// file's end. image-webp walks an extended file's chunks from the end of
+/// `VP8X` as far again as the RIFF's size less 12 bytes, so past the
+/// RIFF's end, and took an `ANMF` frame, a `VP8L` or an `ALPH` chunk it
+/// found there for the picture's (D28).
+fn read_end(file: &mut File, len: u64) -> io::Result<(u64, bool)> {
     let mut head = Vec::with_capacity(12);
     Read::by_ref(file).take(12).read_to_end(&mut head)?;
     file.seek(SeekFrom::Start(0))?;
     Ok(match head.get(..12) {
         Some(head) if head.starts_with(b"RIFF") && head.ends_with(b"WEBP") => {
             let riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
-            len.min(u64::from(riff) + 8)
+            (len.min(u64::from(riff) + 8), true)
         }
-        _ => len,
+        _ => (len, false),
     })
 }
 
@@ -390,9 +351,10 @@ impl<R: Seek> Seek for Bounded<R> {
 }
 
 /// [`decode`], applying the EXIF orientation if `upright`, from the file
-/// as `wrap` reads it, to its [`read_end`].
-#[allow(clippy::too_many_arguments)] // `decode_stored`'s, plus the two choices.
-fn decode_as<R: Read + Seek>(
+/// to its [`read_end`]. A WebP is read as libwebp reads it, or refused as
+/// Compress refuses it ([`crate::imagetool::webp_reading`]).
+#[allow(clippy::too_many_arguments)] // `decode_stored`'s, plus the choice.
+fn decode_as(
     src: &Path,
     from: Format,
     to: Format,
@@ -400,14 +362,27 @@ fn decode_as<R: Read + Seek>(
     cancel: &CancelToken,
     upright: bool,
     tool_peak: ToolPeak,
-    wrap: impl FnOnce(Cancellable<File>) -> R,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let mut file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
     let read_failed = |e: io::Error| names.read_failed(format!("read {}: {e}", src.display()));
     let len = file.metadata().map_err(read_failed)?.len();
-    let end = read_end(&mut file, len).map_err(read_failed)?;
-    let inner = wrap(Cancellable::new(file, cancel));
+    let (end, webp) = read_end(&mut file, len).map_err(read_failed)?;
+    let webp = if webp {
+        if len > MAX_SOURCE {
+            return Err(too_large_source(src, names, len));
+        }
+        let reading = crate::imagetool::webp_reading(&file, src, names, cancel)?;
+        file.seek(SeekFrom::Start(0)).map_err(read_failed)?;
+        Some(reading)
+    } else {
+        None
+    };
+    let inner = Patched {
+        inner: Cancellable::new(file, cancel),
+        pos: 0,
+        patch: webp.and_then(|reading| reading.patch),
+    };
     let mut reader = ImageReader::new(BufReader::new(Bounded { inner, pos: 0, end }));
     if let Some(hint) = image_format(from) {
         // Used only when the content matches no known signature.
@@ -417,12 +392,7 @@ fn decode_as<R: Read + Seek>(
     let mut reader = reader.with_guessed_format().map_err(read_failed)?;
     let format = reader.format();
     if matches!(format, Some(ImageFormat::Jpeg | ImageFormat::WebP)) && len > MAX_SOURCE {
-        return Err(names.too_large(format!(
-            "decode {}: the file is {} MiB, over the {} MiB limit for a JPEG or WebP source",
-            src.display(),
-            len / MIB,
-            MAX_SOURCE / MIB
-        )));
+        return Err(too_large_source(src, names, len));
     }
     let keeps = match format {
         Some(ImageFormat::Jpeg) => {
@@ -512,6 +482,13 @@ fn decode_as<R: Read + Seek>(
         },
     ));
     match decoded {
+        Ok(Ok((img, _))) if webp.is_some_and(|reading| reading.opaque) && transparent(&img) => {
+            // libwebp goes by the VP8L's bit, image-webp by VP8X's flag.
+            Err(names.decode_failed(format!(
+                "decode {}: transparent in image-webp, opaque in libwebp",
+                src.display()
+            )))
+        }
         Ok(Ok(decoded)) => Ok(decoded),
         Ok(Err(DecodeFailure::TooLarge(detail))) => {
             Err(names.too_large(format!("decode {}: {detail}", src.display())))
@@ -539,6 +516,23 @@ fn decode_as<R: Read + Seek>(
             Err(names.decode_failed(format!("decode {}: the decoder panicked", src.display())))
         }
     }
+}
+
+/// A JPEG or WebP source over [`MAX_SOURCE`], refused unread.
+fn too_large_source(src: &Path, names: &Names, len: u64) -> GrapeError {
+    names.too_large(format!(
+        "decode {}: the file is {} MiB, over the {} MiB limit for a JPEG or WebP source",
+        src.display(),
+        len / MIB,
+        MAX_SOURCE / MIB
+    ))
+}
+
+/// Whether any pixel of `img` isn't opaque.
+/// (image-webp decodes to 8-bit RGB or RGBA only.)
+fn transparent(img: &DynamicImage) -> bool {
+    img.as_rgba8()
+        .is_some_and(|rgba| rgba.pixels().any(|p| p.0[3] != u8::MAX))
 }
 
 /// What the JPEG decoder will hold besides pixels for a file of `len`
@@ -905,8 +899,7 @@ mod tests {
         let patched = |at| Patched {
             inner: Cursor::new(data.clone()),
             pos: 0,
-            at,
-            byte: 0xAA,
+            patch: Some((at, 0xAA)),
         };
         let mut want = data.clone();
         want[20] = 0xAA;
@@ -934,9 +927,17 @@ mod tests {
         let mut b = BufReader::with_capacity(8, patched(20));
         b.seek(SeekFrom::Start(16)).unwrap();
         assert_eq!(&b.fill_buf().unwrap()[..6], &[16, 17, 18, 19, 0xAA, 21]);
-        // Past the end, nothing.
+        // Past the end, or no patch, nothing.
         let mut all = Vec::new();
         patched(64).read_to_end(&mut all).unwrap();
+        assert_eq!(all, data);
+        let mut all = Vec::new();
+        let mut plain = Patched {
+            inner: Cursor::new(data.clone()),
+            pos: 0,
+            patch: None,
+        };
+        plain.read_to_end(&mut all).unwrap();
         assert_eq!(all, data);
     }
 
@@ -985,9 +986,10 @@ mod tests {
             let path = dir.join("f");
             fs::write(&path, bytes).unwrap();
             let mut file = File::open(&path).unwrap();
-            let end = read_end(&mut file, bytes.len() as u64).unwrap();
+            let (end, webp) = read_end(&mut file, bytes.len() as u64).unwrap();
             // Left at its start.
             assert_eq!(file.stream_position().unwrap(), 0);
+            assert_eq!(webp, bytes.len() >= 12 && &bytes[8..12] == b"WEBP");
             end
         };
         let webp = |riff: u32, len: usize| {

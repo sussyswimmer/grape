@@ -22,6 +22,7 @@
 //! [`assemble`].
 
 use std::io::{BufRead, Cursor, SeekFrom};
+use std::sync::Arc;
 
 use super::exif::{self, MAX_EXIF};
 use super::strip::{more_after, read_at, read_exact, Error, Found, In, Out};
@@ -50,7 +51,7 @@ pub(super) const ALPHA_FLAG: u8 = 0x10;
 const ICC_FLAG: u8 = 0x20;
 
 /// Where an extended file's VP8X flags are: [`scan`] wants `VP8X` first.
-pub(super) const VP8X_FLAGS_AT: u64 = 20;
+const VP8X_FLAGS_AT: u64 = 20;
 
 /// The most of a `VP8 ` frame's first partition [`quality`] reads: its
 /// frame header up to the quantizer index takes at most 186 bits.
@@ -373,6 +374,12 @@ impl Carried {
 /// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
 ///   image-webp read nothing after it, so nothing after it is carried.
 pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
+    walk(r, true)
+}
+
+/// [`scan`], carrying the metadata only if `carry`: a decode reads none of
+/// it, so none of it can be too large for one.
+fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
     let mut header = [0; 12];
     read_at(r, 0, &mut header)?;
     let mut left = riff(&header)?;
@@ -457,9 +464,11 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
                     name(&head.fourcc)
                 )));
             }
-            b"ICCP" => carry(r, body, &head, MAX_ICC as u64, &mut found.carried.iccp)?,
-            b"EXIF" => carry(r, body, &head, MAX_CARRIED, &mut found.carried.exif)?,
-            b"XMP " => carry(r, body, &head, MAX_CARRIED, &mut found.carried.xmp)?,
+            b"ICCP" if carry => {
+                take(r, body, &head, MAX_ICC as u64, &mut found.carried.iccp)?;
+            }
+            b"EXIF" if carry => take(r, body, &head, MAX_CARRIED, &mut found.carried.exif)?,
+            b"XMP " if carry => take(r, body, &head, MAX_CARRIED, &mut found.carried.xmp)?,
             _ => {}
         }
     }
@@ -480,6 +489,106 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
         found.alpha_bytes = 0;
     }
     Ok(found)
+}
+
+/// How image-webp, which goes by a file's VP8X flags, must read a still
+/// WebP to show the picture libwebp shows ([`reading`]), for every decode
+/// of one: conversions and Compress alike (D16, D28).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Reading {
+    /// The byte to read the file's VP8X flags as, and where they are, when
+    /// they aren't the file's own ([`decode_flags`]).
+    pub(crate) patch: Option<(u64, u8)>,
+    /// VP8X flags alpha over a `VP8L` whose own bit says none: libwebp
+    /// shows the picture opaque, and image-webp (by the flag) with the
+    /// alpha its pixels hold, so a picture whose pixels hold some is shown
+    /// differently by each and must be refused once decoded.
+    pub(crate) opaque: bool,
+}
+
+/// Walks the WebP `r` as [`scan`] does, its metadata unread, and says how
+/// a decode must read it ([`Reading`]). What the scan refuses is
+/// [`Error::Broken`], and so is a file whose alpha libwebp and image-webp
+/// read differently ([`alpha_disagrees`]): no decode could show what both
+/// show. An animation's frames aren't walked; a decode takes its first.
+pub(crate) fn reading(r: &mut dyn In) -> Result<Reading, Error> {
+    let scan = walk(r, false)?;
+    if let Some(why) = alpha_disagrees(&scan) {
+        return Err(Error::Broken(why.into()));
+    }
+    let flagged = scan.vp8x.is_some_and(|vp8x| vp8x.flags & ALPHA_FLAG != 0);
+    Ok(Reading {
+        patch: decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags)),
+        opaque: !scan.animated && scan.lossless && flagged && !scan.alpha,
+    })
+}
+
+/// Why `scan`'s alpha reads differently in libwebp (by the chunks) and
+/// image-webp (by VP8X's flag, then the first `ALPH` in the RIFF), if it
+/// does: a decode would show one of them something else.
+fn alpha_disagrees(scan: &Scan) -> Option<&'static str> {
+    if scan.animated {
+        return None;
+    }
+    let flagged = scan.vp8x?.flags & ALPHA_FLAG != 0;
+    if !flagged && scan.alpha {
+        Some("VP8X says no alpha, and its image has some libwebp reads")
+    } else if flagged && !scan.lossless && !scan.alpha && scan.late_alpha {
+        Some("its only ALPH chunk comes after its VP8, where libwebp never reads it")
+    } else {
+        None
+    }
+}
+
+/// VP8X's flags as image-webp should read `scan`'s file to see what
+/// libwebp does, when they aren't the file's own: the EXIF and XMP flags
+/// off, which change no pixel, and for a still lossy image with no `ALPH`
+/// chunk before it, alpha off (one only after it, with the flag, is
+/// refused: [`alpha_disagrees`]). image-webp refuses a flag whose chunk is
+/// missing ("An expected chunk was missing"), and libwebp, Pillow and
+/// ImageMagick read the file.
+fn decode_flags(scan: &Scan) -> Option<u8> {
+    let flags = scan.vp8x?.flags;
+    let mut view = flags & !(EXIF_FLAG | XMP_FLAG);
+    if !scan.animated && !scan.lossless && !scan.alpha {
+        view &= !ALPHA_FLAG;
+    }
+    (view != flags).then_some(view)
+}
+
+/// The WebP `data` as image-webp must read it to show what libwebp shows
+/// ([`reading`]): cut at its RIFF's end, where libwebp stops, its VP8X
+/// flags patched; any other data as it is. For a decoder that reads from
+/// memory, such as resvg's for an SVG's embedded image (lane A's
+/// `svg::resolve`). An error says why it isn't a readable WebP: what a
+/// conversion refuses before decoding, and a `VP8L` whose own alpha bit
+/// says none under VP8X's alpha flag, whose pixels such a decoder can't be
+/// asked to check.
+#[allow(dead_code)] // For lane A's `svg::resolve` (D28).
+pub(crate) fn readable(data: &Arc<Vec<u8>>) -> Result<Arc<Vec<u8>>, String> {
+    let Some(riff) = data.get(4..8).filter(|_| sniff(data)) else {
+        return Ok(Arc::clone(data));
+    };
+    let riff = u32::from_le_bytes([riff[0], riff[1], riff[2], riff[3]]);
+    let end = usize::try_from(u64::from(riff) + 8).map_or(data.len(), |end| end.min(data.len()));
+    let bytes = data.get(..end).unwrap_or_default();
+    let reading = reading(&mut Cursor::new(bytes)).map_err(|e| match e {
+        Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => why,
+        Error::Read(e) | Error::Write(e) => e.to_string(),
+    })?;
+    if reading.opaque {
+        return Err("VP8X says alpha, and its VP8L says none".into());
+    }
+    if reading.patch.is_none() && end == data.len() {
+        return Ok(Arc::clone(data));
+    }
+    let mut out = bytes.to_vec();
+    if let Some((at, byte)) = reading.patch {
+        if let Some(slot) = usize::try_from(at).ok().and_then(|at| out.get_mut(at)) {
+            *slot = byte;
+        }
+    }
+    Ok(Arc::new(out))
 }
 
 /// The size the bitstream of the image chunk `head` (its body at `at`)
@@ -671,7 +780,7 @@ impl<'a> BoolReader<'a> {
 
 /// Reads the chunk `head` (its body at `at`) into `slot`, unless an
 /// earlier one is there: at most `max` bytes, or [`Error::TooLarge`].
-fn carry(
+fn take(
     r: &mut dyn In,
     at: u64,
     head: &Head,
@@ -1346,6 +1455,151 @@ mod tests {
         let riff = u32::try_from(n - 8).unwrap() + at_cap;
         big[4..8].copy_from_slice(&riff.to_le_bytes());
         assert!(matches!(scanned(&big), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn alpha_libwebp_and_image_webp_read_differently_is_refused() {
+        let scan = |flags: u8, lossless: bool, alpha: bool, late_alpha: bool| Scan {
+            vp8x: Some(Vp8x {
+                flags,
+                canvas: (9, 9),
+            }),
+            lossless,
+            size: (9, 9),
+            alpha,
+            late_alpha,
+            ..Scan::default()
+        };
+        // Agreed: none, or flagged and there.
+        assert_eq!(alpha_disagrees(&scan(0, false, false, false)), None);
+        assert_eq!(alpha_disagrees(&scan(0x10, false, true, false)), None);
+        assert_eq!(alpha_disagrees(&scan(0x10, true, true, false)), None);
+        // A late ALPH after one image-webp and libwebp both read.
+        assert_eq!(alpha_disagrees(&scan(0x10, false, true, true)), None);
+        // Unflagged alpha libwebp shows and image-webp drops.
+        assert!(alpha_disagrees(&scan(0, false, true, false)).is_some());
+        assert!(alpha_disagrees(&scan(0, true, true, false)).is_some());
+        // Only a late ALPH: image-webp reads it, libwebp doesn't.
+        assert!(alpha_disagrees(&scan(0x10, false, false, true)).is_some());
+        // An animation's frames aren't walked.
+        let animated = Scan {
+            animated: true,
+            ..scan(0, false, true, false)
+        };
+        assert_eq!(alpha_disagrees(&animated), None);
+        // A simple file has no flag to disagree with.
+        let simple = Scan {
+            vp8x: None,
+            ..scan(0, true, true, false)
+        };
+        assert_eq!(alpha_disagrees(&simple), None);
+    }
+
+    #[test]
+    fn image_webp_reads_the_flags_the_chunks_bear_out() {
+        let scan = |flags: u8, lossless: bool, alpha: bool| Scan {
+            vp8x: Some(Vp8x {
+                flags,
+                canvas: (9, 9),
+            }),
+            lossless,
+            size: (9, 9),
+            alpha,
+            ..Scan::default()
+        };
+        // As they are.
+        assert_eq!(decode_flags(&scan(0x30, false, true)), None);
+        // An animation's alpha flag stays, its EXIF and XMP flags go.
+        let animated = |flags: u8| Scan {
+            animated: true,
+            ..scan(flags, false, false)
+        };
+        assert_eq!(decode_flags(&animated(0x12)), None);
+        assert_eq!(decode_flags(&animated(0x1E)), Some(0x12));
+        assert_eq!(decode_flags(&scan(0x20, false, false)), None);
+        assert_eq!(decode_flags(&scan(0x10, true, false)), None);
+        assert_eq!(decode_flags(&Scan::default()), None);
+        // Alpha with no ALPH chunk before a lossy image; EXIF and XMP.
+        assert_eq!(decode_flags(&scan(0x30, false, false)), Some(0x20));
+        assert_eq!(decode_flags(&scan(0x3C, false, true)), Some(0x30));
+        assert_eq!(decode_flags(&scan(0x1C, true, true)), Some(0x10));
+    }
+
+    #[test]
+    fn a_decode_reads_a_webp_as_libwebp_does_or_not_at_all() {
+        let read = |file: &[u8]| reading(&mut Cursor::new(file));
+        // As it is.
+        assert_eq!(read(&webp(&[vp8(9, 9)])).unwrap(), Reading::default());
+        // Flags patched, at VP8X's flags.
+        let tagged = webp(&[canvas(0x18, 9, 9), vp8(9, 9)]);
+        assert_eq!(
+            read(&tagged).unwrap(),
+            Reading {
+                patch: Some((20, 0)),
+                opaque: false
+            }
+        );
+        assert_eq!(tagged[20], 0x18);
+        // VP8X's alpha flag over a VP8L whose bit says none.
+        let opaque = read(&webp(&[canvas(0x10, 9, 9), vp8l(9, 9, false)])).unwrap();
+        assert!(opaque.opaque && opaque.patch.is_none());
+        assert!(
+            !read(&webp(&[canvas(0x10, 9, 9), vp8l(9, 9, true)]))
+                .unwrap()
+                .opaque
+        );
+        // An animation: its first frame, as it is.
+        let anim = webp(&[
+            canvas(0x12, 9, 9),
+            chunk(b"ANIM", &[0; 6]),
+            anmf(&[vp8(9, 9)]),
+        ]);
+        assert_eq!(read(&anim).unwrap(), Reading::default());
+        // Refused: what the scan refuses, and alpha read differently.
+        for bad in [
+            webp(&[canvas(0, 9, 9), vp8(9, 9), anmf(&[vp8l(9, 9, false)])]),
+            webp(&[canvas(0, 9, 9), anmf(&[vp8l(9, 9, false)]), vp8(9, 9)]),
+            webp(&[canvas(0, 9, 9), chunk(b"ALPH", b"a"), vp8l(9, 9, false)]),
+            webp(&[canvas(0, 9, 9), chunk(b"ALPH", b"a"), vp8(9, 9)]),
+            webp(&[canvas(0x10, 9, 9), vp8(9, 9), chunk(b"ALPH", b"a")]),
+            webp(&[canvas(0, 9, 9), vp8l(9, 9, true)]),
+        ] {
+            assert!(matches!(read(&bad), Err(Error::Broken(_))), "{bad:?}");
+        }
+        // Metadata isn't read, so it's never too large to decode.
+        let mut big = webp(&[canvas(0x08, 9, 9), vp8(9, 9)]);
+        let size = u32::try_from(MAX_CARRIED + 2).unwrap();
+        big.extend_from_slice(b"EXIF");
+        big.extend_from_slice(&size.to_le_bytes());
+        big.resize(big.len() + size as usize, 0);
+        let riff = u32::try_from(big.len() - 8).unwrap();
+        big[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(matches!(scanned(&big), Err(Error::TooLarge(_))));
+        assert!(read(&big).is_ok());
+    }
+
+    #[test]
+    fn readable_gives_a_decoder_from_memory_the_bytes_libwebp_reads() {
+        let arc = |v: Vec<u8>| Arc::new(v);
+        // Not a WebP, or one read as it is: the same bytes.
+        for data in [b"not a webp at all".to_vec(), webp(&[vp8(9, 9)])] {
+            let data = arc(data);
+            assert!(Arc::ptr_eq(&readable(&data).unwrap(), &data));
+        }
+        // Cut at the RIFF's end, its flags patched.
+        let file = webp(&[canvas(0x08, 9, 9), vp8(9, 9)]);
+        let after = arc([file.clone(), chunk(b"EXIF", b"MM\0*")].concat());
+        let mut want = file;
+        want[20] = 0;
+        assert_eq!(*readable(&after).unwrap(), want);
+        // Refused: an ANMF frame in a still file, and VP8L's bit against
+        // VP8X's flag, whose pixels can't be checked from here.
+        for bad in [
+            webp(&[canvas(0, 9, 9), vp8(9, 9), anmf(&[vp8l(9, 9, false)])]),
+            webp(&[canvas(0x10, 9, 9), vp8l(9, 9, false)]),
+        ] {
+            assert!(readable(&arc(bad)).is_err());
+        }
     }
 
     /// The fourcc of each top-level chunk of `file`, checking the RIFF size

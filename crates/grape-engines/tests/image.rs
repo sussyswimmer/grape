@@ -730,8 +730,9 @@ fn animated_webp(width: u32, height: u32) -> Vec<u8> {
 }
 
 /// A still extended WebP with alpha on a `width`×`height` canvas. A
-/// `lossy` one carries `ALPH` and `VP8 ` chunks (whose data is never read:
-/// it is refused before decoding); otherwise the small lossless gradient.
+/// `lossy` one carries `ALPH` and `VP8 ` chunks, the VP8 key frame's header
+/// the canvas's size (the rest is never read: it is refused before
+/// decoding); otherwise the small lossless gradient.
 fn still_webp_with_alpha(width: u32, height: u32, lossy: bool) -> Vec<u8> {
     let simple = encode(&gradient(), Format::Webp);
     assert_eq!(&simple[12..16], b"VP8L");
@@ -741,7 +742,14 @@ fn still_webp_with_alpha(width: u32, height: u32, lossy: bool) -> Vec<u8> {
     vp8x.extend(u24(width - 1));
     vp8x.extend(u24(height - 1));
     let image = if lossy {
-        [riff_chunk(b"ALPH", &[0; 4]), riff_chunk(b"VP8 ", &[0; 10])].concat()
+        let [w0, w1, ..] = width.to_le_bytes();
+        let [h0, h1, ..] = height.to_le_bytes();
+        let key_frame = [0x10, 2, 0, 0x9D, 1, 0x2A, w0, w1, h0, h1];
+        [
+            riff_chunk(b"ALPH", &[0; 4]),
+            riff_chunk(b"VP8 ", &key_frame),
+        ]
+        .concat()
     } else {
         simple[12..].to_vec()
     };
@@ -818,9 +826,8 @@ fn a_still_lossy_webp_with_alpha_counts_its_alpha_decoding() {
         &still_webp_with_alpha(11_585, 11_585, true),
         "needs about 1343 MiB, over the 1024 MiB limit",
     );
-    // The same canvas holding a lossless image decodes into the output
-    // directly, so it gets past the estimate; its 64×48 bitstream then
-    // doesn't match the canvas, which the decoder reports.
+    // The same canvas over a 64×48 lossless image, which libwebp refuses:
+    // refused before decoding, as Compress refuses it.
     let dir = TestDir::new("webp-lossless");
     let (src, job) = plan_one(
         &dir,
