@@ -729,7 +729,9 @@ fn pointer(r: &mut dyn In, entry: &Entry, order: Order) -> Result<Option<u64>, E
 /// RowsPerStrip, TileWidth, TileLength, ImageDepth and TileDepth, each as
 /// [`number`] reads it, and the strips or tiles it counts
 /// (`TIFFNumberOfStrips`, `TIFFNumberOfTiles`). It tells tiles by a
-/// TileWidth or TileLength, not by the tags the blocks are listed under.
+/// TileWidth or TileLength, not by the tags the blocks are listed under,
+/// and takes one it isn't given from a RowsPerStrip the IFD lists before
+/// them ([`Dims::of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Dims {
     pub(crate) width: u64,
@@ -801,6 +803,27 @@ impl Dims {
             }
         }
         let tiled = ifd.get(322).is_some() || ifd.get(323).is_some();
+        // libtiff sets the tags in the order the IFD lists them (the first
+        // of each), and a RowsPerStrip set before either tile size sets
+        // both (`_TIFFVSetField`): TileLength to it, and TileWidth to the
+        // ImageWidth set by then, 0 before it; a tile size listed sets its
+        // own after that.
+        let at = |tag| ifd.entries.iter().position(|e| e.tag == tag);
+        let first_tile = [at(322), at(323)].into_iter().flatten().min();
+        let (tw, tl) = match (at(278), first_tile) {
+            (Some(r), Some(t)) if r < t => {
+                let width = if at(256).is_some_and(|w| w < r) {
+                    width
+                } else {
+                    0
+                };
+                (
+                    if ifd.get(322).is_some() { tw } else { width },
+                    if ifd.get(323).is_some() { tl } else { rows },
+                )
+            }
+            _ => (tw, tl),
+        };
         let dims = Dims {
             width,
             height,
@@ -2374,6 +2397,34 @@ mod tests {
     }
 
     #[test]
+    fn a_tile_size_left_out_is_libtiffs_from_a_rowsperstrip_listed_first() {
+        // 64 × 64, its entries in the order given (as libtiff sets them).
+        let count = |entries: &[(u16, u16, u64)]| dims(entries).map(|d| (d.count(), d.tile()));
+        let with = |more: &[(u16, u16, u64)]| [&[(256, 4, 64), (257, 4, 64)][..], more].concat();
+        // A RowsPerStrip before a TileLength: tiles as wide as the picture,
+        // so that strips of 16 rows are its four tiles; before a TileWidth,
+        // tiles of its rows; before both, both its own.
+        let length = with(&[(278, 3, 16), (323, 3, 16)]);
+        assert_eq!(count(&length), Ok((4, Some((64, 16)))));
+        let width = with(&[(278, 3, 16), (322, 3, 32)]);
+        assert_eq!(count(&width), Ok((8, Some((32, 16)))));
+        let both = with(&[(278, 3, 16), (322, 3, 32), (323, 3, 32)]);
+        assert_eq!(count(&both), Ok((4, Some((32, 32)))));
+        // A RowsPerStrip of 2^32 - 1: tiles as long as the picture.
+        let whole = with(&[(278, 4, u64::from(u32::MAX)), (323, 3, 16)]);
+        assert_eq!(count(&whole), Ok((4, Some((64, 16)))));
+        let whole = with(&[(278, 4, u64::from(u32::MAX)), (322, 3, 16)]);
+        assert_eq!(count(&whole), Ok((4, Some((16, 64)))));
+        // A RowsPerStrip after the tile size sets nothing, nor one before
+        // the ImageWidth a TileWidth: libtiff counts no tiles.
+        assert!(count(&with(&[(323, 3, 16), (278, 3, 16)])).is_err());
+        let early = [(278, 3, 16), (256, 4, 64), (257, 4, 64), (323, 3, 16)];
+        assert!(count(&early).is_err());
+        let early = [(257, 4, 64), (278, 3, 16), (256, 4, 64), (322, 3, 32)];
+        assert_eq!(count(&early), Ok((8, Some((32, 16)))));
+    }
+
+    #[test]
     fn a_layout_libtiff_cant_read_is_refused_but_for_one_compressed_block() {
         let refused =
             |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
@@ -2384,27 +2435,36 @@ mod tests {
         page.tags[4] = (278, V::Rational(vec![(10, 1)]));
         assert!(refused(&Builder::new(b'I', false, vec![page]).build()));
         // A lone uncompressed strip where libtiff counts no strips or tiles
-        // (a RowsPerStrip of 2^32 - 2, a lone TileWidth, a TileWidth or a
-        // TileLength beside a RowsPerStrip), or can't read the layout:
-        // Pillow reads the whole picture from it, which Grape can't size as
-        // libtiff would, so a strip counted short of it can't be told from
-        // a whole one. Refused, short or whole.
+        // (a RowsPerStrip of 2^32 - 2, a lone TileWidth), or can't read the
+        // layout: Pillow reads the whole picture from it, which Grape can't
+        // size as libtiff would, so a strip counted short of it can't be
+        // told from a whole one. Refused, short or whole.
+        let lone = |tags: &[(u16, V)], count: u64| {
+            let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
+            page.tags.retain(|t| t.0 != 278);
+            page.tags.extend(tags.iter().cloned());
+            page.counts = Some(vec![count]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
         for tags in [
             vec![(278, V::Long(vec![u32::MAX - 1]))],
             vec![(278, V::Rational(vec![(100, 1)]))],
             vec![(322, V::Long(vec![304]))],
-            vec![(278, V::Long(vec![100])), (322, V::Long(vec![304]))],
-            vec![(278, V::Long(vec![100])), (323, V::Short(vec![100]))],
         ] {
             for count in [10, 30_000] {
-                let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
-                page.tags.retain(|t| t.0 != 278);
-                page.tags.extend(tags.iter().cloned());
-                page.counts = Some(vec![count]);
-                let file = Builder::new(b'I', false, vec![page]).build();
-                assert!(refused(&file), "{tags:?} {count}");
+                assert!(refused(&lone(&tags, count)), "{tags:?} {count}");
             }
         }
+        // A TileWidth or a TileLength beside a RowsPerStrip, which libtiff
+        // reads as one tile of 304 × 100, or the picture's 300 × 100:
+        // refused short of it, and taken whole.
+        let rows = (278, V::Long(vec![100]));
+        let wide = [rows.clone(), (322, V::Long(vec![304]))];
+        assert!(refused(&lone(&wide, 10)));
+        assert!(refused(&lone(&wide, 30_000)));
+        let long = [rows, (323, V::Short(vec![100]))];
+        assert!(refused(&lone(&long, 10)));
+        assert_eq!(lens(&read(&lone(&long, 30_000)).unwrap()), [30_000]);
         // A lone compressed one is the one libtiff would read, as it is.
         let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
         page.tags[4] = (278, V::Rational(vec![(100, 1)]));

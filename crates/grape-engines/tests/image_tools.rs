@@ -786,6 +786,41 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
 }
 
 #[test]
+fn both_tiff_tools_take_a_tile_size_left_out_from_rows_per_strip() {
+    // The review's file: gray 64 × 64 in four strips of 16 rows, 1,024
+    // bytes each, with a TileLength of 16 and no TileWidth. libtiff sets a
+    // RowsPerStrip listed before a tile size as the tile's too, as wide as
+    // the picture, and reads four tiles of 64 × 16, the same bytes, and so
+    // do Pillow and ImageMagick. Remove Metadata copies them whole;
+    // Compress copies the page as it is, its tiles listed as strips.
+    let picture: Vec<u8> = (0..4_096).map(|i| (i % 251) as u8).collect();
+    let entries = vec![
+        (256, 4, le(64, 4)),
+        (257, 4, le(64, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (273, 4, (0..4).flat_map(|i| le(8 + 1_024 * i, 4)).collect()),
+        (278, 3, le(16, 2)),
+        (279, 4, (0..4).flat_map(|_| le(1_024, 4)).collect()),
+        (323, 3, le(16, 2)),
+    ];
+    let bytes = laid_out(false, &picture, entries);
+    let dir = TestDir::new("tiff-rows-tile");
+    let outcome = strip(&dir, "tiles.tif", &bytes).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(out.windows(4_096).any(|w| w == picture));
+    let op = compress_op(grape_core::CompressPreset::High);
+    let err = run(&dir, "tiles.tif", &bytes, op).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert!(
+        err.detail
+            .contains("lists strips where libtiff reads tiles"),
+        "{}",
+        err.detail
+    );
+}
+
+#[test]
 fn both_tiff_tools_size_rgb_by_the_bits_of_its_samples_alone() {
     // RGB, 100 × 100 in ten strips of 3,000 bytes, its BitsPerSample of
     // four values, as some writers leave it: libtiff reads the first three
