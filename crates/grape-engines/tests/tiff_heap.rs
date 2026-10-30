@@ -1,7 +1,7 @@
 //! The heap Remove Metadata and Compress on TIFF hold at their peak (D28):
-//! TIFFs of a million strips, of 65,536 pages, and of pages with
-//! Photoshop's resources, through `run_job`, under an allocator that
-//! counts. The tests take turns, so nothing else allocates meanwhile.
+//! TIFFs of a million strips, of 65,536 pages, of a million entries, and
+//! of pages with Photoshop's resources, through `run_job`, under an
+//! allocator that counts. The tests take turns, so nothing else allocates meanwhile.
 #![allow(clippy::unwrap_used)]
 
 mod common;
@@ -442,4 +442,63 @@ fn compress_on_a_tiff_of_a_million_entries_holds_about_100_bytes_an_entry() {
     assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
     let mib = peak as f64 / f64::from(1 << 20);
     assert!(mib < 112.0, "{mib:.2} MiB");
+}
+
+/// A classic TIFF of `n` gray 8 × 8 pages, a chain, one 64-byte strip
+/// each, and `extra` ImageDescriptions each, every one other text out of
+/// line after its IFD.
+fn descriptions(n: u32, extra: u32) -> Vec<u8> {
+    let ifd = 2 + 12 * (7 + extra) + 4;
+    let page = ifd + 8 * extra + 64;
+    let mut file = b"II*\0\x08\0\0\0".to_vec();
+    for k in 0..n {
+        let at = 8 + k * page;
+        let values = at + ifd;
+        let strip = values + 8 * extra;
+        let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+            (256, 4, 1, 8),
+            (257, 4, 1, 8),
+            (258, 3, 1, 8),
+            (262, 3, 1, 1),
+            (273, 4, 1, strip),
+            (278, 4, 1, 8),
+            (279, 4, 1, 64),
+        ];
+        entries.extend((0..extra).map(|i| (270, 2, 8, values + 8 * i)));
+        entries.sort_by_key(|e| e.0);
+        file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+        for (tag, kind, count, value) in entries {
+            file.extend(tag.to_le_bytes());
+            file.extend(kind.to_le_bytes());
+            file.extend(count.to_le_bytes());
+            file.extend(value.to_le_bytes());
+        }
+        let next = if k + 1 < n { at + page } else { 0 };
+        file.extend(next.to_le_bytes());
+        for i in 0..extra {
+            file.extend(format!("{:03}:{i:04}", k % 1000).as_bytes());
+        }
+        file.extend((0..64).map(|i| (i * 3 + k) as u8));
+    }
+    file
+}
+
+#[test]
+fn remove_metadata_on_a_tiff_of_a_million_descriptions_holds_56_bytes_an_entry() {
+    // 256 pages of 4,096 entries, the cap, 1,046,784 of them
+    // ImageDescriptions, each its own text out of line: each is read for
+    // ImageJ's and OME's, and goes. The model holds 40 bytes an entry, and
+    // the overlap check 16 for each value out of line (56.13 MiB
+    // measured); remembering every description read, so that one IFDs
+    // share is read once, held 115.12 MiB.
+    let _turn = turn();
+    let dir = TestDir::new("tiff-heap-descriptions");
+    let (_, job) = plan_one(
+        &dir,
+        "descriptions.tif",
+        &descriptions(256, 4_089),
+        Operation::tool(ToolKey::RemoveMetadata),
+    );
+    let mib = peak(&job) as f64 / f64::from(1 << 20);
+    assert!(mib < 58.0, "{mib:.2} MiB");
 }

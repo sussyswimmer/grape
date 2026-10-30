@@ -82,7 +82,8 @@ use grape_core::{Format, Job};
 use super::super::strip::{self as strips, Error, In, Out};
 use super::codec::{Codec, Codecs, Fail, Geometry, Predictor, Recipe, Why};
 use super::read::{
-    number, per_sample, repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff, SHORT,
+    number, per_sample, repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, MAX_ENTRIES,
+    SHORT,
 };
 use super::write::{self, Blocks, Data, Dir, Field, Image, Sink, Written};
 use crate::cancel::Cancellable;
@@ -279,6 +280,15 @@ impl Planned {
         let (mut recoded, mut copied): (u64, u64) = (0, 0);
         let mut log = Log::default();
         for (n, ifd) in tiff.ifds().into_iter().enumerate() {
+            // libtiff reads no IFD of more than MAX_ENTRIES entries: one the
+            // writer would take past them even copied as it is (one with
+            // no byte counts, which it writes) can't be written.
+            let entries = written_entries(ifd, &[]);
+            if entries > MAX_ENTRIES {
+                return Err(Error::TooLarge(format!(
+                    "an IFD that would be written with {entries} entries"
+                )));
+            }
             let how = how(r, ifd, order, &mut left)?;
             let blocks = ifd.blocks.iter().enumerate().filter(|(_, b)| b.len > 0);
             match &how {
@@ -560,7 +570,14 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
         // Already in the decoded bytes, which stay as they are.
         None
     } else {
-        let added = added(r, ifd, order, photometric, &geometry, left)?;
+        // A Predictor the IFD doesn't list is an entry more, which past
+        // MAX_ENTRIES no reader reads: it isn't added then.
+        let room = ifd.get(317).is_some() || written_entries(ifd, &[259, 317]) <= MAX_ENTRIES;
+        let added = if room {
+            added(r, ifd, order, photometric, &geometry, left)?
+        } else {
+            None
+        };
         if added.is_some() {
             fields.push(short(317, 2));
         } else if ifd.get(317).is_some() {
@@ -568,6 +585,14 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
         }
         added
     };
+    // Nor is a Compression: the IFD is copied as it is then.
+    let tags: Vec<u16> = fields.iter().map(|f| f.tag).collect();
+    let entries = written_entries(ifd, &tags);
+    if entries > MAX_ENTRIES {
+        return copy(format!(
+            "recoded, it would have {entries} entries, past the {MAX_ENTRIES} libtiff reads"
+        ));
+    }
     Ok(How::Recode {
         codec,
         geometry,
@@ -619,19 +644,44 @@ fn added(
     }))
 }
 
+/// Whether [`dir`] leaves `tag` out of an image IFD's fields: the writer
+/// makes it again (the blocks, the SubIFDs, the Exif and GPS pointers), or
+/// it would point at what's gone (FreeOffsets and FreeByteCounts).
+fn left_out(tag: u16) -> bool {
+    matches!(tag, 273 | 279 | 324 | 325 | 330 | 34665 | 34853 | 288 | 289)
+}
+
+/// How many entries `ifd` is written with, its blocks' writing giving
+/// fields for `written` (none when it's copied as it is): those the writer
+/// makes, and those of its own [`dir`] keeps ([`write::count`]).
+fn written_entries(ifd: &Ifd, written: &[u16]) -> u64 {
+    let mut made = if ifd.tiled {
+        vec![324, 325]
+    } else {
+        vec![273, 279]
+    };
+    if ifd.subs.iter().any(|chain| !chain.is_empty()) {
+        made.push(330);
+    }
+    for (tag, meta) in [(34665, &ifd.exif), (34853, &ifd.gps)] {
+        if meta.as_ref().is_some_and(|meta| !meta.unread) {
+            made.push(tag);
+        }
+    }
+    let own = ifd
+        .entries
+        .iter()
+        .filter(|e| !left_out(e.tag) && e.value != Value::Unread);
+    write::count(&made, written, own.map(|e| e.tag)) as u64
+}
+
 /// The image IFD `ifd` as it will be written: every entry but the ones the
-/// writer makes or that would point at nothing, its Exif and GPS IFDs,
-/// and its SubIFDs.
+/// writer makes or that would point at nothing ([`left_out`]), its Exif
+/// and GPS IFDs, and its SubIFDs.
 fn dir(ifd: Ifd, log: &mut Log) -> Result<Dir, Error> {
     let mut fields = Vec::with_capacity(ifd.entries.len());
-    for entry in &ifd.entries {
-        match entry.tag {
-            // Made again by the writer, or below.
-            273 | 279 | 324 | 325 | 330 | 34665 | 34853 => {}
-            // FreeOffsets and FreeByteCounts: what they point at is gone.
-            288 | 289 => {}
-            _ => fields.extend(field(entry, log)?),
-        }
+    for entry in ifd.entries.iter().filter(|e| !left_out(e.tag)) {
+        fields.extend(field(entry, log)?);
     }
     let mut children = Vec::new();
     for (tag, meta) in [(34665, &ifd.exif), (34853, &ifd.gps)] {
@@ -2033,6 +2083,65 @@ mod tests {
             listed(&file, &ea.entries, 0xA001)
         );
         assert_eq!(listed(&out, &eb.entries, 0xA001).len(), 2);
+        assert_eq!(decoded(&out), decoded(&file));
+    }
+
+    #[test]
+    fn an_ifd_at_the_entry_cap_is_written_with_no_entry_more() {
+        // libtiff reads no IFD of more than 4,096 entries: a 64 × 64 gray
+        // page of 4,096 (its 9 layout tags, and one tag 4,087 times, or
+        // 4,087 tags) is recoded without the Predictor it would gain, and
+        // one with no Compression of its own, which it would gain, is
+        // copied as it is.
+        let samples = smooth(64 * 64);
+        let page = |distinct: bool, compression: bool| {
+            let mut page = gray(64, 64, 64, vec![B::data(&samples)]);
+            page.tags.push((277, V::Short(vec![1])));
+            if compression {
+                page.tags.push((259, V::Short(vec![1])));
+            } else {
+                page.tags.push((284, V::Short(vec![1])));
+            }
+            let tag = |i: u16| if distinct { 60_000 + i } else { 65_000 };
+            page.tags
+                .extend((0..4_087).map(|i| (tag(i), V::Short(vec![i]))));
+            page
+        };
+        for distinct in [false, true] {
+            let file = Builder::new(b'I', false, vec![page(distinct, true)]).build();
+            let out = compressed(&file);
+            let ifd = &read(&out).pages[0];
+            assert_eq!(ifd.entries.len(), 4_096, "{distinct}");
+            assert_eq!(ifd.compression, 8);
+            assert!(ifd.get(317).is_none());
+            assert_eq!(decoded(&out), decoded(&file));
+            let file = Builder::new(b'I', false, vec![page(distinct, false)]).build();
+            let Ok(Planned::Nothing(why)) = planned(&file) else {
+                panic!("recoded")
+            };
+            assert!(why.contains("4097 entries"), "{why}");
+        }
+        // One with no byte counts gains them even copied: too large.
+        let mut page = page(true, true);
+        page.counts = Some(Vec::new());
+        page.tags.push((59_999, V::Short(vec![1])));
+        let file = Builder::new(b'I', false, vec![page]).build();
+        assert_eq!(read(&file).pages[0].entries.len(), 4_096);
+        assert!(matches!(planned(&file), Err(Error::TooLarge(_))));
+    }
+
+    #[test]
+    fn jpeg_tables_of_no_bytes_are_kept_as_they_are() {
+        // libtiff ignores a JPEGTables of count 0; Compress keeps every
+        // tag, that one too.
+        let samples = smooth(16 * 16);
+        let mut page = gray(16, 16, 16, vec![B::data(&lzw(&samples))]);
+        page.tags
+            .extend([(259, V::Short(vec![5])), (347, V::Bytes(7, Vec::new()))]);
+        let file = Builder::new(b'I', false, vec![page]).build();
+        let out = compressed(&file);
+        let tables = read(&out).pages[0].get(347).cloned().unwrap();
+        assert_eq!((tables.kind, tables.count), (7, 0));
         assert_eq!(decoded(&out), decoded(&file));
     }
 

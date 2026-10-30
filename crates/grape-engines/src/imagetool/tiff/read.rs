@@ -35,8 +35,9 @@
 //! - **Refused:** a DNG, an old-style JPEG, or a Compression libtiff can't
 //!   read, in any image IFD: [`Error::Refused`] as soon as the walk reads
 //!   that IFD, before its strips or tiles, which an old-style JPEG may not
-//!   have; entries for a tag the tools decide on that disagree, of which
-//!   libtiff reads the first and Pillow the last ([`UNREAD_COMPRESSION`]
+//!   have; entries for a tag the tools decide on that disagree (that
+//!   don't hold the same value, [`Alike`]), of which libtiff reads the
+//!   first and Pillow the last ([`UNREAD_COMPRESSION`]
 //!   for Compression, [`UNREAD_LAYOUT`] for the others), and so for an
 //!   Exif, GPS or Interop pointer, as the walk follows the first
 //!   ([`TWICE`]); a layout libtiff
@@ -314,6 +315,7 @@ impl Tiff {
             entries: 0,
             blocks: 0,
             samples_left: len,
+            alike: Alike::new(len),
         };
         let mut pages = Vec::new();
         let mut at_pages = HashSet::new();
@@ -566,21 +568,12 @@ pub(crate) const UNREAD_COMPRESSION: &str =
 /// The tags either tool decides on to read an image IFD's blocks: its
 /// layout, samples, Compression, PhotometricInterpretation, FillOrder,
 /// Predictor, SampleFormat and YCbCrSubsampling, its blocks and its
-/// SubIFDs.
+/// SubIFDs. Entries for one that disagree ([`Alike::twice`]) are refused:
+/// libtiff reads the first, and Pillow the last.
 const DECIDED: [u16; 21] = [
     256, 257, 258, 259, 262, 266, 273, 277, 278, 279, 284, 317, 322, 323, 324, 325, 330, 339, 530,
     32997, 32998,
 ];
-
-/// The first tag of [`DECIDED`] that `ifd` lists more than once, its
-/// entries not all the same (type, count and value, where it is): libtiff
-/// reads the first, and Pillow the last.
-fn disagreeing(ifd: &Ifd) -> Option<u16> {
-    DECIDED.into_iter().find(|&tag| {
-        let mut all = ifd.entries.iter().filter(|e| e.tag == tag);
-        all.next().is_some_and(|first| all.any(|e| e != first))
-    })
-}
 
 /// Why a file that lists a tag twice or more, its entries not all the
 /// same, is refused where a tool can't keep each: readers that take the
@@ -588,15 +581,135 @@ fn disagreeing(ifd: &Ifd) -> Option<u16> {
 pub(crate) const TWICE: &str =
     "lists a tag twice with different values, which Grape can't rewrite yet.";
 
-/// The first tag `picks` picks that `entries` list more than once, the
-/// entries not all the same (type, count and value, where it is).
-pub(crate) fn twice(entries: &[Entry], picks: impl Fn(u16) -> bool) -> Option<u16> {
-    let mut first: HashMap<u16, &Entry> = HashMap::new();
-    entries
-        .iter()
-        .filter(|e| picks(e.tag))
-        .find(|&e| *first.entry(e.tag).or_insert(e) != e)
-        .map(|e| e.tag)
+/// The most pairs of entries [`Alike`] remembers holding the same value.
+const MAX_ALIKE: usize = 4_096;
+
+/// Compares the entries a file lists for one tag ([`Alike::same`]), each
+/// pair once while it remembers them, at most [`MAX_ALIKE`]; and what's
+/// left of the bytes it may read to, the file's size at first: past it,
+/// entries that overlap, the file is too large.
+pub(crate) struct Alike {
+    pairs: HashSet<(Value, u16, Value, u16)>,
+    left: u64,
+}
+
+impl Alike {
+    pub(crate) fn new(len: u64) -> Alike {
+        Alike {
+            pairs: HashSet::new(),
+            left: len,
+        }
+    }
+
+    /// The first tag `picks` picks that `entries` list more than once,
+    /// an entry not the same as its first ([`Alike::same`]).
+    pub(crate) fn twice(
+        &mut self,
+        r: &mut dyn In,
+        entries: &[Entry],
+        order: Order,
+        picks: impl Fn(u16) -> bool,
+    ) -> Result<Option<u16>, Error> {
+        let mut first: HashMap<u16, &Entry> = HashMap::new();
+        for entry in entries.iter().filter(|e| picks(e.tag)) {
+            let first = *first.entry(entry.tag).or_insert(entry);
+            if !self.same(r, first, entry, order)? {
+                return Ok(Some(entry.tag));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Whether `a` and `b`, entries for one tag, hold the same value as
+    /// readers read it: the same numbers, of any integer type (IFD and IFD8
+    /// among them: an Exif pointer typed LONG and one typed IFD point at
+    /// one place), or else the same type and bytes, wherever each is. Read
+    /// from `r` a step at a time when they're in different places, `b`'s
+    /// bytes taken from what's left; a value that can't be read is no
+    /// other's.
+    fn same(&mut self, r: &mut dyn In, a: &Entry, b: &Entry, order: Order) -> Result<bool, Error> {
+        if a == b {
+            return Ok(true);
+        }
+        let units = |e: &Entry| match e.kind {
+            13 => Some((4, false)),
+            18 => Some((8, false)),
+            kind => integer(kind),
+        };
+        let len = |e: &Entry| match e.value {
+            Value::Inline { len, .. } => Some(u64::from(len)),
+            Value::At { len, .. } => Some(len),
+            Value::Unread => None,
+        };
+        let (Some(len_a), Some(len_b)) = (len(a), len(b)) else {
+            return Ok(false);
+        };
+        // Each unit's size and whether it's signed, and how many: numbers,
+        // or the bytes of a value of another type.
+        let (ua, ub, n) = match (units(a), units(b)) {
+            (Some(ua), Some(ub)) if a.count == b.count => (ua, ub, a.count),
+            (None, None) if a.kind == b.kind && len_a == len_b => ((1, false), (1, false), len_a),
+            _ => return Ok(false),
+        };
+        let pair = (a.value, a.kind, b.value, b.kind);
+        if self.pairs.contains(&pair) {
+            return Ok(true);
+        }
+        if matches!(b.value, Value::At { .. }) {
+            self.left = self.left.checked_sub(len_b).ok_or_else(|| {
+                Error::TooLarge("entries of a tag that overlap, more to read than it holds".into())
+            })?;
+        }
+        let number = |b: &[u8], (size, signed): (usize, bool)| {
+            let n = i128::from(order.uint(b));
+            if signed && n >> (8 * size - 1) == 1 {
+                n - (1 << (8 * size))
+            } else {
+                n
+            }
+        };
+        let (mut xa, mut xb) = (Vec::new(), Vec::new());
+        let step = (STEP / 8) as u64;
+        let mut done = 0;
+        while done < n {
+            let k = (n - done).min(step);
+            part(r, a, done * ua.0 as u64, k * ua.0 as u64, &mut xa)?;
+            part(r, b, done * ub.0 as u64, k * ub.0 as u64, &mut xb)?;
+            let mut each = xa.chunks_exact(ua.0).zip(xb.chunks_exact(ub.0));
+            if !each.all(|(x, y)| number(x, ua) == number(y, ub)) {
+                return Ok(false);
+            }
+            done += k;
+        }
+        if self.pairs.len() < MAX_ALIKE {
+            self.pairs.insert(pair);
+        }
+        Ok(true)
+    }
+}
+
+/// The `len` bytes `from` bytes into `entry`'s value, into `buf`: inline,
+/// or read from `r`.
+fn part(
+    r: &mut dyn In,
+    entry: &Entry,
+    from: u64,
+    len: u64,
+    buf: &mut Vec<u8>,
+) -> Result<(), Error> {
+    buf.resize(usize_of(len)?, 0);
+    match entry.value {
+        Value::Inline { bytes, .. } => {
+            let range = usize_of(from)?..usize_of(from + len)?;
+            let inline = bytes
+                .get(range)
+                .ok_or_else(|| Error::Broken("a value past its entry".into()))?;
+            buf.copy_from_slice(inline);
+        }
+        Value::At { offset, .. } => read_at(r, offset + from, buf)?,
+        Value::Unread => return Err(Error::Broken("a value that can't be read".into())),
+    }
+    Ok(())
 }
 
 /// The image IFD `ifd`'s Compression, given as libtiff reads it
@@ -1085,6 +1198,8 @@ struct Walk<'r> {
     /// BitsPerSample) and YCbCrSubsampling it may read out of line, the
     /// file's size at first: pages can all point at one long array.
     samples_left: u64,
+    /// The entries of one tag it compared ([`Alike`]).
+    alike: Alike,
 }
 
 impl Walk<'_> {
@@ -1190,7 +1305,9 @@ impl Walk<'_> {
         ifd.compression = admitted(&ifd, compression).map_err(|why| Error::Refused(why.into()))?;
         // Readers that take the first entry and those that take the last
         // would read different files.
-        if let Some(tag) = disagreeing(&ifd) {
+        let o = self.layout.order;
+        let decided = |tag| DECIDED.contains(&tag);
+        if let Some(tag) = self.alike.twice(self.r, &ifd.entries, o, decided)? {
             let why = if tag == 259 {
                 UNREAD_COMPRESSION
             } else {
@@ -1199,7 +1316,12 @@ impl Walk<'_> {
             return Err(Error::Refused(why.into()));
         }
         // So would they an Exif or GPS IFD: the tools follow the first.
-        if twice(&ifd.entries, |tag| matches!(tag, 34665 | 34853)).is_some() {
+        let pointers = |tag| matches!(tag, 34665 | 34853);
+        if self
+            .alike
+            .twice(self.r, &ifd.entries, o, pointers)?
+            .is_some()
+        {
             return Err(Error::Refused(TWICE.into()));
         }
         self.blocks(&mut ifd)?;
@@ -1273,7 +1395,13 @@ impl Walk<'_> {
         let meta = match self.raw(at) {
             Ok(Some((entries, _))) => {
                 // An Interop IFD too.
-                if kind == exif::Ifd::Exif && twice(&entries, |tag| tag == 40965).is_some() {
+                let o = self.layout.order;
+                if kind == exif::Ifd::Exif
+                    && self
+                        .alike
+                        .twice(self.r, &entries, o, |tag| tag == 40965)?
+                        .is_some()
+                {
                     return Err(Error::Refused(TWICE.into()));
                 }
                 let interop = if kind == exif::Ifd::Exif {
@@ -2949,6 +3077,16 @@ mod tests {
         // A tag no tool decides on may be there twice, whatever it says.
         let other = file(305, V::Ascii("one"), V::Ascii("another"));
         assert!(read(&other).is_ok());
+        // The same numbers in another type, or the same bytes in another
+        // place, are the same: every reader reads them alike.
+        for (tag, first, second) in [
+            (278, V::Long(vec![10]), V::Short(vec![10])),
+            (279, V::Long(vec![3_000; 10]), V::Long(vec![3_000; 10])),
+            (279, V::Long(vec![3_000; 10]), V::Short(vec![3_000; 10])),
+        ] {
+            let same = file(tag, first, second);
+            assert_eq!(lens(&read(&same).unwrap()), [3_000; 10], "{tag}");
+        }
     }
 
     #[test]
@@ -2975,6 +3113,75 @@ mod tests {
             exif.push((40965, V::Long(vec![0])));
         }
         assert!(twice(&doubled));
+        // Two pointers to the same IFD, one typed LONG and one IFD, agree.
+        for tag in [34665, 34853] {
+            let mut doubled = page.clone();
+            doubled.tags.push((tag, V::Bytes(13, vec![0; 4])));
+            let mut file = Builder::new(b'I', false, vec![doubled]).build();
+            // The IFD-typed entry is first: it gets the LONG's offset.
+            let n = Order::Little.uint(&file[8..10]) as usize;
+            let entries: Vec<usize> = (0..n)
+                .map(|i| 10 + 12 * i)
+                .filter(|&e| Order::Little.uint(&file[e..e + 2]) == u64::from(tag))
+                .collect();
+            let [ifd, long] = entries[..] else {
+                panic!("{entries:?}")
+            };
+            assert_eq!(Order::Little.uint(&file[ifd + 2..ifd + 4]), 13);
+            let to = file[long + 8..long + 12].to_vec();
+            file[ifd + 8..ifd + 12].copy_from_slice(&to);
+            let tiff = read(&file).unwrap();
+            let meta = match tag {
+                34665 => tiff.pages[0].exif.as_ref(),
+                _ => tiff.pages[0].gps.as_ref(),
+            };
+            assert!(
+                meta.is_some_and(|m| !m.unread && !m.entries.is_empty()),
+                "{tag}"
+            );
+        }
+    }
+
+    #[test]
+    fn entries_compared_in_other_places_are_read_up_to_the_files_size() {
+        // Entries of one tag, each 1,000 zeros a byte further on in 2,000
+        // zeros: each compares the same, each pair is read once, and each
+        // read counts, up to the file's size, past which the file is too
+        // large.
+        let file = vec![0; 2_000];
+        let entries: Vec<Entry> = (0..1_000)
+            .map(|offset| Entry {
+                tag: 34675,
+                kind: 7,
+                count: 1_000,
+                value: Value::At { offset, len: 1_000 },
+            })
+            .collect();
+        let mut alike = Alike::new(file.len() as u64);
+        let twice = |alike: &mut Alike, entries: &[Entry]| {
+            alike.twice(&mut Cursor::new(&file), entries, Order::Little, |_| true)
+        };
+        assert_eq!(twice(&mut alike, &entries[..2]).unwrap(), None);
+        assert_eq!(twice(&mut alike, &entries[..3]).unwrap(), None);
+        assert!(matches!(
+            twice(&mut alike, &entries[..100]),
+            Err(Error::TooLarge(_))
+        ));
+        // A byte apart is another value; the same entry twice is one,
+        // and isn't read.
+        let mut file = file.clone();
+        file[1_500] = 1;
+        let mut alike = Alike::new(0);
+        let r = &mut Cursor::new(&file);
+        let one = [entries[0].clone(), entries[0].clone()];
+        assert_eq!(alike.twice(r, &one, Order::Little, |_| true).unwrap(), None);
+        let mut alike = Alike::new(file.len() as u64);
+        let apart = [entries[0].clone(), entries[99].clone()];
+        let found = alike.twice(r, &apart, Order::Little, |_| true).unwrap();
+        assert_eq!(found, None);
+        let apart = [entries[0].clone(), entries[600].clone()];
+        let found = alike.twice(r, &apart, Order::Little, |_| true).unwrap();
+        assert_eq!(found, Some(34675));
     }
 
     /// `file` with the type of the entry for `tag` in the IFD at `at` set to

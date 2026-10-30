@@ -1475,6 +1475,45 @@ fn remove_metadata_keeps_the_tags_a_tiffs_codec_needs() {
 }
 
 #[test]
+fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
+    // The review's files: tags Remove Metadata keeps, in a type libtiff
+    // ignores and Pillow shows (an Orientation and an XResolution as
+    // text, LercParameters as eight LONGs on an uncompressed page, InkNames
+    // on an RGB page, GDAL's no-data value as words), were published with
+    // nothing said. They go now, as other fields.
+    let dir = TestDir::new("strip-tiff-types");
+    let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W".to_vec();
+    let words = b"shot by John at home\0".to_vec();
+    for (name, tag, kind, value) in [
+        ("orientation.tif", 274, 2, [&secret[..], b"\0"].concat()),
+        ("resolution.tif", 282, 2, [&secret[..], b"\0"].concat()),
+        ("lerc.tif", 50674, 4, secret.clone()),
+        ("inks.tif", 333, 2, words.clone()),
+        ("nodata.tif", 42113, 2, words.clone()),
+    ] {
+        let entries = vec![
+            (256, 4, le(1, 4)),
+            (257, 4, le(1, 4)),
+            (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+            (262, 3, le(2, 2)),
+            (277, 3, le(3, 2)),
+            (278, 4, le(1, 4)),
+            (tag, kind, value),
+        ];
+        let outcome = strip(&dir, name, &one_strip(false, &[9; 3], entries)).unwrap();
+        assert_eq!(
+            outcome.notes,
+            [Note::MetadataRemoved(vec![MetaField::Other])],
+            "{name}"
+        );
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        for text in [&b"SECRET"[..], b"John"] {
+            assert!(!out.windows(text.len()).any(|w| w == text), "{name}");
+        }
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tag_it_keeps_listed_twice_differently() {
     // The review's files: a palette page whose ColorMap is listed twice,
     // red then blue (libtiff reads red, Pillow blue), which Remove
