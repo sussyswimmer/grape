@@ -174,9 +174,11 @@ pub(crate) struct Plan {
     broken: bool,
 }
 
-/// Reasons for the log: the first [`MAX_LOG`], and how many more.
+/// Reasons for the log: the line that ended the job, if one did, first
+/// and always kept; then the first [`MAX_LOG`] others, and how many more.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Log {
+    end: Option<String>,
     lines: Vec<String>,
     more: usize,
 }
@@ -190,9 +192,23 @@ impl Log {
         }
     }
 
+    /// Puts `line` first, as what ended the job, in place of `instead`, a
+    /// line [`Log::add`] took for the same IFD, kept or one of the more.
+    fn end(&mut self, line: String, instead: Option<&str>) {
+        if let Some(instead) = instead {
+            match self.lines.iter().position(|l| l == instead) {
+                Some(at) => {
+                    self.lines.remove(at);
+                }
+                None => self.more = self.more.saturating_sub(1),
+            }
+        }
+        self.end = Some(line);
+    }
+
     /// `detail`, then what the log holds, if anything.
     pub(crate) fn after(&self, detail: String) -> String {
-        if self.lines.is_empty() {
+        if self.end.is_none() && self.lines.is_empty() {
             detail
         } else {
             format!("{detail}; {self}")
@@ -202,7 +218,13 @@ impl Log {
 
 impl std::fmt::Display for Log {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.lines.join("; "))?;
+        let all: Vec<&str> = self
+            .end
+            .iter()
+            .chain(&self.lines)
+            .map(String::as_str)
+            .collect();
+        f.write_str(&all.join("; "))?;
         if self.more > 0 {
             write!(f, "; and {} more", self.more)?;
         }
@@ -1074,14 +1096,24 @@ impl Blocks for Recoder<'_> {
         };
         self.more_now.clear();
         let written = match how {
-            How::Copy(_) => self.copy(r, out, image)?,
+            How::Copy(why) => {
+                let copied = self.copy(r, out, image);
+                if copied.is_err() && matches!(self.stop, Some(Stopped::NotSmaller)) {
+                    let line = format!(
+                        "IFD {n}, copied as it is ({why}), took the output past 95 % of the source"
+                    );
+                    let planned = format!("IFD {n} copied as it is: {why}");
+                    self.log.end(line, Some(&planned));
+                }
+                copied?
+            }
             How::Recode { .. } => {
                 let start = out.at();
                 let recoded = match self.recode(r, out, image, how, n)? {
                     // Larger than a copy (noise, data deflated better
                     // already, or blocks copied already): copied as it is.
                     Recode::Done(Recoded { made, copy, .. }) if made > copy => Err(format!(
-                        "recoded, its blocks came to {made} bytes, where a copy writes {copy}"
+                        "its blocks came to {made} bytes recoded, where a copy writes {copy}"
                     )),
                     Recode::Done(recoded) => Ok(recoded.written),
                     Recode::Copy(why) => Err(why),
@@ -1091,23 +1123,28 @@ impl Blocks for Recoder<'_> {
                         self.read_back(out)?;
                         written
                     }
-                    // Copied, held to the most too; the log says why, or
-                    // that the copy passed the most as well.
+                    // Copied, held to the most too; the log says why, or,
+                    // first, that the copy passed the most as well.
                     Err(why) => {
                         self.take_back(out, image, start)?;
                         let copied = self.copy(r, out, image);
-                        let line = match (&copied, &self.stop) {
-                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => format!(
-                                "IFD {n} took the output past 95 % of the source recoded, \
-                                 and copied as it is too"
-                            ),
-                            (Err(_), Some(Stopped::NotSmaller)) => format!(
-                                "IFD {n} took the output past 95 % of the source copied \
-                                 as it is, as it was to be: {why}"
-                            ),
-                            _ => format!("IFD {n} copied as it is: {why}"),
-                        };
-                        self.log.add(line);
+                        match (&copied, &self.stop) {
+                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => {
+                                let line = format!(
+                                    "IFD {n} took the output past 95 % of the source both \
+                                     recoded and copied as it is"
+                                );
+                                self.log.end(line, None);
+                            }
+                            (Err(_), Some(Stopped::NotSmaller)) => {
+                                let line = format!(
+                                    "IFD {n}, copied as it is instead of recoded ({why}), \
+                                     took the output past 95 % of the source"
+                                );
+                                self.log.end(line, None);
+                            }
+                            _ => self.log.add(format!("IFD {n} copied as it is: {why}")),
+                        }
                         copied?
                     }
                 }
@@ -1802,11 +1839,12 @@ mod tests {
             else {
                 panic!("{stopped:?}")
             };
+            // First, and in place of a line that it was copied.
             let log = log.to_string();
-            let past =
-                "IFD 0 took the output past 95 % of the source copied as it is, as it was to be: ";
+            let instead = "IFD 0, copied as it is instead of recoded (its ";
+            let past = "), took the output past 95 % of the source";
             assert!(
-                log.contains(past) && !log.contains("IFD 0 copied as it is"),
+                log.starts_with(instead) && log.contains(past) && !log.contains("IFD 0 copied"),
                 "{log}"
             );
         }
@@ -2117,7 +2155,7 @@ mod tests {
         assert_eq!(decoded(&out), decoded(&file));
         let log = wrote.log.to_string();
         assert!(
-            log.contains("IFD 0 copied as it is: recoded, its blocks"),
+            log.contains("IFD 0 copied as it is: its blocks came to"),
             "{log}"
         );
     }
@@ -2158,10 +2196,63 @@ mod tests {
             panic!("{stopped:?}")
         };
         let log = log.to_string();
+        assert_eq!(
+            log,
+            "IFD 1 took the output past 95 % of the source both recoded and copied as it is"
+        );
+    }
+
+    #[test]
+    fn the_line_that_ended_the_job_comes_first_and_stays() {
+        // Twenty pages copied as they are (JPEG: twenty lines, four past
+        // the log's 16), then one to recode: with the most where the
+        // last JPEG page ends, a byte short, its copy passes it.
+        let mut pages: Vec<Page> = (0..20)
+            .map(|n| coded(7, format!("JPEG data {n:02}").into_bytes()))
+            .collect();
+        pages.push(page(64, 64, 16, 8, &smooth(64 * 64)));
+        let file = Builder::new(b'I', false, pages).build();
+        let plan = plan(&file);
+        let (whole, _) = written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+        let last = read(&whole).pages[19].blocks[0];
+        let stopped = written(
+            &file,
+            &plan,
+            last.offset + last.len - 1,
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        let Err(Halt {
+            why: Stopped::NotSmaller,
+            log,
+        }) = stopped
+        else {
+            panic!("{stopped:?}")
+        };
+        // It says plainly what happened, first, in place of the plan's
+        // line for that page, which was one of the four past the 16.
+        let log = log.to_string();
+        let ended = "IFD 19, copied as it is (its compression is 7), took the output past 95 % \
+                     of the source; IFD 0 copied as it is: its compression is 7; ";
+        assert!(log.starts_with(ended), "{log}");
         assert!(
-            log.contains(
-                "IFD 1 took the output past 95 % of the source recoded, and copied as it is too"
-            ) && !log.contains("IFD 1 copied as it is"),
+            log.ends_with("IFD 15 copied as it is: its compression is 7; and 3 more"),
+            "{log}"
+        );
+        assert!(!log.contains("IFD 19 copied"), "{log}");
+        // The first page's copy passing it: its line takes the place of the
+        // plan's, which was kept.
+        let first = read(&whole).pages[0].blocks[0];
+        let stopped = written(&file, &plan, first.offset, &CancelToken::new(), &mut |_| {});
+        let Err(Halt { log, .. }) = stopped else {
+            panic!("{stopped:?}")
+        };
+        let log = log.to_string();
+        assert!(
+            log.starts_with(
+                "IFD 0, copied as it is (its compression is 7), took the output past 95 % of the \
+                 source; IFD 1 copied as it is: its compression is 7; "
+            ) && log.ends_with("IFD 15 copied as it is: its compression is 7; and 4 more"),
             "{log}"
         );
     }
@@ -2209,7 +2300,7 @@ mod tests {
         assert_eq!(back.pages[1].uint(259, o), None);
         assert_eq!(back.pages[1].blocks[0], back.pages[0].blocks[0]);
         assert!(
-            log.contains("IFD 1 copied as it is: recoded, its blocks came to"),
+            log.contains("IFD 1 copied as it is: its blocks came to"),
             "{log}"
         );
         // One block of noise listed twice, recoded whole and cut at the
@@ -2222,7 +2313,7 @@ mod tests {
         let blocks = &back.pages[0].blocks;
         assert_eq!(blocks[0], blocks[1]);
         assert!(
-            log.contains("IFD 0 copied as it is: recoded, its blocks came to"),
+            log.contains("IFD 0 copied as it is: its blocks came to"),
             "{log}"
         );
     }

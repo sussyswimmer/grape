@@ -1857,10 +1857,10 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
         "mostly.tif is already as small as Grape makes it."
     );
     assert!(
-        err.detail.contains("passed 95 %")
-            && err
-                .detail
-                .contains("IFD 0 copied as it is: its compression is 7"),
+        err.detail.contains(
+            " bytes; IFD 0, copied as it is (its compression is 7), took the output past 95 % \
+             of the source"
+        ) && !err.detail.contains("IFD 0 copied"),
         "{}",
         err.detail
     );
@@ -1897,7 +1897,7 @@ fn compress_says_a_tiff_page_passed_95_percent_recoded_and_copied() {
     assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
     assert!(
         err.detail.contains(
-            "bytes; IFD 0 took the output past 95 % of the source recoded, and copied as it is too"
+            "bytes; IFD 0 took the output past 95 % of the source both recoded and copied as it is"
         ) && !err.detail.contains("copied as it is:"),
         "{}",
         err.detail
