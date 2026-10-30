@@ -1544,6 +1544,78 @@ fn compress_leaves_a_tiff_it_cant_shrink_alone_and_refuses_what_it_cant_rewrite(
     }
 }
 
+/// A classic gray 64 × 64 TIFF, uncompressed, its picture at 8 as four
+/// 32 × 32 tiles of 1,024 bytes, listed under `tags` (StripOffsets and
+/// StripByteCounts, or TileOffsets and TileByteCounts), with RowsPerStrip
+/// 16 and `layout`'s entries besides.
+fn four_blocks(tags: (u16, u16), layout: &[(u16, u16, u32)]) -> Vec<u8> {
+    let mut entries: Vec<(u16, u16, u32, u32)> = vec![
+        (256, 4, 1, 64),
+        (257, 4, 1, 64),
+        (258, 3, 1, 8),
+        (262, 3, 1, 1),
+        (278, 3, 1, 16),
+        (tags.0, 4, 4, 0),
+        (tags.1, 4, 4, 0),
+    ];
+    entries.extend(
+        layout
+            .iter()
+            .map(|&(tag, kind, value)| (tag, kind, 1, value)),
+    );
+    entries.sort_by_key(|e| e.0);
+    let ifd = 8 + 4_096;
+    let arrays = ifd + 2 + 12 * u32::try_from(entries.len()).unwrap() + 4;
+    let mut file = b"II*\0".to_vec();
+    file.extend(ifd.to_le_bytes());
+    file.extend((0..4_096u32).map(|i| (i / 1_024 * 40 + i % 32 + i % 1_024 / 32) as u8));
+    file.extend(u16::try_from(entries.len()).unwrap().to_le_bytes());
+    for (tag, kind, count, value) in entries {
+        let value = match tag {
+            _ if tag == tags.0 => arrays,
+            _ if tag == tags.1 => arrays + 16,
+            _ => value,
+        };
+        file.extend(tag.to_le_bytes());
+        file.extend(kind.to_le_bytes());
+        file.extend(count.to_le_bytes());
+        file.extend(value.to_le_bytes());
+    }
+    file.extend([0; 4]);
+    file.extend((0..4u32).flat_map(|i| (8 + 1_024 * i).to_le_bytes()));
+    file.extend((0..4).flat_map(|_| 1_024u32.to_le_bytes()));
+    file
+}
+
+#[test]
+fn compress_copies_a_tiff_page_whose_blocks_libtiff_reads_as_the_other_kind() {
+    // libtiff tells tiles by a TileWidth or TileLength, whichever tags
+    // list the blocks: four blocks listed as strips with tile sizes are
+    // its four tiles, which a recode as strips of 16 rows would garble;
+    // four listed as tiles without them are its four strips. Both are
+    // copied as they are, and so nothing is left to recode.
+    let tiles = [(322, 3, 32), (323, 3, 32)];
+    let dir = TestDir::new("compress-tiff-kind");
+    for (name, bytes, why) in [
+        (
+            "strips.tif",
+            four_blocks((273, 279), &tiles),
+            "IFD 0 copied as it is: it lists strips where libtiff reads tiles",
+        ),
+        (
+            "tiles.tif",
+            four_blocks((324, 325), &[]),
+            "IFD 0 copied as it is: it lists tiles where libtiff reads strips",
+        ),
+    ] {
+        let err = compress(&dir, name, &bytes, grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{name}: {}", err.detail);
+        assert!(err.detail.contains(why), "{name}: {}", err.detail);
+        // Remove Metadata copies them as they are.
+        strip(&dir, name, &bytes).unwrap();
+    }
+}
+
 #[test]
 fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
     use tiff::encoder::{colortype, TiffEncoder};

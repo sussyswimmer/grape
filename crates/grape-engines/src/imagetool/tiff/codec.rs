@@ -170,10 +170,13 @@ impl Geometry {
             return not("its subsampled YCbCr isn't three samples in one plane".into());
         }
         let past = || not("its sizes are past any number".into());
+        // libtiff tells tiles by a TileWidth or TileLength, whichever tags
+        // list the blocks: decoded as the other kind, they'd come out wrong.
         let (tiled, across, rows, per_plane) = match (ifd.tiled, dims.tile()) {
             (true, Some((tw, tl))) => (true, tw, tl, dims.per_plane()),
-            (true, None) => return not("it has no tile size".into()),
-            (false, _) => (false, width, dims.rows(), dims.strips_per_plane()),
+            (false, None) => (false, width, dims.rows(), dims.per_plane()),
+            (true, None) => return not("it lists tiles where libtiff reads strips".into()),
+            (false, Some(_)) => return not("it lists strips where libtiff reads tiles".into()),
         };
         let planes = if planar { samples } else { 1 };
         // A row's bits: of its pixels' samples, of one plane's, or of

@@ -14,7 +14,9 @@
 //! - **Copied as they are**, with their tags ([`How::Copy`]): JPEG, fax,
 //!   JBIG, JPEG 2000, LZMA, ZSTD, WebP and other codecs; FillOrder 2
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
-//!   out wrong); layouts that can't be sized; an IFD with an empty block
+//!   out wrong); layouts that can't be sized; blocks listed as strips
+//!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
+//!   TileLength, or as tiles it reads as strips; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
 //!   can't be decoded (old-style LZW, data that's broken or short), whose

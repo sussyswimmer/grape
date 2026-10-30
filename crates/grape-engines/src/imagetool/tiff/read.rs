@@ -701,7 +701,7 @@ impl Dims {
 
     /// The strips in each plane as libtiff counts them: ImageLength over
     /// RowsPerStrip, one without it; 0 past 32 bits.
-    pub(crate) fn strips_per_plane(&self) -> u64 {
+    fn strips_per_plane(&self) -> u64 {
         if self.rows == LONG {
             1
         } else {
