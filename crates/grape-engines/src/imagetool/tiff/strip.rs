@@ -4,12 +4,15 @@
 //! picture.
 //!
 //! - **Kept:** the layout, color, resolution and page tags ([`kept`]), ICC
-//!   and Orientation among them; Photoshop's resources, filtered
+//!   and Orientation among them, each only in a type and count libtiff 4.5
+//!   reads it in, and where it reads it ([`shape`], [`Walk::keeps`]);
+//!   Photoshop's resources, filtered
 //!   ([`irb`](super::irb)): a block that IFDs share is filtered once, and
 //!   held and written once; with a block past [`MAX_IRB`], past that much
 //!   of them kept in all, or more of them read than the file holds
 //!   (blocks that overlap), the file is too large.
-//! - **Dropped and reported:** every other tag ([`field`]), and the Exif
+//! - **Dropped and reported:** every other tag ([`field`]), a kept one in
+//!   another type or count (as other fields), and the Exif
 //!   and GPS IFDs, walked as [`exif::classify`] does (one that pages share,
 //!   once). Padding, and blank values of up to [`MAX_JUDGED`] bytes, go
 //!   unsaid: a value that entries share is read once, and at most
@@ -44,7 +47,8 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, read_value, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, TWICE,
+    integer, number, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff,
+    Value, SHORT, TWICE,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -141,26 +145,134 @@ fn coded(n: u64) -> Result<Option<Kind>, &'static str> {
 /// Why an ImageJ or OME file is refused.
 const DESCRIBED: &str = "keeps its layout in its description, so Remove Metadata would break it.";
 
-/// Whether `tag` is kept as it is: the picture's layout, color,
-/// resolution and pages, with ICC and Orientation (D28's whitelist), and
-/// every tag a codec libtiff 4.5 has reads to decode (`tif_dirinfo.c` and
-/// each codec's own fields): Predictor, the fax options, JPEG's tables and
-/// LERC's parameters, which say whether Deflate or ZSTD is inside it.
+/// Whether `tag` is kept: the picture's layout, color, resolution and
+/// pages, with ICC and Orientation (D28's whitelist), and every tag a
+/// codec libtiff 4.5 has reads to decode (`tif_dirinfo.c` and each codec's
+/// own fields): Predictor, the fax options, JPEG's tables and LERC's
+/// parameters, which say whether Deflate or ZSTD is inside it. Each only
+/// as libtiff reads it ([`shape`]).
 fn kept(tag: u16) -> bool {
-    matches!(
-        tag,
-        // Layout.
-        254..=259 | 262..=266 | 274 | 277 | 278 | 280 | 281 | 284 | 317 | 338..=342
-        // Resolution and position; pages; fax and gray.
-        | 282 | 283 | 286 | 287 | 296 | 297 | 290..=293
-        // Color.
-        | 301 | 318..=321 | 332..=334 | 336 | 529..=532 | 34675
-        // The tile size, JPEG's tables, LERC's parameters.
-        | 322 | 323 | 347 | 50674
-        // SGI, TIFF/EP's CFA, GDAL's no-data value.
-        | 32995..=32998 | 33421 | 33422 | 42113
-    )
+    shape(tag).is_some()
 }
+
+/// The types and counts libtiff 4.5.1 reads a tag Remove Metadata keeps in
+/// (`TIFFReadDirectory` and `TIFFFetchNormalTag` in `tif_dirread.c`, by
+/// each field's `set_field_type` in `tif_dirinfo.c` and the codecs'), which
+/// is all it keeps of it: an entry of another type or count, which
+/// libtiff ignores ("Incorrect value", "incorrect count … tag ignored") or
+/// fails on and other readers may show (Pillow shows an ASCII Orientation
+/// as its text), goes, as other fields ([`Walk::keeps`]). Values aren't
+/// checked: a number out of its range is a number still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// Integers of any type but IFD and IFD8 ([`integer`]), as
+    /// `TIFFReadDirEntryShort`, `…Long` and their arrays read them.
+    Ints(Count),
+    /// Numbers of any type libtiff reads as floating point
+    /// (`TIFFReadDirEntryFloat`, `…FloatArray`, `…DoubleArray`): the
+    /// integers, RATIONAL, SRATIONAL, FLOAT and DOUBLE.
+    Reals(Count),
+    /// Bytes as `TIFFReadDirEntryByteArray` reads them: BYTE, ASCII,
+    /// UNDEFINED and the other integer types.
+    Bytes(Count),
+    /// Text: ASCII alone.
+    Text(Count),
+    /// GDAL's no-data value, which libtiff doesn't know: ASCII, as GDAL
+    /// writes it, that reads as a number ([`numeric`]).
+    Number,
+}
+
+/// How many values a [`Shape`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Count {
+    /// This many.
+    Is(u64),
+    /// From the first to the second, both included.
+    Within(u64, u64),
+    /// One, or at least one for each sample (SamplesPerPixel), as
+    /// `TIFFReadDirEntryPersampleShort` reads them.
+    PerSample,
+    /// One for each sample.
+    Samples,
+}
+
+/// The [`Shape`] of a tag Remove Metadata keeps, or `None` for one it
+/// drops. A tag libtiff doesn't know (TransferRange, GDAL's no-data value)
+/// takes the type TIFF 6 or GDAL gives it.
+fn shape(tag: u16) -> Option<Shape> {
+    use Count::*;
+    use Shape::*;
+    // libtiff's arrays of 2^32 − 1 values at most, or 65,535.
+    let (c32, c16) = (u64::from(u32::MAX), u64::from(u16::MAX));
+    Some(match tag {
+        // One number: NewSubfileType, SubfileType, the size,
+        // PhotometricInterpretation, Threshholding, CellWidth, CellLength,
+        // FillOrder, Orientation, SamplesPerPixel, RowsPerStrip,
+        // PlanarConfiguration, GrayResponseUnit, the fax options,
+        // ResolutionUnit, Predictor, the tile size, InkSet, NumberOfInks,
+        // YCbCrPositioning, Matteing, ImageDepth and TileDepth.
+        254..=257
+        | 262..=266
+        | 274
+        | 277
+        | 278
+        | 284
+        | 290
+        | 292
+        | 293
+        | 296
+        | 317
+        | 322
+        | 323
+        | 332
+        | 334
+        | 531
+        | 32995
+        | 32997
+        | 32998 => Ints(Is(1)),
+        // One, or one for each sample: BitsPerSample, Compression,
+        // MinSampleValue, MaxSampleValue, SampleFormat and DataType.
+        258 | 259 | 280 | 281 | 339 | 32996 => Ints(PerSample),
+        // Two: PageNumber, HalftoneHints, DotRange, YCbCrSubsampling and
+        // CFARepeatPatternDim; TransferRange's six.
+        297 | 321 | 336 | 530 | 33421 => Ints(Is(2)),
+        342 => Ints(Is(6)),
+        // Tables: GrayResponseCurve, TransferFunction and ColorMap, and
+        // ExtraSamples; LercParameters, its version and what's inside at
+        // least.
+        291 | 301 | 320 => Ints(Within(1, c32)),
+        338 => Ints(Within(1, c16)),
+        50674 => Ints(Within(2, c32)),
+        // The resolution and position; WhitePoint, the primaries, the
+        // YCbCr coefficients and ReferenceBlackWhite; SMinSampleValue and
+        // SMaxSampleValue, one for each sample.
+        282 | 283 | 286 | 287 => Reals(Is(1)),
+        318 => Reals(Is(2)),
+        529 => Reals(Is(3)),
+        319 | 532 => Reals(Is(6)),
+        340 | 341 => Reals(Samples),
+        // JPEGTables and ICC; CFAPattern.
+        347 | 34675 => Bytes(Within(1, c32)),
+        33422 => Bytes(Within(1, c16)),
+        // InkNames: the names of a separated page's inks, text by design.
+        333 => Text(Within(1, c16)),
+        42113 => Number,
+        _ => return None,
+    })
+}
+
+/// Whether GDAL's no-data value `text` reads as a number, as GDAL writes
+/// it (`%.18g`, `nan`, `inf`): spaces around it allowed, NULs only after
+/// it, nothing else.
+fn numeric(text: &[u8]) -> bool {
+    let end = text.iter().rposition(|&b| b != 0).map_or(0, |at| at + 1);
+    let text = &text[..end];
+    !text.contains(&0) && std::str::from_utf8(text).is_ok_and(|t| t.trim().parse::<f64>().is_ok())
+}
+
+/// The longest GDAL no-data value read ([`numeric`]): a number's text, of
+/// any precision, is shorter.
+const MAX_NUMBER: u64 = 64;
 
 /// Whether `ifd` lists a tag Remove Metadata keeps (Photoshop's resources
 /// among them), or the Exif ColorSpace or Interop index that decide the
@@ -899,10 +1011,14 @@ impl Walk<'_> {
                 34665 | 34853 => {}
                 34377 if first => fields.extend(self.irb(entry)?),
                 tag if kept(tag) => {
-                    if first {
+                    if first && self.keeps(&ifd, entry)? {
                         let field = Field::copy(entry)
                             .ok_or_else(|| Error::Broken(format!("tag {tag} can't be read")))?;
                         fields.push(field);
+                    } else if first {
+                        // Not as libtiff reads it: other readers may show
+                        // what it holds.
+                        self.report(MetaField::Other, entry)?;
                     }
                 }
                 tag => {
@@ -938,6 +1054,57 @@ impl Walk<'_> {
                 subs,
             }),
             children,
+        })
+    }
+
+    /// Whether the entry `entry` of `ifd`, for a tag Remove Metadata keeps,
+    /// is kept: in a type and count libtiff 4.5 reads it in ([`shape`]),
+    /// and where libtiff reads it (JPEGTables on JPEG data, which tifffile
+    /// reads too, LercParameters on LERC data, as `TIFFReadDirectory`
+    /// ignores a codec's tags on another's; InkNames on a separated page,
+    /// PhotometricInterpretation 5, whose inks they name).
+    fn keeps(&mut self, ifd: &Ifd, entry: &Entry) -> Result<bool, Error> {
+        let Some(shape) = shape(entry.tag) else {
+            return Ok(false);
+        };
+        let here = match entry.tag {
+            347 => matches!(coded(ifd.compression), Ok(Some(Kind::Jpeg))),
+            50674 => ifd.compression == 34887,
+            333 => match ifd.get(262) {
+                Some(photometric) => number(self.r, photometric, self.order, SHORT)? == Some(5),
+                None => false,
+            },
+            _ => true,
+        };
+        let (count, of) = match shape {
+            Shape::Ints(count) => (count, integer(entry.kind).is_some()),
+            Shape::Reals(count) => {
+                let real = matches!(entry.kind, 5 | 10 | 11 | 12);
+                (count, real || integer(entry.kind).is_some())
+            }
+            Shape::Bytes(count) => {
+                let bytes = matches!(entry.kind, 2 | 7);
+                (count, bytes || integer(entry.kind).is_some())
+            }
+            Shape::Text(count) => (count, entry.kind == 2),
+            Shape::Number => {
+                let text = match entry.kind {
+                    2 => head(self.r, entry, MAX_NUMBER)?,
+                    _ => None,
+                };
+                let number = text.is_some_and(|(text, whole)| whole && numeric(&text));
+                return Ok(here && number);
+            }
+        };
+        if !here || !of {
+            return Ok(false);
+        }
+        let n = entry.count;
+        Ok(match count {
+            Count::Is(want) => n == want,
+            Count::Within(least, most) => (least..=most).contains(&n),
+            Count::PerSample => n == 1 || samples(self.r, ifd, self.order)?.is_some_and(|s| n >= s),
+            Count::Samples => samples(self.r, ifd, self.order)? == Some(n),
         })
     }
 
@@ -1483,6 +1650,110 @@ mod tests {
             value(&out, &tiff.pages[0], 50674).unwrap(),
             [0, 0, 0, 4, 0, 0, 0, 1]
         );
+    }
+
+    #[test]
+    fn a_kept_tag_is_kept_only_as_libtiff_reads_it() {
+        // libtiff reads a tag Remove Metadata keeps in some types and
+        // counts only, and where its codec or picture uses it; any other
+        // entry it ignores, and Pillow shows: such an entry goes, as other
+        // fields.
+        let page = |compression: u16, tags: Vec<(u16, V)>| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags.push((259, V::Short(vec![compression])));
+            for (tag, value) in tags {
+                page.tags.retain(|t| t.0 != tag);
+                page.tags.push((tag, value));
+            }
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let gone = |file: Vec<u8>, tag: u16| {
+            let (out, found) = strip(&file);
+            assert_eq!(found, [Other].into(), "{tag}");
+            assert!(read(&out).pages[0].get(tag).is_none(), "{tag}");
+            for secret in [&b"secret"[..], b"SECRET", b"John"] {
+                assert!(!out.windows(secret.len()).any(|w| w == secret), "{tag}");
+            }
+        };
+        let stays = |file: Vec<u8>, tag: u16| {
+            let (out, found) = strip(&file);
+            assert!(found.is_empty(), "{tag}: {found:?}");
+            let tiff = read(&out);
+            let (a, b) = (
+                read(&file).pages[0].get(tag).cloned(),
+                tiff.pages[0].get(tag),
+            );
+            let a = a.unwrap();
+            let b = b.unwrap();
+            assert_eq!((a.kind, a.count), (b.kind, b.count), "{tag}");
+            assert_eq!(
+                value(&file, &read(&file).pages[0], tag),
+                value(&out, &tiff.pages[0], tag)
+            );
+        };
+        // Every tag it keeps, in a type libtiff doesn't read it in: text,
+        // or for those it reads as bytes (text too), two FLOATs. The page
+        // is compressed, one strip, so that no layout tag need be read.
+        for tag in (0..=u16::MAX).filter(|&tag| kept(tag) && !matches!(tag, 259 | 347)) {
+            let wrong = match shape(tag) {
+                Some(Shape::Bytes(_)) => V::Bytes(11, b"secrets!".to_vec()),
+                _ => V::Ascii("secret value"),
+            };
+            gone(page(8, vec![(tag, wrong)]), tag);
+        }
+        // A review's: an Orientation, an XResolution and a LercParameters
+        // as text, eight LONGs of LercParameters on an uncompressed page,
+        // InkNames on a gray one, and a no-data value of words.
+        let secret = b"SECRET_IN_ORIENTATION_51.5N_0.1W".to_vec();
+        let longs = secret
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()));
+        for (compression, tag, value) in [
+            (1, 274, V::Ascii("SECRET_IN_ORIENTATION_51.5N_0.1W")),
+            (1, 282, V::Ascii("secret resolution")),
+            (1, 50674, V::Ascii("secret parameters")),
+            (1, 50674, V::Long(longs.collect())),
+            (1, 333, V::Ascii("shot by John at home")),
+            (1, 42113, V::Ascii("shot by John at home")),
+            // Counts libtiff ignores: two Orientations, one PageNumber, an
+            // SMinSampleValue for two samples of one.
+            (1, 274, V::Short(vec![1, 6])),
+            (1, 297, V::Short(vec![1])),
+            (1, 340, V::Rational(vec![(1, 1), (2, 1)])),
+            // Words after a no-data value's NUL.
+            (1, 42113, V::Bytes(2, b"-9999\0secret\0".to_vec())),
+            // JPEGTables on LZW data, which libtiff doesn't read.
+            (5, 347, V::Bytes(7, b"\xFF\xD8\xFF\xD9".to_vec())),
+        ] {
+            gone(page(compression, vec![(tag, value)]), tag);
+        }
+        // And kept as libtiff reads them: an Orientation typed LONG, an
+        // XResolution typed SHORT, a no-data value that's a number, eight
+        // LONGs of LercParameters on LERC data, InkNames on a separated
+        // page, and an SMinSampleValue for its one sample.
+        for (compression, tag, value) in [
+            (1, 274, V::Long(vec![6])),
+            (1, 282, V::Short(vec![300])),
+            (1, 42113, V::Ascii("-9999")),
+            (1, 42113, V::Ascii(" nan ")),
+            (
+                1,
+                42113,
+                V::Bytes(2, b"-3.4028234663852886e+38\0\0".to_vec()),
+            ),
+            (34887, 50674, V::Long(vec![4, 1, 0, 0, 0, 0, 0, 0])),
+            (1, 340, V::Rational(vec![(1, 1)])),
+        ] {
+            stays(page(compression, vec![(tag, value)]), tag);
+        }
+        let separated = page(
+            1,
+            vec![
+                (262, V::Short(vec![5])),
+                (333, V::Ascii("Cyan\0Magenta\0Yellow\0Black")),
+            ],
+        );
+        stays(separated, 333);
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
