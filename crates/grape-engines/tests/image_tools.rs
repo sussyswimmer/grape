@@ -1490,6 +1490,9 @@ fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
         ("lerc.tif", 50674, 4, secret.clone()),
         ("inks.tif", 333, 2, words.clone()),
         ("nodata.tif", 42113, 2, words.clone()),
+        // An ICC profile of SHORTs and a CFAPattern of LONGs past a byte.
+        ("icc.tif", 34675, 3, secret.clone()),
+        ("cfa.tif", 33422, 4, secret.clone()),
         // A ColorMap of 64 SHORTs, where libtiff reads 3 × 256 or none.
         (
             "colormap.tif",

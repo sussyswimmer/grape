@@ -170,7 +170,8 @@ fn kept(tag: u16) -> bool {
 /// libtiff ignores ("Incorrect value", "incorrect count … tag ignored") or
 /// fails on and other readers may show (Pillow shows an ASCII Orientation
 /// as its text), goes, as other fields ([`Walk::keeps`]). Values aren't
-/// checked: a number out of its range is a number still.
+/// checked, but bytes' of a wider type ([`Walk::bytes`]): a number out of
+/// its range is a number still.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
     /// Integers of any type but IFD and IFD8 ([`integer`]), as
@@ -181,7 +182,8 @@ enum Shape {
     /// integers, RATIONAL, SRATIONAL, FLOAT and DOUBLE.
     Reals(Count),
     /// Bytes as `TIFFReadDirEntryByteArray` reads them: BYTE, ASCII,
-    /// UNDEFINED and the other integer types.
+    /// UNDEFINED and the other integer types, each value of those from 0
+    /// to 255.
     Bytes(Count),
     /// Text: ASCII alone.
     Text(Count),
@@ -442,7 +444,7 @@ impl Plan {
             irb_read: len,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
-            bits_left: len,
+            values_left: len,
         };
         let pages = pages
             .into_iter()
@@ -510,7 +512,7 @@ impl Plan {
             irb_read: u64::MAX,
             blanks: HashSet::new(),
             judge_left: JUDGE_BUDGET,
-            bits_left: u64::MAX,
+            values_left: u64::MAX,
         };
         for page in out.pages {
             walk.dir(page)?;
@@ -1045,11 +1047,11 @@ struct Walk<'r> {
     /// What's left of the bytes it may read to judge values blank
     /// ([`JUDGE_BUDGET`]).
     judge_left: u64,
-    /// What's left of the bytes of BitsPerSample it may read out of line
-    /// to size ColorMaps and TransferFunctions ([`Walk::bits`]): what the
-    /// file holds, which only pages that all point at one array come to
-    /// more than.
-    bits_left: u64,
+    /// What's left of the bytes of kept values it may read out of line to
+    /// check them: BitsPerSample, to size ColorMaps and TransferFunctions
+    /// ([`Walk::bits`]), and bytes of a wider type ([`Walk::bytes`]). What
+    /// the file holds, which only values that overlap come to more than.
+    values_left: u64,
 }
 
 impl Walk<'_> {
@@ -1158,7 +1160,7 @@ impl Walk<'_> {
             return Ok(false);
         }
         let n = entry.count;
-        Ok(match count {
+        let counted = match count {
             Count::Is(want) => n == want,
             Count::Within(least, most) => (least..=most).contains(&n),
             Count::PerSample => n == 1 || samples(self.r, ifd, self.order)?.is_some_and(|s| n >= s),
@@ -1168,7 +1170,50 @@ impl Walk<'_> {
                 Some(bits) => n == 3 << bits || (once && n == 1 << bits),
                 None => false,
             },
-        })
+        };
+        // JPEGTables were read whole as bytes, or the file was refused
+        // ([`Scan::seen`]).
+        let bytes = matches!(shape, Shape::Bytes(_)) && entry.tag != 347;
+        Ok(counted && (!bytes || self.bytes(entry)?))
+    }
+
+    /// Whether each value of `entry`, of a tag libtiff reads as bytes (ICC,
+    /// CFAPattern), is one as libtiff reads it (`TIFFReadDirEntryByteArray`):
+    /// of BYTE, ASCII or UNDEFINED it is; of a wider integer type when it's
+    /// from 0 to 255, as libtiff ignores the tag otherwise ("Incorrect
+    /// value"), and a tag dump shows the values whole. Those are read to
+    /// see, [`MAX_SCAN`] bytes at a time, from what the walk may read of
+    /// them.
+    fn bytes(&mut self, entry: &Entry) -> Result<bool, Error> {
+        let Some((size, signed)) = integer(entry.kind).filter(|_| entry.kind != 1) else {
+            return Ok(true);
+        };
+        let order = self.order;
+        let byte = |b: &[u8]| {
+            let v = order.uint(b);
+            !(signed && v >> (8 * size - 1) == 1) && v <= 0xFF
+        };
+        let (offset, len) = match entry.value {
+            Value::Inline { bytes, len } => {
+                return Ok(bytes[..usize::from(len)].chunks_exact(size).all(byte));
+            }
+            Value::At { offset, len } => (offset, len),
+            Value::Unread => return Ok(false),
+        };
+        self.values_left = self.values_left.checked_sub(len).ok_or_else(|| {
+            Error::TooLarge("kept values that overlap, more to read than it holds".into())
+        })?;
+        let mut buf = vec![0; len.min(MAX_SCAN) as usize];
+        let mut at = 0;
+        while at < len {
+            let n = (len - at).min(MAX_SCAN) as usize;
+            read_at(self.r, offset + at, &mut buf[..n])?;
+            if !buf[..n].chunks_exact(size).all(byte) {
+                return Ok(false);
+            }
+            at += n as u64;
+        }
+        Ok(true)
     }
 
     /// BitsPerSample as libtiff reads it ([`per_sample`]) by the time it
@@ -1187,7 +1232,7 @@ impl Walk<'_> {
         }
         let samples = samples(self.r, ifd, self.order)?;
         let entry = &ifd.entries[bits];
-        let bits = per_sample(self.r, entry, self.order, samples, &mut self.bits_left)?;
+        let bits = per_sample(self.r, entry, self.order, samples, &mut self.values_left)?;
         Ok(bits.filter(|&bits| bits <= 24))
     }
 
@@ -1865,6 +1910,17 @@ mod tests {
             (1, 255, V::Short(vec![1])),
             (1, 290, V::Short(vec![2])),
             (1, 291, V::Short(vec![7; 256])),
+            // An ICC profile and a CFAPattern in a wider type, past a
+            // byte, which libtiff ignores, and a negative SSHORT; one of
+            // 40,000 SHORTs, its last past a byte.
+            (
+                1,
+                34675,
+                V::Bytes(3, b"SECRET shot by John at home!".to_vec()),
+            ),
+            (1, 33422, V::Long(vec![0, 1, 0x5345_4352])),
+            (1, 34675, V::Bytes(8, vec![1, 0, 0xFF, 0xFF])),
+            (1, 34675, V::Short([vec![200; 39_999], vec![256]].concat())),
         ] {
             gone(page(compression, vec![(tag, value)]), tag);
         }
@@ -1913,6 +1969,10 @@ mod tests {
             (1, 320, V::Short(vec![7; 768])),
             (1, 301, V::Short(vec![7; 256])),
             (1, 301, V::Short(vec![7; 768])),
+            // Bytes in a wider type, each one.
+            (1, 34675, V::Short(vec![1, 2, 3, 255])),
+            (1, 33422, V::Long(vec![0, 1, 1, 2])),
+            (1, 34675, V::Short(vec![200; 40_000])),
         ] {
             stays(page(compression, vec![(tag, value)]), tag);
         }
@@ -3149,6 +3209,36 @@ mod tests {
             "{read} bytes read of {}",
             file.len()
         );
+    }
+
+    #[test]
+    fn bytes_of_a_wider_type_are_read_up_to_the_files_size() {
+        // 40 pages whose ICC profiles are 30,000 SHORTs at one place, each
+        // a byte: 2.4 MB to read to see so, from a file of 60 KB.
+        let pages = (0..40)
+            .map(|n| {
+                let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+                let icc = if n == 0 { vec![7; 30_000] } else { vec![7] };
+                page.tags.push((34675, V::Short(icc)));
+                page
+            })
+            .collect();
+        let mut file = Builder::new(b'I', false, pages).build();
+        let tiff = read(&file);
+        let Value::At { offset, .. } = tiff.pages[0].get(34675).unwrap().value else {
+            panic!("an inline profile")
+        };
+        for page in &tiff.pages[1..] {
+            set_entry(&mut file, page.at, 34675, 30_000, offset);
+        }
+        assert!(file.len() < 100_000);
+        assert!(matches!(plan(&file), Err(Error::TooLarge(_))));
+        // On one page, it's kept.
+        let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+        page.tags.push((34675, V::Short(vec![7; 30_000])));
+        let (out, found) = strip(&Builder::new(b'I', false, vec![page]).build());
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].get(34675).unwrap().count, 30_000);
     }
 
     #[test]
