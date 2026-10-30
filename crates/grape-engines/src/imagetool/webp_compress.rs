@@ -362,8 +362,8 @@ fn transparent(img: &DynamicImage) -> bool {
 }
 
 /// `img` (8-bit RGB or RGBA) encoded with `opts`; libwebp's progress goes
-/// to 0.5–0.9 of `progress`, and a cancel ends the encode at its next
-/// report.
+/// to 0.5–0.9 of `progress`, never back (a lossless encode's percent can
+/// go down), and a cancel ends the encode at its next report.
 fn encode(
     img: &DynamicImage,
     opts: &Options,
@@ -384,8 +384,10 @@ fn encode(
         },
         _ => return Err(grape_webp::Error::BadInput),
     };
+    let mut most = 0;
     grape_webp::encode(px, opts, &mut |percent| {
-        progress(0.5 + 0.4 * f32::from(percent) / 100.0);
+        most = most.max(percent);
+        progress(0.5 + 0.4 * f32::from(most) / 100.0);
         !cancel.is_cancelled()
     })
 }
@@ -663,6 +665,39 @@ mod tests {
         .unwrap();
         assert!(seen.len() > 3, "{seen:?}");
         assert!(seen.iter().all(|p| (0.5..=0.9).contains(p)), "{seen:?}");
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+        // libwebp's lossless percent goes down now and then (1, 2, 34, 18,
+        // 22, … for a 16,383 × 1 gradient with noise); what `progress`
+        // sees doesn't.
+        let mut n = 7u32;
+        let line = RgbImage::from_fn(16_383, 1, |x, _| {
+            n = n.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let v = (x / 64) as u8;
+            Rgb([v, v.wrapping_add((n >> 16) as u8 & 15), v / 2])
+        });
+        let mut raw = Vec::new();
+        grape_webp::encode(
+            Pixels::Rgb {
+                data: line.as_raw(),
+                width: 16_383,
+                height: 1,
+            },
+            &LOSSLESS,
+            &mut |p| {
+                raw.push(p);
+                true
+            },
+        )
+        .unwrap();
+        assert!(raw.windows(2).any(|w| w[0] > w[1]), "{raw:?}");
+        let mut seen = Vec::new();
+        encode(
+            &DynamicImage::ImageRgb8(line),
+            &LOSSLESS,
+            &CancelToken::default(),
+            &mut |p| seen.push(p),
+        )
+        .unwrap();
         assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
         let cancel = CancelToken::default();
         cancel.cancel();
