@@ -25,9 +25,10 @@
 //!   that Grape doesn't read ([`coded`]: JPEG 2000, JPEG XL, JPEG XR, PNG,
 //!   and every code it doesn't know); metadata inside JPEG data (the codes
 //!   that hold JPEG streams, as libtiff reads Compression; an APP1, APP13
-//!   or COM in a block, or in a JPEGTables, any IFD's, read as libtiff
-//!   reads it ([`tables`]): up to its first scan when that's a sequential
-//!   frame's only one, and through every scan otherwise), and JPEG data
+//!   or COM in a block, or in a JPEG page's JPEGTables, read as libtiff
+//!   reads it ([`tables`]; another page's go unread): up to its first
+//!   scan when that's a sequential frame's only one, and through every
+//!   scan otherwise), and JPEG data
 //!   Grape can't check, whose segments or scans run past the first
 //!   [`MAX_SCAN`] bytes read before that, that's hierarchical, or
 //!   JPEGTables libtiff can't read as bytes, or that are more than tables
@@ -426,12 +427,12 @@ impl Plan {
         {
             return Err(Error::Refused(unchecked(kind)));
         }
-        // JPEG and WebP data, and JPEGTables in any IFD: libtiff hands any
-        // IFD's to whoever asks for them. Tables of no bytes are none.
+        // JPEG and WebP data, and a JPEG page's JPEGTables: another page's
+        // go, as other fields, unread ([`Walk::keeps`]).
         let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))) || tables_of(ifd).is_some())
+            .filter(|ifd| matches!(coded(ifd.compression), Ok(Some(_))))
             .collect();
         if !scanned.is_empty() {
             let shared = tiff.shared();
@@ -680,14 +681,18 @@ struct Scan<'s> {
 }
 
 impl Scan<'_> {
-    /// What the JPEG or WebP data of `ifd` holds: its JPEGTables, as
-    /// libtiff reads them ([`tables`]), as [`segments`] reads them; then
-    /// each of its blocks, as the [`Kind`] of its Compression. The first
-    /// that isn't clean, with the kind of data it is; JPEGTables libtiff
-    /// can't read as bytes can't be seen through.
+    /// What the JPEG or WebP data of `ifd` holds: a JPEG page's
+    /// JPEGTables, as libtiff reads them ([`tables`]), as [`segments`]
+    /// reads them; then each of its blocks, as the [`Kind`] of its
+    /// Compression. The first that isn't clean, with the kind of data it
+    /// is; JPEGTables libtiff can't read as bytes can't be seen through.
     fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<(Seen, &'static str), Error> {
+        let Ok(Some(kind)) = coded(ifd.compression) else {
+            return Ok((Seen::Clean, "JPEG"));
+        };
         let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
-        if let Some(entry) = tables_of(ifd).filter(fresh) {
+        let jpeg = tables_of(ifd).filter(|_| kind == Kind::Jpeg);
+        if let Some(entry) = jpeg.filter(fresh) {
             let Some((tables, whole)) = tables(r, entry, self.order, MAX_SCAN, &mut self.left)?
             else {
                 return Ok((Seen::Unseen, "JPEG"));
@@ -702,9 +707,6 @@ impl Scan<'_> {
                 return Ok((seen, "JPEG"));
             }
         }
-        let Ok(Some(kind)) = coded(ifd.compression) else {
-            return Ok((Seen::Clean, "JPEG"));
-        };
         let mut buf = Vec::new();
         for block in ifd.blocks.iter().filter(|b| b.len > 0) {
             // A block IFDs share is read once as each kind they list it as.
@@ -2480,8 +2482,10 @@ mod tests {
     fn jpeg_tables_are_read_as_libtiff_reads_them_whatever_their_type() {
         // Tables of SOI, an Exif APP1 and EOI, each byte a value of a type
         // libtiff reads JPEGTables in (`TIFFReadDirEntryByteArray`), which
-        // hands libjpeg, and TIFFGetField, the stream: refused, in a JPEG
-        // page or any other; tables of SOI and EOI alone are kept.
+        // hands libjpeg, and TIFFGetField, the stream: refused in a JPEG
+        // page; tables of SOI and EOI alone are kept. Another page's go,
+        // unread, as other fields: the review's LZW page, whose tables
+        // held an APP1, was refused as metadata in its image data.
         let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
         let stream = [&b"\xFF\xD8"[..], app1, b"\xFF\xD9"].concat();
         let clean = b"\xFF\xD8\xFF\xD9";
@@ -2501,11 +2505,15 @@ mod tests {
             (true, 16),
             (true, 17),
         ] {
-            for compression in [7, 1] {
+            let file = with_tables(big, 7, each_as(kind, &stream));
+            assert_eq!(why(&file).as_deref(), Some(IN_DATA), "{kind}");
+            let file = with_tables(big, 7, each_as(kind, clean));
+            assert_eq!(why(&file), None, "{kind}");
+            for compression in [1, 5] {
                 let file = with_tables(big, compression, each_as(kind, &stream));
-                assert_eq!(why(&file).as_deref(), Some(IN_DATA), "{kind} {compression}");
-                let file = with_tables(big, compression, each_as(kind, clean));
-                assert_eq!(why(&file), None, "{kind} {compression}");
+                let (out, found) = strip(&file);
+                assert_eq!(found, [Other].into(), "{kind} {compression}");
+                assert!(read(&out).pages[0].get(347).is_none());
             }
         }
         // Where libtiff can't read them as bytes, what readers take from
@@ -2528,14 +2536,14 @@ mod tests {
             V::Bytes(11, vec![0; 8]),
             V::Bytes(13, vec![0xFF, 0xD8, 0xFF, 0xD9]),
         ] {
-            for compression in [7, 1] {
-                let file = with_tables(false, compression, tables.clone());
-                assert_eq!(
-                    why(&file).as_deref(),
-                    Some(unchecked("JPEG").as_str()),
-                    "{tables:?}"
-                );
-            }
+            let file = with_tables(false, 7, tables.clone());
+            assert_eq!(
+                why(&file).as_deref(),
+                Some(unchecked("JPEG").as_str()),
+                "{tables:?}"
+            );
+            let (out, _) = strip(&with_tables(false, 1, tables.clone()));
+            assert!(read(&out).pages[0].get(347).is_none(), "{tables:?}");
         }
     }
 
