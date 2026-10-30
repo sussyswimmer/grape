@@ -3143,6 +3143,16 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
         err.user_message,
         "anim.webp is animated. Compress works on still WebP images for now."
     );
+    // An animation's chunks in a still file (VP8X's flag off): libwebp's
+    // still decoder skips them and its demuxer refuses the file.
+    let still = riff(&[
+        vp8x_chunk(0, 16, 16),
+        riff_chunk(b"ANIM", &[0; 6]),
+        frame[12..].to_vec(),
+    ]);
+    let err = compress(&dir, "still.webp", &still, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "still.webp isn't a readable WEBP image.");
     // Alpha only libwebp reads (VP8X says none): refused, nothing written.
     let alpha = lossy_webp(&[200; 8 * 8 * 4], 8, 8, true, 80.0);
     let mut unflagged = alpha.clone();

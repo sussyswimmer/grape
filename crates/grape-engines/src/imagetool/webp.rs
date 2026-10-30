@@ -297,8 +297,7 @@ pub(super) struct Scan {
     /// An `ALPH` chunk after the `VP8 ` one, which libwebp never reads and
     /// image-webp does when none comes before it.
     pub(super) late_alpha: bool,
-    /// VP8X's animation flag, or an `ANIM` or `ANMF` chunk: the walk
-    /// stops there.
+    /// VP8X's animation flag: the walk stops there.
     pub(super) animated: bool,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
@@ -342,7 +341,8 @@ impl Carried {
 ///   chunks, and its first `ICCP`, `EXIF` and `XMP `, up to
 ///   [`crate::image::MAX_ICC`] bytes for the profile and [`MAX_CARRIED`]
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
-///   metadata). It stops at an animation;
+///   metadata). It stops at an animation (VP8X's flag), and an `ANIM` or
+///   `ANMF` chunk in a still file is broken;
 /// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
 ///   image-webp read nothing after it, so nothing after it is carried.
 pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
@@ -408,8 +408,12 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
                 }
             }
             b"ANIM" | b"ANMF" => {
-                found.animated = true;
-                return Ok(found);
+                // In a still file: libwebp's still decoder skips it, and
+                // its demuxer (Chrome's) refuses the file.
+                return Err(Error::Broken(format!(
+                    "an {} chunk in a still image",
+                    name(&head.fourcc)
+                )));
             }
             b"ICCP" => carry(r, body, &head, MAX_ICC as u64, &mut found.carried.iccp)?,
             b"EXIF" => carry(r, body, &head, MAX_CARRIED, &mut found.carried.exif)?,
@@ -1001,10 +1005,18 @@ mod tests {
             // Its flag set, and nothing after it read: an animation with
             // no frame is still an animation.
             webp(&[canvas(0x12, 9, 9), chunk(b"EXIF", &[0; 3])]),
-            webp(&[canvas(0, 9, 9), chunk(b"ANIM", &[0; 6]), vp8(9, 9)]),
-            webp(&[canvas(0, 9, 9), anmf(&[vp8(9, 9)])]),
         ] {
             assert!(scanned(&file).unwrap().animated, "{file:?}");
+        }
+        // Without the flag, an animation's chunks are a broken still file:
+        // libwebp's still decoder skips them, its demuxer refuses the file.
+        for file in [
+            webp(&[canvas(0, 9, 9), chunk(b"ANIM", &[0; 6]), vp8(9, 9)]),
+            webp(&[canvas(0, 9, 9), anmf(&[vp8(9, 9)])]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9), chunk(b"ANIM", &[0; 6])]),
+            webp(&[canvas(0x10, 9, 9), vp8l(9, 9, true), anmf(&[vp8(9, 9)])]),
+        ] {
+            assert!(matches!(scanned(&file), Err(Error::Broken(_))), "{file:?}");
         }
     }
 
