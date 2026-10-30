@@ -1335,7 +1335,7 @@ mod tests {
         // thumbnail: 20 MiB read, under 1 MiB kept.
         let kept = [
             res(1005, "", &[0, 72, 0, 0, 0, 1, 0, 1]),
-            res(2000, "", &[7; 22_000]),
+            res(2000, "Path 1", &[7; 22_000]),
         ]
         .concat();
         let irb = [kept.clone(), res(1036, "", &[7; 500_000])].concat();

@@ -1148,6 +1148,54 @@ fn remove_metadata_refuses_jpeg_tables_with_more_than_tables() {
 }
 
 #[test]
+fn remove_metadata_writes_photoshops_kept_resources_back_without_their_names() {
+    // A resolution resource named with a secret, and a path whose name
+    // the clipping path names: the resolution kept its name, and so did
+    // the path.
+    let res = |id: u16, name: &str, data: &[u8]| {
+        let mut r = b"8BIM".to_vec();
+        r.extend(id.to_be_bytes());
+        r.push(u8::try_from(name.len()).unwrap());
+        r.extend(name.as_bytes());
+        if name.len().is_multiple_of(2) {
+            r.push(0);
+        }
+        r.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+        r.extend(data);
+        if data.len() % 2 == 1 {
+            r.push(0);
+        }
+        r
+    };
+    let irb = [
+        res(1005, "Jane Doe's scan", &[0, 72, 0, 0, 0, 1, 0, 1]),
+        res(2000, "Jane's outline", &[0; 26]),
+        res(2999, "", b"\x0EJane's outline\0\0"),
+    ]
+    .concat();
+    let entries = vec![
+        (256, 4, le(4, 4)),
+        (257, 4, le(4, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (34377, 7, irb),
+    ];
+    let dir = TestDir::new("strip-tiff-irb-names");
+    let outcome = strip(&dir, "named.tif", &one_strip(false, &[9; 16], entries)).unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])]);
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(!out.windows(4).any(|w| w == b"Jane"));
+    let kept = [
+        res(1005, "", &[0, 72, 0, 0, 0, 1, 0, 1]),
+        res(2000, "Path 1", &[0; 26]),
+        res(2999, "", b"\x06Path 1\0\0"),
+    ]
+    .concat();
+    assert!(out.windows(kept.len()).any(|w| w == kept));
+}
+
+#[test]
 fn remove_metadata_refuses_metadata_in_jpeg_tables_whatever_type_holds_them() {
     // The review's file: a 16 × 16 gray JPEG strip whose JPEGTables hold
     // SOI, an Exif APP1 (its Make and a GPS IFD) and EOI, each byte a
