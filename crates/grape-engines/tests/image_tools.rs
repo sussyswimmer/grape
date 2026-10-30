@@ -3188,6 +3188,45 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
 }
 
 #[test]
+fn compress_reads_a_webp_whose_vp8x_flags_a_chunk_it_lacks() {
+    use grape_core::CompressPreset::High;
+    let dir = TestDir::new("compress-webp-flags");
+    let photo = photo(600, 400);
+    let lossy = lossy_webp(photo.as_raw(), 600, 400, false, 95.0);
+    let vp8 = riff_chunk(b"VP8 ", &webp_chunk(&lossy, b"VP8 ").unwrap());
+    // VP8X says alpha, EXIF, XMP and ICC, and only an XMP chunk is there:
+    // libwebp, Pillow and ImageMagick show the picture opaque, and
+    // image-webp alone refused it ("An expected chunk was missing"). (A
+    // missing profile alone it allows.)
+    for (name, flags) in [
+        ("alpha.webp", 0x10),
+        ("tags.webp", 0x3C),
+        ("icc.webp", 0x20),
+    ] {
+        let src = riff(&[
+            vp8x_chunk(flags, 600, 400),
+            vp8.clone(),
+            riff_chunk(b"XMP ", b"<x:xmpmeta/>"),
+        ]);
+        let outcome = compress(&dir, name, &src, High).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert!(out.len() * 10 <= src.len() * 9, "{name}");
+        let back = image::load_from_memory(&out).unwrap();
+        assert!(!back.color().has_alpha(), "{name}");
+        assert_eq!((back.width(), back.height()), (600, 400));
+        // The XMP goes on with its flag as it was, and no flag says a
+        // chunk that isn't there.
+        assert_eq!(
+            webp_chunk(&out, b"VP8X").unwrap()[0],
+            flags & 0x04,
+            "{name}"
+        );
+        assert_eq!(webp_chunk(&out, b"XMP ").unwrap(), b"<x:xmpmeta/>");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+    }
+}
+
+#[test]
 fn compress_refuses_a_webp_too_large_before_decoding_it() {
     let dir = TestDir::new("compress-webp-huge");
     // A lossless header of 16,383 × 16,383 and no image data: refused for

@@ -36,16 +36,19 @@ const FRAME_HEADER: u64 = 16;
 const ANIMATION_FLAG: u8 = 0x02;
 
 /// VP8X's flag for an XMP chunk.
-const XMP_FLAG: u8 = 0x04;
+pub(super) const XMP_FLAG: u8 = 0x04;
 
 /// VP8X's flag for an EXIF chunk.
-const EXIF_FLAG: u8 = 0x08;
+pub(super) const EXIF_FLAG: u8 = 0x08;
 
 /// VP8X's flag for alpha.
 pub(super) const ALPHA_FLAG: u8 = 0x10;
 
 /// VP8X's flag for an ICC profile.
 const ICC_FLAG: u8 = 0x20;
+
+/// Where an extended file's VP8X flags are: [`scan`] wants `VP8X` first.
+pub(super) const VP8X_FLAGS_AT: u64 = 20;
 
 /// The largest `EXIF` or `XMP ` chunk Compress carries (D28). Compress
 /// keeps metadata, so a file with a larger one is refused rather than

@@ -1,7 +1,8 @@
-//! Compress on WebP (D28): image-webp decodes the picture as stored,
-//! Grape scales a lossy one down, libwebp 1.6.0 encodes it again through
-//! `grape-webp`, and Grape puts the source's metadata back in the file
-//! libwebp wrote ([`webp::assemble`]).
+//! Compress on WebP (D28): image-webp decodes the picture as stored (an
+//! extended file's VP8X flags read as its chunks bear them out, as libwebp
+//! reads them: [`decode_flags`]), Grape scales a lossy one down, libwebp
+//! 1.6.0 encodes it again through `grape-webp`, and Grape puts the
+//! source's metadata back in the file libwebp wrote ([`webp::assemble`]).
 //!
 //! | Source | Small | Balanced | High |
 //! |---|---|---|---|
@@ -53,7 +54,7 @@ use image::{ColorType, DynamicImage, GenericImageView};
 use super::exif;
 use super::scale;
 use super::strip::{self, Error};
-use super::webp::{self, Scan, ALPHA_FLAG};
+use super::webp::{self, Scan, ALPHA_FLAG, EXIF_FLAG, VP8X_FLAGS_AT, XMP_FLAG};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -181,9 +182,19 @@ pub(crate) fn run(
         let bpp = u64::from(color.bytes_per_pixel());
         peak(width, height, bpp, lossless, cap).saturating_add(metadata)
     };
-    let (img, _icc) =
-        crate::image::decode_stored(src, from, Format::Webp, &names, cancel, &tool_peak)
-            .map_err(|e| publish::or_cancelled(cancel, src, e))?;
+    let decoded = match decode_flags(&scan) {
+        Some(flags) => crate::image::decode_stored_patched(
+            src,
+            from,
+            Format::Webp,
+            &names,
+            cancel,
+            &tool_peak,
+            (VP8X_FLAGS_AT, flags),
+        ),
+        None => crate::image::decode_stored(src, from, Format::Webp, &names, cancel, &tool_peak),
+    };
+    let (img, _icc) = decoded.map_err(|e| publish::or_cancelled(cancel, src, e))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
@@ -309,6 +320,21 @@ fn alpha_disagrees(scan: &Scan) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// VP8X's flags as image-webp should read `scan`'s file to see what
+/// libwebp does, when they aren't the file's own: alpha off for a lossy
+/// image with no `ALPH` chunk before it (one only after it, with the flag,
+/// is refused before this), and the EXIF and XMP flags off, which change
+/// no pixel. image-webp refuses a flag whose chunk is missing ("An expected
+/// chunk was missing"), and libwebp, Pillow and ImageMagick read the file.
+fn decode_flags(scan: &Scan) -> Option<u8> {
+    let flags = scan.vp8x?.flags;
+    let mut view = flags & !(EXIF_FLAG | XMP_FLAG);
+    if !scan.lossless && !scan.alpha {
+        view &= !ALPHA_FLAG;
+    }
+    (view != flags).then_some(view)
 }
 
 /// `img` as 8-bit RGB or RGBA, what image-webp decodes to.
@@ -549,6 +575,29 @@ mod tests {
             ..scan(0, true, true, false)
         };
         assert_eq!(alpha_disagrees(&simple), None);
+    }
+
+    #[test]
+    fn image_webp_reads_the_flags_the_chunks_bear_out() {
+        let scan = |flags: u8, lossless: bool, alpha: bool| Scan {
+            vp8x: Some(Vp8x {
+                flags,
+                canvas: (9, 9),
+            }),
+            lossless,
+            size: (9, 9),
+            alpha,
+            ..Scan::default()
+        };
+        // As they are.
+        assert_eq!(decode_flags(&scan(0x30, false, true)), None);
+        assert_eq!(decode_flags(&scan(0x20, false, false)), None);
+        assert_eq!(decode_flags(&scan(0x10, true, false)), None);
+        assert_eq!(decode_flags(&Scan::default()), None);
+        // Alpha with no ALPH chunk before a lossy image; EXIF and XMP.
+        assert_eq!(decode_flags(&scan(0x30, false, false)), Some(0x20));
+        assert_eq!(decode_flags(&scan(0x3C, false, true)), Some(0x30));
+        assert_eq!(decode_flags(&scan(0x1C, true, true)), Some(0x10));
     }
 
     #[test]

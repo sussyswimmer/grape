@@ -50,8 +50,9 @@
 //!   file before decoding, so a JPEG decode (like the `image` crate's own
 //!   pixel conversions and rotations) runs to its end once started.
 
+use std::convert;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 
@@ -236,7 +237,16 @@ pub(crate) fn decode(
     names: &Names,
     cancel: &CancelToken,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(src, from, to, names, cancel, true, &|_, _, _| 0)
+    decode_as(
+        src,
+        from,
+        to,
+        names,
+        cancel,
+        true,
+        &|_, _, _| 0,
+        convert::identity,
+    )
 }
 
 /// What a tool holds at its peak for a `width`×`height` image of a
@@ -255,11 +265,78 @@ pub(crate) fn decode_stored(
     cancel: &CancelToken,
     tool_peak: ToolPeak,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    decode_as(src, from, to, names, cancel, false, tool_peak)
+    decode_as(
+        src,
+        from,
+        to,
+        names,
+        cancel,
+        false,
+        tool_peak,
+        convert::identity,
+    )
 }
 
-/// [`decode`], applying the EXIF orientation if `upright`.
-fn decode_as(
+/// [`decode_stored`], reading the byte at `patch.0` of the file as
+/// `patch.1`: for Compress on WebP (D28), which decodes an extended file
+/// with the VP8X flags its chunks bear out, as libwebp reads it. The file
+/// itself is only read.
+pub(crate) fn decode_stored_patched(
+    src: &Path,
+    from: Format,
+    to: Format,
+    names: &Names,
+    cancel: &CancelToken,
+    tool_peak: ToolPeak,
+    (at, byte): (u64, u8),
+) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
+    decode_as(src, from, to, names, cancel, false, tool_peak, |file| {
+        Patched {
+            inner: file,
+            pos: 0,
+            at,
+            byte,
+        }
+    })
+}
+
+/// `inner`, a stream at its start, read with the byte at `at` as `byte`.
+struct Patched<R> {
+    inner: R,
+    /// Where `inner` is.
+    pos: u64,
+    at: u64,
+    byte: u8,
+}
+
+impl<R: Read> Read for Patched<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        let read = buf.get_mut(..n).unwrap_or_default();
+        if let Some(b) = self
+            .at
+            .checked_sub(self.pos)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| read.get_mut(i))
+        {
+            *b = self.byte;
+        }
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Patched<R> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        self.pos = self.inner.seek(to)?;
+        Ok(self.pos)
+    }
+}
+
+/// [`decode`], applying the EXIF orientation if `upright`, from the file
+/// as `wrap` reads it.
+#[allow(clippy::too_many_arguments)] // `decode_stored`'s, plus the two choices.
+fn decode_as<R: Read + Seek>(
     src: &Path,
     from: Format,
     to: Format,
@@ -267,6 +344,7 @@ fn decode_as(
     cancel: &CancelToken,
     upright: bool,
     tool_peak: ToolPeak,
+    wrap: impl FnOnce(Cancellable<File>) -> R,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
     let file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
@@ -274,7 +352,7 @@ fn decode_as(
         .metadata()
         .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?
         .len();
-    let mut reader = ImageReader::new(BufReader::new(Cancellable::new(file, cancel)));
+    let mut reader = ImageReader::new(BufReader::new(wrap(Cancellable::new(file, cancel))));
     if let Some(hint) = image_format(from) {
         // Used only when the content matches no known signature.
         reader.set_format(hint);
@@ -765,6 +843,48 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn a_patched_read_changes_that_one_byte_however_it_is_read() {
+        use std::io::{BufRead, Cursor};
+        let data: Vec<u8> = (0..64).collect();
+        let patched = |at| Patched {
+            inner: Cursor::new(data.clone()),
+            pos: 0,
+            at,
+            byte: 0xAA,
+        };
+        let mut want = data.clone();
+        want[20] = 0xAA;
+        // Whole, in small reads, after seeks, and through a buffer.
+        let mut all = Vec::new();
+        patched(20).read_to_end(&mut all).unwrap();
+        assert_eq!(all, want);
+        let mut r = patched(20);
+        let mut got = Vec::new();
+        let mut one = [0; 3];
+        while let Ok(n @ 1..) = r.read(&mut one) {
+            got.extend_from_slice(&one[..n]);
+        }
+        assert_eq!(got, want);
+        let mut r = patched(20);
+        r.seek(SeekFrom::Start(19)).unwrap();
+        r.read_exact(&mut one).unwrap();
+        assert_eq!(one, [19, 0xAA, 21]);
+        r.seek(SeekFrom::Current(-2)).unwrap();
+        r.read_exact(&mut one[..1]).unwrap();
+        assert_eq!(one[0], 0xAA);
+        r.seek(SeekFrom::End(-1)).unwrap();
+        r.read_exact(&mut one[..1]).unwrap();
+        assert_eq!(one[0], 63);
+        let mut b = BufReader::with_capacity(8, patched(20));
+        b.seek(SeekFrom::Start(16)).unwrap();
+        assert_eq!(&b.fill_buf().unwrap()[..6], &[16, 17, 18, 19, 0xAA, 21]);
+        // Past the end, nothing.
+        let mut all = Vec::new();
+        patched(64).read_to_end(&mut all).unwrap();
+        assert_eq!(all, data);
+    }
 
     #[test]
     fn flattening_blends_onto_white() {
