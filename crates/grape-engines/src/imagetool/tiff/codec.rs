@@ -11,10 +11,11 @@
 //! - **Cut** at the block's size ([`Geometry`]): its rows times a row's
 //!   bytes (a plane's, when the planes are stored apart; a row of YCbCr
 //!   sampling units when the chroma is subsampled, TIFF 6 §21; of
-//!   BitsPerSample as libtiff reads it, one size for every sample),
-//!   the last strip of each plane holding what's left of the picture, a
-//!   tile always full size. Bytes after that are dropped, as readers drop
-//!   them; data that ends before it can't be decoded.
+//!   BitsPerSample as libtiff reads it, one size for every sample), the
+//!   last strip of each plane holding what's left of the picture, a tile
+//!   always full size, and one slice deep (a deeper one isn't decoded).
+//!   Bytes after that are dropped, as readers drop them; data that ends
+//!   before it can't be decoded.
 //! - **Predicted** ([`Predictor`]): horizontal differencing (TIFF's
 //!   predictor 2) over each row of 8 or 16-bit samples, in the file's byte
 //!   order, and its inverse.
@@ -165,6 +166,13 @@ impl Geometry {
         let subsampled = (h, v) != (1, 1);
         if subsampled && (planar || samples != 3) {
             return not("its subsampled YCbCr isn't three samples in one plane".into());
+        }
+        // A tile of several slices (TileDepth) holds them one after the
+        // other, which libtiff's tile size leaves out: decoded as one, the
+        // slices after the first would be lost.
+        let slices = dims.tile_depth();
+        if slices > 1 {
+            return not(format!("its tiles are {slices} slices deep"));
         }
         let past = || not("its sizes are past any number".into());
         // libtiff tells tiles by a TileWidth or TileLength, whichever tags

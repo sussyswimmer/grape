@@ -18,7 +18,9 @@
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
 //!   out wrong); layouts that can't be sized; blocks listed as strips
 //!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
-//!   TileLength, or as tiles it reads as strips; an IFD with an empty block
+//!   TileLength, or as tiles it reads as strips; tiles more than one slice
+//!   deep (TileDepth), whose slices after the first libtiff's tile size
+//!   leaves out and a recode would lose; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
 //!   can't be decoded (old-style LZW, data that's broken or short), whose
@@ -1645,6 +1647,67 @@ mod tests {
         let mut page = gray(8, 8, 8, vec![B::Data(data)]);
         page.tags.push((259, V::Short(vec![compression])));
         page
+    }
+
+    #[test]
+    fn tiles_more_than_a_slice_deep_are_copied_as_they_are() {
+        // Gray 64 × 64, two slices deep (ImageDepth 2), in 32 × 32 tiles:
+        // `slices` to a tile, each of 1,024 bytes.
+        let volume = |slices: u32| {
+            let samples = smooth(64 * 64 * 2);
+            let tile = 1_024 * slices as usize;
+            Page {
+                tags: vec![
+                    (256, V::Long(vec![64])),
+                    (257, V::Long(vec![64])),
+                    (258, V::Short(vec![8])),
+                    (262, V::Short(vec![1])),
+                    (322, V::Short(vec![32])),
+                    (323, V::Short(vec![32])),
+                    (32997, V::Long(vec![2])),
+                    (32998, V::Long(vec![slices])),
+                ],
+                blocks: samples.chunks(tile).map(B::data).collect(),
+                tiled: true,
+                ..Page::default()
+            }
+        };
+        // Two slices to a tile, or the picture's depth (2^32 - 1): four
+        // tiles of 2,048 bytes, which a recode of one slice would cut in
+        // half. Copied as they are, so nothing is left to recode.
+        for slices in [2, u32::MAX] {
+            let file = Builder::new(b'I', false, vec![volume(slices)]).build();
+            let Planned::Nothing(why) = planned(&file).unwrap() else {
+                panic!("{slices}: planned")
+            };
+            assert!(why.contains("its tiles are 2 slices deep"), "{why}");
+        }
+        // One slice to a tile: eight tiles, recoded, each to its 1,024
+        // bytes.
+        let file = Builder::new(b'I', false, vec![volume(1)]).build();
+        let out = compressed(&file);
+        let (a, b) = (read(&file), read(&out));
+        assert_eq!(b.pages[0].blocks.len(), 8);
+        assert_eq!(b.pages[0].uint(259, b.layout.order), Some(8));
+        let mut back = Codecs::new(9);
+        let plan = plan(&file);
+        let How::Recode { predictor, .. } = &plan.hows[0] else {
+            panic!("{:?}", plan.hows)
+        };
+        for (n, (source, written)) in a.pages[0].blocks.iter().zip(&b.pages[0].blocks).enumerate() {
+            let recipe = Recipe {
+                codec: Codec::Deflate,
+                expected: 1_024,
+                row: 32,
+                predictor: *predictor,
+            };
+            let crc = back
+                .check(&mut Cursor::new(&out), *written, recipe)
+                .unwrap();
+            let start = source.offset as usize;
+            let want = crc32fast::hash(&file[start..start + 1_024]);
+            assert_eq!(crc, want, "tile {n}");
+        }
     }
 
     #[test]

@@ -867,16 +867,24 @@ impl Dims {
         }
     }
 
+    /// The slices a tile holds: TileDepth, ImageDepth's for [`LONG`]; 1
+    /// for strips, which ignore it.
+    pub(crate) fn tile_depth(&self) -> u64 {
+        match (self.tile, self.depth) {
+            (Some(_), (depth, LONG)) => depth,
+            (Some(_), (_, td)) => td,
+            (None, _) => 1,
+        }
+    }
+
     /// The strips or tiles in each plane as libtiff counts them: its
     /// strips, or the tiles across, down and deep; 0 past 32 bits.
     pub(crate) fn per_plane(&self) -> u64 {
         let Some((tw, tl)) = self.tile() else {
             return self.strips_per_plane();
         };
-        let (depth, td) = self.depth;
-        let td = if td == LONG { depth } else { td };
         let across = times(howmany(self.width, tw), howmany(self.height, tl));
-        times(across, howmany(depth, td))
+        times(across, howmany(self.depth.0, self.tile_depth()))
     }
 
     /// The strips or tiles libtiff reads: those of a plane, times the
