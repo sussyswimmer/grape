@@ -1612,6 +1612,30 @@ mod tests {
                 wrote.log
             );
             assert_eq!(wrote.len, out.len() as u64);
+            // With the most a byte short of the copy, the log says the copy
+            // passed it, and why the page was to be copied.
+            let most = b.pages[0].blocks.iter().map(|b| b.offset + b.len).max();
+            let stopped = written(
+                &file,
+                &plan,
+                most.unwrap() - 1,
+                &CancelToken::new(),
+                &mut |_| {},
+            );
+            let Err(Halt {
+                why: Stopped::NotSmaller,
+                log,
+            }) = stopped
+            else {
+                panic!("{stopped:?}")
+            };
+            let log = log.to_string();
+            let past =
+                "IFD 0 took the output past 95 % of the source copied as it is, as it was to be: ";
+            assert!(
+                log.contains(past) && !log.contains("IFD 0 copied as it is"),
+                "{log}"
+            );
         }
     }
 
