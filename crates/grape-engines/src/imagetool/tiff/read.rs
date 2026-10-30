@@ -1263,25 +1263,34 @@ impl Walk<'_> {
     /// - **Refused** ([`MISSIZED`]): a block of 0 bytes at a nonzero offset
     ///   (one at 0 is empty, GDAL's sparse tiles), an uncompressed block
     ///   libtiff reads that's shorter than the picture says, which libtiff
-    ///   fails on and Pillow and ImageMagick read past, and more than one
-    ///   entry where libtiff can't read the layout ([`Dims::of`]), as which
-    ///   it would read can't be told.
+    ///   fails on and Pillow and ImageMagick read past, more than one entry
+    ///   where libtiff can't read the layout ([`Dims::of`]), as which it
+    ///   would read can't be told, and uncompressed blocks Grape can't size
+    ///   ([`Walk::sizes`]: a layout, BitsPerSample, Photometric or
+    ///   YCbCrSubsampling libtiff can't read, a lone strip's too), as how
+    ///   much of the picture readers read from them can't be checked.
     ///
     /// Gives whether it worked them out.
     fn recount(&mut self, ifd: &Ifd, blocks: &mut [Block], plain: bool) -> Result<bool, Error> {
         let l = self.layout;
         let listed = blocks.len() as u64;
-        // Where libtiff can't count them, a lone entry is the one it would
-        // read; of more, it can't be told which.
+        // Where libtiff can't count them, a lone compressed entry is the
+        // one it would read; of more, it can't be told which, nor, for
+        // uncompressed data, how much of the picture readers that size it
+        // themselves read from it.
         let (count, tiled, apart) = match Dims::of(self.r, ifd, l.order)? {
             Ok(dims) => (dims.count(), dims.tiled(), dims.planar),
-            Err(_) if listed == 1 => (1, ifd.tiled, false),
+            Err(_) if listed == 1 && !plain => (1, ifd.tiled, false),
             Err(_) => return Err(Error::Refused(MISSIZED.into())),
         };
-        // Sized as libtiff sizes them, as the kind it reads them as,
-        // whichever tags list them.
+        // Uncompressed, sized as libtiff sizes them, as the kind it reads
+        // them as, whichever tags list them; when they can't be (a tag
+        // libtiff can't read), what readers read of them can't be checked.
         let sizes = match usize::try_from(count) {
-            Ok(want) if plain => self.sizes(ifd, want)?.ok(),
+            Ok(want) if plain => match self.sizes(ifd, want)? {
+                Ok(sizes) => Some(sizes),
+                Err(_) => return Err(Error::Refused(MISSIZED.into())),
+            },
             _ => None,
         };
         let short = |n: u64, block: &Block| sizes.as_ref().is_some_and(|s| block.len < s.of(n));
@@ -2365,7 +2374,7 @@ mod tests {
     }
 
     #[test]
-    fn more_than_one_entry_of_a_layout_libtiff_cant_read_is_refused() {
+    fn a_layout_libtiff_cant_read_is_refused_but_for_one_compressed_block() {
         let refused =
             |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
         // Ten strips of a page whose RowsPerStrip is a RATIONAL, which
@@ -2374,9 +2383,32 @@ mod tests {
         let mut page = gray(300, 100, 10, strips);
         page.tags[4] = (278, V::Rational(vec![(10, 1)]));
         assert!(refused(&Builder::new(b'I', false, vec![page]).build()));
-        // A lone strip is the one it would read.
+        // A lone uncompressed strip where libtiff counts no strips or tiles
+        // (a RowsPerStrip of 2^32 - 2, a lone TileWidth, a TileWidth or a
+        // TileLength beside a RowsPerStrip), or can't read the layout:
+        // Pillow reads the whole picture from it, which Grape can't size as
+        // libtiff would, so a strip counted short of it can't be told from
+        // a whole one. Refused, short or whole.
+        for tags in [
+            vec![(278, V::Long(vec![u32::MAX - 1]))],
+            vec![(278, V::Rational(vec![(100, 1)]))],
+            vec![(322, V::Long(vec![304]))],
+            vec![(278, V::Long(vec![100])), (322, V::Long(vec![304]))],
+            vec![(278, V::Long(vec![100])), (323, V::Short(vec![100]))],
+        ] {
+            for count in [10, 30_000] {
+                let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
+                page.tags.retain(|t| t.0 != 278);
+                page.tags.extend(tags.iter().cloned());
+                page.counts = Some(vec![count]);
+                let file = Builder::new(b'I', false, vec![page]).build();
+                assert!(refused(&file), "{tags:?} {count}");
+            }
+        }
+        // A lone compressed one is the one libtiff would read, as it is.
         let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
         page.tags[4] = (278, V::Rational(vec![(100, 1)]));
+        page.tags.push((259, V::Short(vec![5])));
         let tiff = read(&Builder::new(b'I', false, vec![page]).build()).unwrap();
         assert_eq!(lens(&tiff), [30_000]);
     }

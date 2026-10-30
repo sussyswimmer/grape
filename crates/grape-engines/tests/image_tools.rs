@@ -644,11 +644,14 @@ fn laid_out(big: bool, data: &[u8], mut entries: Vec<Change>) -> Vec<u8> {
 }
 
 /// A TIFF, classic or BigTIFF, of `data` as one strip right after its
-/// header, counted as long as it is, and `entries` ([`laid_out`]).
+/// header, counted as long as it is unless `entries` count it, and
+/// `entries` ([`laid_out`]).
 fn one_strip(big: bool, data: &[u8], mut entries: Vec<Change>) -> Vec<u8> {
     let (header, word, number) = if big { (16, 8, 16) } else { (8, 4, 4) };
     entries.push((273, number, le(header, word)));
-    entries.push((279, number, le(data.len() as u64, word)));
+    if !entries.iter().any(|e| e.0 == 279) {
+        entries.push((279, number, le(data.len() as u64, word)));
+    }
     laid_out(big, data, entries)
 }
 
@@ -726,6 +729,60 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
     strip(&dir, "rows.tif", &bytes).unwrap();
     let op = compress_op(grape_core::CompressPreset::High);
     run(&dir, "rows.tif", &bytes, op).unwrap();
+}
+
+#[test]
+fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
+    // A gray 300 × 100 picture, all of it at the header, as one
+    // uncompressed strip counted 10, where libtiff counts no strips or
+    // tiles (a RowsPerStrip of 2^32 - 2, a lone TileWidth) or more of the
+    // picture than it holds (a TileWidth of 304 beside a RowsPerStrip,
+    // which it reads as one tile of 304 × 100), or one tile of the picture
+    // (a TileLength beside a RowsPerStrip): Pillow reads the whole picture
+    // from it, and the 10 bytes copied would leave it no picture. Both
+    // tools refuse it.
+    let picture: Vec<u8> = (0..30_000).map(|i| (i % 251) as u8).collect();
+    let size = [
+        (256, 4, le(300, 4)),
+        (257, 4, le(100, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (279, 4, le(10, 4)),
+    ];
+    let dir = TestDir::new("tiff-lone-unsized");
+    for (name, layout) in [
+        ("rows.tif", vec![(278, 4, le(0xFFFF_FFFE, 4))]),
+        ("width.tif", vec![(322, 3, le(304, 2))]),
+        (
+            "rows-width.tif",
+            vec![(278, 3, le(100, 2)), (322, 3, le(304, 2))],
+        ),
+        (
+            "rows-length.tif",
+            vec![(278, 3, le(100, 2)), (323, 3, le(100, 2))],
+        ),
+    ] {
+        let bytes = one_strip(false, &picture, [&size[..], &layout].concat());
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
 }
 
 #[test]
