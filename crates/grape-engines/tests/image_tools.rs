@@ -3373,6 +3373,54 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
 }
 
 #[test]
+fn compress_says_try_small_only_when_small_would_do_more() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    // Each of these was told "Try Small" at Balanced or High, and Small
+    // then left it alone too.
+    let dir = TestDir::new("compress-webp-try-small");
+    // A little over 2048 px at a coarse quality: Small scales it hardly
+    // at all, and its q70 spends more on what's left.
+    let coarse = lossy_webp(photo(2049, 1152).as_raw(), 2049, 1152, false, 30.0);
+    // Not scaled, at a finer quality than Small's, its alpha (stored
+    // losslessly at every preset) most of the file.
+    let mut n = 1u32;
+    let colors = photo(512, 512);
+    let veil = image::RgbaImage::from_fn(512, 512, |x, y| {
+        n = n.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let [r, g, b] = colors.get_pixel(x, y).0;
+        image::Rgba([r, g, b, 96 + (n >> 16) as u8 % 128])
+    });
+    let veiled = lossy_webp(veil.as_raw(), 512, 512, true, 80.0);
+    assert!(webp_chunk(&veiled, b"ALPH").unwrap().len() * 2 > veiled.len());
+    // One pixel: the container and VP8's frame header are all there is.
+    let dot = lossy_webp(&[200, 30, 30], 1, 1, false, 90.0);
+    let dot_alpha = lossy_webp(&[200, 30, 30, 128], 1, 1, true, 90.0);
+    for (name, src, presets) in [
+        ("coarse.webp", &coarse, &[Balanced][..]),
+        ("veil.webp", &veiled, &[Balanced, High]),
+        ("dot.webp", &dot, &[Balanced, High]),
+        ("dot-alpha.webp", &dot_alpha, &[Balanced, High]),
+    ] {
+        for &preset in presets.iter().chain([&Small]) {
+            let err = compress(&dir, name, src, preset).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NoChange,
+                "{name} {preset:?}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!("{name} is already as small as Grape makes it."),
+                "{preset:?}: {}",
+                err.detail
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[test]
 fn compress_reads_a_webp_only_to_its_riffs_end() {
     use grape_core::CompressPreset::High;
     // A photo in the RIFF; past its end, where libwebp (so Pillow,

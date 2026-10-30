@@ -21,7 +21,7 @@
 //!   ones nearest them ([`scale`]). The qualities are JPEG's, so a preset
 //!   means the same across formats.
 //!   Kept when it's at most 90 % of the source's size; "Try Small" only
-//!   when Small would do more ([`small_does_more`]).
+//!   when Small's file is likely to be ([`small_does_more`]).
 //! - **Lossless:** at every preset, never scaled, libwebp's lossless
 //!   preset [`LOSSLESS_LEVEL`] with every pixel's color kept (`exact`),
 //!   even under full transparency. The output is decoded again and must
@@ -112,29 +112,50 @@ fn plan(preset: CompressPreset) -> (f32, Option<u32>) {
     }
 }
 
+/// The bytes of the smallest `VP8 ` frame libwebp writes, a 1 × 1
+/// picture's at any quality: its headers, which no preset shrinks.
+const VP8_FRAME: f64 = 26.0;
+
 /// Whether Small would do more than another preset to the lossy WebP
-/// `scan` found, a file of `before` bytes (D26): it scales the picture (a
-/// side over 2048), or the source's quality ([`webp::quality`]) is finer
-/// than Small's 70 and its `VP8 ` data holds detail a coarser quality
-/// drops (2 bytes a macroblock or more: a flat or fully transparent
-/// picture takes about half a byte, whatever its quality); and either way
-/// its image data (`ALPH` and `VP8 `) is a fifth of the file or more, so
-/// that what Small drops can bring the file under 90 %. Small's method 6
-/// at q70 made Pillow's q70 to q75 photos (method 4) 11 to 23 % smaller,
-/// and some of its q60 to q68 ones too; a q55 one it couldn't.
-fn small_does_more(scan: &Scan, before: u64) -> bool {
-    let (quality, cap) = plan(CompressPreset::Small);
+/// `scan` found, a file of `before` bytes (D26): whether the file Small
+/// would write is likely at most 90 % of it. Its `VP8 ` data past
+/// [`VP8_FRAME`] is predicted to take c(q) × s of what it takes now, where
+/// s is Small's scale (its long side over 2048, or 1) and c(q) = 1.3 −
+/// 0.0085 (q − 30) for the quality q the frame header reads as
+/// ([`webp::quality`]; 0 if unread): the most Small took of two photos,
+/// one smooth, at 30 to 90 and 2049 to 4096 px, and of crops down to 1 px.
+/// Data that holds less than 2 bytes a macroblock (a flat or fully
+/// transparent picture: about half a byte, whatever its quality) takes at
+/// least s² (a macroblock's worth each), and isn't sent to Small unless it
+/// scales. Its `ALPH` chunk, stored losslessly at every preset, stays as it
+/// is, or once scaled half again as large unless its alpha is only 0 and
+/// 255 (`hard_alpha`; Small keeps such edges hard): an antialiased alpha
+/// plane came out up to 1.5 times as large at 1.3 to 1, and a hard one at
+/// most as large but for one with almost nothing in it. The rest of the
+/// file (its container, metadata) stays.
+fn small_does_more(scan: &Scan, before: u64, hard_alpha: bool) -> bool {
+    let (_, cap) = plan(CompressPreset::Small);
     let (w, h) = scan.size;
-    let scales = cap.is_some_and(|cap| w.max(h) > cap);
+    let long = f64::from(w.max(h).max(1));
+    let scale = cap.map_or(1.0, |cap| (f64::from(cap) / long).min(1.0));
+    let scales = scale < 1.0;
     let macroblocks = u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16));
     let detail = scan.image_bytes >= macroblocks.saturating_mul(2);
-    let finer = detail && scan.quality.is_some_and(|q| f32::from(q) > quality);
-    let share = scan
-        .image_bytes
-        .saturating_add(scan.alpha_bytes)
-        .saturating_mul(5)
-        >= before;
-    share && (scales || finer)
+    if !scales && !detail {
+        return false;
+    }
+    let q = f64::from(scan.quality.unwrap_or(0));
+    let kept = (1.3 - 0.0085 * (q - 30.0)) * scale;
+    let kept = if detail {
+        kept
+    } else {
+        kept.max(scale * scale)
+    };
+    let vp8 = scan.image_bytes as f64;
+    let vp8 = VP8_FRAME.min(vp8) + (vp8 - VP8_FRAME).max(0.0) * kept;
+    let alpha = scan.alpha_bytes as f64 * if scales && !hard_alpha { 1.5 } else { 1.0 };
+    let rest = before.saturating_sub(scan.image_bytes.saturating_add(scan.alpha_bytes));
+    rest as f64 + vp8 + alpha <= 0.9 * before as f64
 }
 
 /// What Compress holds at its peak for a `width`×`height` decoded picture
@@ -212,7 +233,6 @@ pub(crate) fn run(
 
     let (quality, cap) = plan(preset);
     let lossless = scan.lossless;
-    let try_small = !lossless && preset != CompressPreset::Small && small_does_more(&scan, before);
     // The metadata is held throughout, and again in the file written.
     let metadata = scan.carried.len().saturating_mul(2);
     let tool_peak = |width: u32, height: u32, color: ColorType| {
@@ -236,7 +256,9 @@ pub(crate) fn run(
         return Err(crate::cancelled(src));
     }
     let img = rgb_or_rgba(img);
-    let transparent = transparent(&img);
+    let (transparent, hard_alpha) = alpha_kind(&img);
+    let try_small =
+        !lossless && preset != CompressPreset::Small && small_does_more(&scan, before, hard_alpha);
     if lossless && transparent && !scan.alpha {
         // VP8X says alpha and VP8L's bit says none: libwebp shows it
         // opaque, image-webp didn't.
@@ -383,15 +405,18 @@ fn rgb_or_rgba(img: DynamicImage) -> DynamicImage {
     }
 }
 
-/// Whether any pixel of `img` isn't opaque.
-fn transparent(img: &DynamicImage) -> bool {
-    img.as_rgba8().is_some_and(|rgba| {
-        rgba.as_raw()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .any(|p| p[3] != u8::MAX)
-    })
+/// Whether any pixel of `img` isn't opaque, and whether every pixel's
+/// alpha is 0 or 255.
+fn alpha_kind(img: &DynamicImage) -> (bool, bool) {
+    let Some(rgba) = img.as_rgba8() else {
+        return (false, true);
+    };
+    let (mut transparent, mut hard) = (false, true);
+    for p in rgba.as_raw().as_chunks::<4>().0 {
+        transparent |= p[3] != u8::MAX;
+        hard &= p[3] == 0 || p[3] == u8::MAX;
+    }
+    (transparent, hard)
 }
 
 /// `img` (8-bit RGB or RGBA) encoded with `opts`; libwebp's progress goes
@@ -613,73 +638,65 @@ mod tests {
 
     #[test]
     fn try_small_only_when_small_does_more() {
-        // 1600 × 900, 5,700 macroblocks: a q90 photo of 200 KB.
-        let photo = Scan {
-            size: (1600, 900),
-            quality: Some(90),
-            image_bytes: 200_000,
-            ..Scan::default()
-        };
-        assert!(small_does_more(&photo, 200_100));
-        assert!(small_does_more(
-            &Scan {
-                quality: Some(71),
-                ..photo.clone()
-            },
-            200_100
-        ));
-        // Its quality Small's 70 or coarser (q50, q30), or unread: no.
-        for quality in [Some(70), Some(50), Some(30), None] {
-            let coarse = Scan {
-                quality,
-                ..photo.clone()
+        // The scan of a Pillow file: VP8 data, ALPH data and the rest.
+        let file = |w: u32, h: u32, q: u8, vp8: u64, alph: u64| {
+            let scan = Scan {
+                size: (w, h),
+                quality: Some(q),
+                image_bytes: vp8,
+                alpha_bytes: alph,
+                ..Scan::default()
             };
-            assert!(!small_does_more(&coarse, 200_100), "{quality:?}");
+            let before = vp8 + alph + if alph > 0 { 48 } else { 20 };
+            (scan, before)
+        };
+        let does = |(scan, before): (Scan, u64), hard: bool| small_does_more(&scan, before, hard);
+        // Measured (lake.jpg, Pillow 12.3): a little over 2048 px at q30
+        // (Small 116.6 %), q40 (102.3 %) and q50 (91.8 %), and 2200 px at
+        // q30 (110.6 %): no. 4096 px at q30 (43.6 %) and 2049 at q90
+        // (23.8 %): yes.
+        for (w, q, vp8) in [
+            (2049, 31, 35_084),
+            (2049, 41, 43_355),
+            (2049, 51, 51_620),
+            (2200, 31, 41_581),
+        ] {
+            assert!(!does(file(w, w * 9 / 16, q, vp8, 0), true), "{w} q{q}");
         }
+        assert!(does(file(4096, 2304, 31, 123_727, 0), true));
+        assert!(does(file(2049, 1153, 91, 256_386, 0), true));
+        // Not scaled: only the VP8 data shrinks, so the ALPH data counts
+        // as it is (a 1000 × 256 logo at q72, 6,824 bytes of it, Small
+        // 102 %), and a finer quality than Small's, but not much finer,
+        // isn't enough (a 64 × 64 crop at q75: 92.2 %).
+        assert!(!does(file(1000, 256, 72, 3_976, 6_824), false));
+        assert!(!does(file(64, 64, 75, 414, 0), true));
+        assert!(does(file(64, 64, 90, 810, 0), true));
+        // One pixel: VP8's frame header is all its data (Small 100 %).
+        assert!(!does(file(1, 1, 90, 26, 0), true));
+        assert!(!does(file(1, 1, 100, 30, 2), true));
+        // Scaled, an alpha that isn't only 0 and 255 counts half again (two
+        // antialiased discs, 2600 px, q95: Small 100.4 %), a hard one as it
+        // is (a signature, 3000 px, q90: 62.0 %).
+        assert!(!does(file(2600, 1300, 95, 8_098, 13_326), false));
+        assert!(does(file(2600, 1300, 95, 8_098, 13_326), true));
+        assert!(does(file(3000, 2000, 91, 10_760, 16_401), true));
         // Flat (a fully transparent picture's VP8 takes about half a byte
-        // a macroblock): no, at any quality.
-        let flat = Scan {
-            image_bytes: 2_636,
-            alpha_bytes: 75,
-            ..photo.clone()
+        // a macroblock): not unless it scales, then by its macroblocks.
+        let flat = file(1600, 900, 90, 2_812, 0);
+        assert!(!does(flat, true));
+        assert!(does(file(4000, 2000, 90, 15_625, 0), true));
+        assert!(!does(file(2100, 1000, 90, 4_102, 0), true));
+        // Unread, its quality counts as 0; metadata four times the image
+        // outweighs what it saves.
+        let (fine, before) = file(2600, 1463, 91, 100_000, 0);
+        assert!(small_does_more(&fine, before, true));
+        let unread = Scan {
+            quality: None,
+            ..fine.clone()
         };
-        assert!(!small_does_more(&flat, 2_758));
-        // From 2 bytes a macroblock, yes.
-        assert!(!small_does_more(
-            &Scan {
-                image_bytes: 11_399,
-                ..flat.clone()
-            },
-            11_500
-        ));
-        assert!(small_does_more(
-            &Scan {
-                image_bytes: 11_400,
-                ..flat.clone()
-            },
-            11_500
-        ));
-        // Metadata over four times the image: no.
-        assert!(!small_does_more(&photo, 1_000_001));
-        assert!(small_does_more(&photo, 1_000_000));
-        // A side over 2048, whatever its quality and detail, but not when
-        // outweighed.
-        let wide = Scan {
-            size: (2049, 100),
-            quality: Some(30),
-            image_bytes: 300,
-            alpha_bytes: 100,
-            ..Scan::default()
-        };
-        assert!(small_does_more(&wide, 2_000));
-        assert!(!small_does_more(&wide, 2_001));
-        assert!(!small_does_more(
-            &Scan {
-                size: (2048, 100),
-                ..wide
-            },
-            400
-        ));
+        assert!(!small_does_more(&unread, before, true));
+        assert!(!small_does_more(&fine, before * 5, true));
     }
 
     #[test]
@@ -868,7 +885,14 @@ mod tests {
             .pixels()
             .zip(rgba.pixels())
             .all(|(a, b)| a.0[3] == b.0[3]));
-        assert!(transparent(&DynamicImage::ImageRgba8(rgba)));
-        assert!(!transparent(&DynamicImage::ImageRgb8(src)));
+        assert_eq!(
+            alpha_kind(&DynamicImage::ImageRgba8(rgba.clone())),
+            (true, false)
+        );
+        assert_eq!(alpha_kind(&DynamicImage::ImageRgb8(src)), (false, true));
+        let hard = RgbaImage::from_fn(4, 1, |x, _| Rgba([9, 9, 9, [0, 255][x as usize % 2]]));
+        assert_eq!(alpha_kind(&DynamicImage::ImageRgba8(hard)), (true, true));
+        let opaque = RgbaImage::from_pixel(2, 2, Rgba([9, 9, 9, 255]));
+        assert_eq!(alpha_kind(&DynamicImage::ImageRgba8(opaque)), (false, true));
     }
 }
