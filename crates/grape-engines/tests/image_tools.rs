@@ -1654,6 +1654,44 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
 }
 
 #[test]
+fn compress_says_a_tiff_page_passed_95_percent_recoded_and_copied() {
+    use tiff::encoder::{colortype, Compression, DeflateLevel, TiffEncoder};
+    // One page of noise, Deflate already: recoded, it passes 95 % of the
+    // source, and copied as it is too, so nothing is made of it.
+    let mut x: u32 = 0x1234_5678;
+    let noise: Vec<u8> = (0..128 * 128)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 24) as u8
+        })
+        .collect();
+    let mut out = Cursor::new(Vec::new());
+    TiffEncoder::new(&mut out)
+        .unwrap()
+        .with_compression(Compression::Deflate(DeflateLevel::Best))
+        .write_image::<colortype::Gray8>(128, 128, &noise)
+        .unwrap();
+    let dir = TestDir::new("compress-tiff-both");
+    let err = compress(
+        &dir,
+        "noise.tif",
+        &out.into_inner(),
+        grape_core::CompressPreset::High,
+    )
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert!(
+        err.detail.contains(
+            "bytes; IFD 0 took the output past 95 % of the source recoded, and copied as it is too"
+        ) && !err.detail.contains("copied as it is:"),
+        "{}",
+        err.detail
+    );
+}
+
+#[test]
 fn compress_says_why_it_copied_a_tiff_page_when_it_cant_make_its_output() {
     use grape_core::JobOutput;
     use tiff::encoder::{colortype, TiffEncoder};

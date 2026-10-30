@@ -1028,16 +1028,9 @@ impl<'a> Recoder<'a> {
         Ok(())
     }
 
-    /// Takes back what was written of `image`, IFD `n`, from `start` on,
-    /// for `why`: the places its blocks went are forgotten.
-    fn take_back(
-        &mut self,
-        out: &mut Sink,
-        image: &Image,
-        start: u64,
-        n: usize,
-        why: &str,
-    ) -> Result<(), Error> {
+    /// Takes back what was written of `image` from `start` on: the places
+    /// its blocks went are forgotten.
+    fn take_back(&mut self, out: &mut Sink, image: &Image, start: u64) -> Result<(), Error> {
         out.rewind(start)?;
         self.pending.retain(|(block, ..)| block.offset < start);
         self.pending_bytes = self.pending.iter().map(|(block, ..)| block.len).sum();
@@ -1052,7 +1045,6 @@ impl<'a> Recoder<'a> {
         for key in self.more_now.drain(..) {
             self.more.remove(&key);
         }
-        self.log.add(format!("IFD {n} copied as it is: {why}"));
         Ok(())
     }
 }
@@ -1087,10 +1079,24 @@ impl Blocks for Recoder<'_> {
                         self.read_back(out)?;
                         written
                     }
-                    // Copied, held to the most too.
+                    // Copied, held to the most too; the log says why, or
+                    // that the copy passed the most as well.
                     Err(why) => {
-                        self.take_back(out, image, start, n, &why)?;
-                        self.copy(r, out, image)?
+                        self.take_back(out, image, start)?;
+                        let copied = self.copy(r, out, image);
+                        let line = match (&copied, &self.stop) {
+                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => format!(
+                                "IFD {n} took the output past 95 % of the source recoded, \
+                                 and copied as it is too"
+                            ),
+                            (Err(_), Some(Stopped::NotSmaller)) => format!(
+                                "IFD {n} took the output past 95 % of the source copied \
+                                 as it is, as it was to be: {why}"
+                            ),
+                            _ => format!("IFD {n} copied as it is: {why}"),
+                        };
+                        self.log.add(line);
+                        copied?
                     }
                 }
             }
@@ -1944,17 +1950,22 @@ mod tests {
             log.contains(&format!("IFD 1 copied as it is: {PASSED}")),
             "{log}"
         );
-        // A byte less, and the copy doesn't fit either.
+        // A byte less, and the copy doesn't fit either, which the log says
+        // rather than that it was copied.
         let stopped = written(&file, &plan, most - 1, &CancelToken::new(), &mut |_| {});
+        let Err(Halt {
+            why: Stopped::NotSmaller,
+            log,
+        }) = stopped
+        else {
+            panic!("{stopped:?}")
+        };
+        let log = log.to_string();
         assert!(
-            matches!(
-                stopped,
-                Err(Halt {
-                    why: Stopped::NotSmaller,
-                    ..
-                })
-            ),
-            "{stopped:?}"
+            log.contains(
+                "IFD 1 took the output past 95 % of the source recoded, and copied as it is too"
+            ) && !log.contains("IFD 1 copied as it is"),
+            "{log}"
         );
     }
 
