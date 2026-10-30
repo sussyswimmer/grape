@@ -343,6 +343,7 @@ impl Carried {
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
 ///   metadata). It stops at an animation (VP8X's flag), and an `ANIM` or
 ///   `ANMF` chunk in a still file is broken;
+///   Its canvas must be its image's size, as libwebp has it;
 /// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
 ///   image-webp read nothing after it, so nothing after it is carried.
 pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
@@ -421,16 +422,22 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
             _ => {}
         }
     }
-    match image {
-        None => Err(Error::Broken("no image data".into())),
-        Some(fourcc) => {
-            if &fourcc == b"VP8L" {
-                // An ALPH chunk is the lossy image's.
-                found.late_alpha = false;
-            }
-            Ok(found)
-        }
+    let Some(fourcc) = image else {
+        return Err(Error::Broken("no image data".into()));
+    };
+    if let Some(vp8x) = found.vp8x.filter(|vp8x| vp8x.canvas != found.size) {
+        // libwebp refuses such a still file, and image-webp decodes the
+        // whole frame, whatever its size, before it compares them.
+        let ((cw, ch), (w, h)) = (vp8x.canvas, found.size);
+        return Err(Error::Broken(format!(
+            "a {cw}x{ch} canvas over a {w}x{h} image"
+        )));
     }
+    if &fourcc == b"VP8L" {
+        // An ALPH chunk is the lossy image's.
+        found.late_alpha = false;
+    }
+    Ok(found)
 }
 
 /// The size the bitstream of the image chunk `head` (its body at `at`)
@@ -1032,6 +1039,11 @@ mod tests {
             webp(&[chunk(b"VP8 ", &[0x10, 2, 0, 0x9D, 1, 0x2B, 1, 0, 1, 0])]),
             webp(&[chunk(b"VP8 ", &[0x10, 2, 0, 0x9D, 1, 0x2A, 1, 0, 1])]),
             webp(&[chunk(b"VP8X", &[0; 9]), vp8(9, 9)]),
+            // A canvas other than the image's size, which libwebp refuses:
+            // image-webp would decode the whole frame before it checks.
+            webp(&[canvas(0, 9, 9), vp8(8, 9)]),
+            webp(&[canvas(0x10, 16_383, 16_383), vp8l(96, 64, true)]),
+            webp(&[canvas(0, 1, 1), vp8(16_383, 16_383)]),
         ] {
             assert!(matches!(scanned(&bad), Err(Error::Broken(_))), "{bad:?}");
         }

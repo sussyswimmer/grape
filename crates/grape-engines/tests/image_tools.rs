@@ -3194,6 +3194,19 @@ fn compress_refuses_a_webp_too_large_before_decoding_it() {
     )
     .unwrap_err();
     assert_eq!(err.user_message, "tags.webp is too large to convert.");
+    // A canvas other than its image's size is damaged, as libwebp has it,
+    // not too large: a 16,383² canvas over a 96 × 64 picture, and a 1 × 1
+    // one that would pass the memory check while image-webp decoded the
+    // whole frame.
+    let image = lossy_webp(photo(96, 64).as_raw(), 96, 64, false, 80.0);
+    for (w, h) in [(16_383, 16_383), (1, 1)] {
+        let src = riff(&[vp8x_chunk(0, w, h), image[12..].to_vec()]);
+        let err =
+            compress(&dir, "canvas.webp", &src, grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+        assert_eq!(err.user_message, "canvas.webp isn't a readable WEBP image.");
+        fs::remove_file(dir.join("canvas.webp")).unwrap();
+    }
 }
 
 /// Runs `op` on `bytes` named `name`, cancelling at the `nth` progress
