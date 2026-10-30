@@ -357,8 +357,11 @@ impl Carried {
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
 ///   metadata). It stops at an animation (VP8X's flag). An `ANIM` or
 ///   `ANMF` chunk in a still file is broken, as are two `ALPH` chunks
-///   before a `VP8 ` (libwebp reads the last, image-webp the first) and a
-///   canvas other than the image's size (libwebp refuses it). Nothing past
+///   before a `VP8 ` (libwebp reads the last, image-webp the first), any
+///   before a `VP8L` (libwebp's still decoder then shows alpha, which
+///   image-webp reads by VP8X's flag and the `VP8L`'s own bit, and its
+///   demuxer refuses the file) and a canvas other than the image's size
+///   (libwebp refuses it). Nothing past
 ///   the RIFF's end is read, by this walk or by the decoder (which
 ///   `crate::image` ends there: image-webp's own walk would go on, as far
 ///   again as the RIFF's size less 12 bytes from the end of `VP8X`);
@@ -407,6 +410,11 @@ pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
                             return Err(Error::Broken(format!(
                                 "{alph} ALPH chunks before its VP8"
                             )));
+                        }
+                        if alph > 0 && &head.fourcc == b"VP8L" {
+                            // libwebp's still decoder shows alpha whenever
+                            // there's one, and its demuxer refuses it.
+                            return Err(Error::Broken("an ALPH chunk before its VP8L".into()));
                         }
                         image = Some(head.fourcc);
                         found.image_bytes = head.size;
@@ -1174,10 +1182,10 @@ mod tests {
         ]))
         .unwrap();
         assert!(!late.alpha && late.late_alpha);
-        // VP8L has its own alpha; an ALPH chunk beside it is nothing.
+        // VP8L has its own alpha; an ALPH chunk after it is nothing (one
+        // before it is refused).
         let lossless = scanned(&webp(&[
             canvas(0, 9, 9),
-            chunk(b"ALPH", b"al"),
             vp8l(9, 9, false),
             chunk(b"ALPH", b"al"),
         ]))
@@ -1200,14 +1208,22 @@ mod tests {
             vp8(9, 9),
         ]);
         assert!(matches!(scanned(&two), Err(Error::Broken(_))));
-        // Before a VP8L, neither reads them.
-        let lossless = webp(&[
-            canvas(0, 9, 9),
-            chunk(b"ALPH", b"a"),
-            chunk(b"ALPH", b"b"),
-            vp8l(9, 9, false),
-        ]);
-        assert!(!scanned(&lossless).unwrap().alpha);
+        // Before a VP8L, one or more: libwebp's still decoder then shows
+        // alpha whatever VP8X and the VP8L say, which image-webp goes by,
+        // and its demuxer refuses the file.
+        for alph in [
+            &[chunk(b"ALPH", b"a")][..],
+            &[chunk(b"ALPH", b"a"), chunk(b"ALPH", b"b")],
+        ] {
+            for alpha in [false, true] {
+                let file = webp(&[&[canvas(0, 9, 9)], alph, &[vp8l(9, 9, alpha)]].concat());
+                assert!(matches!(scanned(&file), Err(Error::Broken(_))), "{file:?}");
+            }
+        }
+        // After it, neither reads it.
+        let after = webp(&[canvas(0, 9, 9), vp8l(9, 9, false), chunk(b"ALPH", b"a")]);
+        let found = scanned(&after).unwrap();
+        assert!(!found.alpha && !found.late_alpha);
         // One before and one after: both read the one before.
         let both = scanned(&webp(&[
             canvas(0x10, 9, 9),

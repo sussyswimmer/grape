@@ -3348,6 +3348,28 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     let err = compress(&dir, "two.webp", &two, High).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
     assert_eq!(err.user_message, "two.webp isn't a readable WEBP image.");
+    // An ALPH chunk before a VP8L: libwebp's still decoder shows alpha
+    // whenever there's one (ImageMagick read the picture RGBA) and its
+    // demuxer refuses the file, while image-webp goes by VP8X's flag and
+    // VP8L's alpha bit, both off here, though its pixels have alpha:
+    // Compress wrote it opaque.
+    let mut lossless = Vec::new();
+    let pixels = image::RgbaImage::from_fn(8, 8, |x, _| {
+        image::Rgba([90, 90, 90, if x < 4 { 40 } else { 255 }])
+    });
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(pixels.as_raw(), 8, 8, image::ExtendedColorType::Rgba8)
+        .unwrap();
+    let mut vp8l = webp_chunk(&lossless, b"VP8L").unwrap();
+    vp8l[4] &= !0x10;
+    let before = riff(&[
+        vp8x_chunk(0, 8, 8),
+        riff_chunk(b"ALPH", &half),
+        riff_chunk(b"VP8L", &vp8l),
+    ]);
+    let err = compress(&dir, "before.webp", &before, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    assert_eq!(err.user_message, "before.webp isn't a readable WEBP image.");
 }
 
 #[test]
