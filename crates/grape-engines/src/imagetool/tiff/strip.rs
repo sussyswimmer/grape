@@ -1321,7 +1321,10 @@ impl Walk<'_> {
     /// SHORT, another type ignored ("Wrong data type"), and of more than
     /// one value the first ("tag trimmed"), as Pillow reads the first of
     /// them, when they're in the entry; of more than it holds, libtiff
-    /// reads the entry's offset as the value, so such a one says nothing.
+    /// reads the first two bytes of the entry's offset field, in the file's
+    /// byte order (65535 for values at 0xFFFF in a little-endian file, 0 in
+    /// a big-endian one), where Pillow reads the first value: such a one
+    /// says nothing.
     /// Its entries all agree, or the file was refused ([`twice_kept`]).
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
         let uncalibrated = exif
@@ -2121,8 +2124,9 @@ mod tests {
         // where it did. Of more than one value it reads the first ("tag
         // trimmed"), as Pillow reads (65535, 1), when they're in the entry
         // (two in a classic file, four in a BigTIFF); of more, it reads the
-        // entry's offset as the value (130 for values at 130), which isn't
-        // a ColorSpace: such a one says nothing.
+        // first two bytes of the entry's offset field (130 for values at 130
+        // in a little-endian file), which aren't a ColorSpace: such a one
+        // says nothing.
         for (big, space, back) in [
             (false, V::Long(vec![0xFFFF]), false),
             (false, V::Bytes(8, vec![0xFF, 0xFF]), false),
