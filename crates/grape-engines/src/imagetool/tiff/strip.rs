@@ -211,8 +211,9 @@ enum Count {
 }
 
 /// The [`Shape`] of a tag Remove Metadata keeps, or `None` for one it
-/// drops. A tag libtiff doesn't know (TransferRange, GDAL's no-data value)
-/// takes the type TIFF 6 or GDAL gives it.
+/// drops. A tag libtiff 4.5.1 doesn't know (TransferRange, CFAPattern and
+/// CFARepeatPatternDim, GDAL's no-data value), which it reads in any type
+/// and shows whole, takes the type TIFF 6, TIFF/EP or GDAL gives it.
 fn shape(tag: u16) -> Option<Shape> {
     use Count::*;
     use Shape::*;
@@ -1200,13 +1201,14 @@ impl Walk<'_> {
         Ok(counted && (!bytes || self.bytes(entry)?))
     }
 
-    /// Whether each value of `entry`, of a tag libtiff reads as bytes (ICC,
-    /// CFAPattern), is one as libtiff reads it (`TIFFReadDirEntryByteArray`):
-    /// of BYTE, ASCII or UNDEFINED it is; of a wider integer type when it's
-    /// from 0 to 255, as libtiff ignores the tag otherwise ("Incorrect
-    /// value"), and a tag dump shows the values whole. Those are read to
-    /// see, [`MAX_SCAN`] bytes at a time, from what the walk may read of
-    /// them.
+    /// Whether each value of `entry`, of a tag kept as bytes (ICC, which
+    /// libtiff reads so, and CFAPattern, which TIFF/EP types so), is one as
+    /// libtiff reads ICC (`TIFFReadDirEntryByteArray`): of BYTE, ASCII or
+    /// UNDEFINED it is; of a wider integer type when it's from 0 to 255, as
+    /// libtiff ignores an ICC profile otherwise ("Incorrect value"), and a
+    /// tag dump shows the values whole (libtiff doesn't know CFAPattern,
+    /// and shows it whole in any type). Those are read to see,
+    /// [`MAX_SCAN`] bytes at a time, from what the walk may read of them.
     fn bytes(&mut self, entry: &Entry) -> Result<bool, Error> {
         let Some((size, signed)) = integer(entry.kind).filter(|_| entry.kind != 1) else {
             return Ok(true);
@@ -1326,9 +1328,10 @@ impl Walk<'_> {
     /// one value the first ("tag trimmed"), as Pillow reads the first of
     /// them, when they're in the entry; of more than it holds, libtiff
     /// reads the first two bytes of the entry's offset field, in the file's
-    /// byte order (65535 for values at 0xFFFF in a little-endian file, 0 in
-    /// a big-endian one), where Pillow reads the first value: such a one
-    /// says nothing.
+    /// byte order (65535 for values at an offset whose low 16 bits are
+    /// 0xFFFF in a little-endian file, 0xFFFF or 0x1FFFF, and 0 for values
+    /// at 0xFFFF in a big-endian one), where Pillow reads the first value:
+    /// such a one says nothing.
     /// Its entries all agree, or the file was refused ([`twice_kept`]).
     fn adobe_rgb(&mut self, exif: &Meta) -> Result<bool, Error> {
         let uncalibrated = exif
@@ -1935,9 +1938,9 @@ mod tests {
             (1, 255, V::Short(vec![1])),
             (1, 290, V::Short(vec![2])),
             (1, 291, V::Short(vec![7; 256])),
-            // An ICC profile and a CFAPattern in a wider type, past a
-            // byte, which libtiff ignores, and a negative SSHORT; one of
-            // 40,000 SHORTs, its last past a byte.
+            // An ICC profile in a wider type, past a byte, which libtiff
+            // ignores, a CFAPattern so, which it shows whole, and a
+            // negative SSHORT; one of 40,000 SHORTs, its last past a byte.
             (
                 1,
                 34675,
