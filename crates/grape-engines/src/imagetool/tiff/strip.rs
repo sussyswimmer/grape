@@ -24,8 +24,11 @@
 //!   when that's a sequential frame's only one, and through every scan
 //!   otherwise), and JPEG data Grape can't check, whose segments or scans
 //!   run past the first [`MAX_SCAN`] bytes read before that, that's
-//!   hierarchical, or JPEGTables libtiff can't read as bytes; ImageJ and
-//!   OME files, whose layout is in their description.
+//!   hierarchical, or JPEGTables libtiff can't read as bytes; metadata
+//!   inside WebP data (Compression 50001: an EXIF or XMP chunk, [`chunks`]),
+//!   and WebP data whose chunks run on past the first [`MAX_CHUNKS`];
+//!   JPEG 2000 and JPEG XL data, which Grape can't check yet ([`unread`]);
+//!   ImageJ and OME files, whose layout is in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -60,11 +63,29 @@ const MAX_IRB: u64 = 16 << 20;
 /// How much of each JPEG block (and of its tables) is read for segments.
 const MAX_SCAN: u64 = 64 * 1024;
 
+/// The most chunks of a WebP block read for EXIF and XMP: past them, what
+/// follows can't be seen.
+const MAX_CHUNKS: usize = 64;
+
 /// Why a file with metadata inside its JPEG data is refused.
 const IN_DATA: &str = "has metadata inside its image data, which Grape can't remove yet.";
 
-/// Why a file whose JPEG data runs on past what's read of it is refused.
-const UNCHECKED: &str = "has JPEG data Grape can't check for metadata yet.";
+/// Why a file whose `kind` of data (JPEG, WebP, JPEG 2000, JPEG XL) runs on
+/// past what's read of it, or isn't read at all, is refused.
+fn unchecked(kind: &str) -> String {
+    format!("has {kind} data Grape can't check for metadata yet.")
+}
+
+/// The kind of data of Compression `n` that Grape can't check for metadata
+/// yet, whose boxes may hold Exif and XMP: JPEG 2000 (Aperio's 33003 to
+/// 33005, and 34712) and JPEG XL (50002).
+fn unread(n: u64) -> Option<&'static str> {
+    match n {
+        33003..=33005 | 34712 => Some("JPEG 2000"),
+        50002 => Some("JPEG XL"),
+        _ => None,
+    }
+}
 
 /// Why an ImageJ or OME file is refused.
 const DESCRIBED: &str = "keeps its layout in its description, so Remove Metadata would break it.";
@@ -141,27 +162,30 @@ impl Plan {
                 }
             }
         }
-        // JPEG data, and JPEGTables in any IFD: libtiff hands any IFD's to
-        // whoever asks for them.
-        let jpegs: Vec<&Ifd> = tiff
+        if let Some(kind) = tiff.ifds().iter().find_map(|ifd| unread(ifd.compression)) {
+            return Err(Error::Refused(unchecked(kind)));
+        }
+        // JPEG and WebP data, and JPEGTables in any IFD: libtiff hands any
+        // IFD's to whoever asks for them.
+        let scanned: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| ifd.compression == 7 || ifd.get(347).is_some())
+            .filter(|ifd| matches!(ifd.compression, 7 | 50001) || ifd.get(347).is_some())
             .collect();
-        if !jpegs.is_empty() {
+        if !scanned.is_empty() {
             let shared = tiff.shared();
-            let mut scan = JpegScan {
+            let mut scan = Scan {
                 order,
                 shared: &shared,
                 scanned: vec![false; shared.len()],
                 tables: HashSet::new(),
                 left,
             };
-            for ifd in jpegs {
+            for ifd in scanned {
                 match scan.seen(r, ifd)? {
-                    Seen::Clean => {}
-                    Seen::Metadata => return Err(Error::Refused(IN_DATA.into())),
-                    Seen::Unseen => return Err(Error::Refused(UNCHECKED.into())),
+                    (Seen::Clean, _) => {}
+                    (Seen::Metadata, _) => return Err(Error::Refused(IN_DATA.into())),
+                    (Seen::Unseen, kind) => return Err(Error::Refused(unchecked(kind))),
                 }
             }
         }
@@ -347,10 +371,10 @@ fn look(
     head(r, entry, max)
 }
 
-/// The scan of JPEG data for metadata, which reads a block, or a
+/// The scan of JPEG and WebP data for metadata, which reads a block, or a
 /// JPEGTables value, once however many times IFDs list it: one that held
 /// metadata, or couldn't be seen through, ended the scan.
-struct JpegScan<'s> {
+struct Scan<'s> {
     /// The file's byte order, which JPEGTables are read in.
     order: Order,
     /// The blocks listed more than once, sorted ([`Tiff::shared`]).
@@ -363,26 +387,30 @@ struct JpegScan<'s> {
     left: u64,
 }
 
-impl JpegScan<'_> {
-    /// What the JPEG data of `ifd` holds, as [`segments`] reads its
-    /// JPEGTables, as libtiff reads them ([`tables`]), and each of its
-    /// blocks when it's compression 7: the first that isn't clean.
-    /// JPEGTables libtiff can't read as bytes can't be seen through.
-    fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<Seen, Error> {
+impl Scan<'_> {
+    /// What the JPEG or WebP data of `ifd` holds: its JPEGTables, as
+    /// libtiff reads them ([`tables`]), as [`segments`] reads them; then
+    /// each of its blocks, of compression 7 as [`segments`] reads them, of
+    /// 50001 as [`chunks`] does. The first that isn't clean, with the kind
+    /// of data it is; JPEGTables libtiff can't read as bytes can't be seen
+    /// through.
+    fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<(Seen, &'static str), Error> {
         let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
         if let Some(entry) = ifd.get(347).filter(fresh) {
             let Some((tables, whole)) = tables(r, entry, self.order, MAX_SCAN, &mut self.left)?
             else {
-                return Ok(Seen::Unseen);
+                return Ok((Seen::Unseen, "JPEG"));
             };
             let seen = segments(&tables, whole);
             if seen != Seen::Clean {
-                return Ok(seen);
+                return Ok((seen, "JPEG"));
             }
         }
-        if ifd.compression != 7 {
-            return Ok(Seen::Clean);
-        }
+        let kind = match ifd.compression {
+            7 => "JPEG",
+            50001 => "WebP",
+            _ => return Ok((Seen::Clean, "JPEG")),
+        };
         let mut buf = Vec::new();
         for block in ifd.blocks.iter().filter(|b| b.len > 0) {
             let shared = self.shared.binary_search(block).ok();
@@ -391,15 +419,57 @@ impl JpegScan<'_> {
                     continue;
                 }
             }
-            buf.resize(block.len.min(MAX_SCAN) as usize, 0);
-            read_at(r, block.offset, &mut buf)?;
-            let seen = segments(&buf, block.len <= MAX_SCAN);
+            let seen = if ifd.compression == 50001 {
+                chunks(r, *block)?
+            } else {
+                buf.resize(block.len.min(MAX_SCAN) as usize, 0);
+                read_at(r, block.offset, &mut buf)?;
+                segments(&buf, block.len <= MAX_SCAN)
+            };
             if seen != Seen::Clean {
-                return Ok(seen);
+                return Ok((seen, kind));
             }
         }
-        Ok(Seen::Clean)
+        Ok((Seen::Clean, kind))
     }
+}
+
+/// What the WebP data at `block` holds ([`Seen`]), as libwebp reads its
+/// RIFF container: an EXIF or XMP chunk is metadata. The chunks are read by
+/// their headers alone, one after the other to the container's end (or
+/// the block's, when that's sooner: what's past either isn't read), at
+/// most [`MAX_CHUNKS`] of them: past them, what follows can't be seen. A
+/// block that isn't a RIFF container (a bare VP8 or VP8L bitstream, which
+/// libwebp reads too) has no chunks, and is clean.
+fn chunks(r: &mut dyn In, block: Block) -> Result<Seen, Error> {
+    let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    let mut head = [0; 12];
+    if block.len < head.len() as u64 {
+        return Ok(Seen::Clean);
+    }
+    read_at(r, block.offset, &mut head)?;
+    if &head[..4] != b"RIFF" || &head[8..] != b"WEBP" {
+        return Ok(Seen::Clean);
+    }
+    let end = block.len.min(8 + le(&head[4..8]));
+    let mut at = 12;
+    for _ in 0..MAX_CHUNKS {
+        if at + 8 > end {
+            return Ok(Seen::Clean);
+        }
+        let mut chunk = [0; 8];
+        read_at(r, block.offset + at, &mut chunk)?;
+        if matches!(&chunk[..4], b"EXIF" | b"XMP ") {
+            return Ok(Seen::Metadata);
+        }
+        let size = le(&chunk[4..]);
+        at += 8 + size + (size & 1);
+    }
+    Ok(if at + 8 > end {
+        Seen::Clean
+    } else {
+        Seen::Unseen
+    })
 }
 
 /// The first `max` bytes of the JPEGTables `entry` holds as libtiff 4.5
@@ -453,17 +523,17 @@ fn tables(
     Ok(Some((each, n == entry.count)))
 }
 
-/// What JPEG data holds, as far as it's read.
+/// What JPEG or WebP data holds, as far as it's read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seen {
-    /// No APP1, APP13 or COM segment, or not segments Grape knows, which
-    /// are copied as they are.
+    /// No APP1, APP13 or COM segment (no EXIF or XMP chunk), or not
+    /// segments (chunks) Grape knows, which are copied as they are.
     Clean,
-    /// An APP1, APP13 or COM segment.
+    /// An APP1, APP13 or COM segment, or an EXIF or XMP chunk.
     Metadata,
     /// What Grape can't see through: segments or scans that run on past
-    /// what was read, or a hierarchical JPEG (DHP), whose frames after the
-    /// first it doesn't read.
+    /// what was read, a hierarchical JPEG (DHP), whose frames after the
+    /// first it doesn't read, or WebP chunks past [`MAX_CHUNKS`].
     Unseen,
 }
 
@@ -1435,8 +1505,107 @@ mod tests {
         ] {
             for compression in [7, 1] {
                 let file = with_tables(false, compression, tables.clone());
-                assert_eq!(why(&file).as_deref(), Some(UNCHECKED), "{tables:?}");
+                assert_eq!(
+                    why(&file).as_deref(),
+                    Some(unchecked("JPEG").as_str()),
+                    "{tables:?}"
+                );
             }
+        }
+    }
+
+    /// A RIFF chunk, padded to even.
+    fn chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let len = (data.len() as u32).to_le_bytes();
+        let pad = vec![0; data.len() % 2];
+        [&fourcc[..], &len, data, &pad].concat()
+    }
+
+    /// A WebP file of `chunks`.
+    fn webp(chunks: &[Vec<u8>]) -> Vec<u8> {
+        let body = chunks.concat();
+        let len = (body.len() as u32 + 4).to_le_bytes();
+        [&b"RIFF"[..], &len, b"WEBP", &body].concat()
+    }
+
+    /// A gray 8 × 8 page of one strip, `data`, of `compression`.
+    fn coded_page(compression: u16, data: Vec<u8>) -> Vec<u8> {
+        let mut page = gray(8, 8, 8, vec![B::Data(data)]);
+        page.tags.push((259, V::Short(vec![compression])));
+        Builder::new(b'I', false, vec![page]).build()
+    }
+
+    #[test]
+    fn webp_data_with_exif_or_xmp_chunks_is_refused_and_plain_webp_kept() {
+        let refused = |file: &[u8]| match plan(file) {
+            Ok(_) => None,
+            Err(Error::Refused(why)) => Some(why),
+            Err(e) => panic!("{e:?}"),
+        };
+        // A lossless picture's chunk (the bytes don't matter), in an
+        // extended file as Pillow writes it with its Exif and XMP after
+        // the picture, each alone, and with neither.
+        let vp8x = chunk(b"VP8X", &[0x0C, 0, 0, 0, 7, 0, 0, 7, 0, 0]);
+        let vp8l = chunk(b"VP8L", &[0x2F, 7, 0xC0, 0x01, 0, 0x55, 0x55, 0x55]);
+        let exif = chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0");
+        let xmp = chunk(b"XMP ", b"<x:xmpmeta>a secret</x:xmpmeta>");
+        let icc = chunk(b"ICCP", &[1; 20]);
+        for (chunks, metadata) in [
+            (
+                vec![vp8x.clone(), vp8l.clone(), exif.clone(), xmp.clone()],
+                true,
+            ),
+            (vec![vp8x.clone(), vp8l.clone(), exif.clone()], true),
+            (
+                vec![vp8x.clone(), icc.clone(), vp8l.clone(), xmp.clone()],
+                true,
+            ),
+            (vec![vp8x.clone(), icc.clone(), vp8l.clone()], false),
+            (vec![vp8l.clone()], false),
+        ] {
+            let file = coded_page(50001, webp(&chunks));
+            let want = metadata.then_some(IN_DATA.to_string());
+            assert_eq!(refused(&file), want, "{chunks:?}");
+        }
+        // A bare bitstream, which libwebp reads too, has no chunks; a
+        // chunk past the container's end, or past the strip's, isn't read.
+        assert_eq!(refused(&coded_page(50001, vp8l[8..].to_vec())), None);
+        let mut short = webp(std::slice::from_ref(&vp8l));
+        short.extend(&exif);
+        assert_eq!(refused(&coded_page(50001, short)), None);
+        let mut cut = webp(&[vp8l.clone(), exif.clone()]);
+        cut[16..20].copy_from_slice(&1_000u32.to_le_bytes());
+        assert_eq!(refused(&coded_page(50001, cut)), None);
+        // 64 chunks, read by their headers, then an EXIF: past what's read.
+        let many = [vec![chunk(b"ABCD", b"x"); 64], vec![exif.clone()]].concat();
+        let file = coded_page(50001, webp(&many));
+        let unseen = "has WebP data Grape can't check for metadata yet.";
+        assert_eq!(refused(&file).as_deref(), Some(unseen));
+        let fewer = [vec![chunk(b"ABCD", b"x"); 63], vec![exif]].concat();
+        let file = coded_page(50001, webp(&fewer));
+        assert_eq!(refused(&file).as_deref(), Some(IN_DATA));
+        // Another codec's strip isn't read as WebP.
+        let file = coded_page(50000, webp(&[vp8l, xmp]));
+        assert_eq!(refused(&file), None);
+    }
+
+    #[test]
+    fn jpeg_2000_and_jpeg_xl_data_is_refused_as_unchecked() {
+        for (compression, kind) in [
+            (33003, "JPEG 2000"),
+            (33004, "JPEG 2000"),
+            (33005, "JPEG 2000"),
+            (34712, "JPEG 2000"),
+            (50002, "JPEG XL"),
+        ] {
+            let file = coded_page(compression, b"\0\0\0\x0CjP  \r\n\x87\n".to_vec());
+            let Err(Error::Refused(why)) = plan(&file) else {
+                panic!("{compression} not refused")
+            };
+            assert_eq!(
+                why,
+                format!("has {kind} data Grape can't check for metadata yet.")
+            );
         }
     }
 
@@ -1568,7 +1737,7 @@ mod tests {
         let Err(Error::Refused(why)) = plan(&jpeg_page(jpeg(&far), None)) else {
             panic!("not refused")
         };
-        assert_eq!(why, UNCHECKED);
+        assert_eq!(why, unchecked("JPEG"));
     }
 
     #[test]
@@ -1583,7 +1752,7 @@ mod tests {
             let Err(Error::Refused(why)) = plan(&file) else {
                 panic!("not refused")
             };
-            assert_eq!(why, UNCHECKED);
+            assert_eq!(why, unchecked("JPEG"));
         }
     }
 
@@ -1606,7 +1775,7 @@ mod tests {
         let Err(Error::Refused(why)) = plan(&jpeg_page(stream, None)) else {
             panic!("not refused")
         };
-        assert_eq!(why, UNCHECKED);
+        assert_eq!(why, unchecked("JPEG"));
     }
 
     #[test]
@@ -1625,7 +1794,7 @@ mod tests {
             let Err(Error::Refused(why)) = plan(&file) else {
                 panic!("not refused")
             };
-            assert_eq!(why, UNCHECKED);
+            assert_eq!(why, unchecked("JPEG"));
         }
         // A stream that ends there, read whole, has nothing after it.
         assert_eq!(segments(b"\xFF\xD8\xFF\xE2\0\x10ab", true), Seen::Clean);

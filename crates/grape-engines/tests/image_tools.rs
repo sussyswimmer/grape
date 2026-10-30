@@ -1138,6 +1138,67 @@ fn remove_metadata_refuses_metadata_in_jpeg_tables_whatever_type_holds_them() {
 }
 
 #[test]
+fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
+    // The review's file: RGB 64 × 48 in one strip of WebP (50001), a
+    // lossless WebP with an Exif (a Make and a GPS IFD) and an XMP chunk,
+    // which libtiff decodes: Remove Metadata published it with both.
+    let mut lossless = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let vp8l = lossless[12..].to_vec();
+    let vp8x = |flags: u8| riff_chunk(b"VP8X", &[flags, 0, 0, 0, 63, 0, 0, 47, 0, 0]);
+    let tiff = |compression: u64, data: &[u8]| {
+        let entries = vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+            (259, 3, le(compression, 2)),
+            (262, 3, le(2, 2)),
+            (277, 3, le(3, 2)),
+            (278, 4, le(48, 4)),
+        ];
+        one_strip(false, data, entries)
+    };
+    let dir = TestDir::new("strip-tiff-webp");
+    let tagged = riff(&[
+        vp8x(0x0C),
+        vp8l.clone(),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    let err = strip(&dir, "tagged.tif", &tiff(50001, &tagged)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "tagged.tif has metadata inside its image data, which Grape can't remove yet."
+    );
+    // Without them, it's stripped, the strip byte for byte.
+    let plain = riff(&[vp8x(0), vp8l]);
+    let outcome = strip(&dir, "plain.tif", &tiff(50001, &plain)).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(out.windows(plain.len()).any(|w| w == plain));
+    // JPEG 2000 and JPEG XL data, whose boxes Grape doesn't read yet.
+    for (name, compression, kind) in [
+        ("j2k.tif", 34712, "JPEG 2000"),
+        ("aperio.tif", 33005, "JPEG 2000"),
+        ("jxl.tif", 50002, "JPEG XL"),
+    ] {
+        let err = strip(&dir, name, &tiff(compression, b"\0\0\0\x0CjP  ")).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has {kind} data Grape can't check for metadata yet.")
+        );
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;
