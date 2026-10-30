@@ -533,7 +533,7 @@ fn added(
 /// writer makes or that would point at nothing, its Exif and GPS IFDs,
 /// and its SubIFDs.
 fn dir(ifd: Ifd, log: &mut Log) -> Result<Dir, Error> {
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(ifd.entries.len());
     for entry in &ifd.entries {
         match entry.tag {
             // Made again by the writer, or below.
@@ -575,7 +575,7 @@ fn meta_dir(meta: &Meta, log: &mut Log) -> Result<Option<Dir>, Error> {
         ));
         return Ok(None);
     }
-    let mut fields = Vec::new();
+    let mut fields = Vec::with_capacity(meta.entries.len());
     for entry in &meta.entries {
         if entry.tag != 40965 {
             fields.extend(field(entry, log)?);

@@ -350,7 +350,9 @@ pub(crate) fn write_with(
 
     // The IFDs, laid out before they're written. A value copied from the
     // source, or shared, is written once however many entries hold it, as
-    // blocks are.
+    // blocks are: only those that more than one entry copies from the
+    // source are looked up, and noted where they went.
+    let repeated = repeated_values(&nodes, layout.word());
     let mut copied: HashMap<Key, u64> = HashMap::new();
     let mut pos = out.at;
     for node in &mut nodes {
@@ -359,14 +361,13 @@ pub(crate) fn write_with(
         pos = sum(pos, layout.ifd_len(node.entries.len() as u64))?;
         let mut values = Vec::with_capacity(node.entries.len());
         for (_, kind, count, made) in &node.entries {
-            let field = match made {
-                Made::Field(n) => Some(&node.dir.fields[*n]),
-                Made::Written(n) => Some(&node.written.fields[*n]),
-                _ => None,
-            };
+            let field = field_of(node, made);
             let len = field.map_or_else(|| type_size(*kind).unwrap_or(8) * count, Field::len);
             let key = match field.map(|f| &f.value) {
-                Some(&Data::Source { offset, len }) => Some(Key::Source(offset, len)),
+                Some(&Data::Source { offset, len }) => repeated
+                    .binary_search(&(offset, len))
+                    .is_ok()
+                    .then_some(Key::Source(offset, len)),
                 Some(Data::Shared(bytes)) => Some(Key::Shared(Arc::as_ptr(bytes))),
                 _ => None,
             };
@@ -509,25 +510,67 @@ fn add<'d>(dir: &'d Dir, nodes: &mut Vec<Node<'d>>, layout: Layout) -> usize {
     at
 }
 
+/// The field `made` takes its value from, of `node`'s, if one.
+fn field_of<'n>(node: &'n Node, made: &Made) -> Option<&'n Field> {
+    match made {
+        Made::Field(n) => node.dir.fields.get(*n),
+        Made::Written(n) => node.written.fields.get(*n),
+        _ => None,
+    }
+}
+
+/// The values out of line (longer than `word`) that more than one entry
+/// of `nodes` copies from the same place in the source, sorted, each once.
+/// Every such value's place is held, sorted, only while they're found;
+/// each list is counted before it's collected, so it's held at its size.
+fn repeated_values(nodes: &[Node], word: u64) -> Vec<(u64, u64)> {
+    let sources = || {
+        nodes.iter().flat_map(|node| {
+            let fields = node.entries.iter().filter_map(|e| field_of(node, &e.3));
+            fields.filter_map(|field| match field.value {
+                Data::Source { offset, len } if len > word => Some((offset, len)),
+                _ => None,
+            })
+        })
+    };
+    let mut all = Vec::with_capacity(sources().count());
+    all.extend(sources());
+    all.sort_unstable();
+    // The first of each run of two or more.
+    let firsts = || {
+        let mut last = None;
+        all.windows(2).filter_map(move |w| {
+            let first = w[0] == w[1] && last != Some(w[0]);
+            last = Some(w[0]);
+            first.then_some(w[0])
+        })
+    };
+    let mut repeated = Vec::with_capacity(firsts().count());
+    repeated.extend(firsts());
+    repeated
+}
+
 /// `node`'s entries, sorted by tag, once its blocks are written: the ones
 /// the writer makes, the fields its blocks' writing gave, then its own,
-/// each tag once.
+/// each tag once; held at their number, never grown past it.
 fn entries(node: &mut Node) -> Vec<(u16, u16, u64, Made)> {
+    fn fields(
+        fields: &[Field],
+        made: fn(usize) -> Made,
+    ) -> impl Iterator<Item = (u16, u16, u64, Made)> + '_ {
+        let fields = fields.iter().enumerate();
+        fields.map(move |(n, f)| (f.tag, f.kind, f.count, made(n)))
+    }
     let made = std::mem::take(&mut node.made);
     let mut tags: HashSet<u16> = [273, 279, 324, 325, 330].into();
     tags.extend(made.iter().map(|m| m.0));
-    let fields = |fields: &[Field], made: fn(usize) -> Made| {
-        fields
-            .iter()
-            .enumerate()
-            .map(move |(n, f)| (f.tag, f.kind, f.count, made(n)))
-            .collect::<Vec<_>>()
-    };
-    let mut entries: Vec<(u16, u16, u64, Made)> = fields(&node.written.fields, Made::Written)
-        .into_iter()
-        .chain(fields(&node.dir.fields, Made::Field))
-        .filter(|e| tags.insert(e.0))
-        .collect();
+    let (written, own) = (&node.written.fields, &node.dir.fields);
+    let mut entries = Vec::with_capacity(written.len() + own.len() + made.len());
+    entries.extend(
+        fields(written, Made::Written)
+            .chain(fields(own, Made::Field))
+            .filter(|e| tags.insert(e.0)),
+    );
     entries.extend(made);
     entries.sort_by_key(|e| e.0);
     entries
