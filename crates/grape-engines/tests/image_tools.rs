@@ -663,12 +663,10 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
     // (1) and BitsPerSample in types libtiff reads too (signed but not
     // negative, a LONG8 a classic file holds out of line, or a value for
     // each sample), or with an ImageDepth, which strips don't count, it
-    // reads the same: refused, as the plain file is. So is one whose
-    // layout libtiff can't read, an ImageWidth typed IFD, as which strips
-    // it would read can't be told.
+    // reads the same: refused, as the plain file is.
     let mut short = [3_000; 10];
     short[3] = 10;
-    let cases: [(&str, bool, Vec<Change>); 21] = [
+    let cases: [(&str, bool, Vec<Change>); 20] = [
         ("plain.tif", false, vec![]),
         ("sshort-none.tif", false, vec![(259, 8, le(1, 2))]),
         ("slong-none.tif", false, vec![(259, 9, le(1, 4))]),
@@ -693,7 +691,6 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
         ("sbyte-rows.tif", false, vec![(278, 6, le(100, 1))]),
         ("sshort-planar.tif", false, vec![(284, 8, le(1, 2))]),
         ("slong8-planar.tif", true, vec![(284, 17, le(1, 8))]),
-        ("ifd-width.tif", false, vec![(256, 13, le(300, 4))]),
     ];
     let dir = TestDir::new("tiff-typed");
     for (name, big, changes) in cases {
@@ -713,6 +710,46 @@ fn both_tiff_tools_read_a_tiffs_layout_as_libtiff_reads_it() {
                 err.user_message,
                 format!(
                     "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
+                )
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+    // One whose layout libtiff can't read, an ImageWidth typed IFD, as
+    // which strips it would read can't be told; and ten whole strips of 10
+    // rows, each counted right, with a PhotometricInterpretation libtiff
+    // can't read (a RATIONAL, which it ignores), as how other readers size
+    // them can't be told: refused as a layout Grape can't read.
+    let rows = (278, 3, le(10, 2));
+    for (name, bytes) in [
+        (
+            "ifd-width.tif",
+            typed_tiff(false, &short, &[(256, 13, le(300, 4))]),
+        ),
+        (
+            "rational-photometric.tif",
+            typed_tiff(
+                false,
+                &[3_000; 10],
+                &[rows.clone(), (262, 5, [le(1, 4), le(1, 4)].concat())],
+            ),
+        ),
+    ] {
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(
+                err.kind,
+                ErrorKind::NotYetSupported,
+                "{name}: {}",
+                err.detail
+            );
+            assert_eq!(
+                err.user_message,
+                format!(
+                    "{name} says how its image data is laid out in a way Grape can't read yet."
                 )
             );
             fs::remove_file(dir.join(name)).unwrap();
@@ -740,7 +777,8 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
     // which it reads as one tile of 304 × 100), or one tile of the picture
     // (a TileLength beside a RowsPerStrip): Pillow reads the whole picture
     // from it, and the 10 bytes copied would leave it no picture. Both
-    // tools refuse it.
+    // tools refuse it: as a layout Grape can't read where libtiff counts
+    // none, and as wrong-size where it reads one that's short.
     let picture: Vec<u8> = (0..30_000).map(|i| (i % 251) as u8).collect();
     let size = [
         (256, 4, le(300, 4)),
@@ -750,16 +788,20 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
         (279, 4, le(10, 4)),
     ];
     let dir = TestDir::new("tiff-lone-unsized");
-    for (name, layout) in [
-        ("rows.tif", vec![(278, 4, le(0xFFFF_FFFE, 4))]),
-        ("width.tif", vec![(322, 3, le(304, 2))]),
+    let unread = "says how its image data is laid out in a way Grape can't read yet.";
+    let missized = "says the wrong size for some of its image data, which Grape can't rewrite yet.";
+    for (name, layout, why) in [
+        ("rows.tif", vec![(278, 4, le(0xFFFF_FFFE, 4))], unread),
+        ("width.tif", vec![(322, 3, le(304, 2))], unread),
         (
             "rows-width.tif",
             vec![(278, 3, le(100, 2)), (322, 3, le(304, 2))],
+            missized,
         ),
         (
             "rows-length.tif",
             vec![(278, 3, le(100, 2)), (323, 3, le(100, 2))],
+            missized,
         ),
     ] {
         let bytes = one_strip(false, &picture, [&size[..], &layout].concat());
@@ -774,11 +816,62 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
                 "{name}: {}",
                 err.detail
             );
+            assert_eq!(err.user_message, format!("{name} {why}"));
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[test]
+fn both_tiff_tools_read_strip_offsets_and_counts_as_libtiff_reads_them() {
+    // A gray picture right after the header as one strip, its
+    // StripOffsets and StripByteCounts typed SBYTE (a 10 × 10 picture, so
+    // its count fits), SSHORT, SLONG or SLONG8 (300 × 100): libtiff reads
+    // them, with a warning, and both tools take them. Typed IFD or IFD8,
+    // libtiff can't read the file ("Incompatible type"), and both tools
+    // refuse it as damaged.
+    let file = |big: bool, kind: u16, size: usize, (w, h): (u64, u64)| {
+        let header = if big { 16 } else { 8 };
+        let picture: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
+        let entries = vec![
+            (256, 4, le(w, 4)),
+            (257, 4, le(h, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (273, kind, le(header, size)),
+            (278, 4, le(h, 4)),
+            (279, kind, le(w * h, size)),
+        ];
+        laid_out(big, &picture, entries)
+    };
+    let dir = TestDir::new("tiff-typed-strips");
+    for (name, big, kind, size, picture) in [
+        ("sbyte.tif", false, 6, 1, (10, 10)),
+        ("sshort.tif", false, 8, 2, (300, 100)),
+        ("slong.tif", false, 9, 4, (300, 100)),
+        ("slong8.tif", true, 17, 8, (300, 100)),
+    ] {
+        let bytes = file(big, kind, size, picture);
+        let outcome = strip(&dir, name, &bytes).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        if picture.0 == 300 {
+            let op = compress_op(grape_core::CompressPreset::High);
+            let outcome = run(&dir, name, &bytes, op).unwrap();
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        }
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    for (name, big, kind, size) in [("ifd.tif", false, 13, 4), ("ifd8.tif", true, 18, 8)] {
+        let bytes = file(big, kind, size, (300, 100));
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
             assert_eq!(
                 err.user_message,
-                format!(
-                    "{name} says the wrong size for some of its image data, which Grape can't rewrite yet."
-                )
+                format!("{name} isn't a readable TIFF image.")
             );
             fs::remove_file(dir.join(name)).unwrap();
         }
@@ -944,6 +1037,529 @@ fn remove_metadata_refuses_metadata_in_a_jpeg_strip_whatever_type_says_so() {
                 err.user_message
             );
         }
+    }
+}
+
+#[test]
+fn both_tiff_tools_refuse_two_compressions_that_disagree() {
+    // A 16 × 16 gray JPEG strip with an Exif APP1 that holds a GPS IFD,
+    // under two Compression entries, 5 then 7: libtiff reads the first,
+    // Pillow the last, and Grape read it as LZW, never scanned it, and
+    // published it with the GPS in it. Both tools refuse it; the same
+    // entry twice reads as one.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let data = with(&jpeg, &[exif(1)], b"");
+    let tags = |compressions: &[u64]| {
+        let mut tags = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+        ];
+        tags.extend(compressions.iter().map(|&n| (259, 3, le(n, 2))));
+        tags
+    };
+    let dir = TestDir::new("tiff-two-compressions");
+    let bytes = one_strip(false, &data, tags(&[5, 7]));
+    for op in [
+        Operation::tool(ToolKey::RemoveMetadata),
+        compress_op(grape_core::CompressPreset::High),
+    ] {
+        let err = run(&dir, "two.tif", &bytes, op).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            "two.tif says how it's compressed in a way Grape can't read yet."
+        );
+    }
+    let err = strip(&dir, "same.tif", &one_strip(false, &data, tags(&[7, 7]))).unwrap_err();
+    assert!(
+        err.user_message
+            .starts_with("same.tif has metadata inside its image data"),
+        "{}",
+        err.user_message
+    );
+}
+
+#[test]
+fn remove_metadata_refuses_jpeg_tables_with_more_than_tables() {
+    // The review's layouts, around a 16 × 16 gray JPEG strip's tables (SOI,
+    // DQT, DHT and EOI): an APP1 (a Make and a GPS IFD) after their EOI,
+    // stray bytes before their SOI, and an APP1 before it. libjpeg reads
+    // none of it, and Remove Metadata kept it.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    // The encoder's DQT and DHT segments, as tables.
+    let sos = jpeg.windows(2).position(|w| w == [0xFF, 0xDA]).unwrap();
+    let mut tables = vec![0xFF, 0xD8];
+    let mut at = 2;
+    while at < sos {
+        let len = usize::from(u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]));
+        if matches!(jpeg[at + 1], 0xDB | 0xC4) {
+            tables.extend_from_slice(&jpeg[at..at + 2 + len]);
+        }
+        at += 2 + len;
+    }
+    tables.extend([0xFF, 0xD9]);
+    let entries = |tables: Vec<u8>| {
+        vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (347, 7, tables),
+        ]
+    };
+    let dir = TestDir::new("strip-tiff-loose-tables");
+    let outcome = strip(
+        &dir,
+        "tables.tif",
+        &one_strip(false, &jpeg, entries(tables.clone())),
+    )
+    .unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])]);
+    for (name, tables) in [
+        ("after.tif", [&tables[..], &exif(1)].concat()),
+        ("stray.tif", [&b"\0\0\0\0"[..], &tables].concat()),
+        ("before.tif", [&exif(1)[..], &tables].concat()),
+    ] {
+        let err = strip(&dir, name, &one_strip(false, &jpeg, entries(tables))).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has JPEG data Grape can't check for metadata yet.")
+        );
+    }
+}
+
+#[test]
+fn remove_metadata_writes_photoshops_kept_resources_back_without_their_names() {
+    // A resolution resource named with a secret, and a path whose name
+    // the clipping path names: the resolution kept its name, and so did
+    // the path.
+    let res = |id: u16, name: &str, data: &[u8]| {
+        let mut r = b"8BIM".to_vec();
+        r.extend(id.to_be_bytes());
+        r.push(u8::try_from(name.len()).unwrap());
+        r.extend(name.as_bytes());
+        if name.len().is_multiple_of(2) {
+            r.push(0);
+        }
+        r.extend(u32::try_from(data.len()).unwrap().to_be_bytes());
+        r.extend(data);
+        if data.len() % 2 == 1 {
+            r.push(0);
+        }
+        r
+    };
+    let irb = [
+        res(1005, "Jane Doe's scan", &[0, 72, 0, 0, 0, 1, 0, 1]),
+        res(2000, "Jane's outline", &[0; 26]),
+        res(2999, "", b"\x0EJane's outline\0\0"),
+    ]
+    .concat();
+    let entries = vec![
+        (256, 4, le(4, 4)),
+        (257, 4, le(4, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (34377, 7, irb),
+    ];
+    let dir = TestDir::new("strip-tiff-irb-names");
+    let outcome = strip(&dir, "named.tif", &one_strip(false, &[9; 16], entries)).unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])]);
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(!out.windows(4).any(|w| w == b"Jane"));
+    let kept = [
+        res(1005, "", &[0, 72, 0, 0, 0, 1, 0, 1]),
+        res(2000, "Path 1", &[0; 26]),
+        res(2999, "", b"\x06Path 1\0\0"),
+    ]
+    .concat();
+    assert!(out.windows(kept.len()).any(|w| w == kept));
+}
+
+#[test]
+fn remove_metadata_refuses_metadata_in_jpeg_tables_whatever_type_holds_them() {
+    // The review's file: a 16 × 16 gray JPEG strip whose JPEGTables hold
+    // SOI, an Exif APP1 (its Make and a GPS IFD) and EOI, each byte a
+    // value of a type libtiff reads them in, SHORT among them: libtiff
+    // hands the stream on, and Remove Metadata published it with the GPS.
+    // Refused, as UNDEFINED tables are.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let tables = [&b"\xFF\xD8"[..], &exif(1), b"\xFF\xD9"].concat();
+    let dir = TestDir::new("strip-tiff-typed-tables");
+    for (name, big, kind, size) in [
+        ("undefined.tif", false, 7, 1),
+        ("ascii.tif", false, 2, 1),
+        ("short.tif", false, 3, 2),
+        ("sshort.tif", false, 8, 2),
+        ("long.tif", false, 4, 4),
+        ("slong.tif", false, 9, 4),
+        ("long8.tif", true, 16, 8),
+        ("slong8.tif", true, 17, 8),
+    ] {
+        let value = tables
+            .iter()
+            .flat_map(|&b| le(u64::from(b), size))
+            .collect();
+        let entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (347, kind, value),
+        ];
+        let err = strip(&dir, name, &one_strip(big, &jpeg, entries)).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
+        );
+    }
+}
+
+#[test]
+fn remove_metadata_refuses_metadata_in_a_webp_strip_and_data_it_cant_check() {
+    // The review's file: RGB 64 × 48 in one strip of WebP (50001), a
+    // lossless WebP with an Exif (a Make and a GPS IFD) and an XMP chunk,
+    // which libtiff decodes: Remove Metadata published it with both.
+    let mut lossless = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let vp8l = lossless[12..].to_vec();
+    let vp8x = |flags: u8| riff_chunk(b"VP8X", &[flags, 0, 0, 0, 63, 0, 0, 47, 0, 0]);
+    let tiff = |compression: u64, data: &[u8]| {
+        let entries = vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+            (259, 3, le(compression, 2)),
+            (262, 3, le(2, 2)),
+            (277, 3, le(3, 2)),
+            (278, 4, le(48, 4)),
+        ];
+        one_strip(false, data, entries)
+    };
+    let dir = TestDir::new("strip-tiff-webp");
+    let tagged = riff(&[
+        vp8x(0x0C),
+        vp8l.clone(),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    let err = strip(&dir, "tagged.tif", &tiff(50001, &tagged)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "tagged.tif has metadata inside its image data, which Grape can't remove yet."
+    );
+    // The review's other two: a container whose size covers only its
+    // VP8L, its EXIF and XMP chunks after it in the strip; and its ALPH,
+    // EXIF and VP8L chunks with no RIFF header, which libtiff decodes as
+    // libwebp walks them. Both were published with their Exif.
+    let mut short = riff(std::slice::from_ref(&vp8l));
+    short.extend(riff_chunk(b"EXIF", &exif(1)[10..]));
+    short.extend(riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"));
+    let headless = [
+        riff_chunk(b"ALPH", &[0; 9]),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        vp8l.clone(),
+    ]
+    .concat();
+    for (name, data) in [("short.tif", short), ("headless.tif", headless)] {
+        let err = strip(&dir, name, &tiff(50001, &data)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+        assert_eq!(
+            err.user_message,
+            format!("{name} has WebP data Grape can't check for metadata yet.")
+        );
+    }
+    // Without them, it's stripped, the strip byte for byte.
+    let plain = riff(&[vp8x(0), vp8l]);
+    let outcome = strip(&dir, "plain.tif", &tiff(50001, &plain)).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert!(out.windows(plain.len()).any(|w| w == plain));
+    // JPEG 2000, JPEG XL, JPEG XR and PNG data, whose boxes and chunks
+    // Grape doesn't read yet, and data of a code it doesn't know.
+    for (name, compression, kind) in [
+        ("j2k.tif", 34712, "JPEG 2000"),
+        ("aperio.tif", 33005, "JPEG 2000"),
+        ("jxl.tif", 50002, "JPEG XL"),
+        ("dng-jxl.tif", 52546, "JPEG XL"),
+        ("jxr.tif", 34934, "JPEG XR"),
+        ("ndpi-jxr.tif", 22610, "JPEG XR"),
+        ("png.tif", 34933, "PNG"),
+        ("raw.tif", 34713, "image"),
+    ] {
+        let err = strip(&dir, name, &tiff(compression, b"\0\0\0\x0CjP  ")).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has {kind} data Grape can't check for metadata yet.")
+        );
+    }
+}
+
+#[test]
+fn remove_metadata_reads_jpeg_data_under_any_code_that_holds_it() {
+    // The review's file: a 16 × 16 gray JPEG strip holding an Exif APP1
+    // (a Make and a GPS IFD), under DNG's lossy JPEG code (34892) in a
+    // TIFF that isn't a DNG, or Bio-Formats' (33007): published with
+    // them, as only Compression 7 was read.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let tagged = with(&jpeg, &[exif(1)], b"");
+    let dir = TestDir::new("strip-tiff-jpeg-codes");
+    for (name, compression) in [("lossy.tif", 34892), ("alt.tif", 33007), ("leaf.tif", 99)] {
+        let entries = |compression: u64| {
+            vec![
+                (256, 4, le(16, 4)),
+                (257, 4, le(16, 4)),
+                (258, 3, le(8, 2)),
+                (259, 3, le(compression, 2)),
+                (262, 3, le(1, 2)),
+                (278, 4, le(16, 4)),
+            ]
+        };
+        let err = strip(&dir, name, &one_strip(false, &tagged, entries(compression))).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
+        );
+        // A plain one is stripped, its strip byte for byte.
+        let plain = format!("plain-{name}");
+        let outcome = strip(&dir, &plain, &one_strip(false, &jpeg, entries(compression))).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        assert!(out.windows(jpeg.len()).any(|w| w == jpeg), "{name}");
+    }
+}
+
+#[test]
+fn remove_metadata_reads_a_strip_a_webp_and_a_jpeg_page_share_as_both() {
+    // The review's files: two RGB 64 × 48 pages listing one strip, the
+    // first WebP (50001) and the second JPEG (7, YCbCr 1 × 1), the strip
+    // a JPEG with an Exif APP1 (a Make and a GPS IFD); and the other way
+    // round, the strip a lossless WebP with EXIF and XMP chunks. The strip
+    // was read once, as the first page's kind, and passed the second's
+    // check: published with its Exif, or its chunks.
+    let jpeg = with(&plain_jpeg(), &[exif(1)], b"");
+    let mut lossless = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless)
+        .write_image(gradient().as_raw(), 64, 48, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let webp = riff(&[
+        riff_chunk(b"VP8X", &[0x0C, 0, 0, 0, 63, 0, 0, 47, 0, 0]),
+        lossless[12..].to_vec(),
+        riff_chunk(b"EXIF", &exif(1)[10..]),
+        riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>"),
+    ]);
+    let tags = |compression: u64| {
+        let mut entries = vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+            (259, 3, le(compression, 2)),
+            (262, 3, le(if compression == 7 { 6 } else { 2 }, 2)),
+            (277, 3, le(3, 2)),
+            (278, 4, le(48, 4)),
+        ];
+        if compression == 7 {
+            entries.push((530, 3, [le(1, 2), le(1, 2)].concat()));
+        }
+        entries
+    };
+    let dir = TestDir::new("strip-tiff-shared-kinds");
+    // (A JPEG stream isn't WebP data Grape can check, now, either.)
+    for (name, data, first, second, why) in [
+        (
+            "webp-then-jpeg.tif",
+            &jpeg,
+            50001,
+            7,
+            "has WebP data Grape can't check for metadata yet.",
+        ),
+        (
+            "jpeg-then-webp.tif",
+            &webp,
+            7,
+            50001,
+            "has metadata inside its image data, which Grape can't remove yet.",
+        ),
+    ] {
+        // The second page lists the first's strip, at 8.
+        let mut shared = tags(second);
+        shared.extend([(273, 4, le(8, 4)), (279, 4, le(data.len() as u64, 4))]);
+        let file = paged(&[(tags(first), data.clone()), (shared, Vec::new())]);
+        let err = strip(&dir, name, &file).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(err.user_message, format!("{name} {why}"));
+    }
+}
+
+#[test]
+fn remove_metadata_keeps_the_tags_a_tiffs_codec_needs() {
+    // The review's files: LERC strips with Deflate or ZSTD inside
+    // (`tiffcp -c lerc:s1` or `lerc:s2`), which libtiff decodes as
+    // LercParameters (50674) says. It went, reported as other fields, and
+    // the output couldn't be decoded ("lerc_getBlobInfo() failed").
+    let dir = TestDir::new("strip-tiff-lerc");
+    for (name, inside) in [("deflate.tif", 1), ("zstd.tif", 2)] {
+        let params = [le(4, 4), le(inside, 4)].concat();
+        let entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(34887, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (50674, 4, params.clone()),
+        ];
+        let outcome = strip(&dir, name, &one_strip(false, &[9; 40], entries)).unwrap();
+        assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![])], "{name}");
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        // Its entry: LONG, 2, then where its 8 bytes are.
+        let entry = [&50674_u16.to_le_bytes()[..], &le(4, 2), &le(2, 4)].concat();
+        let at = out.windows(8).position(|w| w == entry).unwrap();
+        let value =
+            usize::try_from(u32::from_le_bytes(out[at + 8..at + 12].try_into().unwrap())).unwrap();
+        assert_eq!(out[value..value + 8], params, "{name}");
+    }
+}
+
+#[test]
+fn remove_metadata_refuses_a_tag_it_keeps_listed_twice_differently() {
+    // The review's files: a palette page whose ColorMap is listed twice,
+    // red then blue (libtiff reads red, Pillow blue), which Remove
+    // Metadata cut to the first, so Pillow's pixels changed; and a second
+    // description that's ImageJ's, which went unread.
+    let mut red = vec![0; 768];
+    let mut blue = vec![0; 768];
+    for i in 0..4 {
+        red[i] = 0xFFFF;
+        blue[512 + i] = 0xFFFF;
+    }
+    let map = |colors: &[u64]| colors.iter().flat_map(|&c| le(c, 2)).collect::<Vec<u8>>();
+    let tags = |more: Vec<Change>| {
+        let mut entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(3, 2)),
+            (278, 4, le(16, 4)),
+        ];
+        entries.extend(more);
+        entries
+    };
+    let pixels: Vec<u8> = (0..256).map(|i| (i % 4) as u8).collect();
+    let dir = TestDir::new("strip-tiff-twice");
+    let twice = tags(vec![(320, 3, map(&red)), (320, 3, map(&blue))]);
+    let err = strip(&dir, "twice.tif", &one_strip(false, &pixels, twice)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "twice.tif lists a tag twice with different values, which Grape can't rewrite yet."
+    );
+    let imagej = tags(vec![
+        (320, 3, map(&red)),
+        (270, 2, b"A scan\0".to_vec()),
+        (270, 2, b"ImageJ=1.54f\nimages=3\n\0".to_vec()),
+    ]);
+    let err = strip(&dir, "imagej.tif", &one_strip(false, &pixels, imagej)).unwrap_err();
+    assert_eq!(
+        err.user_message,
+        "imagej.tif keeps its layout in its description, so Remove Metadata would break it."
+    );
+}
+
+#[test]
+fn both_tiff_tools_refuse_two_exif_pointers_that_disagree() {
+    // Both tools follow the first entry, where Pillow follows the last:
+    // Compress moved the first's Exif IFD alone, and Remove Metadata
+    // read only it for the DCF Exif and the report.
+    let entries = vec![
+        (256, 4, le(4, 4)),
+        (257, 4, le(4, 4)),
+        (258, 3, le(8, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (34665, 4, le(0, 4)),
+        (34665, 4, le(8, 4)),
+    ];
+    let file = one_strip(false, &[9; 16], entries);
+    let dir = TestDir::new("tiff-two-exif-pointers");
+    for (name, result) in [
+        ("strip.tif", strip(&dir, "strip.tif", &file)),
+        (
+            "compress.tif",
+            compress(
+                &dir,
+                "compress.tif",
+                &file,
+                grape_core::CompressPreset::Balanced,
+            ),
+        ),
+    ] {
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!(
+                "{name} lists a tag twice with different values, which Grape can't rewrite yet."
+            )
+        );
     }
 }
 
@@ -1626,6 +2242,42 @@ fn scan_tiff(big: bool) -> Vec<u8> {
 }
 
 #[test]
+fn compress_keeps_both_of_a_tiffs_descriptions_in_their_order() {
+    // tifffile's file: RGB 64 × 48, uncompressed, its description, then
+    // its shape as a second ImageDescription, which tifffile reads the
+    // series by. Compress kept only the first.
+    let description = b"a description of the scan\0".to_vec();
+    let shape = b"{\"shape\": [48, 64, 3]}\0".to_vec();
+    let entries = vec![
+        (256, 4, le(64, 4)),
+        (257, 4, le(48, 4)),
+        (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+        (262, 3, le(2, 2)),
+        (270, 2, description.clone()),
+        (270, 2, shape.clone()),
+        (277, 3, le(3, 2)),
+        (278, 4, le(48, 4)),
+    ];
+    let dir = TestDir::new("compress-tiff-two-descriptions");
+    let file = one_strip(false, gradient().as_raw(), entries);
+    let outcome = compress(
+        &dir,
+        "shaped.tif",
+        &file,
+        grape_core::CompressPreset::Balanced,
+    )
+    .unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    let at = |value: &[u8]| out.windows(value.len()).position(|w| w == value);
+    // Both, the description first: written in the entries' order.
+    let (Some(first), Some(second)) = (at(&description), at(&shape)) else {
+        panic!("a description went")
+    };
+    assert!(first < second);
+    assert_eq!(tiff_pages(&out), tiff_pages(&file));
+}
+
+#[test]
 fn compress_deflates_every_page_of_a_tiff_and_keeps_its_tags() {
     use tiff::tags::Tag;
     let dir = TestDir::new("compress-tiff");
@@ -1861,6 +2513,148 @@ fn compress_says_why_it_copied_a_tiff_page_when_it_ends_no_change() {
             " bytes; IFD 0, copied as it is (its compression is 7), took the output past 95 % \
              of the source"
         ) && !err.detail.contains("IFD 0 copied"),
+        "{}",
+        err.detail
+    );
+}
+
+/// A classic TIFF of `pages`, each its entries ([`Change`]s, sorted here,
+/// its strip's offset and count added unless they list them) and its one
+/// strip: each strip, then its IFD and the values its entries can't hold,
+/// the IFDs chained. The first strip is at 8.
+fn paged(pages: &[(Vec<Change>, Vec<u8>)]) -> Vec<u8> {
+    let mut file = b"II*\0\0\0\0\0".to_vec();
+    // Where the offset of the next IFD goes.
+    let mut link = 4;
+    for (entries, strip) in pages {
+        let at = file.len() as u64;
+        file.extend(strip);
+        file.resize(file.len().next_multiple_of(2), 0);
+        let mut entries = entries.clone();
+        if !entries.iter().any(|e| e.0 == 273) {
+            entries.extend([(273, 4, le(at, 4)), (279, 4, le(strip.len() as u64, 4))]);
+        }
+        entries.sort_by_key(|e| e.0);
+        let ifd = file.len() as u64;
+        file[link..link + 4].copy_from_slice(&le(ifd, 4));
+        let mut value_at = ifd + 2 + 12 * entries.len() as u64 + 4;
+        file.extend(le(entries.len() as u64, 2));
+        let mut values: Vec<u8> = Vec::new();
+        for (tag, kind, value) in &entries {
+            let size = match kind {
+                3 | 8 => 2,
+                4 | 9 => 4,
+                _ => 1,
+            };
+            file.extend(tag.to_le_bytes());
+            file.extend(kind.to_le_bytes());
+            file.extend(le(value.len() as u64 / size, 4));
+            if value.len() <= 4 {
+                let mut field = value.clone();
+                field.resize(4, 0);
+                file.extend(field);
+            } else {
+                file.extend(le(value_at, 4));
+                value_at += value.len() as u64;
+                values.extend(value);
+            }
+        }
+        link = file.len();
+        file.extend([0; 4]);
+        file.extend(values);
+        file.resize(file.len().next_multiple_of(2), 0);
+    }
+    file
+}
+
+#[test]
+fn compress_says_first_which_tiff_pages_it_took_back_when_the_file_passes_95_percent() {
+    // The review's files: twenty pages of 64 × 48 gray JPEG, then one of
+    // uncompressed noise; and that noise first, then twenty of 16 × 16
+    // JPEG. The noise grows recoded and is copied as it is, and the
+    // finished file passes 95 % of the source: the detail said why each
+    // JPEG page was copied, the first 16, and the one useful line was one
+    // of "… and 5 more". It comes first now, whole.
+    let jpeg_page = |w: u32, h: u32| {
+        let gray = image::GrayImage::from_fn(w, h, |x, y| image::Luma([(x * 3 + y * 5) as u8]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 90)
+            .encode_image(&gray)
+            .unwrap();
+        let entries = vec![
+            (256, 4, le(u64::from(w), 4)),
+            (257, 4, le(u64::from(h), 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(u64::from(h), 4)),
+        ];
+        (entries, jpeg)
+    };
+    let mut x: u32 = 0x1234_5678;
+    let noise: Vec<u8> = (0..64 * 48)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x >> 24) as u8
+        })
+        .collect();
+    let noisy = (
+        vec![
+            (256, 4, le(64, 4)),
+            (257, 4, le(48, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(48, 4)),
+        ],
+        noise,
+    );
+    let last = [vec![jpeg_page(64, 48); 20], vec![noisy.clone()]].concat();
+    let first = [vec![noisy], vec![jpeg_page(16, 16); 20]].concat();
+    let dir = TestDir::new("compress-tiff-taken-back");
+    for (name, pages, n) in [("last.tif", last, 20), ("first.tif", first, 0)] {
+        let err =
+            compress(&dir, name, &paged(&pages), grape_core::CompressPreset::High).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+        let (head, log) = err.detail.split_once("; ").unwrap();
+        assert!(head.contains(" bytes from "), "{}", err.detail);
+        assert!(
+            log.starts_with(&format!("IFD {n} copied as it is: its blocks came to ")),
+            "{}",
+            err.detail
+        );
+        assert!(
+            log.ends_with("its compression is 7; and 4 more"),
+            "{}",
+            err.detail
+        );
+    }
+}
+
+#[test]
+fn compress_copies_a_tiff_page_pillow_would_fail_on_once_deflated() {
+    // RGB 40 × 24 in one uncompressed strip, its RowsPerStrip 2^31: Pillow
+    // 12.3 reads it, and failed on Compress's Deflate output of it
+    // ("decoder error -9"), where libtiff reads both. It's copied as it
+    // is, so there's nothing to recode.
+    let picture: Vec<u8> = (0..40 * 24 * 3).map(|i| (i % 251) as u8).collect();
+    let entries = vec![
+        (256, 4, le(40, 4)),
+        (257, 4, le(24, 4)),
+        (258, 3, [le(8, 2), le(8, 2), le(8, 2)].concat()),
+        (262, 3, le(2, 2)),
+        (277, 3, le(3, 2)),
+        (278, 4, le(1 << 31, 4)),
+    ];
+    let dir = TestDir::new("compress-tiff-rows");
+    let bytes = one_strip(false, &picture, entries);
+    let err = compress(&dir, "rows.tif", &bytes, grape_core::CompressPreset::High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NoChange, "{}", err.detail);
+    assert!(
+        err.detail.contains(
+            "IFD 0 copied as it is: its RowsPerStrip is 2147483648, more than readers take"
+        ),
         "{}",
         err.detail
     );

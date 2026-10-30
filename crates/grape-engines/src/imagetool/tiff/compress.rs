@@ -18,7 +18,11 @@
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
 //!   out wrong); layouts that can't be sized; blocks listed as strips
 //!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
-//!   TileLength, or as tiles it reads as strips; tiles more than one slice
+//!   TileLength, or as tiles it reads as strips; strips whose RowsPerStrip
+//!   is 2^31 or more but isn't 2^32 − 1 (Pillow reads them uncompressed
+//!   and fails on them as Deflate), and a
+//!   PhotometricInterpretation libtiff doesn't know ([`known`]), which
+//!   readers read by guesswork; tiles more than one slice
 //!   deep (TileDepth), whose slices after the first libtiff's tile size
 //!   leaves out and a recode would lose; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
@@ -28,7 +32,8 @@
 //!   once, its whole size unless it's copied already, even when it's
 //!   recoded already, which costs the recode nothing), or whose recode
 //!   takes the output past 95 % of the source, whose blocks written
-//!   already are taken back ([`Recoder`]).
+//!   already are taken back ([`Recoder`]; the log says why for the first
+//!   [`MAX_BACK`] of them, first, and how many more).
 //! - **Predictor:** a source's own (2, 3 or another) on LZW or Deflate
 //!   stays, its decoded bytes deflated as they are. Otherwise (None and
 //!   PackBits, whatever their 317 says, since libtiff applies a predictor
@@ -37,8 +42,9 @@
 //!   sample is 8 or 16 bits, the sample format is 1 or 2 (or not given)
 //!   and a row is at most [`MAX_ROW`], a pixel's samples apart, or 1 when
 //!   the planes are; and 317 is 1 when it's given.
-//! - **Kept:** every other tag, with the Exif, GPS and Interop IFDs moved
-//!   with their values; XMP, IPTC, Photoshop's resources and layers,
+//! - **Kept:** every other tag, a tag listed more than once each time, in
+//!   the source's order, with the Exif, GPS and Interop IFDs moved with
+//!   their values; XMP, IPTC, Photoshop's resources and layers,
 //!   GeoTIFF, ICC, Orientation, a MakerNote (as bytes). FreeOffsets and
 //!   FreeByteCounts (288, 289) go, as they'd point at nothing; so does an
 //!   entry, or an Exif, GPS or Interop IFD, that can't be read. Any other
@@ -94,6 +100,10 @@ const MAX_PENDING_BYTES: u64 = 4 << 20;
 
 /// The most reasons the log keeps.
 const MAX_LOG: usize = 16;
+
+/// The most reasons the log keeps of IFDs taken back: the app logs a
+/// detail as one line, and 65,536 of them came to 5.9 MB.
+const MAX_BACK: usize = 64;
 
 /// The most places kept of shared blocks written in a way other than the
 /// one they were first written in (another recipe's, or copied as they
@@ -175,15 +185,31 @@ pub(crate) struct Plan {
 }
 
 /// Reasons for the log: the line that ended the job, if one did, first
-/// and always kept; then the first [`MAX_LOG`] others, and how many more.
+/// and always kept; then why each IFD Compress recoded, or tried to, was
+/// taken back and copied as it is (at most one an IFD), which says why
+/// the output came to what it did, at the 95 % stop while it's written or
+/// when it's done, the first [`MAX_BACK`] and how many more; then the
+/// first [`MAX_LOG`] others, and how many more.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Log {
     end: Option<String>,
+    back: Vec<String>,
+    back_more: usize,
     lines: Vec<String>,
     more: usize,
 }
 
 impl Log {
+    /// Adds why an IFD was taken back and copied as it is, ahead of the
+    /// others.
+    fn back(&mut self, line: String) {
+        if self.back.len() < MAX_BACK {
+            self.back.push(line);
+        } else {
+            self.back_more += 1;
+        }
+    }
+
     fn add(&mut self, line: String) {
         if self.lines.len() < MAX_LOG {
             self.lines.push(line);
@@ -208,7 +234,7 @@ impl Log {
 
     /// `detail`, then what the log holds, if anything.
     pub(crate) fn after(&self, detail: String) -> String {
-        if self.end.is_none() && self.lines.is_empty() {
+        if self.end.is_none() && self.back.is_empty() && self.lines.is_empty() {
             detail
         } else {
             format!("{detail}; {self}")
@@ -218,9 +244,13 @@ impl Log {
 
 impl std::fmt::Display for Log {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let back_more =
+            (self.back_more > 0).then(|| format!("and {} more taken back", self.back_more));
         let all: Vec<&str> = self
             .end
             .iter()
+            .chain(&self.back)
+            .chain(&back_more)
             .chain(&self.lines)
             .map(String::as_str)
             .collect();
@@ -485,6 +515,28 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
             geometry.blocks()
         ));
     }
+    // A RowsPerStrip of 2^31 or more, but for 2^32 - 1: Pillow 12.3 reads
+    // such a page uncompressed and fails on it compressed ("decoder error
+    // -9"). Fewer past the picture's rows it reads, as libtiff and
+    // ImageMagick read any, and the tiff crate writes them for any picture
+    // of under 1 MB.
+    if let Some(rows) = geometry.rows_past() {
+        return copy(format!(
+            "its RowsPerStrip is {rows}, more than readers take"
+        ));
+    }
+    // A PhotometricInterpretation libtiff doesn't know: readers read such
+    // a page by guesswork, which may not hold once it's Deflate. One that
+    // can't be read, the geometry refused.
+    let photometric = match ifd.get(262) {
+        Some(entry) => number(r, entry, order, SHORT)?,
+        None => None,
+    };
+    if let Some(photometric) = photometric.filter(|&n| !known(n)) {
+        return copy(format!(
+            "its PhotometricInterpretation is {photometric}, which libtiff doesn't know"
+        ));
+    }
     // An empty block (GDAL's sparse tiles) isn't Deflate data: the tiff
     // crate and Pillow fail on it once the IFD says Deflate.
     if ifd.blocks.iter().any(|b| b.len == 0) {
@@ -508,7 +560,7 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
         // Already in the decoded bytes, which stay as they are.
         None
     } else {
-        let added = added(r, ifd, order, &geometry, left)?;
+        let added = added(r, ifd, order, photometric, &geometry, left)?;
         if added.is_some() {
             fields.push(short(317, 2));
         } else if ifd.get(317).is_some() {
@@ -524,19 +576,23 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
     })
 }
 
-/// The predictor Compress adds to `ifd`'s unpredicted samples, if it adds
-/// one ([module docs](self)).
+/// The PhotometricInterpretations libtiff 4.5 knows
+/// (`_TIFFGetMaxColorChannels`): 0 to 6, 8 to 10, CFA (32803), LogL and
+/// LogLuv (32844, 32845).
+fn known(photometric: u64) -> bool {
+    matches!(photometric, 0..=6 | 8..=10 | 32803 | 32844 | 32845)
+}
+
+/// The predictor Compress adds to `ifd`'s unpredicted samples, of
+/// `photometric`, if it adds one ([module docs](self)).
 fn added(
     r: &mut dyn In,
     ifd: &Ifd,
     order: Order,
+    photometric: Option<u64>,
     geometry: &Geometry,
     left: &mut u64,
 ) -> Result<Option<Predictor>, Error> {
-    let photometric = match ifd.get(262) {
-        Some(entry) => number(r, entry, order, SHORT)?,
-        None => None,
-    };
     if !matches!(photometric, Some(0 | 1 | 2 | 5))
         || geometry.subsampled
         || !matches!(geometry.bits, 8 | 16)
@@ -1143,7 +1199,7 @@ impl Blocks for Recoder<'_> {
                                 );
                                 self.log.end(line, None);
                             }
-                            _ => self.log.add(format!("IFD {n} copied as it is: {why}")),
+                            _ => self.log.back(format!("IFD {n} copied as it is: {why}")),
                         }
                         copied?
                     }
@@ -1748,6 +1804,48 @@ mod tests {
     }
 
     #[test]
+    fn a_page_readers_may_fail_on_once_deflated_is_copied_as_it_is() {
+        // Gray 40 × 24 in one uncompressed strip.
+        let plain = |rows: u32, photometric: u16| {
+            let mut page = gray(40, 24, rows, vec![B::Data(smooth(40 * 24))]);
+            page.tags[3] = (262, V::Short(vec![photometric]));
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let copied = |file: &[u8]| match planned(file).unwrap() {
+            Planned::Nothing(why) => Some(why),
+            Planned::Plan(_) => None,
+        };
+        // A RowsPerStrip of 2^31 or more: Pillow 12.3 reads such a page
+        // uncompressed, and fails on it as Deflate ("decoder error -9").
+        // 2^32 - 1, the whole picture, is recoded, and so are fewer past
+        // its rows, which every reader reads (the tiff crate writes them).
+        for rows in [1 << 31, 0xFF00_0018] {
+            let why = copied(&plain(rows, 1));
+            let want = format!("its RowsPerStrip is {rows}, more than readers take");
+            assert!(
+                why.as_ref().is_some_and(|why| why.contains(&want)),
+                "{rows}: {why:?}"
+            );
+        }
+        for rows in [24, 25, (1 << 31) - 1, u32::MAX] {
+            assert_eq!(copied(&plain(rows, 1)), None, "{rows}");
+        }
+        // A PhotometricInterpretation libtiff doesn't know: ImageMagick
+        // reads such a page by guesswork, which a recode may not keep.
+        for photometric in [7, 11, 255, 34892, 65535] {
+            let why = copied(&plain(24, photometric));
+            let want = format!("its PhotometricInterpretation is {photometric}");
+            assert!(
+                why.as_ref().is_some_and(|why| why.contains(&want)),
+                "{photometric}: {why:?}"
+            );
+        }
+        for photometric in [0, 1, 2, 3, 4, 5, 8, 9, 10, 32803, 32844, 32845] {
+            assert_eq!(copied(&plain(24, photometric)), None, "{photometric}");
+        }
+    }
+
+    #[test]
     fn fill_order_2_jpeg_fax_and_other_codecs_are_copied_as_they_are() {
         let mut reversed = coded(1, smooth(64));
         reversed.tags.push((266, V::Short(vec![2])));
@@ -1894,6 +1992,48 @@ mod tests {
             assert_eq!(values(&file, &ga.entries), values(&out, &gb.entries));
             assert_eq!(decoded(&out), decoded(&file));
         }
+    }
+
+    #[test]
+    fn a_tag_listed_twice_is_written_twice_in_its_order() {
+        // tifffile writes the description it's given, then the picture's
+        // shape as a second ImageDescription, which it reads the series
+        // by; of a ColorMap listed twice libtiff reads the first and
+        // Pillow the last, and of a ColorSpace twice in an Exif IFD
+        // libtiff reads the last. Compress kept the first of each.
+        let mut first = page(32, 8, 4, 8, &smooth(256));
+        first.tags.extend([
+            (270, V::Ascii("a description of the scan")),
+            (270, V::Ascii("{\"shape\": [8, 32]}")),
+            (320, V::Short(vec![1; 768])),
+            (320, V::Short(vec![2; 768])),
+        ]);
+        first.exif = Some(vec![
+            (0xA001, V::Short(vec![1])),
+            (0xA001, V::Short(vec![0xFFFF])),
+        ]);
+        let file = Builder::new(b'M', false, vec![first]).build();
+        let out = compressed(&file);
+        let (a, b) = (read(&file), read(&out));
+        let listed = |file: &[u8], entries: &[Entry], tag: u16| -> Vec<Vec<u8>> {
+            let mut r = Cursor::new(file);
+            let all = entries.iter().filter(|e| e.tag == tag);
+            all.map(|e| read_value(&mut r, e, 1 << 20).unwrap().unwrap())
+                .collect()
+        };
+        let (pa, pb) = (&a.pages[0], &b.pages[0]);
+        for tag in [270, 320] {
+            let source = listed(&file, &pa.entries, tag);
+            assert_eq!(source.len(), 2);
+            assert_eq!(listed(&out, &pb.entries, tag), source, "{tag}");
+        }
+        let (ea, eb) = (pa.exif.as_ref().unwrap(), pb.exif.as_ref().unwrap());
+        assert_eq!(
+            listed(&out, &eb.entries, 0xA001),
+            listed(&file, &ea.entries, 0xA001)
+        );
+        assert_eq!(listed(&out, &eb.entries, 0xA001).len(), 2);
+        assert_eq!(decoded(&out), decoded(&file));
     }
 
     #[test]
@@ -2255,6 +2395,47 @@ mod tests {
             ) && log.ends_with("IFD 15 copied as it is: its compression is 7; and 4 more"),
             "{log}"
         );
+    }
+
+    #[test]
+    fn the_lines_of_ifds_taken_back_come_first_the_first_64_of_them() {
+        // Twenty pages copied as they are (JPEG: twenty lines, four past
+        // the log's 16) and a page of noise, which grows recoded and is
+        // taken back, last or first: its line comes first, whole, and the
+        // copies' follow.
+        let jpegs = || (0..20).map(|n| coded(7, format!("JPEG data {n:02}").into_bytes()));
+        let noisy = || page(64, 48, 48, 8, &noise(64 * 48));
+        for (pages, n) in [
+            (jpegs().chain([noisy()]).collect::<Vec<_>>(), 20),
+            ([noisy()].into_iter().chain(jpegs()).collect(), 0),
+        ] {
+            let file = Builder::new(b'I', false, pages).build();
+            let plan = plan(&file);
+            let (_, wrote) =
+                written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+            let log = wrote.log.to_string();
+            let back = format!("IFD {n} copied as it is: its blocks came to ");
+            assert!(log.starts_with(&back), "{log}");
+            assert!(log.ends_with("its compression is 7; and 4 more"), "{log}");
+        }
+        // At 65,536 pages taken back, every line made a 5.9 MB detail,
+        // which the app logs as one line: the first 64 are kept, and how
+        // many more.
+        let mut log = Log::default();
+        for n in 0..65_536 {
+            log.back(format!(
+                "IFD {n} copied as it is: its blocks came to 99 bytes recoded"
+            ));
+        }
+        log.add("IFD 70000 copied as it is: its compression is 7".into());
+        let text = log.to_string();
+        assert!(text.len() < 8 * 1024, "{}", text.len());
+        assert!(text.starts_with("IFD 0 copied as it is: "), "{text}");
+        assert!(
+            text.contains("IFD 63 copied as it is: its blocks came to 99 bytes recoded; and 65472 more taken back; IFD 70000 copied as it is: its compression is 7"),
+            "{text}"
+        );
+        assert!(!text.contains("IFD 64 "), "{text}");
     }
 
     #[test]

@@ -92,6 +92,8 @@ pub(crate) struct Geometry {
     height: u64,
     /// The pixel rows of a full block: RowsPerStrip, or the tile's length.
     rows: u64,
+    /// RowsPerStrip as the IFD says it, 2^32 − 1 when it's absent.
+    rows_per_strip: u64,
     /// The pixel rows a row of the block covers: 1, or the vertical
     /// subsampling.
     per_row: u64,
@@ -215,10 +217,18 @@ impl Geometry {
             tiled,
             height,
             rows,
+            rows_per_strip: dims.rows_per_strip(),
             per_row: v,
             per_plane,
             planes,
         }))
+    }
+
+    /// Strips' RowsPerStrip, when it's 2^31 or more but isn't 2^32 − 1,
+    /// "the whole picture": more than Pillow takes in compressed strips.
+    pub(crate) fn rows_past(&self) -> Option<u64> {
+        let rows = self.rows_per_strip;
+        (!self.tiled && rows >= 1 << 31 && rows != u64::from(u32::MAX)).then_some(rows)
     }
 
     /// How many blocks the layout has.
