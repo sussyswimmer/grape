@@ -1514,6 +1514,31 @@ fn remove_metadata_keeps_a_tag_only_as_libtiff_reads_it() {
 }
 
 #[test]
+fn remove_metadata_refuses_a_layout_tag_libtiff_cant_read() {
+    // The review's file: an 8 × 8 page of 32-bit float gray whose
+    // SampleFormat is FLOAT 3.0, which libtiff can't load and Pillow reads
+    // as float. Dropped, both read integers: it's refused instead.
+    let dir = TestDir::new("strip-tiff-layout");
+    let samples: Vec<u8> = (0..64)
+        .flat_map(|i| (i as f32 / 4.0).to_le_bytes())
+        .collect();
+    let entries = vec![
+        (256, 4, le(8, 4)),
+        (257, 4, le(8, 4)),
+        (258, 3, le(32, 2)),
+        (262, 3, le(1, 2)),
+        (278, 4, le(8, 4)),
+        (339, 11, 3.0_f32.to_le_bytes().to_vec()),
+    ];
+    let err = strip(&dir, "float.tif", &one_strip(false, &samples, entries)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "float.tif says how its image data is laid out in a way Grape can't read yet."
+    );
+}
+
+#[test]
 fn remove_metadata_refuses_a_tag_it_keeps_listed_twice_differently() {
     // The review's files: a palette page whose ColorMap is listed twice,
     // red then blue (libtiff reads red, Pillow blue), which Remove

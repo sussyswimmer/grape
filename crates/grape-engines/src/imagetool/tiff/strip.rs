@@ -35,8 +35,11 @@
 //!   EXIF or XMP chunk, [`chunks`]), and WebP data Grape can't check: not
 //!   a RIFF container that covers its block, nor a bare bitstream, or
 //!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
-//!   files, whose layout is in their description (any of an IFD's); and a
-//!   tag it keeps listed twice with different values ([`twice_kept`]).
+//!   files, whose layout is in their description (any of an IFD's); a
+//!   tag it keeps listed twice with different values ([`twice_kept`]);
+//!   and a tag a page's layout or samples are read from, or a palette
+//!   page's ColorMap, in a type or count libtiff doesn't read
+//!   ([`LAID_OUT`]), which can't go as other fields.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -48,7 +51,7 @@ use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
     integer, number, read_value, samples, Alike, Block, Entry, Ifd, Layout, Meta, Order, Tiff,
-    Value, SHORT, TWICE,
+    Value, SHORT, TWICE, UNREAD_LAYOUT,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -199,6 +202,9 @@ enum Count {
     PerSample,
     /// One for each sample.
     Samples,
+    /// At most one for each sample, none included, as `setExtraSamples`
+    /// takes them.
+    UpToSamples,
 }
 
 /// The [`Shape`] of a tag Remove Metadata keeps, or `None` for one it
@@ -242,11 +248,11 @@ fn shape(tag: u16) -> Option<Shape> {
         // CFARepeatPatternDim; TransferRange's six.
         297 | 321 | 336 | 530 | 33421 => Ints(Is(2)),
         342 => Ints(Is(6)),
-        // Tables: GrayResponseCurve, TransferFunction and ColorMap, and
+        // Tables: GrayResponseCurve, TransferFunction and ColorMap;
         // ExtraSamples; LercParameters, its version and what's inside at
         // least.
         291 | 301 | 320 => Ints(Within(1, c32)),
-        338 => Ints(Within(1, c16)),
+        338 => Ints(UpToSamples),
         50674 => Ints(Within(2, c32)),
         // The resolution and position; WhitePoint, the primaries, the
         // YCbCr coefficients and ReferenceBlackWhite; SMinSampleValue and
@@ -302,6 +308,20 @@ fn twice_kept(r: &mut dyn In, ifd: &Ifd, order: Order, alike: &mut Alike) -> Res
     }
     Ok(false)
 }
+
+/// The tags Remove Metadata keeps that say how a page's data is laid out
+/// or what its samples are: those either TIFF tool decides on to read its
+/// blocks but the ones the walk read already (Compression, the blocks and
+/// the SubIFDs), and ExtraSamples. An entry of one that libtiff can't read
+/// ([`shape`]; it fails on most, and ignores FillOrder, Predictor and
+/// YCbCrSubsampling) can't go as other fields: readers that read it
+/// (Pillow reads a SampleFormat of FLOAT 3.0 as float samples) would read
+/// the output as another picture. The file is refused instead
+/// ([`UNREAD_LAYOUT`]), and so for a palette page's ColorMap
+/// ([`Walk::lays_out`]).
+const LAID_OUT: [u16; 16] = [
+    256, 257, 258, 262, 266, 277, 278, 284, 317, 322, 323, 338, 339, 530, 32997, 32998,
+];
 
 /// Whether the writer makes `tag` afresh: the blocks and the SubIFDs.
 fn rebuilt(tag: u16) -> bool {
@@ -1038,7 +1058,10 @@ impl Walk<'_> {
                         fields.push(field);
                     } else if first {
                         // Not as libtiff reads it: other readers may show
-                        // what it holds.
+                        // what it holds, or read the picture by it.
+                        if self.lays_out(&ifd, tag)? {
+                            return Err(Error::Refused(UNREAD_LAYOUT.into()));
+                        }
                         self.report(MetaField::Other, entry)?;
                     }
                 }
@@ -1126,7 +1149,20 @@ impl Walk<'_> {
             Count::Within(least, most) => (least..=most).contains(&n),
             Count::PerSample => n == 1 || samples(self.r, ifd, self.order)?.is_some_and(|s| n >= s),
             Count::Samples => samples(self.r, ifd, self.order)? == Some(n),
+            Count::UpToSamples => samples(self.r, ifd, self.order)?.is_some_and(|s| n <= s),
         })
+    }
+
+    /// Whether the tag `tag` of `ifd` says how the page's data is laid out
+    /// or what its samples are ([`LAID_OUT`]; a palette page's ColorMap),
+    /// so that an entry of it that isn't kept ([`Walk::keeps`]) can't go.
+    fn lays_out(&mut self, ifd: &Ifd, tag: u16) -> Result<bool, Error> {
+        Ok(LAID_OUT.contains(&tag)
+            || (tag == 320
+                && match ifd.get(262) {
+                    Some(photometric) => number(self.r, photometric, self.order, SHORT)? == Some(3),
+                    None => false,
+                }))
     }
 
     /// Reports `found` for the dropped `entry`, unless it's reported
@@ -1742,13 +1778,21 @@ mod tests {
         };
         // Every tag it keeps, in a type libtiff doesn't read it in: text,
         // or for those it reads as bytes (text too), two FLOATs. The page
-        // is compressed, one strip, so that no layout tag need be read.
+        // is compressed, one strip, so that no layout tag need be read;
+        // one that says how the picture is laid out is refused instead.
         for tag in (0..=u16::MAX).filter(|&tag| kept(tag) && !matches!(tag, 259 | 347)) {
             let wrong = match shape(tag) {
                 Some(Shape::Bytes(_)) => V::Bytes(11, b"secrets!".to_vec()),
                 _ => V::Ascii("secret value"),
             };
-            gone(page(8, vec![(tag, wrong)]), tag);
+            let file = page(8, vec![(tag, wrong)]);
+            if LAID_OUT.contains(&tag) {
+                let refused =
+                    matches!(plan(&file), Err(Error::Refused(why)) if why == UNREAD_LAYOUT);
+                assert!(refused, "{tag}");
+            } else {
+                gone(file, tag);
+            }
         }
         // A review's: an Orientation, an XResolution and a LercParameters
         // as text, eight LONGs of LercParameters on an uncompressed page,
@@ -1803,6 +1847,67 @@ mod tests {
             ],
         );
         stays(separated, 333);
+    }
+
+    #[test]
+    fn a_layout_tag_libtiff_cant_read_is_refused_not_dropped() {
+        // The review's file: an 8 × 8 page of 32-bit float gray whose
+        // SampleFormat is FLOAT 3.0, or DOUBLE or RATIONAL 3. libtiff
+        // can't load it ("Incompatible type for SampleFormat"), Pillow
+        // reads it as float (0.25 at (1, 0)); its SampleFormat dropped,
+        // both read integers (1048576000). It's refused, as a layout Grape
+        // can't read.
+        let float = |kind: u16, value: Vec<u8>, extra: Vec<(u16, V)>| {
+            let samples: Vec<u8> = (0..64)
+                .flat_map(|i| (i as f32 / 4.0).to_le_bytes())
+                .collect();
+            let mut page = gray(8, 8, 8, vec![B::data(&samples)]);
+            page.tags.retain(|t| t.0 != 258);
+            page.tags
+                .extend([(258, V::Short(vec![32])), (339, V::Bytes(kind, value))]);
+            page.tags.extend(extra);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let refused =
+            |file: &[u8]| matches!(plan(file), Err(Error::Refused(why)) if why == UNREAD_LAYOUT);
+        for (kind, value) in [
+            (11, 3.0_f32.to_le_bytes().to_vec()),
+            (12, 3.0_f64.to_le_bytes().to_vec()),
+            (5, [3_u32.to_le_bytes(), 1_u32.to_le_bytes()].concat()),
+        ] {
+            assert!(refused(&float(kind, value, vec![])), "{kind}");
+        }
+        // As a SHORT, it stays.
+        let (out, found) = strip(&float(3, 3_u16.to_le_bytes().to_vec(), vec![]));
+        assert!(found.is_empty(), "{found:?}");
+        assert_eq!(read(&out).pages[0].uint(339, Order::Little), Some(3));
+        // ExtraSamples: none, or as many as the samples, stay; more go
+        // with the file, as libtiff can't load the page.
+        let two = |extra: V| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"xy")]);
+            page.tags.extend([(277, V::Short(vec![2])), (338, extra)]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        for extra in [V::Short(vec![]), V::Short(vec![2]), V::Short(vec![2, 0])] {
+            let (out, found) = strip(&two(extra.clone()));
+            assert!(found.is_empty(), "{extra:?}: {found:?}");
+            assert!(read(&out).pages[0].get(338).is_some());
+        }
+        assert!(refused(&two(V::Short(vec![2, 0, 0]))));
+        // A palette page's ColorMap libtiff can't read, which it reads as
+        // gray: refused; a gray page's goes.
+        let mapped = |photometric: u16| {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags.retain(|t| t.0 != 262);
+            page.tags.extend([
+                (262, V::Short(vec![photometric])),
+                (320, V::Ascii("SECRET shot by John")),
+            ]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        assert!(refused(&mapped(3)));
+        let (_, found) = strip(&mapped(1));
+        assert_eq!(found, [Other].into());
     }
 
     /// A page with an Exif IFD saying ColorSpace `space` and Interop
