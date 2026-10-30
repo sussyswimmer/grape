@@ -8,7 +8,9 @@
 //!
 //! - **Recoded:** IFDs of compression 1 (None), 5 (LZW), 8 or 32946
 //!   (Deflate) or 32773 (PackBits), with a FillOrder of 1 or none, whose
-//!   blocks [`Geometry`] can size. Only their Compression (to 8), their
+//!   blocks [`Geometry`] can size, every tag it decides on read as libtiff
+//!   reads it ([`read`](super::read)): one libtiff can't read, and the IFD
+//!   is copied as it is. Only their Compression (to 8), their
 //!   Predictor and their blocks' offsets and counts change: RowsPerStrip,
 //!   the tiles and the planes stay.
 //! - **Copied as they are**, with their tags ([`How::Copy`]): JPEG, fax,
@@ -16,7 +18,9 @@
 //!   (libtiff reverses the compressed bytes, so new Deflate data would come
 //!   out wrong); layouts that can't be sized; blocks listed as strips
 //!   that libtiff reads as tiles, as it tells tiles by a TileWidth or
-//!   TileLength, or as tiles it reads as strips; an IFD with an empty block
+//!   TileLength, or as tiles it reads as strips; tiles more than one slice
+//!   deep (TileDepth), whose slices after the first libtiff's tile size
+//!   leaves out and a recode would lose; an IFD with an empty block
 //!   (GDAL's sparse tiles, which stay 0 bytes at 0: as Deflate, the tiff
 //!   crate and Pillow fail on them); and an IFD with a block that
 //!   can't be decoded (old-style LZW, data that's broken or short), whose
@@ -70,8 +74,10 @@ use std::path::Path;
 use grape_core::{Format, Job};
 
 use super::super::strip::{self as strips, Error, In, Out};
-use super::codec::{numbers, Codec, Codecs, Fail, Geometry, Predictor, Recipe, Why, MAX_SAMPLES};
-use super::read::{repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff};
+use super::codec::{Codec, Codecs, Fail, Geometry, Predictor, Recipe, Why};
+use super::read::{
+    number, per_sample, repeats, Block, Entry, Ifd, Layout, Meta, Order, Tiff, SHORT,
+};
 use super::write::{self, Blocks, Data, Dir, Field, Image, Sink, Written};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
@@ -168,9 +174,11 @@ pub(crate) struct Plan {
     broken: bool,
 }
 
-/// Reasons for the log: the first [`MAX_LOG`], and how many more.
+/// Reasons for the log: the line that ended the job, if one did, first
+/// and always kept; then the first [`MAX_LOG`] others, and how many more.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Log {
+    end: Option<String>,
     lines: Vec<String>,
     more: usize,
 }
@@ -184,9 +192,23 @@ impl Log {
         }
     }
 
+    /// Puts `line` first, as what ended the job, in place of `instead`, a
+    /// line [`Log::add`] took for the same IFD, kept or one of the more.
+    fn end(&mut self, line: String, instead: Option<&str>) {
+        if let Some(instead) = instead {
+            match self.lines.iter().position(|l| l == instead) {
+                Some(at) => {
+                    self.lines.remove(at);
+                }
+                None => self.more = self.more.saturating_sub(1),
+            }
+        }
+        self.end = Some(line);
+    }
+
     /// `detail`, then what the log holds, if anything.
     pub(crate) fn after(&self, detail: String) -> String {
-        if self.lines.is_empty() {
+        if self.end.is_none() && self.lines.is_empty() {
             detail
         } else {
             format!("{detail}; {self}")
@@ -196,7 +218,13 @@ impl Log {
 
 impl std::fmt::Display for Log {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.lines.join("; "))?;
+        let all: Vec<&str> = self
+            .end
+            .iter()
+            .chain(&self.lines)
+            .map(String::as_str)
+            .collect();
+        f.write_str(&all.join("; "))?;
         if self.more > 0 {
             write!(f, "; and {} more", self.more)?;
         }
@@ -428,20 +456,23 @@ pub(crate) enum Stopped {
     Failed(Error),
 }
 
-/// How `ifd`'s blocks are written ([module docs](self)).
+/// How `ifd`'s blocks are written ([module docs](self)), from its tags as
+/// libtiff reads them ([`number`]; the walk read its Compression, and
+/// refused one libtiff can't read): one libtiff can't read, that other
+/// readers might read otherwise, and the IFD is copied as it is.
 fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, Error> {
     let copy = |why: String| Ok(How::Copy(why));
-    let Some(compression) = ifd.get(259).map_or(Some(1), |e| e.uint(order)) else {
-        return copy("its Compression can't be read".into());
-    };
+    let compression = ifd.compression;
     let Some(codec) = Codec::of(compression) else {
         return copy(format!("its compression is {compression}"));
     };
     // FillOrder 2: libtiff reverses the compressed bytes' bits.
-    match ifd.get(266).map(|e| e.uint(order)) {
-        None | Some(Some(1)) => {}
-        Some(Some(fill)) => return copy(format!("its FillOrder is {fill}")),
-        Some(None) => return copy("its FillOrder can't be read".into()),
+    if let Some(entry) = ifd.get(266) {
+        match number(r, entry, order, SHORT)? {
+            Some(1) => {}
+            Some(fill) => return copy(format!("its FillOrder is {fill}")),
+            None => return copy("its FillOrder can't be read".into()),
+        }
     }
     let geometry = match Geometry::of(r, ifd, order, left)? {
         Ok(geometry) => geometry,
@@ -461,7 +492,7 @@ fn how(r: &mut dyn In, ifd: &Ifd, order: Order, left: &mut u64) -> Result<How, E
     }
     let own = match ifd.get(317) {
         None => 1,
-        Some(entry) => match entry.uint(order) {
+        Some(entry) => match number(r, entry, order, SHORT)? {
             Some(own) => own,
             None => return copy("its Predictor can't be read".into()),
         },
@@ -502,7 +533,10 @@ fn added(
     geometry: &Geometry,
     left: &mut u64,
 ) -> Result<Option<Predictor>, Error> {
-    let photometric = ifd.uint(262, order);
+    let photometric = match ifd.get(262) {
+        Some(entry) => number(r, entry, order, SHORT)?,
+        None => None,
+    };
     if !matches!(photometric, Some(0 | 1 | 2 | 5))
         || geometry.subsampled
         || !matches!(geometry.bits, 8 | 16)
@@ -510,11 +544,11 @@ fn added(
     {
         return Ok(None);
     }
-    let formats = match ifd.get(339) {
-        None => vec![1],
-        Some(entry) => numbers(r, entry, order, MAX_SAMPLES, left)?.unwrap_or_default(),
+    let format = match ifd.get(339) {
+        None => Some(1),
+        Some(entry) => per_sample(r, entry, order, Some(geometry.samples), left)?,
     };
-    if formats.is_empty() || formats.iter().any(|f| !matches!(f, 1 | 2)) {
+    if !matches!(format, Some(1 | 2)) {
         return Ok(None);
     }
     let stride = if geometry.planar {
@@ -1062,14 +1096,24 @@ impl Blocks for Recoder<'_> {
         };
         self.more_now.clear();
         let written = match how {
-            How::Copy(_) => self.copy(r, out, image)?,
+            How::Copy(why) => {
+                let copied = self.copy(r, out, image);
+                if copied.is_err() && matches!(self.stop, Some(Stopped::NotSmaller)) {
+                    let line = format!(
+                        "IFD {n}, copied as it is ({why}), took the output past 95 % of the source"
+                    );
+                    let planned = format!("IFD {n} copied as it is: {why}");
+                    self.log.end(line, Some(&planned));
+                }
+                copied?
+            }
             How::Recode { .. } => {
                 let start = out.at();
                 let recoded = match self.recode(r, out, image, how, n)? {
                     // Larger than a copy (noise, data deflated better
                     // already, or blocks copied already): copied as it is.
                     Recode::Done(Recoded { made, copy, .. }) if made > copy => Err(format!(
-                        "recoded, its blocks came to {made} bytes, where a copy writes {copy}"
+                        "its blocks came to {made} bytes recoded, where a copy writes {copy}"
                     )),
                     Recode::Done(recoded) => Ok(recoded.written),
                     Recode::Copy(why) => Err(why),
@@ -1079,23 +1123,28 @@ impl Blocks for Recoder<'_> {
                         self.read_back(out)?;
                         written
                     }
-                    // Copied, held to the most too; the log says why, or
-                    // that the copy passed the most as well.
+                    // Copied, held to the most too; the log says why, or,
+                    // first, that the copy passed the most as well.
                     Err(why) => {
                         self.take_back(out, image, start)?;
                         let copied = self.copy(r, out, image);
-                        let line = match (&copied, &self.stop) {
-                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => format!(
-                                "IFD {n} took the output past 95 % of the source recoded, \
-                                 and copied as it is too"
-                            ),
-                            (Err(_), Some(Stopped::NotSmaller)) => format!(
-                                "IFD {n} took the output past 95 % of the source copied \
-                                 as it is, as it was to be: {why}"
-                            ),
-                            _ => format!("IFD {n} copied as it is: {why}"),
-                        };
-                        self.log.add(line);
+                        match (&copied, &self.stop) {
+                            (Err(_), Some(Stopped::NotSmaller)) if why == PASSED => {
+                                let line = format!(
+                                    "IFD {n} took the output past 95 % of the source both \
+                                     recoded and copied as it is"
+                                );
+                                self.log.end(line, None);
+                            }
+                            (Err(_), Some(Stopped::NotSmaller)) => {
+                                let line = format!(
+                                    "IFD {n}, copied as it is instead of recoded ({why}), \
+                                     took the output past 95 % of the source"
+                                );
+                                self.log.end(line, None);
+                            }
+                            _ => self.log.add(format!("IFD {n} copied as it is: {why}")),
+                        }
                         copied?
                     }
                 }
@@ -1530,11 +1579,172 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_tag_compress_decides_on_is_read_as_libtiff_reads_it() {
+        // A gray 32 × 8 page whose Compression, BitsPerSample,
+        // PhotometricInterpretation, FillOrder, Predictor and SampleFormat
+        // are in types libtiff reads (signed but not negative, a LONG8 a
+        // classic file holds out of line, a value for each sample):
+        // recoded, its predictor added, as when they're SHORTs.
+        let bytes = |kind: u16, n: u64| {
+            let size = super::super::read::type_size(kind).unwrap() as usize;
+            V::Bytes(kind, n.to_le_bytes()[..size].to_vec())
+        };
+        let samples = smooth(32 * 8);
+        for (big, typed) in [
+            (
+                false,
+                vec![
+                    (258, bytes(8, 8)),
+                    (259, bytes(16, 1)),
+                    (262, bytes(9, 1)),
+                    (266, bytes(6, 1)),
+                    (317, bytes(1, 1)),
+                    (339, V::Short(vec![1, 1])),
+                ],
+            ),
+            (
+                true,
+                vec![
+                    (258, bytes(17, 8)),
+                    (259, V::Short(vec![1, 1])),
+                    (262, bytes(16, 1)),
+                    (266, bytes(8, 1)),
+                    (317, bytes(9, 1)),
+                    (339, bytes(17, 1)),
+                ],
+            ),
+        ] {
+            let mut gray = page(32, 8, 8, 8, &samples);
+            gray.tags
+                .retain(|t| !typed.iter().any(|(tag, _)| *tag == t.0));
+            gray.tags.extend(typed);
+            let file = Builder::new(b'I', big, vec![gray]).build();
+            let plan = plan(&file);
+            assert!(
+                matches!(
+                    plan.hows[..],
+                    [How::Recode {
+                        predictor: Some(_),
+                        ..
+                    }]
+                ),
+                "{:?}",
+                plan.hows
+            );
+            let out = compressed(&file);
+            let back = read(&out);
+            assert_eq!(back.pages[0].uint(317, back.layout.order), Some(2));
+        }
+        // Where libtiff can't read one, and other readers might read it
+        // otherwise, the page is copied as it is: PackBits, so that the
+        // walk doesn't size its strip.
+        let packbits: Vec<u8> = samples
+            .chunks(128)
+            .flat_map(|run| [&[run.len() as u8 - 1][..], run].concat())
+            .collect();
+        for (tag, value, why) in [
+            (258, V::Short(vec![8, 16]), "BitsPerSample can't be read"),
+            (
+                262,
+                bytes(8, 0xFFFF),
+                "PhotometricInterpretation can't be read",
+            ),
+            (266, V::Short(vec![1, 1]), "FillOrder can't be read"),
+            (317, V::Rational(vec![(2, 1)]), "Predictor can't be read"),
+            (
+                530,
+                V::Short(vec![2, 2, 2]),
+                "YCbCrSubsampling can't be read",
+            ),
+        ] {
+            let mut gray = page(32, 8, 8, 8, &samples);
+            gray.blocks = vec![B::Data(packbits.clone())];
+            gray.tags.retain(|t| t.0 != tag);
+            gray.tags
+                .extend([(259, V::Short(vec![32773])), (tag, value)]);
+            if tag == 530 {
+                gray.tags[3] = (262, V::Short(vec![6]));
+                gray.tags.extend([(277, V::Short(vec![3]))]);
+                gray.tags[2] = (258, V::Short(vec![8, 8, 8]));
+            }
+            if tag == 258 {
+                gray.tags.push((277, V::Short(vec![2])));
+            }
+            let file = Builder::new(b'I', false, vec![gray]).build();
+            let Planned::Nothing(log) = planned(&file).unwrap() else {
+                panic!("{tag} planned")
+            };
+            assert!(log.contains(why), "{tag}: {log}");
+        }
+    }
+
     /// A gray 8 × 8 page of one strip of `data`, `compression`.
     fn coded(compression: u16, data: Vec<u8>) -> Page {
         let mut page = gray(8, 8, 8, vec![B::Data(data)]);
         page.tags.push((259, V::Short(vec![compression])));
         page
+    }
+
+    #[test]
+    fn tiles_more_than_a_slice_deep_are_copied_as_they_are() {
+        // Gray 64 × 64, two slices deep (ImageDepth 2), in 32 × 32 tiles:
+        // `slices` to a tile, each of 1,024 bytes.
+        let volume = |slices: u32| {
+            let samples = smooth(64 * 64 * 2);
+            let tile = 1_024 * slices as usize;
+            Page {
+                tags: vec![
+                    (256, V::Long(vec![64])),
+                    (257, V::Long(vec![64])),
+                    (258, V::Short(vec![8])),
+                    (262, V::Short(vec![1])),
+                    (322, V::Short(vec![32])),
+                    (323, V::Short(vec![32])),
+                    (32997, V::Long(vec![2])),
+                    (32998, V::Long(vec![slices])),
+                ],
+                blocks: samples.chunks(tile).map(B::data).collect(),
+                tiled: true,
+                ..Page::default()
+            }
+        };
+        // Two slices to a tile, or the picture's depth (2^32 - 1): four
+        // tiles of 2,048 bytes, which a recode of one slice would cut in
+        // half. Copied as they are, so nothing is left to recode.
+        for slices in [2, u32::MAX] {
+            let file = Builder::new(b'I', false, vec![volume(slices)]).build();
+            let Planned::Nothing(why) = planned(&file).unwrap() else {
+                panic!("{slices}: planned")
+            };
+            assert!(why.contains("its tiles are 2 slices deep"), "{why}");
+        }
+        // One slice to a tile: eight tiles, recoded, each to its 1,024
+        // bytes.
+        let file = Builder::new(b'I', false, vec![volume(1)]).build();
+        let out = compressed(&file);
+        let (a, b) = (read(&file), read(&out));
+        assert_eq!(b.pages[0].blocks.len(), 8);
+        assert_eq!(b.pages[0].uint(259, b.layout.order), Some(8));
+        let mut back = Codecs::new(9);
+        let plan = plan(&file);
+        let How::Recode { predictor, .. } = &plan.hows[0] else {
+            panic!("{:?}", plan.hows)
+        };
+        for (n, (source, written)) in a.pages[0].blocks.iter().zip(&b.pages[0].blocks).enumerate() {
+            let recipe = Recipe {
+                codec: Codec::Deflate,
+                expected: 1_024,
+                row: 32,
+                predictor: *predictor,
+            };
+            let crc = back
+                .check(&mut Cursor::new(&out), *written, recipe)
+                .unwrap();
+            let start = source.offset as usize;
+            let want = crc32fast::hash(&file[start..start + 1_024]);
+            assert_eq!(crc, want, "tile {n}");
+        }
     }
 
     #[test]
@@ -1629,11 +1839,12 @@ mod tests {
             else {
                 panic!("{stopped:?}")
             };
+            // First, and in place of a line that it was copied.
             let log = log.to_string();
-            let past =
-                "IFD 0 took the output past 95 % of the source copied as it is, as it was to be: ";
+            let instead = "IFD 0, copied as it is instead of recoded (its ";
+            let past = "), took the output past 95 % of the source";
             assert!(
-                log.contains(past) && !log.contains("IFD 0 copied as it is"),
+                log.starts_with(instead) && log.contains(past) && !log.contains("IFD 0 copied"),
                 "{log}"
             );
         }
@@ -1944,7 +2155,7 @@ mod tests {
         assert_eq!(decoded(&out), decoded(&file));
         let log = wrote.log.to_string();
         assert!(
-            log.contains("IFD 0 copied as it is: recoded, its blocks"),
+            log.contains("IFD 0 copied as it is: its blocks came to"),
             "{log}"
         );
     }
@@ -1985,10 +2196,63 @@ mod tests {
             panic!("{stopped:?}")
         };
         let log = log.to_string();
+        assert_eq!(
+            log,
+            "IFD 1 took the output past 95 % of the source both recoded and copied as it is"
+        );
+    }
+
+    #[test]
+    fn the_line_that_ended_the_job_comes_first_and_stays() {
+        // Twenty pages copied as they are (JPEG: twenty lines, four past
+        // the log's 16), then one to recode: with the most where the
+        // last JPEG page ends, a byte short, its copy passes it.
+        let mut pages: Vec<Page> = (0..20)
+            .map(|n| coded(7, format!("JPEG data {n:02}").into_bytes()))
+            .collect();
+        pages.push(page(64, 64, 16, 8, &smooth(64 * 64)));
+        let file = Builder::new(b'I', false, pages).build();
+        let plan = plan(&file);
+        let (whole, _) = written(&file, &plan, u64::MAX, &CancelToken::new(), &mut |_| {}).unwrap();
+        let last = read(&whole).pages[19].blocks[0];
+        let stopped = written(
+            &file,
+            &plan,
+            last.offset + last.len - 1,
+            &CancelToken::new(),
+            &mut |_| {},
+        );
+        let Err(Halt {
+            why: Stopped::NotSmaller,
+            log,
+        }) = stopped
+        else {
+            panic!("{stopped:?}")
+        };
+        // It says plainly what happened, first, in place of the plan's
+        // line for that page, which was one of the four past the 16.
+        let log = log.to_string();
+        let ended = "IFD 19, copied as it is (its compression is 7), took the output past 95 % \
+                     of the source; IFD 0 copied as it is: its compression is 7; ";
+        assert!(log.starts_with(ended), "{log}");
         assert!(
-            log.contains(
-                "IFD 1 took the output past 95 % of the source recoded, and copied as it is too"
-            ) && !log.contains("IFD 1 copied as it is"),
+            log.ends_with("IFD 15 copied as it is: its compression is 7; and 3 more"),
+            "{log}"
+        );
+        assert!(!log.contains("IFD 19 copied"), "{log}");
+        // The first page's copy passing it: its line takes the place of the
+        // plan's, which was kept.
+        let first = read(&whole).pages[0].blocks[0];
+        let stopped = written(&file, &plan, first.offset, &CancelToken::new(), &mut |_| {});
+        let Err(Halt { log, .. }) = stopped else {
+            panic!("{stopped:?}")
+        };
+        let log = log.to_string();
+        assert!(
+            log.starts_with(
+                "IFD 0, copied as it is (its compression is 7), took the output past 95 % of the \
+                 source; IFD 1 copied as it is: its compression is 7; "
+            ) && log.ends_with("IFD 15 copied as it is: its compression is 7; and 4 more"),
             "{log}"
         );
     }
@@ -2036,7 +2300,7 @@ mod tests {
         assert_eq!(back.pages[1].uint(259, o), None);
         assert_eq!(back.pages[1].blocks[0], back.pages[0].blocks[0]);
         assert!(
-            log.contains("IFD 1 copied as it is: recoded, its blocks came to"),
+            log.contains("IFD 1 copied as it is: its blocks came to"),
             "{log}"
         );
         // One block of noise listed twice, recoded whole and cut at the
@@ -2049,7 +2313,7 @@ mod tests {
         let blocks = &back.pages[0].blocks;
         assert_eq!(blocks[0], blocks[1]);
         assert!(
-            log.contains("IFD 0 copied as it is: recoded, its blocks came to"),
+            log.contains("IFD 0 copied as it is: its blocks came to"),
             "{log}"
         );
     }

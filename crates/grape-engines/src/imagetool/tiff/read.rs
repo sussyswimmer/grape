@@ -25,9 +25,16 @@
 //!   value out of line (any IFD's), is [`Error::Broken`], or [`MISSIZED`]
 //!   when only blocks worked out from the picture overlap
 //!   ([`Tiff::check_overlaps`]).
-//! - **Refused:** a DNG, or an old-style JPEG, in any image IFD:
-//!   [`Error::Refused`] as soon as the walk reads that IFD, before its
-//!   strips or tiles, which an old-style JPEG may not have; and byte counts
+//! - **Tags read as libtiff 4.5 reads them:** every integer tag either
+//!   tool decides on, by [`number`], [`per_sample`] and [`pair`] (any
+//!   integer type but IFD and IFD8, signed ones not negative, a classic
+//!   file's LONG8 and SLONG8 out of line), so that Grape and libtiff see
+//!   the same file; where libtiff can't read one, and other readers might
+//!   read it otherwise, the file is refused, or Compress copies the IFD.
+//! - **Refused:** a DNG, an old-style JPEG, or a Compression libtiff can't
+//!   read, in any image IFD: [`Error::Refused`] as soon as the walk reads
+//!   that IFD, before its strips or tiles, which an old-style JPEG may not
+//!   have; and byte counts
 //!   libtiff takes at their word that readers which size data themselves
 //!   read past ([`MISSIZED`]): a block of 0 bytes at a nonzero offset, or
 //!   an uncompressed one shorter than the picture says.
@@ -58,9 +65,10 @@ pub(crate) const MAX_BLOCKS: usize = 4 << 20;
 /// How deep SubIFDs nest under a page.
 pub(crate) const MAX_DEPTH: usize = 4;
 
-/// The most samples a pixel has, for a BitsPerSample read to work out
-/// byte counts.
-const MAX_SAMPLES: usize = 1 << 16;
+/// The most values a per-sample tag (Compression, BitsPerSample,
+/// SampleFormat) is read with ([`per_sample`]): more, and Grape can't read
+/// it.
+pub(crate) const MAX_SAMPLES: u64 = 1 << 16;
 
 /// The most bytes read in one go when reading an array.
 const STEP: usize = 64 * 1024;
@@ -191,6 +199,9 @@ pub(crate) struct Ifd {
     pub(crate) at: u64,
     /// Its entries, in the file's order.
     pub(crate) entries: Vec<Entry>,
+    /// Its Compression (259) as libtiff reads it ([`per_sample`]): 1 when
+    /// it's absent.
+    pub(crate) compression: u64,
     /// Its strips (273, 279) or tiles (324, 325), in order.
     pub(crate) blocks: Vec<Block>,
     /// Tiles rather than strips.
@@ -237,7 +248,9 @@ impl Ifd {
     }
 
     /// The one unsigned number `tag` holds, if it holds one inline (a BYTE,
-    /// SHORT, LONG or LONG8).
+    /// SHORT, LONG or LONG8): for the tests, as the tools read every tag
+    /// they decide on as libtiff reads it ([`number`]).
+    #[cfg(test)]
     pub(crate) fn uint(&self, tag: u16, order: Order) -> Option<u64> {
         self.get(tag).and_then(|e| e.uint(order))
     }
@@ -245,7 +258,8 @@ impl Ifd {
 
 impl Entry {
     /// The one unsigned number this holds inline (a BYTE, SHORT, LONG,
-    /// LONG8, IFD or IFD8), if so.
+    /// LONG8, IFD or IFD8), if so: for the tests ([`Ifd::uint`]).
+    #[cfg(test)]
     pub(crate) fn uint(&self, order: Order) -> Option<u64> {
         match (self.kind, self.count, self.value) {
             (1 | 3 | 4 | 13 | 16 | 18, 1, Value::Inline { bytes, len }) => {
@@ -292,7 +306,7 @@ impl Tiff {
             ifds: 0,
             entries: 0,
             blocks: 0,
-            samples_read: 0,
+            samples_left: len,
         };
         let mut pages = Vec::new();
         let mut at_pages = HashSet::new();
@@ -536,15 +550,22 @@ fn clear_of<'a>(blocks: impl Iterator<Item = &'a Block>, ifds: &[(u64, u64)]) ->
     true
 }
 
-/// Why neither TIFF tool can change a file with the image IFD `ifd`, if
-/// one can't: the end of a sentence that starts with its name.
-fn refusal(ifd: &Ifd, order: Order) -> Option<&'static str> {
+/// Why a file with a Compression libtiff can't read is refused: whether
+/// its data is compressed, which decides how its blocks are sized and
+/// checked, can't be told.
+pub(crate) const UNREAD_COMPRESSION: &str =
+    "says how it's compressed in a way Grape can't read yet.";
+
+/// The image IFD `ifd`'s Compression, given as libtiff reads it
+/// (`compression`, `None` where it can't), or why neither TIFF tool can
+/// change a file with it: the end of a sentence that starts with its name.
+fn admitted(ifd: &Ifd, compression: Option<u64>) -> Result<u64, &'static str> {
     if ifd.get(50706).is_some() {
-        Some("is a camera raw (DNG) file, which Grape can't change yet.")
-    } else if ifd.uint(259, order) == Some(6) || ifd.get(513).is_some() || ifd.get(514).is_some() {
-        Some("uses an old kind of TIFF compression that Grape can't rewrite yet.")
+        Err("is a camera raw (DNG) file, which Grape can't change yet.")
+    } else if compression == Some(6) || ifd.get(513).is_some() || ifd.get(514).is_some() {
+        Err("uses an old kind of TIFF compression that Grape can't rewrite yet.")
     } else {
-        None
+        compression.ok_or(UNREAD_COMPRESSION)
     }
 }
 
@@ -552,26 +573,143 @@ fn refusal(ifd: &Ifd, order: Order) -> Option<&'static str> {
 /// size or a TileDepth of it as: the picture's.
 const LONG: u64 = u32::MAX as u64;
 
+/// The most a SHORT holds.
+pub(crate) const SHORT: u64 = u16::MAX as u64;
+
+/// Each value's size and whether it's signed, for the integer types
+/// libtiff 4.5 reads a number tag in: any but IFD and IFD8.
+fn integer(kind: u16) -> Option<(usize, bool)> {
+    match kind {
+        1 => Some((1, false)),
+        6 => Some((1, true)),
+        3 => Some((2, false)),
+        8 => Some((2, true)),
+        4 => Some((4, false)),
+        9 => Some((4, true)),
+        16 => Some((8, false)),
+        17 => Some((8, true)),
+        _ => None,
+    }
+}
+
+/// The numbers `entry` holds as libtiff 4.5 reads an integer tag's
+/// (`TIFFReadDirEntryShortArray`, `TIFFReadDirEntryLongArray`): of any
+/// integer type but IFD and IFD8, signed ones not negative, each at most
+/// `max`; read from `r` when they aren't inline (a classic file's LONG8
+/// and SLONG8 never are), the bytes taken from `left`, past which the
+/// file is too large. `None` where libtiff can't read them, and for more
+/// than `cap` of them.
+pub(crate) fn numbers(
+    r: &mut dyn In,
+    entry: &Entry,
+    order: Order,
+    max: u64,
+    cap: u64,
+    left: &mut u64,
+) -> Result<Option<Vec<u64>>, Error> {
+    let Some((size, signed)) = integer(entry.kind) else {
+        return Ok(None);
+    };
+    if entry.count > cap {
+        return Ok(None);
+    }
+    if let Value::At { len, .. } = entry.value {
+        *left = left
+            .checked_sub(len)
+            .ok_or_else(|| Error::TooLarge("tags read past the file's size".into()))?;
+    }
+    let Some(bytes) = read_value(r, entry, cap.saturating_mul(8))? else {
+        return Ok(None);
+    };
+    let mut all = Vec::with_capacity(bytes.len() / size);
+    for b in bytes.chunks_exact(size) {
+        let n = order.uint(b);
+        if (signed && n >> (8 * size - 1) == 1) || n > max {
+            return Ok(None);
+        }
+        all.push(n);
+    }
+    Ok(Some(all))
+}
+
 /// The one number `entry` holds as libtiff 4.5 reads a SHORT or LONG tag
-/// (`TIFFReadDirEntryShort`, `TIFFReadDirEntryLong`), if it's at most
-/// `max`: a value of any integer type but IFD and IFD8, a signed one not
-/// negative, a LONG8 or SLONG8 a classic file holds out of line read from
-/// `r`; `None` for any other, and for more than one value.
-fn libtiff_number(
+/// (`TIFFReadDirEntryShort`, `TIFFReadDirEntryLong`), at most `max`, as
+/// [`numbers`] reads it (8 bytes at most); `None` where libtiff can't read
+/// it, and for more than one value.
+pub(crate) fn number(
     r: &mut dyn In,
     entry: &Entry,
     order: Order,
     max: u64,
 ) -> Result<Option<u64>, Error> {
-    let (size, signed) = match entry.kind {
-        1 => (1, false),
-        6 => (1, true),
-        3 => (2, false),
-        8 => (2, true),
-        4 => (4, false),
-        9 => (4, true),
-        16 => (8, false),
-        17 => (8, true),
+    if entry.count != 1 {
+        return Ok(None);
+    }
+    let mut free = u64::MAX;
+    let one = numbers(r, entry, order, max, 1, &mut free)?;
+    Ok(one.and_then(|n| n.first().copied()))
+}
+
+/// The one number a per-sample tag's `entry` holds as libtiff 4.5 reads
+/// Compression, BitsPerSample and SampleFormat (`TIFFReadDirEntryShort`,
+/// then `TIFFReadDirEntryPersampleShort`): its one value, or of more, at
+/// least `samples` (SamplesPerPixel, [`samples`]), every one a SHORT's
+/// ([`numbers`], at most [`MAX_SAMPLES`] of them, taken from `left`),
+/// and the first `samples` the same. `None` where libtiff can't read it.
+pub(crate) fn per_sample(
+    r: &mut dyn In,
+    entry: &Entry,
+    order: Order,
+    samples: Option<u64>,
+    left: &mut u64,
+) -> Result<Option<u64>, Error> {
+    if entry.count == 1 {
+        return number(r, entry, order, SHORT);
+    }
+    let Some(samples) = samples.filter(|&n| n > 0 && entry.count >= n) else {
+        return Ok(None);
+    };
+    let all = numbers(r, entry, order, SHORT, MAX_SAMPLES, left)?.unwrap_or_default();
+    let first = all.first().copied();
+    let used = usize::try_from(samples).unwrap_or(usize::MAX);
+    Ok(first.filter(|&v| all.iter().take(used).all(|&n| n == v)))
+}
+
+/// SamplesPerPixel as libtiff 4.5 reads it ([`number`]): 1 when it's
+/// absent; `None` where libtiff can't read it, or it's 0.
+pub(crate) fn samples(r: &mut dyn In, ifd: &Ifd, order: Order) -> Result<Option<u64>, Error> {
+    match ifd.get(277) {
+        None => Ok(Some(1)),
+        Some(entry) => Ok(number(r, entry, order, SHORT)?.filter(|&n| n > 0)),
+    }
+}
+
+/// YCbCrSubsampling as libtiff 4.5 reads it: exactly two numbers, each a
+/// SHORT's ([`numbers`], taken from `left`). `None` otherwise, where
+/// libtiff keeps its default, 2 × 2, and other readers may not.
+pub(crate) fn pair(
+    r: &mut dyn In,
+    entry: &Entry,
+    order: Order,
+    left: &mut u64,
+) -> Result<Option<(u64, u64)>, Error> {
+    if entry.count != 2 {
+        return Ok(None);
+    }
+    Ok(match numbers(r, entry, order, SHORT, 2, left)?.as_deref() {
+        Some(&[h, v]) => Some((h, v)),
+        _ => None,
+    })
+}
+
+/// The IFD an Exif, GPS or Interop pointer `entry` points at, as libtiff
+/// 4.5 reads one (`TIFFReadDirEntryIfd8`): one LONG, IFD, LONG8 or IFD8,
+/// read from `r` when it isn't inline (a classic file's LONG8 and IFD8);
+/// `None` where libtiff can't read it.
+fn pointer(r: &mut dyn In, entry: &Entry, order: Order) -> Result<Option<u64>, Error> {
+    let size = match entry.kind {
+        4 | 13 => 4,
+        16 | 18 => 8,
         _ => return Ok(None),
     };
     if entry.count != 1 {
@@ -583,17 +721,17 @@ fn libtiff_number(
         Value::At { offset, len: 8 } => read_at(r, offset, &mut bytes)?,
         Value::At { .. } | Value::Unread => return Ok(None),
     }
-    let n = order.uint(&bytes[..size]);
-    let negative = signed && n >> (8 * size - 1) == 1;
-    Ok((!negative && n <= max).then_some(n))
+    Ok(Some(order.uint(&bytes[..size])))
 }
 
 /// An image IFD's layout as libtiff 4.5 reads it (`TIFFReadDirectory`):
 /// ImageWidth, ImageLength, SamplesPerPixel, PlanarConfiguration,
 /// RowsPerStrip, TileWidth, TileLength, ImageDepth and TileDepth, each as
-/// [`libtiff_number`] reads it, and the strips or tiles it counts
+/// [`number`] reads it, and the strips or tiles it counts
 /// (`TIFFNumberOfStrips`, `TIFFNumberOfTiles`). It tells tiles by a
-/// TileWidth or TileLength, not by the tags the blocks are listed under.
+/// TileWidth or TileLength, not by the tags the blocks are listed under,
+/// and takes one it isn't given from a RowsPerStrip the IFD lists before
+/// them ([`Dims::of`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Dims {
     pub(crate) width: u64,
@@ -621,7 +759,6 @@ impl Dims {
         ifd: &Ifd,
         order: Order,
     ) -> Result<Result<Dims, String>, Error> {
-        const SHORT: u64 = u16::MAX as u64;
         let tags = [
             (256, "ImageWidth", LONG, 0),
             (257, "ImageLength", LONG, 0),
@@ -637,7 +774,7 @@ impl Dims {
         for (slot, (tag, name, max, default)) in n.iter_mut().zip(tags) {
             *slot = match ifd.get(tag) {
                 None => default,
-                Some(entry) => match libtiff_number(r, entry, order, max)? {
+                Some(entry) => match number(r, entry, order, max)? {
                     Some(n) => n,
                     None => return Ok(Err(format!("its {name} can't be read"))),
                 },
@@ -666,6 +803,27 @@ impl Dims {
             }
         }
         let tiled = ifd.get(322).is_some() || ifd.get(323).is_some();
+        // libtiff sets the tags in the order the IFD lists them (the first
+        // of each), and a RowsPerStrip set before either tile size sets
+        // both (`_TIFFVSetField`): TileLength to it, and TileWidth to the
+        // ImageWidth set by then, 0 before it; a tile size listed sets its
+        // own after that.
+        let at = |tag| ifd.entries.iter().position(|e| e.tag == tag);
+        let first_tile = [at(322), at(323)].into_iter().flatten().min();
+        let (tw, tl) = match (at(278), first_tile) {
+            (Some(r), Some(t)) if r < t => {
+                let width = if at(256).is_some_and(|w| w < r) {
+                    width
+                } else {
+                    0
+                };
+                (
+                    if ifd.get(322).is_some() { tw } else { width },
+                    if ifd.get(323).is_some() { tl } else { rows },
+                )
+            }
+            _ => (tw, tl),
+        };
         let dims = Dims {
             width,
             height,
@@ -709,16 +867,24 @@ impl Dims {
         }
     }
 
+    /// The slices a tile holds: TileDepth, ImageDepth's for [`LONG`]; 1
+    /// for strips, which ignore it.
+    pub(crate) fn tile_depth(&self) -> u64 {
+        match (self.tile, self.depth) {
+            (Some(_), (depth, LONG)) => depth,
+            (Some(_), (_, td)) => td,
+            (None, _) => 1,
+        }
+    }
+
     /// The strips or tiles in each plane as libtiff counts them: its
     /// strips, or the tiles across, down and deep; 0 past 32 bits.
     pub(crate) fn per_plane(&self) -> u64 {
         let Some((tw, tl)) = self.tile() else {
             return self.strips_per_plane();
         };
-        let (depth, td) = self.depth;
-        let td = if td == LONG { depth } else { td };
         let across = times(howmany(self.width, tw), howmany(self.height, tl));
-        times(across, howmany(depth, td))
+        times(across, howmany(self.depth.0, self.tile_depth()))
     }
 
     /// The strips or tiles libtiff reads: those of a plane, times the
@@ -844,10 +1010,10 @@ struct Walk<'r> {
     ifds: usize,
     entries: usize,
     blocks: usize,
-    /// Bytes of BitsPerSample arrays read to size strips that don't say
-    /// their byte counts, at most the file's size: pages can all point at
-    /// one long array.
-    samples_read: u64,
+    /// What's left of the bytes of per-sample tags (Compression and
+    /// BitsPerSample) and YCbCrSubsampling it may read out of line, the
+    /// file's size at first: pages can all point at one long array.
+    samples_left: u64,
 }
 
 impl Walk<'_> {
@@ -940,6 +1106,7 @@ impl Walk<'_> {
         let mut ifd = Ifd {
             at,
             entries,
+            compression: 1,
             blocks: Vec::new(),
             tiled: false,
             estimated: false,
@@ -948,9 +1115,8 @@ impl Walk<'_> {
             gps: None,
         };
         // Before its blocks: an old-style JPEG may have none.
-        if let Some(why) = refusal(&ifd, self.layout.order) {
-            return Err(Error::Refused(why.into()));
-        }
+        let compression = self.compression(&ifd)?;
+        ifd.compression = admitted(&ifd, compression).map_err(|why| Error::Refused(why.into()))?;
         self.blocks(&mut ifd)?;
         if let Some(subs) = ifd.get(330).cloned() {
             if depth >= MAX_DEPTH {
@@ -966,6 +1132,17 @@ impl Walk<'_> {
         ifd.exif = self.meta(ifd.get(34665).cloned(), exif::Ifd::Exif)?;
         ifd.gps = self.meta(ifd.get(34853).cloned(), exif::Ifd::Gps)?;
         Ok(ifd)
+    }
+
+    /// `ifd`'s Compression as libtiff reads it ([`per_sample`]): 1 when
+    /// it's absent; `None` where libtiff can't read it.
+    fn compression(&mut self, ifd: &Ifd) -> Result<Option<u64>, Error> {
+        let o = self.layout.order;
+        let Some(entry) = ifd.get(259) else {
+            return Ok(Some(1));
+        };
+        let samples = samples(self.r, ifd, o)?;
+        per_sample(self.r, entry, o, samples, &mut self.samples_left)
     }
 
     /// The chain of SubIFDs starting at `at`, `depth` down.
@@ -991,10 +1168,10 @@ impl Walk<'_> {
         let Some(entry) = entry else {
             return Ok(None);
         };
-        let at = match entry.uint(self.layout.order) {
+        let at = match pointer(self.r, &entry, self.layout.order)? {
             Some(0) => return Ok(None),
-            Some(at) if matches!(entry.kind, 4 | 13 | 16 | 18) => at,
-            _ => return Ok(Some(Meta::unread(0))),
+            Some(at) => at,
+            None => return Ok(Some(Meta::unread(0))),
         };
         match self.seen.get(&at) {
             Some(Seen::Meta(seen, meta)) if *seen == kind => {
@@ -1052,7 +1229,7 @@ impl Walk<'_> {
         })?;
         self.blocks += blocks.len();
         // Uncompressed (1, or no Compression): sized from the picture.
-        let plain = ifd.get(259).map_or(Some(1), |e| e.uint(self.layout.order)) == Some(1);
+        let plain = ifd.compression == 1;
         match ifd.get(if tiled { 325 } else { 279 }).cloned() {
             Some(counts) => {
                 let mut lens = 0;
@@ -1101,7 +1278,8 @@ impl Walk<'_> {
     /// data when `plain`) as libtiff 4.5 reads them (`TIFFReadDirectory`),
     /// so that both tools copy what readers read ([module docs](self)).
     /// libtiff reads as many entries as its own count of strips or tiles
-    /// ([`Dims::count`]), 0 for those missing, and checks those:
+    /// ([`Dims::count`]), 0 for those missing, and checks those, as the
+    /// kind it reads them as, whichever tags list them:
     ///
     /// - **Worked out from the picture** ([`Walk::sizes`]) where libtiff
     ///   ignores them ("Bogus" and "Wrong" StripByteCounts): a lone strip
@@ -1116,25 +1294,34 @@ impl Walk<'_> {
     /// - **Refused** ([`MISSIZED`]): a block of 0 bytes at a nonzero offset
     ///   (one at 0 is empty, GDAL's sparse tiles), an uncompressed block
     ///   libtiff reads that's shorter than the picture says, which libtiff
-    ///   fails on and Pillow and ImageMagick read past, and more than one
-    ///   entry where libtiff can't read the layout ([`Dims::of`]), as which
-    ///   it would read can't be told.
+    ///   fails on and Pillow and ImageMagick read past, more than one entry
+    ///   where libtiff can't read the layout ([`Dims::of`]), as which it
+    ///   would read can't be told, and uncompressed blocks Grape can't size
+    ///   ([`Walk::sizes`]: a layout, BitsPerSample, Photometric or
+    ///   YCbCrSubsampling libtiff can't read, a lone strip's too), as how
+    ///   much of the picture readers read from them can't be checked.
     ///
     /// Gives whether it worked them out.
     fn recount(&mut self, ifd: &Ifd, blocks: &mut [Block], plain: bool) -> Result<bool, Error> {
         let l = self.layout;
         let listed = blocks.len() as u64;
-        // Where libtiff can't count them, a lone entry is the one it would
-        // read; of more, it can't be told which.
+        // Where libtiff can't count them, a lone compressed entry is the
+        // one it would read; of more, it can't be told which, nor, for
+        // uncompressed data, how much of the picture readers that size it
+        // themselves read from it.
         let (count, tiled, apart) = match Dims::of(self.r, ifd, l.order)? {
             Ok(dims) => (dims.count(), dims.tiled(), dims.planar),
-            Err(_) if listed == 1 => (1, ifd.tiled, false),
+            Err(_) if listed == 1 && !plain => (1, ifd.tiled, false),
             Err(_) => return Err(Error::Refused(MISSIZED.into())),
         };
-        // Sized as libtiff sizes them, which Grape can do only when it
-        // writes them under the tags libtiff reads them by.
+        // Uncompressed, sized as libtiff sizes them, as the kind it reads
+        // them as, whichever tags list them; when they can't be (a tag
+        // libtiff can't read), what readers read of them can't be checked.
         let sizes = match usize::try_from(count) {
-            Ok(want) if plain && tiled == ifd.tiled => self.sizes(ifd, want)?.ok(),
+            Ok(want) if plain => match self.sizes(ifd, want)? {
+                Ok(sizes) => Some(sizes),
+                Err(_) => return Err(Error::Refused(MISSIZED.into())),
+            },
             _ => None,
         };
         let short = |n: u64, block: &Block| sizes.as_ref().is_some_and(|s| block.len < s.of(n));
@@ -1178,19 +1365,18 @@ impl Walk<'_> {
     }
 
     /// How an uncompressed IFD's `want` strips or tiles are sized from its
-    /// picture, as libtiff sizes them ([`Sizes`]), from its layout as
-    /// libtiff reads it ([`Dims`]), or why they can't be; BitsPerSample
-    /// read out of line counts against what the walk may read of them.
+    /// picture, as libtiff sizes them ([`Sizes`]): as the kind it reads
+    /// them as, whichever tags list them, from its layout and
+    /// BitsPerSample, PhotometricInterpretation and YCbCrSubsampling as
+    /// libtiff reads them ([`Dims`], [`per_sample`], [`number`], [`pair`]),
+    /// or why they can't be; what's read out of line counts against what
+    /// the walk may read of them.
     fn sizes(&mut self, ifd: &Ifd, want: usize) -> Result<Result<Sizes, String>, Error> {
         let o = self.layout.order;
-        let get = |tag| ifd.uint(tag, o);
         let dims = match Dims::of(self.r, ifd, o)? {
             Ok(dims) => dims,
             Err(why) => return Ok(Err(why)),
         };
-        if dims.tiled() != ifd.tiled {
-            return Ok(Err("its blocks are listed as another kind".into()));
-        }
         let Dims {
             width,
             height,
@@ -1198,40 +1384,31 @@ impl Walk<'_> {
             planar,
             ..
         } = dims;
-        let bps = match ifd.get(258).cloned() {
-            Some(bps) => {
-                if let Value::At { len, .. } = bps.value {
-                    self.samples_read = self.samples_read.saturating_add(len);
-                    if self.samples_read > self.layout.len {
-                        return Err(Error::TooLarge(
-                            "BitsPerSample read past the file's size".into(),
-                        ));
-                    }
-                }
-                match self.uints(&bps, MAX_SAMPLES) {
-                    Ok(bps) => bps,
-                    Err(e @ Error::Read(_)) => return Err(e),
-                    Err(_) => return Ok(Err("its BitsPerSample can't be read".into())),
-                }
-            }
-            None => vec![1],
+        // One value for every sample, as libtiff reads it.
+        let bps = match ifd.get(258) {
+            None => 1,
+            Some(entry) => match per_sample(self.r, entry, o, Some(spp), &mut self.samples_left)? {
+                Some(bps) => bps,
+                None => return Ok(Err("its BitsPerSample can't be read".into())),
+            },
         };
-        // libtiff reads one value, or the first SamplesPerPixel of more.
-        let bps = match (bps.len(), bps.get(..spp as usize)) {
-            (1, _) => bps,
-            (_, Some(first)) => first.to_vec(),
-            (n, None) => return Ok(Err(format!("its BitsPerSample has {n} values"))),
+        let photometric = match ifd.get(262) {
+            None => None,
+            Some(entry) => match number(self.r, entry, o, SHORT)? {
+                Some(photometric) => Some(photometric),
+                None => return Ok(Err("its PhotometricInterpretation can't be read".into())),
+            },
         };
         // YCbCr's chroma is subsampled 2 × 2 unless it says otherwise, in
         // sampling units of h × v luma samples and two chroma samples
         // (TIFF 6 §21), when its three samples are in one plane.
-        let (h, v) = match (get(262), planar) {
-            (Some(6), false) => match ifd.get(530).map(|e| (e.kind, e.count, e.value)) {
+        let (h, v) = match (photometric, planar) {
+            (Some(6), false) => match ifd.get(530) {
                 None => (2, 2),
-                Some((3, 2, Value::Inline { bytes, .. })) => {
-                    (o.uint(&bytes[..2]), o.uint(&bytes[2..4]))
-                }
-                Some(_) => return Ok(Err("its YCbCrSubsampling can't be read".into())),
+                Some(entry) => match pair(self.r, entry, o, &mut self.samples_left)? {
+                    Some(sub) => sub,
+                    None => return Ok(Err("its YCbCrSubsampling can't be read".into())),
+                },
             },
             _ => (1, 1),
         };
@@ -1240,22 +1417,14 @@ impl Walk<'_> {
             return Ok(Err(format!("its YCbCrSubsampling is {h} × {v}")));
         }
         let past = || Ok(Err("sizes past any number".into()));
-        // Bits a pixel, or a sampling unit, in each plane.
-        let bits: Vec<u64> = match (planar, bps.as_slice()) {
-            (true, [one]) if spp <= MAX_SAMPLES as u64 => vec![*one; spp as usize],
-            (true, [_]) => return Ok(Err("too many samples".into())),
-            (true, all) => all.to_vec(),
-            (false, all @ [first, ..]) if subsampled => {
-                if all.iter().any(|b| b != first) {
-                    return Ok(Err("its samples have different sizes".into()));
-                }
-                vec![first.saturating_mul(h * v + 2)]
-            }
-            (false, [one]) => vec![one.saturating_mul(spp)],
-            (false, all) => match all.iter().try_fold(0u64, |sum, &b| sum.checked_add(b)) {
-                Some(sum) => vec![sum],
-                None => return past(),
-            },
+        // Bits a pixel, or a sampling unit, in each plane (SamplesPerPixel
+        // is a SHORT's, so the planes are few enough to hold).
+        let bits: Vec<u64> = if planar {
+            vec![bps; usize::try_from(spp).unwrap_or(0)]
+        } else if subsampled {
+            vec![bps * (h * v + 2)]
+        } else {
+            vec![bps * spp]
         };
         // A full block's width and rows, and a plane's last strip's rows.
         let per_plane = dims.per_plane();
@@ -1880,6 +2049,51 @@ mod tests {
         assert_eq!(lens(&read(&file).unwrap()), [30_000, 100]);
     }
 
+    #[test]
+    fn blocks_listed_as_the_other_kind_are_checked_as_libtiff_reads_them() {
+        let refused =
+            |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
+        // Listed as tiles with no tile size, which libtiff reads as strips:
+        // ten, the fourth counted 10, with no RowsPerStrip, where it reads
+        // one, short of the picture, and the picture from it.
+        let mut counts = vec![3_000; 10];
+        counts[3] = 10;
+        let mut page = gray(300, 100, 10, picture().chunks(3_000).map(B::data).collect());
+        page.tags.retain(|t| t.0 != 278);
+        page.tiled = true;
+        page.counts = Some(counts);
+        assert!(refused(&Builder::new(b'I', false, vec![page]).build()));
+        // One counted 10, of a 90 × 90 picture: worked out to it, as libtiff
+        // works it out.
+        let mut page = gray(90, 90, 90, vec![B::Data(picture()[..8_100].to_vec())]);
+        page.tiled = true;
+        page.counts = Some(vec![10]);
+        let tiff = read(&Builder::new(b'I', true, vec![page]).build()).unwrap();
+        assert_eq!(lens(&tiff), [8_100]);
+        // Listed as strips beside a tile size, which libtiff reads as
+        // tiles: four 32 × 32 tiles of 64 × 64, one short of its 1,024
+        // bytes, refused; their first two counts differ ("Wrong"), worked
+        // out as tiles.
+        let tiles = |counts: Vec<u64>| {
+            let mut page = gray(
+                64,
+                64,
+                16,
+                picture()[..4_096].chunks(1_024).map(B::data).collect(),
+            );
+            page.tags
+                .extend([(322, V::Short(vec![32])), (323, V::Short(vec![32]))]);
+            page.counts = Some(counts);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        assert!(refused(&tiles(vec![1_024, 1_024, 10, 1_024])));
+        let tiff = read(&tiles(vec![1_024, 512, 1_024, 1_024])).unwrap();
+        assert_eq!(lens(&tiff), [1_024; 4]);
+        // With no counts at all, they're sized as libtiff reads them too.
+        let tiff = read(&tiles(Vec::new())).unwrap();
+        assert_eq!(lens(&tiff), [1_024; 4]);
+    }
+
     /// An entry for `tag` of type `kind` holding `bytes` inline, `count`
     /// values of it.
     fn inline(tag: u16, kind: u16, count: u64, value: &[u8]) -> Entry {
@@ -1898,7 +2112,7 @@ mod tests {
     fn a_layout_number_is_read_as_libtiff_reads_a_short_or_a_long() {
         let mut r = Cursor::new(vec![0, 0, 100, 0, 0, 0, 0, 0, 0, 0]);
         let number = |r: &mut Cursor<Vec<u8>>, entry: &Entry, max: u64| {
-            libtiff_number(r, entry, Order::Little, max).unwrap()
+            number(r, entry, Order::Little, max).unwrap()
         };
         let long = u64::from(u32::MAX);
         // Any integer type, signed ones not negative.
@@ -1944,6 +2158,164 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_per_sample_tag_is_read_as_libtiff_reads_compression() {
+        // At 2, three SHORTs: 7, 7 and 5.
+        let mut r = Cursor::new(vec![0, 0, 7, 0, 7, 0, 5, 0]);
+        let mut read = |entry: &Entry, samples: Option<u64>| {
+            let mut left = u64::MAX;
+            per_sample(&mut r, entry, Order::Little, samples, &mut left).unwrap()
+        };
+        // One value of any integer type libtiff reads, whatever the
+        // samples, signed ones not negative.
+        for (kind, bytes) in [(1, &[7][..]), (6, &[7]), (8, &[7, 0]), (9, &[7, 0, 0, 0])] {
+            assert_eq!(read(&inline(259, kind, 1, bytes), None), Some(7), "{kind}");
+        }
+        assert_eq!(read(&inline(259, 8, 1, &[0xF9, 0xFF]), Some(1)), None);
+        // More: at least SamplesPerPixel of them, the first that many the
+        // same, every one a SHORT's.
+        let two = inline(259, 3, 2, &[7, 0, 7, 0]);
+        assert_eq!(read(&two, Some(1)), Some(7));
+        assert_eq!(read(&two, Some(2)), Some(7));
+        assert_eq!(read(&two, Some(3)), None);
+        assert_eq!(read(&two, None), None);
+        let three = Entry {
+            tag: 258,
+            kind: 3,
+            count: 3,
+            value: Value::At { offset: 2, len: 6 },
+        };
+        assert_eq!(read(&three, Some(2)), Some(7));
+        assert_eq!(read(&three, Some(3)), None);
+        let past = inline(259, 4, 2, &[7, 0, 0, 0, 0, 0, 1, 0]);
+        assert_eq!(read(&past, Some(1)), None);
+        let negative = inline(259, 8, 2, &[7, 0, 0xFF, 0xFF]);
+        assert_eq!(read(&negative, Some(1)), None);
+        assert_eq!(read(&inline(259, 3, 0, &[]), Some(1)), None);
+        assert_eq!(read(&inline(259, 5, 1, &[7, 0, 0, 0]), Some(1)), None);
+        // What's read out of line comes out of the budget.
+        let mut left = 6;
+        let mut r = Cursor::new(vec![0, 0, 7, 0, 7, 0, 5, 0]);
+        let got = per_sample(&mut r, &three, Order::Little, Some(1), &mut left);
+        assert_eq!((got.unwrap(), left), (Some(7), 0));
+        let got = per_sample(&mut r, &three, Order::Little, Some(1), &mut left);
+        assert!(matches!(got, Err(Error::TooLarge(_))), "{got:?}");
+    }
+
+    #[test]
+    fn ycbcr_subsampling_is_two_numbers_as_libtiff_reads_them() {
+        let mut r = Cursor::new(Vec::new());
+        let mut read = |entry: &Entry| {
+            let mut left = u64::MAX;
+            pair(&mut r, entry, Order::Little, &mut left).unwrap()
+        };
+        assert_eq!(read(&inline(530, 3, 2, &[2, 0, 1, 0])), Some((2, 1)));
+        assert_eq!(read(&inline(530, 1, 2, &[4, 2])), Some((4, 2)));
+        assert_eq!(read(&inline(530, 8, 2, &[2, 0, 2, 0])), Some((2, 2)));
+        assert_eq!(read(&inline(530, 8, 2, &[2, 0, 0xFE, 0xFF])), None);
+        assert_eq!(read(&inline(530, 3, 1, &[2, 0])), None);
+        assert_eq!(read(&inline(530, 1, 3, &[2, 2, 2])), None);
+    }
+
+    #[test]
+    fn compression_is_read_as_libtiff_reads_it_and_refused_where_it_cant() {
+        // A gray 8 × 8 page of one PackBits strip, its Compression `value`,
+        // and `samples` samples a pixel.
+        let file = |value: V, samples: u16| {
+            let mut page = gray(8, 8, 8, vec![B::data(b"\x3F packbits")]);
+            page.tags
+                .extend([(259, value), (277, V::Short(vec![samples]))]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        let compression =
+            |value: V, samples: u16| read(&file(value, samples)).map(|t| t.pages[0].compression);
+        let le = |n: u16| n.to_le_bytes().to_vec();
+        assert_eq!(
+            compression(V::Bytes(8, le(32773)[..2].to_vec()), 1).ok(),
+            None
+        );
+        assert_eq!(compression(V::Bytes(8, le(5)), 1).unwrap(), 5);
+        assert_eq!(
+            compression(V::Bytes(9, 5u32.to_le_bytes().to_vec()), 1).unwrap(),
+            5
+        );
+        assert_eq!(compression(V::Short(vec![5, 5, 5]), 3).unwrap(), 5);
+        assert_eq!(compression(V::Short(vec![5, 5, 1]), 2).unwrap(), 5);
+        // Where libtiff can't read it, nor so the file: refused.
+        let unread = |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == UNREAD_COMPRESSION);
+        for (value, samples) in [
+            (V::Short(vec![5, 1]), 2),
+            (V::Short(vec![5, 5]), 3),
+            (V::Bytes(8, le(0xFFFB)), 1),
+            (V::Long(vec![70_000]), 1),
+            (V::Rational(vec![(5, 1)]), 1),
+        ] {
+            assert!(unread(&file(value.clone(), samples)), "{value:?}");
+        }
+        // An old-style JPEG, 6 in any of those, is refused as one.
+        for (value, samples) in [
+            (V::Bytes(8, le(6)), 1),
+            (V::Bytes(16, 6u64.to_le_bytes().to_vec()), 1),
+            (V::Short(vec![6, 6, 6]), 3),
+        ] {
+            let got = read(&file(value.clone(), samples));
+            assert!(
+                matches!(&got, Err(Error::Refused(why)) if why.contains("old kind")),
+                "{value:?}: {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bits_per_sample_and_photometric_are_read_as_libtiff_reads_them() {
+        // A gray 300 × 100 page in ten strips of 10 rows, the fourth short:
+        // refused, whatever integer type libtiff reads its BitsPerSample
+        // in; and with its count of 10, at 8 bits, one strip of no
+        // RowsPerStrip: worked out to the picture.
+        let refused =
+            |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
+        for (big, bits) in [
+            (false, V::Bytes(1, vec![8])),
+            (false, V::Bytes(6, vec![8])),
+            (false, V::Bytes(8, 8u16.to_le_bytes().to_vec())),
+            (false, V::Bytes(9, 8u32.to_le_bytes().to_vec())),
+            (true, V::Bytes(17, 8u64.to_le_bytes().to_vec())),
+            (false, V::Short(vec![8, 8])),
+        ] {
+            let mut page = gray(300, 100, 10, picture().chunks(3_000).map(B::data).collect());
+            page.tags[2] = (258, bits.clone());
+            let mut counts = vec![3_000; 10];
+            counts[3] = 10;
+            page.counts = Some(counts);
+            assert!(
+                refused(&Builder::new(b'I', big, vec![page.clone()]).build()),
+                "{bits:?}"
+            );
+            let mut lone = page;
+            lone.tags.retain(|t| t.0 != 278);
+            lone.blocks = vec![B::Data(picture())];
+            lone.counts = Some(vec![10]);
+            let tiff = read(&Builder::new(b'I', big, vec![lone]).build()).unwrap();
+            assert_eq!(lens(&tiff), [30_000], "{bits:?}");
+        }
+        // RGB 30 × 20, its Compression a SHORT for each sample: one strip
+        // counted 1,000 of its 1,800 bytes, which libtiff ignores, and ten
+        // of two rows, counted 180, 179 and on, which it ignores too.
+        let mut rgb = gray(30, 20, 20, vec![B::Data(vec![7; 1_800])]);
+        rgb.tags[2] = (258, V::Short(vec![8, 8, 8]));
+        rgb.tags[3] = (262, V::Bytes(8, 2u16.to_le_bytes().to_vec()));
+        rgb.tags
+            .extend([(259, V::Short(vec![1, 1, 1])), (277, V::Short(vec![3]))]);
+        rgb.counts = Some(vec![1_000]);
+        let tiff = read(&Builder::new(b'I', false, vec![rgb.clone()]).build()).unwrap();
+        assert_eq!(lens(&tiff), [1_800]);
+        rgb.tags[4] = (278, V::Long(vec![2]));
+        rgb.blocks = (0..10).map(|n| B::Data(vec![n; 180])).collect();
+        rgb.counts = Some([180, 179].repeat(5));
+        let tiff = read(&Builder::new(b'I', false, vec![rgb]).build()).unwrap();
+        assert_eq!(lens(&tiff), [180; 10]);
+    }
+
     /// An image IFD of `entries` (numbers inline, little-endian), listing
     /// strips.
     fn ifd_of(entries: &[(u16, u16, u64)]) -> Ifd {
@@ -1954,6 +2326,7 @@ mod tests {
                 .iter()
                 .map(|&(tag, kind, n)| inline(tag, kind, 1, &n.to_le_bytes()[..size(kind)]))
                 .collect(),
+            compression: 1,
             blocks: Vec::new(),
             tiled: false,
             estimated: false,
@@ -2032,7 +2405,35 @@ mod tests {
     }
 
     #[test]
-    fn more_than_one_entry_of_a_layout_libtiff_cant_read_is_refused() {
+    fn a_tile_size_left_out_is_libtiffs_from_a_rowsperstrip_listed_first() {
+        // 64 × 64, its entries in the order given (as libtiff sets them).
+        let count = |entries: &[(u16, u16, u64)]| dims(entries).map(|d| (d.count(), d.tile()));
+        let with = |more: &[(u16, u16, u64)]| [&[(256, 4, 64), (257, 4, 64)][..], more].concat();
+        // A RowsPerStrip before a TileLength: tiles as wide as the picture,
+        // so that strips of 16 rows are its four tiles; before a TileWidth,
+        // tiles of its rows; before both, both its own.
+        let length = with(&[(278, 3, 16), (323, 3, 16)]);
+        assert_eq!(count(&length), Ok((4, Some((64, 16)))));
+        let width = with(&[(278, 3, 16), (322, 3, 32)]);
+        assert_eq!(count(&width), Ok((8, Some((32, 16)))));
+        let both = with(&[(278, 3, 16), (322, 3, 32), (323, 3, 32)]);
+        assert_eq!(count(&both), Ok((4, Some((32, 32)))));
+        // A RowsPerStrip of 2^32 - 1: tiles as long as the picture.
+        let whole = with(&[(278, 4, u64::from(u32::MAX)), (323, 3, 16)]);
+        assert_eq!(count(&whole), Ok((4, Some((64, 16)))));
+        let whole = with(&[(278, 4, u64::from(u32::MAX)), (322, 3, 16)]);
+        assert_eq!(count(&whole), Ok((4, Some((16, 64)))));
+        // A RowsPerStrip after the tile size sets nothing, nor one before
+        // the ImageWidth a TileWidth: libtiff counts no tiles.
+        assert!(count(&with(&[(323, 3, 16), (278, 3, 16)])).is_err());
+        let early = [(278, 3, 16), (256, 4, 64), (257, 4, 64), (323, 3, 16)];
+        assert!(count(&early).is_err());
+        let early = [(257, 4, 64), (278, 3, 16), (256, 4, 64), (322, 3, 32)];
+        assert_eq!(count(&early), Ok((8, Some((32, 16)))));
+    }
+
+    #[test]
+    fn a_layout_libtiff_cant_read_is_refused_but_for_one_compressed_block() {
         let refused =
             |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
         // Ten strips of a page whose RowsPerStrip is a RATIONAL, which
@@ -2041,9 +2442,41 @@ mod tests {
         let mut page = gray(300, 100, 10, strips);
         page.tags[4] = (278, V::Rational(vec![(10, 1)]));
         assert!(refused(&Builder::new(b'I', false, vec![page]).build()));
-        // A lone strip is the one it would read.
+        // A lone uncompressed strip where libtiff counts no strips or tiles
+        // (a RowsPerStrip of 2^32 - 2, a lone TileWidth), or can't read the
+        // layout: Pillow reads the whole picture from it, which Grape can't
+        // size as libtiff would, so a strip counted short of it can't be
+        // told from a whole one. Refused, short or whole.
+        let lone = |tags: &[(u16, V)], count: u64| {
+            let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
+            page.tags.retain(|t| t.0 != 278);
+            page.tags.extend(tags.iter().cloned());
+            page.counts = Some(vec![count]);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        for tags in [
+            vec![(278, V::Long(vec![u32::MAX - 1]))],
+            vec![(278, V::Rational(vec![(100, 1)]))],
+            vec![(322, V::Long(vec![304]))],
+        ] {
+            for count in [10, 30_000] {
+                assert!(refused(&lone(&tags, count)), "{tags:?} {count}");
+            }
+        }
+        // A TileWidth or a TileLength beside a RowsPerStrip, which libtiff
+        // reads as one tile of 304 × 100, or the picture's 300 × 100:
+        // refused short of it, and taken whole.
+        let rows = (278, V::Long(vec![100]));
+        let wide = [rows.clone(), (322, V::Long(vec![304]))];
+        assert!(refused(&lone(&wide, 10)));
+        assert!(refused(&lone(&wide, 30_000)));
+        let long = [rows, (323, V::Short(vec![100]))];
+        assert!(refused(&lone(&long, 10)));
+        assert_eq!(lens(&read(&lone(&long, 30_000)).unwrap()), [30_000]);
+        // A lone compressed one is the one libtiff would read, as it is.
         let mut page = gray(300, 100, 100, vec![B::Data(picture())]);
         page.tags[4] = (278, V::Rational(vec![(100, 1)]));
+        page.tags.push((259, V::Short(vec![5])));
         let tiff = read(&Builder::new(b'I', false, vec![page]).build()).unwrap();
         assert_eq!(lens(&tiff), [30_000]);
     }
@@ -2212,18 +2645,32 @@ mod tests {
     }
 
     #[test]
-    fn bits_per_sample_past_any_number_is_broken() {
-        // Two samples of 2^63 bits each, chunky, with no byte counts.
-        let mut page = gray(1, 1, 1, vec![B::data(b"xy")]);
-        page.tags.retain(|t| t.0 != 258);
-        let half = (1u64 << 63).to_le_bytes();
-        page.tags.extend([
-            (258, V::Bytes(16, [half, half].concat())),
-            (277, V::Short(vec![2])),
-        ]);
+    fn sizes_past_any_number_are_broken() {
+        // 2^32 - 1 pixels a row of 65,535 samples of 65,535 bits, in one
+        // strip of 16 rows, with no byte counts: 2^64 bytes and more.
+        let mut page = gray(u32::MAX, 16, 16, vec![B::data(b"xy")]);
+        page.tags[2] = (258, V::Short(vec![u16::MAX]));
+        page.tags.push((277, V::Short(vec![u16::MAX])));
         page.counts = Some(Vec::new());
         let file = Builder::new(b'I', true, vec![page]).build();
-        assert!(matches!(read(&file), Err(Error::Broken(_))));
+        let got = read(&file);
+        assert!(
+            matches!(&got, Err(Error::Broken(why)) if why.contains("past any number")),
+            "{got:?}"
+        );
+        // BitsPerSample past a SHORT, which libtiff can't read: two
+        // samples of 2^63 bits each.
+        let mut page = gray(1, 1, 1, vec![B::data(b"xy")]);
+        let half = (1u64 << 63).to_le_bytes();
+        page.tags[2] = (258, V::Bytes(16, [half, half].concat()));
+        page.tags.push((277, V::Short(vec![2])));
+        page.counts = Some(Vec::new());
+        let file = Builder::new(b'I', true, vec![page]).build();
+        let got = read(&file);
+        assert!(
+            matches!(&got, Err(Error::Broken(why)) if why.contains("BitsPerSample")),
+            "{got:?}"
+        );
     }
 
     #[test]

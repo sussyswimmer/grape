@@ -10,11 +10,12 @@
 //!   MSB-first codes it could come out as other bytes without an error.
 //! - **Cut** at the block's size ([`Geometry`]): its rows times a row's
 //!   bytes (a plane's, when the planes are stored apart; a row of YCbCr
-//!   sampling units when the chroma is subsampled, TIFF 6 §21; of the
-//!   first SamplesPerPixel sizes of BitsPerSample, as libtiff reads it),
-//!   the last strip of each plane holding what's left of the picture, a
-//!   tile always full size. Bytes after that are dropped, as readers drop
-//!   them; data that ends before it can't be decoded.
+//!   sampling units when the chroma is subsampled, TIFF 6 §21; of
+//!   BitsPerSample as libtiff reads it, one size for every sample), the
+//!   last strip of each plane holding what's left of the picture, a tile
+//!   always full size, and one slice deep (a deeper one isn't decoded).
+//!   Bytes after that are dropped, as readers drop them; data that ends
+//!   before it can't be decoded.
 //! - **Predicted** ([`Predictor`]): horizontal differencing (TIFF's
 //!   predictor 2) over each row of 8 or 16-bit samples, in the file's byte
 //!   order, and its inverse.
@@ -34,7 +35,7 @@ use std::io::Write;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
 use super::super::strip::{read_at, Error, In};
-use super::read::{read_value, Block, Dims, Entry, Ifd, Order, Value};
+use super::read::{number, pair, per_sample, Block, Dims, Ifd, Order, SHORT};
 
 /// The most decoded bytes handed on at once, unless a row is longer: what
 /// the caller's cancel check is between.
@@ -42,9 +43,6 @@ pub(crate) const STEP: usize = 256 * 1024;
 
 /// How much of a block is read at once.
 const INPUT: usize = 64 * 1024;
-
-/// The most samples a pixel has, for reading BitsPerSample and SampleFormat.
-pub(crate) const MAX_SAMPLES: u64 = 1 << 16;
 
 /// Why an IFD's blocks can't be re-encoded: the end of "copied as it is,
 /// because …", for the log.
@@ -105,10 +103,12 @@ pub(crate) struct Geometry {
 
 impl Geometry {
     /// The layout `ifd` says its blocks have once decoded, its size, planes
-    /// and strips or tiles as libtiff reads them ([`Dims`]), or why it
-    /// can't be told; reads BitsPerSample and YCbCrSubsampling from `r`
-    /// when they aren't inline, taking what's read from `left` (what's left
-    /// of the bytes it may read for that: past it, the file is too large).
+    /// and strips or tiles as libtiff reads them ([`Dims`]), and its
+    /// BitsPerSample, PhotometricInterpretation and YCbCrSubsampling too
+    /// ([`per_sample`], [`number`], [`pair`]), or why it can't be told;
+    /// reads them from `r` when they aren't inline, taking what's read from
+    /// `left` (what's left of the bytes it may read for that: past it, the
+    /// file is too large).
     pub(crate) fn of(
         r: &mut dyn In,
         ifd: &Ifd,
@@ -129,41 +129,36 @@ impl Geometry {
             planar,
             ..
         } = dims;
+        // One value for every sample, as libtiff reads it.
         let bits = match ifd.get(258) {
-            None => vec![1],
-            Some(entry) => match numbers(r, entry, order, MAX_SAMPLES, left)? {
+            None => 1,
+            Some(entry) => match per_sample(r, entry, order, Some(samples), left)? {
                 Some(bits) => bits,
-                None => return not("its BitsPerSample can't be read".into()),
+                None => return unread("BitsPerSample"),
             },
-        };
-        // One value, or the first SamplesPerPixel of more, as libtiff
-        // reads them.
-        let bits = match (bits.as_slice(), bits.get(..samples as usize)) {
-            ([one], _) => *one,
-            (_, Some(used @ [first, ..])) => {
-                if used.iter().any(|b| b != first) {
-                    return not(format!("its samples have different sizes: {used:?}"));
-                }
-                *first
-            }
-            _ => return not(format!("its BitsPerSample has {} values", bits.len())),
         };
         if bits == 0 || bits > 64 {
             return not(format!("its BitsPerSample is {bits}"));
         }
-        let photometric = ifd.get(262).map(|e| e.uint(order));
-        if photometric == Some(None) {
-            return unread("PhotometricInterpretation");
-        }
+        let photometric = match ifd.get(262) {
+            None => None,
+            Some(entry) => match number(r, entry, order, SHORT)? {
+                Some(photometric) => Some(photometric),
+                None => return unread("PhotometricInterpretation"),
+            },
+        };
         // YCbCr is subsampled 2 × 2 unless it says otherwise (TIFF 6 §21).
-        let (h, v) = if photometric == Some(Some(6)) {
+        let (h, v) = if photometric == Some(6) {
             let sub = match ifd.get(530) {
-                None => vec![2, 2],
-                Some(entry) => numbers(r, entry, order, 2, left)?.unwrap_or_default(),
+                None => (2, 2),
+                Some(entry) => match pair(r, entry, order, left)? {
+                    Some(sub) => sub,
+                    None => return unread("YCbCrSubsampling"),
+                },
             };
-            match sub.as_slice() {
-                &[h @ (1 | 2 | 4), v @ (1 | 2 | 4)] => (h, v),
-                _ => return not(format!("its YCbCrSubsampling is {sub:?}")),
+            match sub {
+                (h @ (1 | 2 | 4), v @ (1 | 2 | 4)) => (h, v),
+                (h, v) => return not(format!("its YCbCrSubsampling is {h} × {v}")),
             }
         } else {
             (1, 1)
@@ -171,6 +166,13 @@ impl Geometry {
         let subsampled = (h, v) != (1, 1);
         if subsampled && (planar || samples != 3) {
             return not("its subsampled YCbCr isn't three samples in one plane".into());
+        }
+        // A tile of several slices (TileDepth) holds them one after the
+        // other, which libtiff's tile size leaves out: decoded as one, the
+        // slices after the first would be lost.
+        let slices = dims.tile_depth();
+        if slices > 1 {
+            return not(format!("its tiles are {slices} slices deep"));
         }
         let past = || not("its sizes are past any number".into());
         // libtiff tells tiles by a TileWidth or TileLength, whichever tags
@@ -235,36 +237,6 @@ impl Geometry {
         };
         rows.div_ceil(self.per_row) * self.row
     }
-}
-
-/// The unsigned numbers `entry` holds (BYTE, SHORT, LONG or LONG8), at
-/// most `cap` of them, read from `r` when they aren't inline and taken
-/// from `left`; `None` when there are more, they aren't numbers, or they
-/// can't be read.
-pub(crate) fn numbers(
-    r: &mut dyn In,
-    entry: &Entry,
-    order: Order,
-    cap: u64,
-    left: &mut u64,
-) -> Result<Option<Vec<u64>>, Error> {
-    let size = match entry.kind {
-        1 => 1,
-        3 => 2,
-        4 => 4,
-        16 => 8,
-        _ => return Ok(None),
-    };
-    if entry.count > cap {
-        return Ok(None);
-    }
-    if let Value::At { len, .. } = entry.value {
-        *left = left
-            .checked_sub(len)
-            .ok_or_else(|| Error::TooLarge("sample sizes read past the file's size".into()))?;
-    }
-    let bytes = read_value(r, entry, cap * 8)?;
-    Ok(bytes.map(|bytes| bytes.chunks_exact(size).map(|n| order.uint(n)).collect()))
 }
 
 /// TIFF's horizontal differencing (predictor 2): each sample less the one
@@ -1333,7 +1305,7 @@ mod tests {
             (rows_rational, 1, "RowsPerStrip can't be read"),
             (planes_apart, 3, "subsampled"),
             (odd, 1, "YCbCrSubsampling"),
-            (mixed, 3, "different sizes"),
+            (mixed, 3, "BitsPerSample can't be read"),
             (no_rows, 1, "RowsPerStrip is 0"),
             (huge, 1, "past any number"),
             (rgb[1..].to_vec(), 1, "0 × 7"),
