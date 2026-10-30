@@ -3335,31 +3335,75 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     let err = compress(&dir, "flag.webp", &unflagged, High).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
     assert_eq!(err.user_message, "flag.webp isn't a readable WEBP image.");
-    // An ALPH chunk just past the RIFF's end, which image-webp reads and
-    // libwebp (so Pillow and ImageMagick) doesn't: they show the picture
-    // opaque, and Compress would have made it half transparent.
-    let alph = webp_chunk(&alpha, b"ALPH").unwrap();
-    let opaque = riff(&[
-        vp8x_chunk(0x10, 8, 8),
-        riff_chunk(b"VP8 ", &webp_chunk(&alpha, b"VP8 ").unwrap()),
-    ]);
-    let late = [opaque, riff_chunk(b"ALPH", &alph)].concat();
-    let err = compress(&dir, "late.webp", &late, High).unwrap_err();
-    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
-    assert_eq!(err.user_message, "late.webp isn't a readable WEBP image.");
     // Two ALPH chunks before the VP8: libwebp reads the last, image-webp
     // the first.
     // (The second is uncompressed: its header byte 0, then 8 × 8 values.)
     let half = [[0u8].as_slice(), &[0x80; 64]].concat();
     let two = riff(&[
         vp8x_chunk(0x10, 8, 8),
-        riff_chunk(b"ALPH", &alph),
+        riff_chunk(b"ALPH", &webp_chunk(&alpha, b"ALPH").unwrap()),
         riff_chunk(b"ALPH", &half),
         riff_chunk(b"VP8 ", &webp_chunk(&alpha, b"VP8 ").unwrap()),
     ]);
     let err = compress(&dir, "two.webp", &two, High).unwrap_err();
     assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
     assert_eq!(err.user_message, "two.webp isn't a readable WEBP image.");
+}
+
+#[test]
+fn compress_reads_a_webp_only_to_its_riffs_end() {
+    use grape_core::CompressPreset::High;
+    // A photo in the RIFF; past its end, where libwebp (so Pillow,
+    // ImageMagick and browsers) never looks, chunks image-webp's walk of an
+    // extended file still reached (as far again as the RIFF's size less 12
+    // bytes from the end of VP8X): an ANMF frame of blue, which Compress
+    // wrote instead of the photo, and an ALPH chunk, which made it half
+    // transparent (refused since).
+    let dir = TestDir::new("compress-webp-riff-end");
+    let (w, h) = (256u32, 160u32);
+    let rgb = photo(w, h);
+    let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
+        let [r, g, b] = rgb.get_pixel(x, y).0;
+        image::Rgba([r, g, b, if x < w / 2 { 40 } else { 255 }])
+    });
+    let with_alpha = lossy_webp(rgba.as_raw(), w, h, true, 95.0);
+    let vp8 = riff_chunk(b"VP8 ", &webp_chunk(&with_alpha, b"VP8 ").unwrap());
+    let alph = riff_chunk(b"ALPH", &webp_chunk(&with_alpha, b"ALPH").unwrap());
+    let mut blue = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut blue)
+        .write_image(
+            &[10, 10, 220, 255].repeat((w * h) as usize),
+            w,
+            h,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let frame = [u24(0), u24(0), u24(w - 1), u24(h - 1), u24(100), vec![0]].concat();
+    let anmf = riff_chunk(b"ANMF", &[frame, blue[12..].to_vec()].concat());
+    for (name, flags, after) in [("frame.webp", 0, anmf), ("alph.webp", 0x10, alph)] {
+        let inside = riff(&[vp8x_chunk(flags, w, h), vp8.clone()]);
+        let shown = image::load_from_memory(&riff(std::slice::from_ref(&vp8)))
+            .unwrap()
+            .to_rgb8();
+        let file = [inside, after].concat();
+        let outcome =
+            compress(&dir, name, &file, High).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        // Opaque, as libwebp shows it, and the photo.
+        assert!(webp_chunk(&out, b"ALPH").is_none(), "{name}");
+        let back = image::load_from_memory(&out).unwrap();
+        assert!(!back.color().has_alpha(), "{name}");
+        let back = back.to_rgb8();
+        let off: u64 = back
+            .as_raw()
+            .iter()
+            .zip(shown.as_raw())
+            .map(|(&a, &b)| u64::from(a.abs_diff(b)))
+            .sum();
+        assert!(off < u64::from(w * h * 3) * 4, "{name}: {off}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+    }
 }
 
 #[test]

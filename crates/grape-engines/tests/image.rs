@@ -750,6 +750,65 @@ fn still_webp_with_alpha(width: u32, height: u32, lossy: bool) -> Vec<u8> {
 }
 
 #[test]
+fn a_webp_is_read_only_to_its_riffs_end() {
+    // A red picture in the RIFF; past its end, where libwebp (so Pillow,
+    // ImageMagick and browsers) never looks, an ANMF frame of blue, or a
+    // VP8L chunk of it. image-webp walks an extended file's chunks from the
+    // end of VP8X as far again as the RIFF's size less 12 bytes, so 10
+    // bytes past its end: it took the frame's blue for the picture, and
+    // refused the file with both a VP8 and a VP8L ("An expected chunk was
+    // missing").
+    let (w, h) = (256u32, 160u32);
+    let red = grape_webp::encode(
+        grape_webp::Pixels::Rgb {
+            data: &[200, 10, 10].repeat((w * h) as usize),
+            width: w,
+            height: h,
+        },
+        &grape_webp::Options {
+            mode: grape_webp::Mode::Lossy {
+                quality: 95.0,
+                method: 4,
+            },
+            threads: false,
+        },
+        &mut |_| true,
+    )
+    .unwrap();
+    assert_eq!(&red[12..16], b"VP8 ");
+    let blue = encode(
+        &DynamicImage::ImageRgba8(RgbaImage::from_pixel(w, h, Rgba([10, 10, 220, 255]))),
+        Format::Webp,
+    );
+    assert_eq!(&blue[12..16], b"VP8L");
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let vp8x = [vec![0; 4], u24(w - 1), u24(h - 1)].concat();
+    let body = [
+        b"WEBP".to_vec(),
+        riff_chunk(b"VP8X", &vp8x),
+        red[12..].to_vec(),
+    ]
+    .concat();
+    let inside = riff_chunk(b"RIFF", &body);
+    let frame = [u24(0), u24(0), u24(w - 1), u24(h - 1), u24(100), vec![0]].concat();
+    let anmf = riff_chunk(b"ANMF", &[frame, blue[12..].to_vec()].concat());
+    for (name, after) in [("frame.webp", anmf), ("vp8l.webp", blue[12..].to_vec())] {
+        let dir = TestDir::new("webp-riff-end");
+        let file = [inside.clone(), after].concat();
+        let (src, job) = plan_one(&dir, name, &file, Operation::convert(Format::Png));
+        let before = SourceState::of(&src);
+        let outcome = run(&job).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        before.assert_unchanged();
+        let out = decode(&fs::read(&outcome.outputs[0]).unwrap()).to_rgb8();
+        assert_eq!(out.dimensions(), (w, h));
+        for p in out.pixels() {
+            let off = p.0.iter().zip([200, 10, 10]).map(|(&a, b)| a.abs_diff(b));
+            assert!(off.max().unwrap() <= 6, "{name}: {p:?}");
+        }
+    }
+}
+
+#[test]
 fn a_still_lossy_webp_with_alpha_counts_its_alpha_decoding() {
     // An 11,585² RGBA canvas: 4 bytes decoded, and 6.5 for what a lossy
     // image with an alpha chunk keeps while decoding, is 1,344 MiB. With

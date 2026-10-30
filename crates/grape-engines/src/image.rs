@@ -31,6 +31,8 @@
 //!     headers are read first ([`crate::headers`]).
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
 //!   its first frame or page.
+//! - **A WebP to its RIFF's end:** the decoder reads no further, as libwebp
+//!   doesn't ([`read_end`]), for Compress too.
 //! - **Targets:** JPEG at quality 90 with any alpha flattened onto white;
 //!   PNG keeps the color type (float becomes 16-bit); WebP is lossless
 //!   (`image` has no lossy WebP encoder); BMP is 8-bit RGB or RGBA; TIFF
@@ -333,8 +335,62 @@ impl<R: Seek> Seek for Patched<R> {
     }
 }
 
+/// Where a decoder should stop reading the file `file` (`len` bytes, read
+/// from its start, which it's left at): a WebP's RIFF end, 8 bytes past
+/// its size, or the file's end if that's sooner, as libwebp stops there;
+/// any other file's end. image-webp walks an extended file's chunks from
+/// the end of `VP8X` as far again as the RIFF's size less 12 bytes, so
+/// past the RIFF's end, and took an `ANMF` frame, a `VP8L` or an `ALPH`
+/// chunk it found there for the picture's (D28).
+fn read_end(file: &mut File, len: u64) -> io::Result<u64> {
+    let mut head = Vec::with_capacity(12);
+    Read::by_ref(file).take(12).read_to_end(&mut head)?;
+    file.seek(SeekFrom::Start(0))?;
+    Ok(match head.get(..12) {
+        Some(head) if head.starts_with(b"RIFF") && head.ends_with(b"WEBP") => {
+            let riff = u32::from_le_bytes([head[4], head[5], head[6], head[7]]);
+            len.min(u64::from(riff) + 8)
+        }
+        _ => len,
+    })
+}
+
+/// `inner`, a stream at its start, read only to `end`: past it, it reads
+/// as ended, and a seek from the end is from there.
+struct Bounded<R> {
+    inner: R,
+    /// Where `inner` is.
+    pos: u64,
+    end: u64,
+}
+
+impl<R: Read> Read for Bounded<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let left = self.end.saturating_sub(self.pos);
+        let take = usize::try_from(left).map_or(buf.len(), |left| left.min(buf.len()));
+        let n = self.inner.read(buf.get_mut(..take).unwrap_or_default())?;
+        self.pos = self.pos.saturating_add(n as u64);
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Bounded<R> {
+    fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
+        let to = match to {
+            SeekFrom::End(by) => {
+                SeekFrom::Start(self.end.checked_add_signed(by).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidInput, "a seek before the start")
+                })?)
+            }
+            to => to,
+        };
+        self.pos = self.inner.seek(to)?;
+        Ok(self.pos)
+    }
+}
+
 /// [`decode`], applying the EXIF orientation if `upright`, from the file
-/// as `wrap` reads it.
+/// as `wrap` reads it, to its [`read_end`].
 #[allow(clippy::too_many_arguments)] // `decode_stored`'s, plus the two choices.
 fn decode_as<R: Read + Seek>(
     src: &Path,
@@ -346,21 +402,19 @@ fn decode_as<R: Read + Seek>(
     tool_peak: ToolPeak,
     wrap: impl FnOnce(Cancellable<File>) -> R,
 ) -> Result<(DynamicImage, Option<Vec<u8>>), GrapeError> {
-    let file =
+    let mut file =
         File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
-    let len = file
-        .metadata()
-        .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?
-        .len();
-    let mut reader = ImageReader::new(BufReader::new(wrap(Cancellable::new(file, cancel))));
+    let read_failed = |e: io::Error| names.read_failed(format!("read {}: {e}", src.display()));
+    let len = file.metadata().map_err(read_failed)?.len();
+    let end = read_end(&mut file, len).map_err(read_failed)?;
+    let inner = wrap(Cancellable::new(file, cancel));
+    let mut reader = ImageReader::new(BufReader::new(Bounded { inner, pos: 0, end }));
     if let Some(hint) = image_format(from) {
         // Used only when the content matches no known signature.
         reader.set_format(hint);
     }
     // Sniffing reads only the first bytes.
-    let mut reader = reader
-        .with_guessed_format()
-        .map_err(|e| names.read_failed(format!("read {}: {e}", src.display())))?;
+    let mut reader = reader.with_guessed_format().map_err(read_failed)?;
     let format = reader.format();
     if matches!(format, Some(ImageFormat::Jpeg | ImageFormat::WebP)) && len > MAX_SOURCE {
         return Err(names.too_large(format!(
@@ -884,6 +938,75 @@ mod tests {
         let mut all = Vec::new();
         patched(64).read_to_end(&mut all).unwrap();
         assert_eq!(all, data);
+    }
+
+    #[test]
+    fn a_bounded_read_ends_at_its_end_however_it_is_read() {
+        use std::io::{BufRead, Cursor};
+        let data: Vec<u8> = (0..64).collect();
+        let bounded = |end| Bounded {
+            inner: Cursor::new(data.clone()),
+            pos: 0,
+            end,
+        };
+        let mut all = Vec::new();
+        bounded(40).read_to_end(&mut all).unwrap();
+        assert_eq!(all, &data[..40]);
+        let mut r = bounded(40);
+        let mut three = [0; 3];
+        r.seek(SeekFrom::Start(38)).unwrap();
+        assert_eq!(r.read(&mut three).unwrap(), 2);
+        assert_eq!(r.read(&mut three).unwrap(), 0);
+        // Past the end by a seek, nothing; from the end, from the bound.
+        r.seek(SeekFrom::Start(50)).unwrap();
+        assert_eq!(r.read(&mut three).unwrap(), 0);
+        assert!(r.read_exact(&mut three).is_err());
+        assert_eq!(r.seek(SeekFrom::End(-2)).unwrap(), 38);
+        r.read_exact(&mut three[..2]).unwrap();
+        assert_eq!(three[..2], [38, 39]);
+        assert!(r.seek(SeekFrom::End(-41)).is_err());
+        r.seek(SeekFrom::Current(-3)).unwrap();
+        r.read_exact(&mut three[..1]).unwrap();
+        assert_eq!(three[0], 37);
+        let mut b = BufReader::with_capacity(8, bounded(20));
+        b.seek(SeekFrom::Start(16)).unwrap();
+        assert_eq!(b.fill_buf().unwrap(), &[16, 17, 18, 19]);
+        // Bounded past the stream's end: the stream's end.
+        let mut all = Vec::new();
+        bounded(u64::MAX).read_to_end(&mut all).unwrap();
+        assert_eq!(all, data);
+    }
+
+    #[test]
+    fn a_webp_is_read_to_its_riffs_end_and_anything_else_to_its_own() {
+        let dir = std::env::temp_dir().join(format!("grape-read-end-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let end = |bytes: &[u8]| {
+            let path = dir.join("f");
+            fs::write(&path, bytes).unwrap();
+            let mut file = File::open(&path).unwrap();
+            let end = read_end(&mut file, bytes.len() as u64).unwrap();
+            // Left at its start.
+            assert_eq!(file.stream_position().unwrap(), 0);
+            end
+        };
+        let webp = |riff: u32, len: usize| {
+            let mut b = [b"RIFF".as_slice(), &riff.to_le_bytes(), b"WEBP"].concat();
+            b.resize(len, 7);
+            b
+        };
+        assert_eq!(end(&webp(30, 60)), 38);
+        assert_eq!(end(&webp(52, 60)), 60);
+        assert_eq!(end(&webp(90, 60)), 60);
+        assert_eq!(end(&webp(u32::MAX, 60)), 60);
+        // Not a WebP, or too short to tell: the file's end.
+        let mut wave = webp(30, 60);
+        wave[8..12].copy_from_slice(b"WAVE");
+        assert_eq!(end(&wave), 60);
+        assert_eq!(end(&webp(30, 11)), 11);
+        assert_eq!(end(&[0x89; 40]), 40);
+        assert_eq!(end(&[]), 0);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
