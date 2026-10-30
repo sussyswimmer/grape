@@ -1475,6 +1475,51 @@ fn remove_metadata_keeps_the_tags_a_tiffs_codec_needs() {
 }
 
 #[test]
+fn remove_metadata_refuses_a_tag_it_keeps_listed_twice_differently() {
+    // The review's files: a palette page whose ColorMap is listed twice,
+    // red then blue (libtiff reads red, Pillow blue), which Remove
+    // Metadata cut to the first, so Pillow's pixels changed; and a second
+    // description that's ImageJ's, which went unread.
+    let mut red = vec![0; 768];
+    let mut blue = vec![0; 768];
+    for i in 0..4 {
+        red[i] = 0xFFFF;
+        blue[512 + i] = 0xFFFF;
+    }
+    let map = |colors: &[u64]| colors.iter().flat_map(|&c| le(c, 2)).collect::<Vec<u8>>();
+    let tags = |more: Vec<Change>| {
+        let mut entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(3, 2)),
+            (278, 4, le(16, 4)),
+        ];
+        entries.extend(more);
+        entries
+    };
+    let pixels: Vec<u8> = (0..256).map(|i| (i % 4) as u8).collect();
+    let dir = TestDir::new("strip-tiff-twice");
+    let twice = tags(vec![(320, 3, map(&red)), (320, 3, map(&blue))]);
+    let err = strip(&dir, "twice.tif", &one_strip(false, &pixels, twice)).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+    assert_eq!(
+        err.user_message,
+        "twice.tif lists a tag twice with different values, which Grape can't rewrite yet."
+    );
+    let imagej = tags(vec![
+        (320, 3, map(&red)),
+        (270, 2, b"A scan\0".to_vec()),
+        (270, 2, b"ImageJ=1.54f\nimages=3\n\0".to_vec()),
+    ]);
+    let err = strip(&dir, "imagej.tif", &one_strip(false, &pixels, imagej)).unwrap_err();
+    assert_eq!(
+        err.user_message,
+        "imagej.tif keeps its layout in its description, so Remove Metadata would break it."
+    );
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

@@ -580,6 +580,23 @@ fn disagreeing(ifd: &Ifd) -> Option<u16> {
     })
 }
 
+/// Why a file that lists a tag twice or more, its entries not all the
+/// same, is refused where a tool can't keep each: readers that take the
+/// first and those that take the last would see different files.
+pub(crate) const TWICE: &str =
+    "lists a tag twice with different values, which Grape can't rewrite yet.";
+
+/// The first tag `picks` picks that `entries` list more than once, the
+/// entries not all the same (type, count and value, where it is).
+pub(crate) fn twice(entries: &[Entry], picks: impl Fn(u16) -> bool) -> Option<u16> {
+    let mut first: HashMap<u16, &Entry> = HashMap::new();
+    entries
+        .iter()
+        .filter(|e| picks(e.tag))
+        .find(|&e| *first.entry(e.tag).or_insert(e) != e)
+        .map(|e| e.tag)
+}
+
 /// The image IFD `ifd`'s Compression, given as libtiff reads it
 /// (`compression`, `None` where it can't), or why neither TIFF tool can
 /// change a file with it: the end of a sentence that starts with its name.

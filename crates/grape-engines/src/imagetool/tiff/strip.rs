@@ -32,7 +32,8 @@
 //!   EXIF or XMP chunk, [`chunks`]), and WebP data Grape can't check: not
 //!   a RIFF container that covers its block, nor a bare bitstream, or
 //!   whose chunks run on past the first [`MAX_CHUNKS`]; ImageJ and OME
-//!   files, whose layout is in their description.
+//!   files, whose layout is in their description (any of an IFD's); and a
+//!   tag it keeps listed twice with different values ([`twice_kept`]).
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -43,7 +44,8 @@ use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
 use super::read::{
-    integer, number, read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT,
+    integer, number, read_value, twice, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT,
+    TWICE,
 };
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
@@ -161,6 +163,19 @@ fn kept(tag: u16) -> bool {
     )
 }
 
+/// Whether `ifd` lists a tag Remove Metadata keeps (Photoshop's resources
+/// among them), or the Exif ColorSpace or Interop index that decide the
+/// DCF Exif, twice or more, its entries not all the same ([`twice`]): the
+/// output would hold only the first, which readers that take the last
+/// (Pillow; libtiff in an Exif IFD) don't read in the source.
+fn twice_kept(ifd: &Ifd) -> bool {
+    let exif = ifd.exif.as_ref();
+    let interop = exif.and_then(|exif| exif.interop.as_deref());
+    twice(&ifd.entries, |tag| kept(tag) || tag == 34377).is_some()
+        || exif.is_some_and(|exif| twice(&exif.entries, |tag| tag == 0xA001).is_some())
+        || interop.is_some_and(|interop| twice(&interop.entries, |tag| tag == 1).is_some())
+}
+
 /// Whether the writer makes `tag` afresh: the blocks and the SubIFDs.
 fn rebuilt(tag: u16) -> bool {
     matches!(tag, 273 | 279 | 324 | 325 | 330)
@@ -207,12 +222,17 @@ impl Plan {
         // A description that IFDs share is read once.
         let mut descriptions = HashSet::new();
         for ifd in tiff.ifds() {
-            if let Some(entry) = ifd.get(270).filter(|e| descriptions.insert(e.value)) {
+            // Every one: tifffile writes two, and ImageJ's may be either.
+            let all = ifd.entries.iter().filter(|e| e.tag == 270);
+            for entry in all.filter(|e| descriptions.insert(e.value)) {
                 let text = look(r, entry, MAX_JUDGED, &mut left)?.map(|(text, _)| text);
                 let text = text.unwrap_or_default();
                 if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
                     return Err(Error::Refused(DESCRIBED.into()));
                 }
+            }
+            if twice_kept(ifd) {
+                return Err(Error::Refused(TWICE.into()));
             }
         }
         if let Some(kind) = tiff
@@ -1539,6 +1559,95 @@ mod tests {
             panic!("not refused")
         };
         assert!(said.starts_with("uses an old kind"), "{said}");
+    }
+
+    #[test]
+    fn a_kept_tag_listed_twice_differently_is_refused() {
+        // Readers that take a tag's first entry and those that take its
+        // last would see different files, the output only the first's: a
+        // ColorMap twice (Pillow's pixels change), JPEGTables twice, the
+        // second with an APP1, which went unread and unsaid, Photoshop's
+        // resources twice, and a ColorSpace or an Interop index twice in
+        // the Exif IFD, which decide the DCF Exif.
+        let refused = |page: Page| match plan(&Builder::new(b'I', false, vec![page]).build()) {
+            Err(Error::Refused(why)) => Some(why),
+            Ok(_) => None,
+            Err(e) => panic!("{e:?}"),
+        };
+        let app1 = [
+            &b"\xFF\xD8"[..],
+            b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0",
+            b"\xFF\xD9",
+        ]
+        .concat();
+        for (tag, first, second) in [
+            (320, V::Short(vec![1; 768]), V::Short(vec![2; 768])),
+            (
+                347,
+                V::Bytes(7, b"\xFF\xD8\xFF\xD9".to_vec()),
+                V::Bytes(7, app1),
+            ),
+            (
+                34377,
+                V::Bytes(7, res(1005, "", &[0; 8])),
+                V::Bytes(7, res(2000, "", &[0; 26])),
+            ),
+            (274, V::Short(vec![1]), V::Short(vec![6])),
+        ] {
+            let mut page = gray(8, 8, 8, vec![B::data(&[7; 64])]);
+            page.tags.extend([(tag, first), (tag, second)]);
+            assert_eq!(refused(page).as_deref(), Some(TWICE), "{tag}");
+        }
+        let exif = |space: &[u16], index: &[&'static str]| {
+            let mut page = gray(8, 8, 8, vec![B::data(&[7; 64])]);
+            page.exif = Some(space.iter().map(|&s| (0xA001, V::Short(vec![s]))).collect());
+            page.interop = Some(index.iter().map(|&i| (1, V::Ascii(i))).collect());
+            page
+        };
+        for page in [
+            exif(&[1, 0xFFFF], &["R03"]),
+            exif(&[0xFFFF], &["R98", "R03"]),
+        ] {
+            assert_eq!(refused(page).as_deref(), Some(TWICE));
+        }
+        // The same entry twice is one, kept once; a dropped tag twice goes.
+        let mut page = exif(&[0xFFFF, 0xFFFF], &["R03", "R03"]);
+        page.tags.extend([
+            (274, V::Short(vec![6])),
+            (274, V::Short(vec![6])),
+            (305, V::Ascii("secret one")),
+            (305, V::Ascii("secret two")),
+        ]);
+        let (out, found) = strip(&Builder::new(b'I', false, vec![page]).build());
+        assert_eq!(found, [Software].into());
+        let tiff = read(&out);
+        assert_eq!(
+            tiff.pages[0]
+                .entries
+                .iter()
+                .filter(|e| e.tag == 274)
+                .count(),
+            1
+        );
+        assert!(dcf_only(tiff.pages[0].exif.as_ref().unwrap()));
+    }
+
+    #[test]
+    fn every_description_is_read_for_imagej_and_ome() {
+        // tifffile writes two descriptions, and ImageJ's may be the second.
+        for second in [
+            "ImageJ=1.54f\nimages=3\n",
+            "<?xml version=\"1.0\"?><OME xmlns=\"x\">",
+        ] {
+            let mut page = gray(1, 1, 1, vec![B::data(b"x")]);
+            page.tags
+                .extend([(270, V::Ascii("A scan")), (270, V::Ascii(second))]);
+            let Err(Error::Refused(why)) = plan(&Builder::new(b'I', false, vec![page]).build())
+            else {
+                panic!("{second} not refused")
+            };
+            assert_eq!(why, DESCRIBED);
+        }
     }
 
     #[test]
