@@ -28,7 +28,8 @@
 //! - **Tags read as libtiff 4.5 reads them:** every integer tag either
 //!   tool decides on, by [`number`], [`per_sample`] and [`pair`] (any
 //!   integer type but IFD and IFD8, signed ones not negative, a classic
-//!   file's LONG8 and SLONG8 out of line), so that Grape and libtiff see
+//!   file's LONG8 and SLONG8 out of line), and the blocks' offsets and
+//!   counts so too ([`Walk::each_strile`]), so that Grape and libtiff see
 //!   the same file; where libtiff can't read one, and other readers might
 //!   read it otherwise, the file is refused, or Compress copies the IFD.
 //! - **Refused:** a DNG, an old-style JPEG, or a Compression libtiff can't
@@ -1280,7 +1281,7 @@ impl Walk<'_> {
         }
         // The offsets and the counts go straight into the blocks.
         let mut blocks = Vec::with_capacity(offsets.count as usize);
-        self.each_uint(&offsets, room, |offset| {
+        self.each_strile(&offsets, room, |offset| {
             blocks.push(Block { offset, len: 0 });
         })?;
         self.blocks += blocks.len();
@@ -1289,7 +1290,7 @@ impl Walk<'_> {
         match ifd.get(if tiled { 325 } else { 279 }).cloned() {
             Some(counts) => {
                 let mut lens = 0;
-                self.each_uint(&counts, room, |len| {
+                self.each_strile(&counts, room, |len| {
                     if let Some(block) = blocks.get_mut(lens) {
                         block.len = len;
                     }
@@ -1528,22 +1529,41 @@ impl Walk<'_> {
 
     /// Gives `f` each unsigned number `entry` holds (SHORT, LONG, LONG8, IFD
     /// or IFD8), in order; at most `cap` of them, or it's too large.
-    fn each_uint(
+    fn each_uint(&mut self, entry: &Entry, cap: usize, f: impl FnMut(u64)) -> Result<(), Error> {
+        let kinds = |kind| match kind {
+            3 => Some((2, false)),
+            4 | 13 => Some((4, false)),
+            16 | 18 => Some((8, false)),
+            _ => None,
+        };
+        self.each_number(entry, cap, kinds, f)
+    }
+
+    /// Gives `f` each strip or tile offset or byte count `entry` holds, as
+    /// libtiff 4.5 reads them (`TIFFReadDirEntryLong8ArrayWithLimit`): of
+    /// any integer type but IFD and IFD8 (BYTE and the signed ones with a
+    /// warning), signed ones not negative; at most `cap` of them, or it's
+    /// too large. Where libtiff can't read them, nor so the IFD, it's
+    /// [`Error::Broken`], a negative one past libtiff's count too.
+    fn each_strile(&mut self, entry: &Entry, cap: usize, f: impl FnMut(u64)) -> Result<(), Error> {
+        self.each_number(entry, cap, integer, f)
+    }
+
+    /// Gives `f` each number `entry` holds, in order, of a type `kinds`
+    /// gives the size of and whether it's signed (a negative one is
+    /// [`Error::Broken`]); at most `cap` of them, or it's too large.
+    fn each_number(
         &mut self,
         entry: &Entry,
         cap: usize,
+        kinds: impl Fn(u16) -> Option<(usize, bool)>,
         mut f: impl FnMut(u64),
     ) -> Result<(), Error> {
-        let size = match entry.kind {
-            3 => 2,
-            4 | 13 => 4,
-            16 | 18 => 8,
-            kind => {
-                return Err(Error::Broken(format!(
-                    "tag {} of type {kind}, not a number",
-                    entry.tag
-                )))
-            }
+        let Some((size, signed)) = kinds(entry.kind) else {
+            return Err(Error::Broken(format!(
+                "tag {} of type {}, not a number it's read as",
+                entry.tag, entry.kind
+            )));
         };
         if entry.count > cap as u64 {
             return Err(Error::TooLarge(format!(
@@ -1552,27 +1572,31 @@ impl Walk<'_> {
             )));
         }
         let o = self.layout.order;
-        match entry.value {
-            Value::Inline { bytes, len } => {
-                for b in bytes[..usize::from(len)].chunks_exact(size) {
-                    f(o.uint(b));
+        let tag = entry.tag;
+        let mut each = |bytes: &[u8]| {
+            for b in bytes.chunks_exact(size) {
+                let n = o.uint(b);
+                if signed && n >> (8 * size - 1) == 1 {
+                    return Err(Error::Broken(format!("tag {tag} holds a negative number")));
                 }
-                Ok(())
+                f(n);
             }
+            Ok(())
+        };
+        match entry.value {
+            Value::Inline { bytes, len } => each(&bytes[..usize::from(len)]),
             Value::At { offset, len } => {
                 let mut step = vec![0; STEP.min(usize_of(len)?)];
                 let mut done = 0;
                 while done < len {
                     let take = &mut step[..STEP.min((len - done) as usize)];
                     read_at(self.r, offset + done, take)?;
-                    for b in take.chunks_exact(size) {
-                        f(o.uint(b));
-                    }
+                    each(take)?;
                     done += take.len() as u64;
                 }
                 Ok(())
             }
-            Value::Unread => Err(Error::Broken(format!("tag {} can't be read", entry.tag))),
+            Value::Unread => Err(Error::Broken(format!("tag {tag} can't be read"))),
         }
     }
 }
@@ -2893,6 +2917,66 @@ mod tests {
         // A tag no tool decides on may be there twice, whatever it says.
         let other = file(305, V::Ascii("one"), V::Ascii("another"));
         assert!(read(&other).is_ok());
+    }
+
+    /// `file` with the type of the entry for `tag` in the IFD at `at` set to
+    /// `kind`, its count and value field as they are: a little-endian
+    /// number inline reads the same in a smaller type when it fits.
+    fn retype(file: &mut [u8], at: u64, tag: u16, kind: u16) {
+        let big = file[2] == 43;
+        let (count_len, entry_len) = if big { (8, 20) } else { (2, 12) };
+        let at = at as usize;
+        let n = Order::Little.uint(&file[at..at + count_len]) as usize;
+        let e = (0..n)
+            .map(|i| at + count_len + i * entry_len)
+            .find(|&e| Order::Little.uint(&file[e..e + 2]) == u64::from(tag))
+            .unwrap();
+        file[e + 2..e + 4].copy_from_slice(&kind.to_le_bytes());
+    }
+
+    #[test]
+    fn block_offsets_and_counts_are_read_as_libtiff_reads_them() {
+        // A 1 × 1 page of one strip, right after its IFD (at 98, or 172 in
+        // a BigTIFF, past an SBYTE), its StripOffsets and StripByteCounts retyped: libtiff
+        // reads any integer type but IFD and IFD8 (BYTE and the signed ones
+        // with a warning), signed ones not negative, and fails on the rest
+        // ("Incompatible type for \"StripOffsets\"").
+        for big in [false, true] {
+            let file = Builder::new(b'I', big, vec![gray(1, 1, 1, vec![B::data(b"x")])]).build();
+            let want = read(&file).unwrap().pages[0].blocks.clone();
+            let (read_as, broken): (&[u16], &[u16]) = if big {
+                (&[1, 3, 4, 8, 9, 17], &[13, 18])
+            } else {
+                (&[1, 3, 6, 8, 9], &[13])
+            };
+            let at = read(&file).unwrap().pages[0].at;
+            for &kind in read_as.iter().chain(broken) {
+                let mut typed = file.clone();
+                retype(&mut typed, at, 273, kind);
+                retype(&mut typed, at, 279, kind);
+                let got = read(&typed);
+                if broken.contains(&kind) {
+                    assert!(
+                        matches!(got, Err(Error::Broken(_))),
+                        "{big} {kind}: {got:?}"
+                    );
+                } else {
+                    assert_eq!(got.unwrap().pages[0].blocks, want, "{big} {kind}");
+                }
+            }
+            // A negative count, signed: libtiff can't read it.
+            let mut negative = file.clone();
+            retype(&mut negative, at, 279, if big { 17 } else { 8 });
+            set_entry(
+                &mut negative,
+                at,
+                279,
+                1,
+                if big { u64::MAX } else { 0xFFFF },
+            );
+            let got = read(&negative);
+            assert!(matches!(got, Err(Error::Broken(_))), "{big}: {got:?}");
+        }
     }
 
     #[test]

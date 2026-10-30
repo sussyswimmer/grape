@@ -823,6 +823,62 @@ fn both_tiff_tools_refuse_a_lone_strip_they_cant_size_as_libtiff_would() {
 }
 
 #[test]
+fn both_tiff_tools_read_strip_offsets_and_counts_as_libtiff_reads_them() {
+    // A gray picture right after the header as one strip, its
+    // StripOffsets and StripByteCounts typed SBYTE (a 10 × 10 picture, so
+    // its count fits), SSHORT, SLONG or SLONG8 (300 × 100): libtiff reads
+    // them, with a warning, and both tools take them. Typed IFD or IFD8,
+    // libtiff can't read the file ("Incompatible type"), and both tools
+    // refuse it as damaged.
+    let file = |big: bool, kind: u16, size: usize, (w, h): (u64, u64)| {
+        let header = if big { 16 } else { 8 };
+        let picture: Vec<u8> = (0..w * h).map(|i| (i % 251) as u8).collect();
+        let entries = vec![
+            (256, 4, le(w, 4)),
+            (257, 4, le(h, 4)),
+            (258, 3, le(8, 2)),
+            (262, 3, le(1, 2)),
+            (273, kind, le(header, size)),
+            (278, 4, le(h, 4)),
+            (279, kind, le(w * h, size)),
+        ];
+        laid_out(big, &picture, entries)
+    };
+    let dir = TestDir::new("tiff-typed-strips");
+    for (name, big, kind, size, picture) in [
+        ("sbyte.tif", false, 6, 1, (10, 10)),
+        ("sshort.tif", false, 8, 2, (300, 100)),
+        ("slong.tif", false, 9, 4, (300, 100)),
+        ("slong8.tif", true, 17, 8, (300, 100)),
+    ] {
+        let bytes = file(big, kind, size, picture);
+        let outcome = strip(&dir, name, &bytes).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        if picture.0 == 300 {
+            let op = compress_op(grape_core::CompressPreset::High);
+            let outcome = run(&dir, name, &bytes, op).unwrap();
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        }
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    for (name, big, kind, size) in [("ifd.tif", false, 13, 4), ("ifd8.tif", true, 18, 8)] {
+        let bytes = file(big, kind, size, (300, 100));
+        for op in [
+            Operation::tool(ToolKey::RemoveMetadata),
+            compress_op(grape_core::CompressPreset::High),
+        ] {
+            let err = run(&dir, name, &bytes, op).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+            assert_eq!(
+                err.user_message,
+                format!("{name} isn't a readable TIFF image.")
+            );
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+    }
+}
+
+#[test]
 fn both_tiff_tools_take_a_tile_size_left_out_from_rows_per_strip() {
     // The review's file: gray 64 × 64 in four strips of 16 rows, 1,024
     // bytes each, with a TileLength of 16 and no TileWidth. libtiff sets a
