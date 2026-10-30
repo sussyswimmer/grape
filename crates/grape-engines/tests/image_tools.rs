@@ -1087,6 +1087,57 @@ fn both_tiff_tools_refuse_two_compressions_that_disagree() {
 }
 
 #[test]
+fn remove_metadata_refuses_metadata_in_jpeg_tables_whatever_type_holds_them() {
+    // The review's file: a 16 × 16 gray JPEG strip whose JPEGTables hold
+    // SOI, an Exif APP1 (its Make and a GPS IFD) and EOI, each byte a
+    // value of a type libtiff reads them in, SHORT among them: libtiff
+    // hands the stream on, and Remove Metadata published it with the GPS.
+    // Refused, as UNDEFINED tables are.
+    let gray = image::GrayImage::from_fn(16, 16, |x, y| image::Luma([(x * 16 + y) as u8]));
+    let mut jpeg = Vec::new();
+    JpegEncoder::new_with_quality(&mut jpeg, 90)
+        .encode_image(&gray)
+        .unwrap();
+    let tables = [&b"\xFF\xD8"[..], &exif(1), b"\xFF\xD9"].concat();
+    let dir = TestDir::new("strip-tiff-typed-tables");
+    for (name, big, kind, size) in [
+        ("undefined.tif", false, 7, 1),
+        ("ascii.tif", false, 2, 1),
+        ("short.tif", false, 3, 2),
+        ("sshort.tif", false, 8, 2),
+        ("long.tif", false, 4, 4),
+        ("slong.tif", false, 9, 4),
+        ("long8.tif", true, 16, 8),
+        ("slong8.tif", true, 17, 8),
+    ] {
+        let value = tables
+            .iter()
+            .flat_map(|&b| le(u64::from(b), size))
+            .collect();
+        let entries = vec![
+            (256, 4, le(16, 4)),
+            (257, 4, le(16, 4)),
+            (258, 3, le(8, 2)),
+            (259, 3, le(7, 2)),
+            (262, 3, le(1, 2)),
+            (278, 4, le(16, 4)),
+            (347, kind, value),
+        ];
+        let err = strip(&dir, name, &one_strip(big, &jpeg, entries)).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} has metadata inside its image data, which Grape can't remove yet.")
+        );
+    }
+}
+
+#[test]
 fn remove_metadata_refuses_a_tiff_it_cant_strip_and_writes_nothing() {
     use tiff::encoder::{colortype, TiffEncoder};
     use tiff::tags::Tag;

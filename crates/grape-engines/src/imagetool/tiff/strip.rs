@@ -19,12 +19,13 @@
 //!   color: each such IFD gets its own, even when they shared one.
 //! - **Refused:** DNG, old-style JPEG and a Compression libtiff can't read
 //!   (both tools); metadata inside JPEG data (Compression 7 as libtiff
-//!   reads it; an APP1, APP13 or COM in its JPEGTables, or in a block:
-//!   up to its first scan when that's a sequential frame's only one, and
-//!   through every scan otherwise), and JPEG data Grape can't check, whose
-//!   segments or scans run past the first [`MAX_SCAN`] bytes read before
-//!   that, or that's hierarchical; ImageJ and OME files, whose layout is
-//!   in their description.
+//!   reads it; an APP1, APP13 or COM in a block, or in a JPEGTables, any
+//!   IFD's, read as libtiff reads it ([`tables`]): up to its first scan
+//!   when that's a sequential frame's only one, and through every scan
+//!   otherwise), and JPEG data Grape can't check, whose segments or scans
+//!   run past the first [`MAX_SCAN`] bytes read before that, that's
+//!   hierarchical, or JPEGTables libtiff can't read as bytes; ImageJ and
+//!   OME files, whose layout is in their description.
 //! - **Checked:** [`Plan::check`] reads the output again before it's
 //!   published.
 
@@ -34,7 +35,9 @@ use std::sync::Arc;
 use super::super::exif;
 use super::super::strip::{read_at, Error, Found, In, Out};
 use super::irb;
-use super::read::{number, read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT};
+use super::read::{
+    integer, number, read_value, Block, Entry, Ifd, Layout, Meta, Order, Tiff, Value, SHORT,
+};
 use super::write::{self, Data, Dir, Field, Image};
 use crate::{CancelToken, MetaField};
 
@@ -138,14 +141,17 @@ impl Plan {
                 }
             }
         }
+        // JPEG data, and JPEGTables in any IFD: libtiff hands any IFD's to
+        // whoever asks for them.
         let jpegs: Vec<&Ifd> = tiff
             .ifds()
             .into_iter()
-            .filter(|ifd| ifd.compression == 7)
+            .filter(|ifd| ifd.compression == 7 || ifd.get(347).is_some())
             .collect();
         if !jpegs.is_empty() {
             let shared = tiff.shared();
             let mut scan = JpegScan {
+                order,
                 shared: &shared,
                 scanned: vec![false; shared.len()],
                 tables: HashSet::new(),
@@ -345,28 +351,37 @@ fn look(
 /// JPEGTables value, once however many times IFDs list it: one that held
 /// metadata, or couldn't be seen through, ended the scan.
 struct JpegScan<'s> {
+    /// The file's byte order, which JPEGTables are read in.
+    order: Order,
     /// The blocks listed more than once, sorted ([`Tiff::shared`]).
     shared: &'s [Block],
     /// Which of them it has read.
     scanned: Vec<bool>,
-    /// The JPEGTables values it has read, by where they are.
-    tables: HashSet<Value>,
+    /// The JPEGTables values it has read, by where they are and their type.
+    tables: HashSet<(Value, u16)>,
     /// What's left of the bytes it may read of JPEGTables values ([`look`]).
     left: u64,
 }
 
 impl JpegScan<'_> {
-    /// What the JPEG data of `ifd` (compression 7) holds, as [`segments`]
-    /// reads its JPEGTables and each of its blocks: the first that isn't
-    /// clean.
+    /// What the JPEG data of `ifd` holds, as [`segments`] reads its
+    /// JPEGTables, as libtiff reads them ([`tables`]), and each of its
+    /// blocks when it's compression 7: the first that isn't clean.
+    /// JPEGTables libtiff can't read as bytes can't be seen through.
     fn seen(&mut self, r: &mut dyn In, ifd: &Ifd) -> Result<Seen, Error> {
-        if let Some(tables) = ifd.get(347).filter(|e| self.tables.insert(e.value)) {
-            if let Some((tables, whole)) = look(r, tables, MAX_SCAN, &mut self.left)? {
-                let seen = segments(&tables, whole);
-                if seen != Seen::Clean {
-                    return Ok(seen);
-                }
+        let fresh = |e: &&Entry| self.tables.insert((e.value, e.kind));
+        if let Some(entry) = ifd.get(347).filter(fresh) {
+            let Some((tables, whole)) = tables(r, entry, self.order, MAX_SCAN, &mut self.left)?
+            else {
+                return Ok(Seen::Unseen);
+            };
+            let seen = segments(&tables, whole);
+            if seen != Seen::Clean {
+                return Ok(seen);
             }
+        }
+        if ifd.compression != 7 {
+            return Ok(Seen::Clean);
         }
         let mut buf = Vec::new();
         for block in ifd.blocks.iter().filter(|b| b.len > 0) {
@@ -385,6 +400,57 @@ impl JpegScan<'_> {
         }
         Ok(Seen::Clean)
     }
+}
+
+/// The first `max` bytes of the JPEGTables `entry` holds as libtiff 4.5
+/// reads them (`TIFFReadDirEntryByteArray`), and whether that's all of
+/// them: of ASCII, UNDEFINED or BYTE as they are; of SBYTE, SHORT, SSHORT,
+/// LONG, SLONG, LONG8 or SLONG8 a byte for each value, each from 0 to 255.
+/// `None` where libtiff can't read them: another type, more than 2^32 - 1
+/// values, or a value of those read past a byte or negative. What's read
+/// is taken from `left`, as [`look`] takes it.
+fn tables(
+    r: &mut dyn In,
+    entry: &Entry,
+    order: Order,
+    max: u64,
+    left: &mut u64,
+) -> Result<Option<(Vec<u8>, bool)>, Error> {
+    let (size, signed) = match entry.kind {
+        2 | 7 => (1, false),
+        kind => match integer(kind) {
+            Some(each) => each,
+            None => return Ok(None),
+        },
+    };
+    if entry.count > u64::from(u32::MAX) {
+        return Ok(None);
+    }
+    let n = entry.count.min(max);
+    let bytes = match entry.value {
+        Value::Inline { bytes, len } => bytes[..usize::from(len)].to_vec(),
+        Value::At { offset, .. } => {
+            let want = n * size as u64;
+            *left = left.checked_sub(want).ok_or_else(|| {
+                Error::TooLarge(
+                    "descriptions or JPEG tables that overlap, more to read than it holds".into(),
+                )
+            })?;
+            let mut bytes = vec![0; want as usize];
+            read_at(r, offset, &mut bytes)?;
+            bytes
+        }
+        Value::Unread => return Ok(None),
+    };
+    let mut each = Vec::with_capacity(bytes.len() / size);
+    for b in bytes.chunks_exact(size) {
+        let v = order.uint(b);
+        if (signed && v >> (8 * size - 1) == 1) || v > 0xFF {
+            return Ok(None);
+        }
+        each.push(v as u8);
+    }
+    Ok(Some((each, n == entry.count)))
 }
 
 /// What JPEG data holds, as far as it's read.
@@ -1287,6 +1353,91 @@ mod tests {
             segments(b"\xFF\xD8\xFF\xDA\0\x02\xFF\xE1", false),
             Seen::Clean
         );
+    }
+
+    /// `bytes`, each as a value of type `kind` (little-endian).
+    fn each_as(kind: u16, bytes: &[u8]) -> V {
+        let size = super::super::read::type_size(kind).unwrap() as usize;
+        V::Bytes(
+            kind,
+            bytes
+                .iter()
+                .flat_map(|&b| u64::from(b).to_le_bytes()[..size].to_vec())
+                .collect(),
+        )
+    }
+
+    /// A page of `compression` (a JPEG strip for 7, gray bytes otherwise)
+    /// whose JPEGTables are `tables`, classic or BigTIFF.
+    fn with_tables(big: bool, compression: u16, tables: V) -> Vec<u8> {
+        let strip = if compression == 7 {
+            jpeg(b"")
+        } else {
+            vec![7; 64]
+        };
+        let mut page = gray(8, 8, 8, vec![B::Data(strip)]);
+        page.tags
+            .extend([(259, V::Short(vec![compression])), (347, tables)]);
+        Builder::new(b'I', big, vec![page]).build()
+    }
+
+    #[test]
+    fn jpeg_tables_are_read_as_libtiff_reads_them_whatever_their_type() {
+        // Tables of SOI, an Exif APP1 and EOI, each byte a value of a type
+        // libtiff reads JPEGTables in (`TIFFReadDirEntryByteArray`), which
+        // hands libjpeg, and TIFFGetField, the stream: refused, in a JPEG
+        // page or any other; tables of SOI and EOI alone are kept.
+        let app1 = b"\xFF\xE1\0\x0EExif\0\0MM\0*\0\0";
+        let stream = [&b"\xFF\xD8"[..], app1, b"\xFF\xD9"].concat();
+        let clean = b"\xFF\xD8\xFF\xD9";
+        let why = |file: &[u8]| match plan(file) {
+            Ok(_) => None,
+            Err(Error::Refused(why)) => Some(why),
+            Err(e) => panic!("{e:?}"),
+        };
+        for (big, kind) in [
+            (false, 1),
+            (false, 2),
+            (false, 3),
+            (false, 4),
+            (false, 7),
+            (false, 8),
+            (false, 9),
+            (true, 16),
+            (true, 17),
+        ] {
+            for compression in [7, 1] {
+                let file = with_tables(big, compression, each_as(kind, &stream));
+                assert_eq!(why(&file).as_deref(), Some(IN_DATA), "{kind} {compression}");
+                let file = with_tables(big, compression, each_as(kind, clean));
+                assert_eq!(why(&file), None, "{kind} {compression}");
+            }
+        }
+        // Where libtiff can't read them as bytes, what readers take from
+        // them can't be checked: an SBYTE stream (0xFF is negative), a
+        // SHORT past a byte or a negative SSHORT among the values, and a
+        // type it doesn't read them in.
+        let mut wide = each_as(3, clean);
+        if let V::Bytes(_, bytes) = &mut wide {
+            bytes[3] = 1;
+        }
+        let mut negative = each_as(8, clean);
+        if let V::Bytes(_, bytes) = &mut negative {
+            bytes[2..4].copy_from_slice(&[0xFF, 0xFF]);
+        }
+        for tables in [
+            each_as(6, &stream),
+            wide,
+            negative,
+            V::Rational(vec![(0xFF, 0xD8)]),
+            V::Bytes(11, vec![0; 8]),
+            V::Bytes(13, vec![0xFF, 0xD8, 0xFF, 0xD9]),
+        ] {
+            for compression in [7, 1] {
+                let file = with_tables(false, compression, tables.clone());
+                assert_eq!(why(&file).as_deref(), Some(UNCHECKED), "{tables:?}");
+            }
+        }
     }
 
     /// A segment: `marker` and `body`, with its length.

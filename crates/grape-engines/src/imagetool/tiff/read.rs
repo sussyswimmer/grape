@@ -602,7 +602,7 @@ pub(crate) const SHORT: u64 = u16::MAX as u64;
 
 /// Each value's size and whether it's signed, for the integer types
 /// libtiff 4.5 reads a number tag in: any but IFD and IFD8.
-fn integer(kind: u16) -> Option<(usize, bool)> {
+pub(crate) fn integer(kind: u16) -> Option<(usize, bool)> {
     match kind {
         1 => Some((1, false)),
         6 => Some((1, true)),
