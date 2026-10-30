@@ -65,6 +65,11 @@ const JUDGE_BUDGET: u64 = 16 << 20;
 /// that entries share is read once.
 const MAX_BLANKS: usize = 4_096;
 
+/// The most descriptions out of line remembered as read for ImageJ's and
+/// OME's, so that one that IFDs share is read once: past them, one is read
+/// again each time, from what the file holds.
+const MAX_DESCRIPTIONS: usize = 4_096;
+
 /// The most bytes of Photoshop's resources the plan holds, filtered, each
 /// block once however many IFDs name it; and the longest block it reads.
 const MAX_IRB: u64 = 16 << 20;
@@ -341,17 +346,24 @@ impl Plan {
         // may come to what the file holds: only values that overlap come
         // to more.
         let mut left = len;
-        // A description that IFDs share is read once.
+        // A description that IFDs share is read once, while it's
+        // remembered ([`MAX_DESCRIPTIONS`]); one in its entry isn't.
         let mut descriptions = HashSet::new();
         let mut alike = Alike::new(len);
         for ifd in tiff.ifds() {
             // Every one: tifffile writes two, and ImageJ's may be either.
-            let all = ifd.entries.iter().filter(|e| e.tag == 270);
-            for entry in all.filter(|e| descriptions.insert(e.value)) {
+            for entry in ifd.entries.iter().filter(|e| e.tag == 270) {
+                let at = matches!(entry.value, Value::At { .. });
+                if at && descriptions.contains(&entry.value) {
+                    continue;
+                }
                 let text = look(r, entry, MAX_JUDGED, &mut left)?.map(|(text, _)| text);
                 let text = text.unwrap_or_default();
                 if text.starts_with(b"ImageJ=") || text.windows(4).any(|w| w == b"<OME") {
                     return Err(Error::Refused(DESCRIBED.into()));
+                }
+                if at && descriptions.len() < MAX_DESCRIPTIONS {
+                    descriptions.insert(entry.value);
                 }
             }
             if twice_kept(r, ifd, order, &mut alike)? {
