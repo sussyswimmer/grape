@@ -1247,7 +1247,8 @@ impl Walk<'_> {
     /// data when `plain`) as libtiff 4.5 reads them (`TIFFReadDirectory`),
     /// so that both tools copy what readers read ([module docs](self)).
     /// libtiff reads as many entries as its own count of strips or tiles
-    /// ([`Dims::count`]), 0 for those missing, and checks those:
+    /// ([`Dims::count`]), 0 for those missing, and checks those, as the
+    /// kind it reads them as, whichever tags list them:
     ///
     /// - **Worked out from the picture** ([`Walk::sizes`]) where libtiff
     ///   ignores them ("Bogus" and "Wrong" StripByteCounts): a lone strip
@@ -1277,10 +1278,10 @@ impl Walk<'_> {
             Err(_) if listed == 1 => (1, ifd.tiled, false),
             Err(_) => return Err(Error::Refused(MISSIZED.into())),
         };
-        // Sized as libtiff sizes them, which Grape can do only when it
-        // writes them under the tags libtiff reads them by.
+        // Sized as libtiff sizes them, as the kind it reads them as,
+        // whichever tags list them.
         let sizes = match usize::try_from(count) {
-            Ok(want) if plain && tiled == ifd.tiled => self.sizes(ifd, want)?.ok(),
+            Ok(want) if plain => self.sizes(ifd, want)?.ok(),
             _ => None,
         };
         let short = |n: u64, block: &Block| sizes.as_ref().is_some_and(|s| block.len < s.of(n));
@@ -1324,7 +1325,8 @@ impl Walk<'_> {
     }
 
     /// How an uncompressed IFD's `want` strips or tiles are sized from its
-    /// picture, as libtiff sizes them ([`Sizes`]), from its layout and
+    /// picture, as libtiff sizes them ([`Sizes`]): as the kind it reads
+    /// them as, whichever tags list them, from its layout and
     /// BitsPerSample, PhotometricInterpretation and YCbCrSubsampling as
     /// libtiff reads them ([`Dims`], [`per_sample`], [`number`], [`pair`]),
     /// or why they can't be; what's read out of line counts against what
@@ -1335,9 +1337,6 @@ impl Walk<'_> {
             Ok(dims) => dims,
             Err(why) => return Ok(Err(why)),
         };
-        if dims.tiled() != ifd.tiled {
-            return Ok(Err("its blocks are listed as another kind".into()));
-        }
         let Dims {
             width,
             height,
@@ -2008,6 +2007,51 @@ mod tests {
         page.tags.retain(|t| t.0 != 278);
         let file = Builder::new(b'I', false, vec![page]).build();
         assert_eq!(lens(&read(&file).unwrap()), [30_000, 100]);
+    }
+
+    #[test]
+    fn blocks_listed_as_the_other_kind_are_checked_as_libtiff_reads_them() {
+        let refused =
+            |file: &[u8]| matches!(read(file), Err(Error::Refused(why)) if why == MISSIZED);
+        // Listed as tiles with no tile size, which libtiff reads as strips:
+        // ten, the fourth counted 10, with no RowsPerStrip, where it reads
+        // one, short of the picture, and the picture from it.
+        let mut counts = vec![3_000; 10];
+        counts[3] = 10;
+        let mut page = gray(300, 100, 10, picture().chunks(3_000).map(B::data).collect());
+        page.tags.retain(|t| t.0 != 278);
+        page.tiled = true;
+        page.counts = Some(counts);
+        assert!(refused(&Builder::new(b'I', false, vec![page]).build()));
+        // One counted 10, of a 90 × 90 picture: worked out to it, as libtiff
+        // works it out.
+        let mut page = gray(90, 90, 90, vec![B::Data(picture()[..8_100].to_vec())]);
+        page.tiled = true;
+        page.counts = Some(vec![10]);
+        let tiff = read(&Builder::new(b'I', true, vec![page]).build()).unwrap();
+        assert_eq!(lens(&tiff), [8_100]);
+        // Listed as strips beside a tile size, which libtiff reads as
+        // tiles: four 32 × 32 tiles of 64 × 64, one short of its 1,024
+        // bytes, refused; their first two counts differ ("Wrong"), worked
+        // out as tiles.
+        let tiles = |counts: Vec<u64>| {
+            let mut page = gray(
+                64,
+                64,
+                16,
+                picture()[..4_096].chunks(1_024).map(B::data).collect(),
+            );
+            page.tags
+                .extend([(322, V::Short(vec![32])), (323, V::Short(vec![32]))]);
+            page.counts = Some(counts);
+            Builder::new(b'I', false, vec![page]).build()
+        };
+        assert!(refused(&tiles(vec![1_024, 1_024, 10, 1_024])));
+        let tiff = read(&tiles(vec![1_024, 512, 1_024, 1_024])).unwrap();
+        assert_eq!(lens(&tiff), [1_024; 4]);
+        // With no counts at all, they're sized as libtiff reads them too.
+        let tiff = read(&tiles(Vec::new())).unwrap();
+        assert_eq!(lens(&tiff), [1_024; 4]);
     }
 
     /// An entry for `tag` of type `kind` holding `bytes` inline, `count`
