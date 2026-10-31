@@ -20,6 +20,7 @@ mod compress;
 pub(crate) mod exif;
 mod gif;
 mod heic;
+mod heic_compress;
 mod isobmff;
 mod jpeg;
 mod png;

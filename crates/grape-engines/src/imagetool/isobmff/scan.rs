@@ -72,8 +72,9 @@
 //! [`Scan::orientation`] and [`Scan::turns`] are what the graft decides by.
 //!
 //! **Memory:** `meta` (within [`MAX_META`](super::boxes::MAX_META)) and its
-//! model, an index of the items' properties and references, `idat`'s
-//! content, and the carried data, [`MAX_CARRIED`] at most.
+//! model, an index of the items' properties and references, and `idat`'s
+//! content, until [`Scan::load`] has read the carried data, [`MAX_CARRIED`]
+//! at most, which it holds instead.
 
 // Compress on HEIC (`heic_compress`, D28's next commit) calls it.
 #![cfg_attr(not(test), allow(dead_code))]
@@ -549,6 +550,8 @@ impl Scan {
             item.data = data;
         }
         self.carried.retain(|item| !item.data.is_empty());
+        // Read: Compress holds the carried data from here on, not `idat`.
+        self.idat = Vec::new();
         self.orientation = self
             .carried
             .iter()
