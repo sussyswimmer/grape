@@ -3661,24 +3661,57 @@ fn compress_keeps_a_webp_with_transparency_unscaled_when_that_is_smaller() {
         small <= balanced && balanced <= high,
         "{small} {balanced} {high}"
     );
+    // Past 2 to 1 too: scaled by 2.1, its file was 97.9 % of the source,
+    // "already as small as Grape makes it", where Balanced, which scales
+    // it by 1.05, wrote 75.2 % as it is.
+    let text = hard_text(4300, 300, 92.0, false);
+    let (small, small_size) = run("wide.webp", &text, Small);
+    let (balanced, _) = run("wide.webp", &text, Balanced);
+    let (high, _) = run("wide.webp", &text, High);
+    assert_eq!(small_size, (4300, 300));
+    assert!(
+        small <= balanced && balanced <= high && small * 10 <= text.len() * 9,
+        "{small} {balanced} {high} of {}",
+        text.len()
+    );
     // A photo with transparent corners, at the same size: scaling makes
     // it smaller, so its scaled file is kept.
-    let colors = photo(2100, 300);
-    let corners = image::RgbaImage::from_fn(2100, 300, |x, y| {
-        let [r, g, b] = colors.get_pixel(x, y).0;
-        let (dx, dy) = (x.min(2099 - x), y.min(299 - y));
-        image::Rgba([r, g, b, if dx + dy < 20 { 0 } else { 255 }])
-    });
-    let corners = lossy_webp(corners.as_raw(), 2100, 300, true, 90.0);
-    let (_, size) = run("corners.webp", &corners, Small);
+    let corners = |w: u32, h: u32| {
+        let colors = photo(w, h);
+        let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
+            let [r, g, b] = colors.get_pixel(x, y).0;
+            let (dx, dy) = (x.min(w - 1 - x), y.min(h - 1 - y));
+            image::Rgba([r, g, b, if dx + dy < 20 { 0 } else { 255 }])
+        });
+        lossy_webp(rgba.as_raw(), w, h, true, 90.0)
+    };
+    let (_, size) = run("corners.webp", &corners(2100, 300), Small);
     assert_eq!(size, (2048, 293));
+    // At 2.1 to 1 its scaled file's color alone rules the picture as it is
+    // out, so it isn't encoded: no report comes from a second encode
+    // (0.7 to 0.9), where the text's comes.
+    for (name, src, second) in [
+        ("corners.webp", corners(4300, 600), false),
+        ("wide.webp", text, true),
+    ] {
+        let (_, job) = plan_one(&dir, name, &src, compress_op(Small));
+        let mut seen = Vec::new();
+        let outcome = run_job(&job, &EngineCtx::default(), &mut |p| seen.push(p)).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        assert_eq!(
+            seen.iter().any(|&p| p > 0.7 && p < 0.9),
+            second,
+            "{name}: {seen:?}"
+        );
+    }
 }
 
 #[test]
 fn compress_reports_both_encodes_of_a_webp_in_order_and_stops_at_a_cancel() {
     use grape_core::CompressPreset::Small;
-    // Encoded as it is (0.5 to 0.7), then scaled (0.7 to 0.9): the
-    // progress never goes back, and a cancel during the first encode ends
+    // Scaled (0.5 to 0.7), then encoded as it is (0.7 to 0.9): the
+    // progress never goes back, and a cancel during either encode ends
     // the job, with nothing written.
     let src = hard_text(2100, 300, 92.0, false);
     let dir = TestDir::new("compress-webp-both");
@@ -3694,6 +3727,8 @@ fn compress_reports_both_encodes_of_a_webp_in_order_and_stops_at_a_cancel() {
     }
     let first = seen.iter().position(|&p| p > 0.5 && p < 0.7).unwrap();
     cancelled_at("text.webp", &src, compress_op(Small), first + 1);
+    let second = seen.iter().position(|&p| p > 0.7 && p < 0.9).unwrap();
+    cancelled_at("text.webp", &src, compress_op(Small), second + 1);
 }
 
 #[test]
