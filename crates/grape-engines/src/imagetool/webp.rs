@@ -81,6 +81,14 @@ const ICC_FLAG: u8 = 0x20;
 /// Where an extended file's VP8X flags are: [`scan`] wants `VP8X` first.
 const VP8X_FLAGS_AT: u64 = 20;
 
+/// Where a simple file's `VP8L` alpha bit is ([`VP8L_ALPHA_BIT`]): its
+/// image is its first chunk, whose header (after the 0x2F signature) is
+/// 14 bits each of width and height less one, the alpha bit, a version.
+const SIMPLE_ALPHA_AT: u64 = 24;
+
+/// The `VP8L` alpha bit in its byte at [`SIMPLE_ALPHA_AT`].
+const VP8L_ALPHA_BIT: u8 = 0x10;
+
 /// The largest `EXIF` or `XMP ` chunk Compress carries (D28). Compress
 /// keeps metadata, so a file with a larger one is refused rather than
 /// written without it.
@@ -1003,6 +1011,15 @@ pub(crate) struct Reading {
     /// alpha its pixels hold, so a picture whose pixels hold some is shown
     /// differently by each and must be refused once decoded.
     pub(crate) opaque: bool,
+    /// A still `VP8L` whose own bit says no alpha with no VP8X alpha flag
+    /// over it (or no VP8X): libwebp's still decoder shows the alpha its
+    /// pixels hold, and its demuxer (Pillow's, Chrome's) and image-webp
+    /// show it opaque, so a picture whose pixels hold some is shown
+    /// differently and must be refused once decoded. The byte to read in
+    /// place of `patch`'s, and where, so that image-webp decodes its alpha
+    /// to see: VP8X's flags with alpha on, or the `VP8L`'s own bit set. A
+    /// picture with none is then handed on opaque, as image-webp shows it.
+    pub(crate) unflagged: Option<(u64, u8)>,
 }
 
 /// Walks the WebP `r` as [`scan`] does, its metadata unread, and says how
@@ -1022,9 +1039,26 @@ fn walked(r: &mut dyn In) -> Result<(Scan, Reading), Error> {
         return Err(Error::Broken(why.into()));
     }
     let flagged = scan.vp8x.is_some_and(|vp8x| vp8x.flags & ALPHA_FLAG != 0);
+    let patch = decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags));
+    let unflagged = if !scan.animated && scan.lossless && !scan.alpha && !flagged {
+        Some(match scan.vp8x {
+            Some(vp8x) => {
+                let flags = patch.map_or(vp8x.flags, |(_, flags)| flags);
+                (VP8X_FLAGS_AT, flags | ALPHA_FLAG)
+            }
+            None => {
+                let mut byte = [0];
+                read_at(r, SIMPLE_ALPHA_AT, &mut byte)?;
+                (SIMPLE_ALPHA_AT, byte[0] | VP8L_ALPHA_BIT)
+            }
+        })
+    } else {
+        None
+    };
     let reading = Reading {
-        patch: decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags)),
+        patch,
         opaque: !scan.animated && scan.lossless && flagged && !scan.alpha,
+        unflagged,
     };
     Ok((scan, reading))
 }
@@ -2593,7 +2627,8 @@ mod tests {
             read(&tagged).unwrap(),
             Reading {
                 patch: Some((20, 0)),
-                opaque: false
+                opaque: false,
+                unflagged: None,
             }
         );
         assert_eq!(tagged[20], 0x18);
@@ -2628,9 +2663,30 @@ mod tests {
             read(&webp(&[canvas(0, 9, 9), vp8l(9, 9, true)])).unwrap(),
             Reading {
                 patch: Some((20, 0x10)),
-                opaque: false
+                opaque: false,
+                unflagged: None,
             }
         );
+        // Its bit off under no flag, or in a simple file: libwebp's still
+        // decoder shows its pixels' alpha, the demuxer and image-webp show
+        // it opaque. Read with alpha on to see, at VP8X's flags (the EXIF
+        // flag off too) or the VP8L's own bit.
+        let unflagged = |file: &[u8]| read(file).unwrap().unflagged;
+        let tagged = webp(&[canvas(0x08, 9, 9), vp8l(9, 9, false)]);
+        assert_eq!(read(&tagged).unwrap().patch, Some((20, 0)));
+        assert_eq!(unflagged(&tagged), Some((20, 0x10)));
+        let simple = webp(&[vp8l(9, 9, false)]);
+        assert_eq!(simple[24] & 0x10, 0);
+        assert_eq!(unflagged(&simple), Some((24, simple[24] | 0x10)));
+        for read_as_it_is in [
+            webp(&[vp8l(9, 9, true)]),
+            webp(&[canvas(0x10, 9, 9), vp8l(9, 9, false)]),
+            webp(&[canvas(0, 9, 9), vp8l(9, 9, true)]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9)]),
+            anim.clone(),
+        ] {
+            assert_eq!(unflagged(&read_as_it_is), None);
+        }
         // Metadata isn't read, so it's never too large to decode.
         let mut big = webp(&[canvas(0x08, 9, 9), vp8(9, 9)]);
         let size = u32::try_from(MAX_CARRIED + 2).unwrap();

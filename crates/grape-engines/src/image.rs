@@ -379,10 +379,13 @@ fn decode_as(
     } else {
         None
     };
+    // A VP8L whose alpha libwebp's readers show differently is decoded
+    // with its alpha, to see.
+    let unflagged = webp.is_some_and(|reading| reading.unflagged.is_some());
     let inner = Patched {
         inner: Cancellable::new(file, cancel),
         pos: 0,
-        patch: webp.and_then(|reading| reading.patch),
+        patch: webp.and_then(|reading| reading.unflagged.or(reading.patch)),
     };
     let mut reader = ImageReader::new(BufReader::new(Bounded { inner, pos: 0, end }));
     if let Some(hint) = image_format(from) {
@@ -454,7 +457,13 @@ fn decode_as(
                 Orientation::NoTransforms
             };
             let (width, height) = decoder.dimensions();
-            let color = decoder.color_type();
+            // Decoded with its alpha to see, it's handed on opaque, as it
+            // was decoded before: image-webp held the same RGBA buffer then,
+            // and copied its color out of it.
+            let color = match decoder.color_type() {
+                ColorType::Rgba8 if unflagged => ColorType::Rgb8,
+                color => color,
+            };
             let icc = decoder
                 .icc_profile()
                 .ok()
@@ -475,7 +484,11 @@ fn decode_as(
             // hold the decoded buffer to the default limit, and give the
             // decoder only what is left for its own buffers.
             let mut limits = Limits::default();
-            limits.reserve(decoder.total_bytes())?;
+            limits.reserve(if unflagged {
+                u64::from(width) * u64::from(height) * 3
+            } else {
+                decoder.total_bytes()
+            })?;
             decoder.set_limits(limits)?;
             let mut img = DynamicImage::from_decoder(decoder)?;
             img.apply_orientation(orientation);
@@ -489,6 +502,18 @@ fn decode_as(
                 "decode {}: transparent in image-webp, opaque in libwebp",
                 src.display()
             )))
+        }
+        Ok(Ok((img, icc))) if unflagged => {
+            if transparent(&img) {
+                // libwebp's still decoder shows its pixels' alpha, its
+                // demuxer and image-webp go by the VP8L's bit.
+                Err(names.decode_failed(format!(
+                    "decode {}: transparent in libwebp's still decoder, opaque in its demuxer",
+                    src.display()
+                )))
+            } else {
+                Ok((DynamicImage::ImageRgb8(img.into_rgb8()), icc))
+            }
         }
         Ok(Ok(decoded)) => Ok(decoded),
         Ok(Err(DecodeFailure::TooLarge(detail))) => {

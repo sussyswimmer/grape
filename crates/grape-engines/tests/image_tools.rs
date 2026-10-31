@@ -4251,8 +4251,16 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             riff(&[red_vp8.clone(), alph.clone(), blue_vp8l.clone()]),
         ),
         // Transparent pixels in a VP8L whose bit says opaque, under
-        // VP8X's alpha flag: refused once decoded.
+        // VP8X's alpha flag: refused once decoded. And under no flag, or
+        // in a simple file, where libwebp's still decoder shows them and
+        // its demuxer (Pillow) and image-webp show the picture opaque,
+        // which conversions wrote.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
+        (
+            "vp8l-bit-off-unflagged.webp",
+            riff(&[canvas(0), bit(false)]),
+        ),
+        ("vp8l-bit-off-simple.webp", riff(&[bit(false)])),
         (
             "canvas.webp",
             riff(&[vp8x_chunk(0, w + 1, h), red_vp8.clone()]),
@@ -4278,7 +4286,7 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         // readers disagree on. But for the one readers show differently
         // only by its pixels, which it doesn't decode: kept as it is, its
         // output shows what it shows in every reader.
-        if name == "vp8l-bit-off.webp" {
+        if name.starts_with("vp8l-bit-off") {
             let outcome = strip(&dir, name, &file).unwrap();
             assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), file);
             fs::remove_file(&outcome.outputs[0]).unwrap();
@@ -4301,6 +4309,9 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             image::Rgba([10, 10, 220, 255]),
         )),
     );
+    // The encoder sets its alpha bit: off, it says none.
+    let mut opaque_off = opaque.clone();
+    opaque_off[12] &= !0x10;
     for (name, file, want) in [
         (
             "exif-after.webp",
@@ -4317,6 +4328,14 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             [200, 10, 10],
         ),
         ("bit-off.webp", riff(&[canvas(0x10), opaque]), [10, 10, 220]),
+        // Its bit off under no flag, or in a simple file: decoded with its
+        // alpha to see, and handed on opaque, as before.
+        (
+            "bit-off-unflagged.webp",
+            riff(&[canvas(0), opaque_off.clone()]),
+            [10, 10, 220],
+        ),
+        ("bit-off-simple.webp", riff(&[opaque_off]), [10, 10, 220]),
         // An ANIM after the picture: libwebp's still decoder and its
         // demuxer (Pillow) both show it. Refused in round 4, and one of 5
         // bytes (6 padded, as the demuxer reads it) in round 5.
@@ -4338,6 +4357,9 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         for p in out.to_rgba8().pixels() {
             let off = p.0[..3].iter().zip(want).map(|(&a, b)| a.abs_diff(b));
             assert!(off.max().unwrap() <= 6 && p.0[3] == 255, "{name}: {p:?}");
+        }
+        if name.starts_with("bit-off-") {
+            assert_eq!(out.color(), image::ColorType::Rgb8, "{name}");
         }
         fs::remove_file(&outcome.outputs[0]).unwrap();
         fs::remove_file(dir.join(name)).unwrap();
