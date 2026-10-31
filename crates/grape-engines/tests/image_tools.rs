@@ -4027,6 +4027,12 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             "alph-vp8-alph.webp",
             riff(&[canvas(0x10), alph.clone(), vp8.clone(), alph.clone()]),
         ),
+        // A simple file's image, an ALPH and a VP8L: the demuxer (Pillow)
+        // refuses it, libwebp's still decoder shows the red picture.
+        (
+            "simple-alph-vp8l.webp",
+            riff(&[red_vp8.clone(), alph.clone(), blue_vp8l.clone()]),
+        ),
         // Transparent pixels in a VP8L whose bit says opaque, under
         // VP8X's alpha flag: refused once decoded.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
@@ -4398,6 +4404,112 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
     fs::remove_file(dir.join("loop.webp")).unwrap();
     let err = compress(&dir, "loop.webp", &ordinary, High).unwrap_err();
     assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+}
+
+#[test]
+fn a_simple_webp_is_read_past_its_image_as_libwebps_demuxer_reads_it() {
+    use grape_core::CompressPreset::High;
+    use grape_core::Format;
+    // libwebp's demuxer (Chrome's, Pillow's) reads on after a simple
+    // file's image to the RIFF's end or a whole chunk (and after a first
+    // ALPH, which it takes for the image's), where its still decoder reads
+    // nothing. 1 to 7 bytes there, or a chunk past the RIFF's end, it
+    // refuses, as Pillow does and Remove Metadata did; conversions and
+    // Compress read them (the review's: a 64 × 40 red VP8 and 3 zero
+    // bytes). Now every tool refuses them.
+    let dir = TestDir::new("webp-simple-tail");
+    let red = lossy_webp(&[200, 0, 0].repeat(64 * 40), 64, 40, false, 90.0);
+    let red_vp8 = riff_chunk(b"VP8 ", &webp_chunk(&red, b"VP8 ").unwrap());
+    let alph = riff_chunk(b"ALPH", &[[0u8].as_slice(), &[0x80; 64 * 40]].concat());
+    let mut refused: Vec<(String, Vec<u8>)> = (1..8)
+        .map(|n| {
+            (
+                format!("tail{n}.webp"),
+                riff(&[red_vp8.clone(), vec![0; n]]),
+            )
+        })
+        .collect();
+    refused.extend([
+        (
+            "past.webp".to_owned(),
+            riff(&[red_vp8.clone(), b"JUNK\x64\0\0\0".to_vec(), vec![0; 10]]),
+        ),
+        (
+            "alph-tail.webp".to_owned(),
+            riff(&[red_vp8.clone(), alph.clone(), vec![0; 3]]),
+        ),
+    ]);
+    for (name, file) in &refused {
+        let message = format!("{name} isn't a readable WEBP image.");
+        for to in [Format::Png, Format::Jpg] {
+            let err = run(&dir, name, file, Operation::convert(to)).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+            assert_eq!(err.user_message, message, "{to:?}");
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+        let err = compress(&dir, name, file, High).unwrap_err();
+        assert_eq!(err.user_message, message, "{name}: {}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+        let err = strip(&dir, name, file).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    // What the demuxer reads (Pillow shows red): a whole chunk after the
+    // image, or an ALPH and one after it. Every tool reads them.
+    for (name, file) in [
+        (
+            "junk.webp",
+            riff(&[red_vp8.clone(), riff_chunk(b"JUNK", b"junk")]),
+        ),
+        (
+            "exif.webp",
+            riff(&[red_vp8.clone(), riff_chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0")]),
+        ),
+        (
+            "anim.webp",
+            riff(&[red_vp8.clone(), riff_chunk(b"ANIM", &[0; 6])]),
+        ),
+        ("vp8-vp8.webp", riff(&[red_vp8.clone(), red_vp8.clone()])),
+        ("alph.webp", riff(&[red_vp8.clone(), alph.clone()])),
+        (
+            "alph-vp8.webp",
+            riff(&[red_vp8.clone(), alph.clone(), red_vp8.clone()]),
+        ),
+    ] {
+        let outcome = run(&dir, name, &file, Operation::convert(Format::Png))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+        assert_eq!((out.width(), out.height()), (64, 40), "{name}");
+        let p = out.to_rgba8().get_pixel(0, 0).0;
+        assert!(p[0] > 190 && p[1] < 10 && p[3] == 255, "{name}: {p:?}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        match compress(&dir, name, &file, High) {
+            Ok(outcome) => fs::remove_file(&outcome.outputs[0]).unwrap(),
+            Err(e) => assert_eq!(e.kind, ErrorKind::NoChange, "{name}: {}", e.detail),
+        }
+        fs::remove_file(dir.join(name)).unwrap();
+        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    // Known limit: the demuxer reads nothing after the chunk that ends the
+    // image's frame, so it reads 3 stray bytes after one (as libwebp's
+    // still decoder and Pillow do), and so do conversions and Compress;
+    // Remove Metadata, which walks every chunk to the RIFF's end, refuses
+    // it as cut short.
+    let stray = riff(&[red_vp8.clone(), riff_chunk(b"JUNK", b"junk"), vec![0; 3]]);
+    let outcome = run(&dir, "stray.webp", &stray, Operation::convert(Format::Png))
+        .unwrap_or_else(|e| panic!("{}", e.detail));
+    fs::remove_file(&outcome.outputs[0]).unwrap();
+    fs::remove_file(dir.join("stray.webp")).unwrap();
+    match compress(&dir, "stray.webp", &stray, High) {
+        Ok(outcome) => fs::remove_file(&outcome.outputs[0]).unwrap(),
+        Err(e) => assert_eq!(e.kind, ErrorKind::NoChange, "{}", e.detail),
+    }
+    fs::remove_file(dir.join("stray.webp")).unwrap();
+    let err = strip(&dir, "stray.webp", &stray).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
 }
 
 #[test]

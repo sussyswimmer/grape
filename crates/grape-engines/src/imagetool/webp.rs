@@ -379,8 +379,11 @@ impl Carried {
 ///   walk or by the decoder (which `crate::image` ends there: image-webp's
 ///   own walk would go on, as far again as the RIFF's size less 12 bytes
 ///   from the end of `VP8X`);
-/// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
-///   image-webp read nothing after it, so nothing after it is carried.
+/// - a simple file to its first chunk, `VP8 ` or `VP8L`, and on as far as
+///   libwebp's demuxer reads after it ([`after_simple_image`]: 1 to 7
+///   bytes left in the RIFF after the image, say, are broken). Nothing
+///   after the image is carried: libwebp's still decoder and image-webp
+///   read nothing after it.
 pub(super) fn scan(r: &mut dyn In) -> Result<Scan, Error> {
     walk(r, true)
 }
@@ -437,6 +440,7 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 image = Some(head.fourcc);
                 bitstream(r, body, &head, &mut found)?;
                 if first {
+                    after_simple_image(r, at, left)?;
                     break;
                 }
             }
@@ -503,6 +507,44 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
         found.late_alpha = false;
     }
     Ok(found)
+}
+
+/// Reads what follows a simple file's image, `left` bytes of the RIFF from
+/// `at`, as libwebp's demuxer (Chrome's, Pillow's) reads it
+/// (`StoreFrame`): the RIFF's end, or a whole chunk, which ends the image's
+/// frame, but for a first `ALPH`, which it takes for the frame's and reads
+/// on after. It refuses the file for 1 to 7 bytes left (too few for a
+/// chunk header), a chunk past the RIFF's end and a `VP8L` after that
+/// `ALPH`, where its still decoder shows the image, so they're
+/// [`Error::Broken`]; it reads nothing after the chunk that ends the frame.
+/// A last chunk whose only missing byte is its pad is read, as in an
+/// extended file ([`next`]).
+fn after_simple_image(r: &mut dyn In, mut at: u64, mut left: u64) -> Result<(), Error> {
+    let mut alpha = false;
+    let mut chunks = 1;
+    loop {
+        if left == 0 {
+            return Ok(());
+        }
+        if left < 8 {
+            return Err(Error::Broken(format!(
+                "{left} bytes after the image, too few for a chunk"
+            )));
+        }
+        let mut raw = [0; 8];
+        read_at(r, at, &mut raw)?;
+        let head = next(raw, &mut left, &mut chunks)?;
+        match &head.fourcc {
+            b"ALPH" if !alpha => {
+                alpha = true;
+                at += 8 + head.body;
+            }
+            b"VP8L" if alpha => {
+                return Err(Error::Broken("a VP8L chunk after an ALPH chunk".into()));
+            }
+            _ => return Ok(()),
+        }
+    }
 }
 
 /// Where a still file's walk is in its image's own chunks: what libwebp's
@@ -1585,6 +1627,58 @@ mod tests {
         .unwrap();
         assert_eq!(found.carried, Carried::default());
         assert!(!found.alpha && !found.late_alpha && !found.lossless);
+    }
+
+    #[test]
+    fn a_simple_files_image_is_read_on_as_libwebps_demuxer_reads_it() {
+        let alph = || chunk(b"ALPH", b"a");
+        // The RIFF's end, or a whole chunk after the image, which ends its
+        // frame (libwebp's demuxer reads nothing after it, so 3 stray
+        // bytes after it go unread); a first ALPH it takes for the frame's
+        // and reads on after (Pillow shows the image). A last chunk short
+        // of its pad byte alone is read, as in an extended file.
+        for good in [
+            webp(&[vp8(9, 9), chunk(b"JUNK", b"junk")]),
+            webp(&[vp8(9, 9), chunk(b"JUNK", b"")]),
+            webp(&[vp8(9, 9), chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0")]),
+            webp(&[vp8(9, 9), chunk(b"XMP ", b"<x/>")]),
+            webp(&[vp8(9, 9), chunk(b"ANIM", &[0; 6])]),
+            webp(&[vp8(9, 9), vp8x(0x10)]),
+            webp(&[vp8(9, 9), vp8(9, 9)]),
+            webp(&[vp8(9, 9), alph()]),
+            webp(&[vp8(9, 9), alph(), vp8(9, 9)]),
+            webp(&[vp8(9, 9), alph(), alph()]),
+            webp(&[vp8l(9, 9, true), alph()]),
+            webp(&[vp8(9, 9), chunk(b"JUNK", b"junk"), vec![0; 3]]),
+            webp(&[vp8(9, 9), b"JUNK\x03\0\0\0abc".to_vec()]),
+        ] {
+            let found = scanned(&good).unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
+            assert_eq!(found.size, (9, 9));
+            assert_eq!(found.carried, Carried::default());
+            assert!(reading(&mut Cursor::new(&good)).is_ok(), "{good:?}");
+        }
+        // What the demuxer refuses (Pillow too), where libwebp's still
+        // decoder shows the image: 1 to 7 bytes after it, or after its
+        // ALPH; a chunk past the RIFF's end; a VP8L after an ALPH.
+        let mut bad: Vec<Vec<u8>> = (1..8)
+            .flat_map(|n| {
+                [
+                    webp(&[vp8(9, 9), vec![0; n]]),
+                    webp(&[vp8l(9, 9, false), vec![0; n]]),
+                    webp(&[vp8(9, 9), alph(), vec![0; n]]),
+                ]
+            })
+            .collect();
+        bad.extend([
+            webp(&[vp8(9, 9), b"JUNK\x64\0\0\0".to_vec(), vec![0; 10]]),
+            webp(&[vp8(9, 9), alph(), vp8l(9, 9, false)]),
+            webp(&[vp8l(9, 9, false), alph(), vp8l(9, 9, false)]),
+        ]);
+        for bad in bad {
+            assert!(matches!(scanned(&bad), Err(Error::Broken(_))), "{bad:?}");
+            assert!(reading(&mut Cursor::new(&bad)).is_err(), "{bad:?}");
+            assert!(readable(&Arc::new(bad.clone())).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
