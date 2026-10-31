@@ -73,6 +73,14 @@ pub(crate) struct Item {
     pub(crate) hidden: bool,
     /// A `mime` item's content type, a `uri ` item's URI type.
     pub(crate) text: Option<&'static str>,
+    /// Its `item_name` (none: empty).
+    pub(crate) name: Option<&'static str>,
+    /// A `mime` item's `content_encoding`, written after its content type.
+    pub(crate) encoding: Option<&'static str>,
+    /// Its `item_protection_index`.
+    pub(crate) protection: u16,
+    /// An `infe` v1 (16-bit ids only): no item type, so a MIME item.
+    pub(crate) v1: bool,
     pub(crate) data: Vec<u8>,
     pub(crate) place: Place,
     /// Its data in this many extents (the last takes what's left).
@@ -89,6 +97,10 @@ impl Item {
             kind,
             hidden: false,
             text: None,
+            name: None,
+            encoding: None,
+            protection: 0,
+            v1: false,
             data,
             place,
             extents: 1,
@@ -172,6 +184,53 @@ pub(crate) const SECRET_XMP: &str = "<x:xmpmeta xmlns:x='adobe:ns:meta/'>SecretP
 /// A property box: `hvcC`, `ispe` and such hold what the tests need only.
 pub(crate) fn prop(kind: &[u8; 4], content: &[u8]) -> Vec<u8> {
     bx(kind, content)
+}
+
+/// An `hvcC`: a 23-byte HEVC decoder configuration record (4:2:0, Main)
+/// with no parameter sets, of `luma` and `chroma` bits.
+pub(crate) fn hvcc(luma: u8, chroma: u8) -> Vec<u8> {
+    let mut record = vec![
+        1, 0x01, 0x60, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 90, 0xF0, 0, 0xFC,
+    ];
+    record.extend_from_slice(&[0xFD, 0xF8 | (luma - 8), 0xF8 | (chroma - 8), 0, 0, 0x0F, 0]);
+    bx(b"hvcC", &record)
+}
+
+/// A `pixi` of `bits` per channel.
+pub(crate) fn pixi(bits: &[u8]) -> Vec<u8> {
+    let mut c = vec![u8::try_from(bits.len()).unwrap()];
+    c.extend_from_slice(bits);
+    full(b"pixi", 0, 0, &c)
+}
+
+/// An `irot` of `angle` quarter turns anticlockwise.
+pub(crate) fn irot(angle: u8) -> Vec<u8> {
+    bx(b"irot", &[angle])
+}
+
+/// An `imir` about `axis`.
+pub(crate) fn imir(axis: u8) -> Vec<u8> {
+    bx(b"imir", &[axis])
+}
+
+/// A `pasp` of `h`:`v`.
+pub(crate) fn pasp(h: u32, v: u32) -> Vec<u8> {
+    bx(b"pasp", &[h.to_be_bytes(), v.to_be_bytes()].concat())
+}
+
+/// A `colr` of type `nclx`.
+pub(crate) fn nclx(primaries: u16, transfer: u16, matrix: u16, full_range: bool) -> Vec<u8> {
+    let mut c = b"nclx".to_vec();
+    for v in [primaries, transfer, matrix] {
+        c.extend_from_slice(&v.to_be_bytes());
+    }
+    c.push(if full_range { 0x80 } else { 0 });
+    bx(b"colr", &c)
+}
+
+/// A `colr` of type `kind` (`prof` or `rICC`) holding `icc`.
+pub(crate) fn icc(kind: &[u8; 4], icc: &[u8]) -> Vec<u8> {
+    bx(b"colr", &[&kind[..], icc].concat())
 }
 
 /// An `ispe` of `w` × `h`.
@@ -427,14 +486,21 @@ impl Builder {
         }
         for item in &self.items {
             let mut c = id(item.id);
-            c.extend_from_slice(&[0, 0]);
-            c.extend_from_slice(&item.kind);
+            c.extend_from_slice(&item.protection.to_be_bytes());
+            if !item.v1 {
+                c.extend_from_slice(&item.kind);
+            }
+            c.extend_from_slice(item.name.unwrap_or_default().as_bytes());
             c.push(0);
-            if let Some(text) = item.text {
+            for text in [item.text, item.encoding].into_iter().flatten() {
                 c.extend_from_slice(text.as_bytes());
                 c.push(0);
             }
-            let version = if wide { 3 } else { 2 };
+            let version = match (wide, item.v1) {
+                (_, true) => 1,
+                (true, false) => 3,
+                (false, false) => 2,
+            };
             iinf.extend_from_slice(&full(b"infe", version, u32::from(item.hidden), &c));
         }
         boxes.push((*b"iinf", full(b"iinf", iinf_version, 0, &iinf)));
@@ -574,7 +640,7 @@ pub(crate) fn simple() -> Builder {
         ],
         1,
     );
-    b.properties = vec![prop(b"hvcC", &[1; 23]), ispe(64, 48)];
+    b.properties = vec![hvcc(8, 8), ispe(64, 48)];
     b.refs = vec![(*b"cdsc", EXIF, vec![1]), (*b"cdsc", XMP, vec![1])];
     b
 }
@@ -614,7 +680,7 @@ pub(crate) fn iphone() -> Builder {
     ]);
     let mut b = Builder::new(items, 1);
     b.properties = vec![
-        prop(b"hvcC", &[1; 23]),
+        hvcc(8, 8),
         ispe(32, 48),
         prop(b"colr", b"prof\0\0\0\x10icc-profile-data"),
         prop(b"irot", &[1]),
@@ -650,7 +716,7 @@ pub(crate) fn wide() -> Builder {
     b.wide = true;
     b.wide_indices = true;
     b.sizes = [8, 8, 8, 0];
-    b.properties = vec![prop(b"hvcC", &[1; 23]), ispe(64, 48)];
+    b.properties = vec![hvcc(8, 8), ispe(64, 48)];
     b.refs = vec![
         (*b"cdsc", 70_002, vec![70_000]),
         (*b"cdsc", 70_003, vec![70_000]),
@@ -663,7 +729,7 @@ pub(crate) fn wide() -> Builder {
 pub(crate) fn described() -> Builder {
     let mut b = simple();
     b.properties = vec![
-        prop(b"hvcC", &[1; 23]),
+        hvcc(8, 8),
         ispe(64, 48),
         udes("SecretTitle", "SecretDescription", "SecretTag"),
         prop(b"colr", b"nclx\0\x01\0\x0d\0\x06\x80"),
