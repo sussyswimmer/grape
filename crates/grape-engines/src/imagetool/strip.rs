@@ -208,15 +208,6 @@ pub(crate) fn run(
                 .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
         ),
     };
-    if let Stripper::Webp(plan) = &stripper {
-        if plan.decides_by_pixels() {
-            // A conversion decides on this one only once it's decoded it,
-            // so it's decoded as a conversion decodes it: one whose pixels
-            // readers show differently is refused as conversions refuse it.
-            crate::image::decode_stored(src, from, Format::Webp, &names, &ctx.cancel, &|_, _, _| 0)
-                .map_err(|e| publish::or_cancelled(&ctx.cancel, src, e))?;
-        }
-    }
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;

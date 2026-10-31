@@ -366,6 +366,38 @@ fn remove_metadata_strips_a_webp_and_fixes_its_header() {
 }
 
 #[test]
+fn remove_metadata_keeps_a_webps_alpha_as_it_is_undecoded() {
+    use MetaField::*;
+    // A 12,000 × 12,000 lossless WebP whose VP8X flags alpha over a VP8L
+    // whose own bit says none: readers show it differently once its pixels
+    // hold transparency, which conversions decode it to see (D16). Remove
+    // Metadata keeps its chunks and the flag byte for byte, so its output
+    // shows what the source shows in every reader; it decoded it first,
+    // and refused it as too large to convert. (Its bitstream is a header:
+    // nothing decodes it.)
+    let dir = TestDir::new("strip-webp-undecoded");
+    let side = 12_000u32 - 1;
+    let header = side | side << 14;
+    let vp8l = riff_chunk(
+        b"VP8L",
+        &[&[0x2F][..], &header.to_le_bytes(), &[0; 7]].concat(),
+    );
+    let s = side.to_le_bytes();
+    let vp8x = |flags: u8| {
+        riff_chunk(
+            b"VP8X",
+            &[flags, 0, 0, 0, s[0], s[1], s[2], s[0], s[1], s[2]],
+        )
+    };
+    let xmp = riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>");
+    let src = riff(&[vp8x(0x14), vp8l.clone(), xmp]);
+    let outcome = strip(&dir, "big.webp", &src).unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![Xmp])]);
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out, riff(&[vp8x(0x10), vp8l]));
+}
+
+#[test]
 fn remove_metadata_strips_a_gif_and_keeps_its_frames() {
     let dir = TestDir::new("strip-gif");
     // Two 1×1 frames, looping, with a 2-color palette (the image crate
@@ -4241,12 +4273,20 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             assert_eq!(err.user_message, message, "{to:?}");
             fs::remove_file(dir.join(name)).unwrap();
         }
-        // Remove Metadata refuses them as conversions do, the last once
-        // decoded as they decode it: it kept their image chunks as they
-        // were, so it wrote files Grape refuses and readers disagree on.
-        let err = strip(&dir, name, &file).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
-        assert_eq!(err.user_message, message, "{}", err.detail);
+        // Remove Metadata refuses them as conversions do: it kept their
+        // image chunks as they were, so it wrote files Grape refuses and
+        // readers disagree on. But for the one readers show differently
+        // only by its pixels, which it doesn't decode: kept as it is, its
+        // output shows what it shows in every reader.
+        if name == "vp8l-bit-off.webp" {
+            let outcome = strip(&dir, name, &file).unwrap();
+            assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), file);
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        } else {
+            let err = strip(&dir, name, &file).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+            assert_eq!(err.user_message, message, "{}", err.detail);
+        }
         fs::remove_file(dir.join(name)).unwrap();
     }
     // Read as libwebp reads them: an EXIF flag whose chunk is past the

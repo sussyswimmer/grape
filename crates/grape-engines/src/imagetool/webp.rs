@@ -23,6 +23,11 @@
 //!   it), everything in a simple file from the chunk that ends its image's
 //!   frame on, which no reader reads (whole chunks said by their kind, the
 //!   rest as other metadata), and anything after the RIFF's end.
+//! - **Not decoded:** a `VP8L` whose own alpha bit says none under VP8X's
+//!   alpha flag ([`Reading::opaque`]), which conversions decode to refuse
+//!   when its pixels hold transparency, keeps its chunks and VP8X's flag
+//!   byte for byte, so its output shows what the source shows in every
+//!   reader, whether they agree on it or not.
 //! - **Refused:** what a conversion refuses before decoding ([`reading`]),
 //!   and an `ANMF` or `ICCP` chunk the demuxer reads at the top level
 //!   inside an `ANMF`, after its frame: the `image` crate trusts the
@@ -113,13 +118,6 @@ impl Plan {
         read_at(r, 0, &mut header)?;
         read_at(r, 12 + riff(&header)? - 1, &mut [0])?;
         Ok(Plan { scan, reading })
-    }
-
-    /// Whether a conversion decides on the source only once it's decoded:
-    /// a `VP8L` whose own alpha bit says none under VP8X's alpha flag,
-    /// refused when its pixels hold transparency ([`Reading::opaque`]).
-    pub(super) fn decides_by_pixels(&self) -> bool {
-        self.reading.opaque
     }
 
     /// Strips the WebP `r` into `w` ([module docs](self)), the file
@@ -1752,12 +1750,14 @@ mod tests {
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
-        // A VP8L whose bit says opaque under VP8X's alpha flag: a
-        // conversion decides on it once decoded, and so does `strip::run`.
-        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, false)]))).unwrap();
-        assert!(plan.decides_by_pixels());
-        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, true)]))).unwrap();
-        assert!(!plan.decides_by_pixels());
+        // A VP8L whose bit says opaque under VP8X's alpha flag, which a
+        // conversion decides on once decoded: kept as it is, undecoded,
+        // its flag byte for byte, so it shows what the source shows.
+        for flags in [0x10, 0x14] {
+            let src = webp(&[vp8x(flags), vp8l(2, 2, false)]);
+            let (out, _) = run(&src).unwrap();
+            assert_eq!(out, webp(&[vp8x(0x10), vp8l(2, 2, false)]));
+        }
     }
 
     /// An `ALPH` chunk.
