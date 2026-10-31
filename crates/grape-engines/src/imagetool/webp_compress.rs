@@ -17,10 +17,9 @@
 //!   Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
 //!   exact, the color under fully transparent pixels free to change; a
 //!   picture with transparency is scaled by area near its transparency,
-//!   its color weighed by its alpha, its alpha kept to the values the
-//!   source's has but its thin strokes whole, its fully transparent pixels
-//!   colored as the visible ones nearest them, and by Lanczos3 elsewhere
-//!   ([`scale`]). The qualities are JPEG's, so a preset
+//!   its color weighed by its alpha, its alpha in steps of what each new
+//!   pixel covers, its fully transparent pixels colored as the visible ones
+//!   nearest them, and by Lanczos3 elsewhere ([`scale`]). The qualities are JPEG's, so a preset
 //!   means the same across formats.
 //!   Kept when it's at most 90 % of the source's size. "Try Small" only
 //!   when Small's own file is: when Balanced or High ends `NoChange`, Small

@@ -3185,11 +3185,12 @@ fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
         let out = fs::read(&outcome.outputs[0]).unwrap();
         sizes.push(out.len());
         if preset == Small {
-            // Hard edges stay hard, and no edge darkens: each opaque pixel
-            // of the white disc beside a transparent one is white.
+            // Its edges take two steps at 1.27 to 1, half and whole, and no
+            // edge darkens: each visible pixel of the white disc beside a
+            // transparent one is white.
             let back = image::load_from_memory(&out).unwrap().to_rgba8();
             assert_eq!(back.dimensions(), (2048, 1024));
-            assert!(back.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+            assert!(back.pixels().all(|p| [0, 128, 255].contains(&p.0[3])));
             let mut edges = 0;
             for (x, y, p) in back.enumerate_pixels() {
                 let beside = |dx: i32, dy: i32| {
@@ -3197,7 +3198,7 @@ fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
                     x >= 0 && y >= 0 && back.get_pixel(x as u32, y as u32).0[3] == 0
                 };
                 let edge = beside(-1, 0) || beside(0, -1) || beside(1, 0) || beside(0, 1);
-                if x < 1100 && p.0[3] == 255 && edge {
+                if x < 1100 && p.0[3] > 0 && edge {
                     assert!(p.0[..3].iter().all(|&c| c >= 230), "({x}, {y}): {p:?}");
                     edges += 1;
                 }
@@ -3261,15 +3262,15 @@ fn compress_keeps_a_hard_edged_webps_thin_strokes_whole_and_their_color() {
             );
         }
     }
-    // Hard edges stay hard, and the visible pixels as near the strokes'
-    // blue as the source's own (libwebp's q90 over black left them 16 off
-    // on average, 41 at most): with black under the transparency again,
-    // they came out 45 off on average, 92 at most.
+    // Its alpha in three steps at 2.93 to 1, and the visible pixels as near
+    // the strokes' blue as the source's own (libwebp's q90 over black left
+    // them 16 off on average, 41 at most): with black under the
+    // transparency again, they came out 45 off on average, 92 at most.
     let source = image::load_from_memory(&src).unwrap().to_rgba8();
     let off = |img: &image::RgbaImage| {
         let offs: Vec<u8> = img
             .pixels()
-            .filter(|p| p.0[3] == 255)
+            .filter(|p| p.0[3] > 0)
             .map(|p| {
                 let off = p.0[..3]
                     .iter()
@@ -3286,7 +3287,7 @@ fn compress_keeps_a_hard_edged_webps_thin_strokes_whole_and_their_color() {
         is.0 <= was.0 + 2.0 && is.1 <= was.1,
         "{is:?} against {was:?}"
     );
-    assert!(back.pixels().all(|p| p.0[3] == 0 || p.0[3] == 255));
+    assert!(back.pixels().all(|p| [0, 85, 170, 255].contains(&p.0[3])));
 }
 
 #[test]
