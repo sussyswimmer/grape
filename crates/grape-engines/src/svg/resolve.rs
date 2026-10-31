@@ -160,6 +160,13 @@ impl Budget {
         };
         match embedded {
             Embedded::Raster => {
+                // A WebP is read as a dropped one is (D28): cut at its
+                // RIFF's end, its VP8X flags patched, and refused where
+                // libwebp's readers disagree, so resvg draws what libwebp
+                // shows. Other data passes through as it is.
+                let Ok(data) = crate::imagetool::webp_readable(&data) else {
+                    return self.refuse_data(&data);
+                };
                 let Some(kind) = self.raster_kind(&data) else {
                     return self.refuse_data(&data);
                 };
@@ -380,6 +387,26 @@ mod tests {
             assert!(admit(&budget, mime, data).is_none(), "{mime}");
         }
         assert_eq!(budget.left_out(), 5);
+    }
+
+    #[test]
+    fn an_embedded_webp_is_read_as_a_dropped_one_is() {
+        let budget = Budget::new(&Limits::DEFAULT);
+        let webp = encoded(ImageFormat::WebP, 3, 2);
+        // Bytes past the RIFF's end are cut off before resvg sees them.
+        let after = [webp.clone(), b"trailing".to_vec()].concat();
+        match admit(&budget, "image/webp", after) {
+            Some(ImageKind::WEBP(data)) => assert_eq!(*data, webp),
+            other => panic!("{:?}", kind_name(other)),
+        }
+        assert_eq!(budget.left_out(), 0);
+        // A few bytes after the image inside the RIFF: libwebp's demuxer
+        // refuses that, so a conversion would, and so does the SVG.
+        let mut inside = [webp, vec![0; 3]].concat();
+        let riff = u32::from_le_bytes(inside[4..8].try_into().unwrap()) + 3;
+        inside[4..8].copy_from_slice(&riff.to_le_bytes());
+        assert!(admit(&budget, "image/webp", inside).is_none());
+        assert_eq!(budget.left_out(), 1);
     }
 
     #[test]
