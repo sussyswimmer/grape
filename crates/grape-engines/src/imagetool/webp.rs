@@ -94,9 +94,24 @@ pub(super) struct Plan {
 impl Plan {
     /// Walks the WebP `r` as a conversion does before decoding it: what
     /// that refuses (readers disagree on it, or libwebp's demuxer refuses
-    /// it) is [`Error::Broken`], before anything is written.
+    /// it) is [`Error::Broken`], before anything is written, and so are an
+    /// `ANMF` or `ICCP` chunk the demuxer reads inside an `ANMF`
+    /// ([`Scan::inside`]) and a file shorter than its RIFF says, which
+    /// libwebp's still decoder and its demuxer refuse and the walk doesn't
+    /// read to its end. Everything the file makes Remove Metadata refuse
+    /// is refused here: what [`Plan::write`] then finds broken is Grape's
+    /// own failure.
     pub(super) fn new(r: &mut dyn In) -> Result<Plan, Error> {
         let (scan, reading) = walked(r)?;
+        if let Some(fourcc) = scan.inside {
+            return Err(Error::Broken(format!(
+                "{} chunk inside an ANMF",
+                a(&fourcc)
+            )));
+        }
+        let mut header = [0; 12];
+        read_at(r, 0, &mut header)?;
+        read_at(r, 12 + riff(&header)? - 1, &mut [0])?;
         Ok(Plan { scan, reading })
     }
 
@@ -107,16 +122,14 @@ impl Plan {
         self.reading.opaque
     }
 
-    /// Strips the WebP `r` into `w` ([module docs](self)).
+    /// Strips the WebP `r` into `w` ([module docs](self)), the file
+    /// [`Plan::new`] walked: an [`Error::Broken`] here, on a file the plan
+    /// took, is Grape's own failure, not the file's.
     pub(super) fn write(&self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
         let mut found = Found::default();
         let mut header = [0; 12];
         read_at(r, 0, &mut header)?;
         let end = 12 + riff(&header)?;
-        // The RIFF must be whole: libwebp's still decoder and its demuxer
-        // refuse a file shorter than it says, which the walk doesn't read
-        // to its end.
-        read_at(r, end - 1, &mut [0])?;
         let mut written = 0u64;
         write(w, &header, &mut written)?;
         let flags = match self.scan.vp8x {
@@ -308,11 +321,12 @@ fn extended(
             b"VP8X" => {}
             b"ANIM" if in_frame => {}
             // A frame the demuxer shows and the `image` crate doesn't, or
-            // a profile it may apply: readers disagree on the file.
+            // a profile it may apply: readers disagree on the file, which
+            // [`Plan::new`] refused.
             b"ANMF" | b"ICCP" if in_frame => {
                 return Err(Error::Broken(format!(
-                    "a {} chunk inside an ANMF",
-                    name(&head.fourcc)
+                    "{} chunk inside an ANMF, past the plan",
+                    a(&head.fourcc)
                 )));
             }
             b"ANMF" => {
@@ -477,6 +491,13 @@ pub(super) struct Scan {
     pub(super) animated: bool,
     /// An animation's frames, as the demuxer counts them; 0 for a still.
     pub(super) frames: u64,
+    /// The first `ANMF` or `ICCP` chunk the demuxer reads at the top level
+    /// inside an animation's `ANMF`, after its frame's image: it shows the
+    /// one as a frame and may apply the other as the file's profile, where
+    /// the `image` crate, trusting the `ANMF`'s size, reads neither.
+    /// Conversions take the first frame, which both show; Remove Metadata
+    /// refuses the file ([`Plan::new`]).
+    pub(super) inside: Option<[u8; 4]>,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
 }
@@ -585,7 +606,8 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 if flags & ANIMATION_FLAG != 0 {
                     found.animated = true;
                     let canvas = (side(&data[4..7]), side(&data[7..10]));
-                    found.frames = animation(r, at, at + left, canvas, &mut chunks)?;
+                    found.frames =
+                        animation(r, at, at + left, canvas, &mut chunks, &mut found.inside)?;
                     return Ok(found);
                 }
             }
@@ -604,10 +626,7 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 }
             }
             _ if first => {
-                return Err(Error::Broken(format!(
-                    "a {} chunk first",
-                    name(&head.fourcc)
-                )));
+                return Err(Error::Broken(format!("{} chunk first", a(&head.fourcc))));
             }
             // The image's own: one before it, or one after it ([`Own`]).
             b"ALPH" => match image {
@@ -740,8 +759,8 @@ impl Own {
             } if is_image => Own::In { alpha, image: true },
             _ if is_alph || is_image => {
                 return Err(Error::Broken(format!(
-                    "a {} chunk past the image's own",
-                    name(fourcc)
+                    "{} chunk past the image's own",
+                    a(fourcc)
                 )));
             }
             Own::In { .. } => Own::Past,
@@ -773,13 +792,15 @@ const MAX_AREA: u64 = 1 << 32;
 /// padded, a frame that's broken ([`animation_frame`]) and an animation
 /// with no frame are all [`Error::Broken`]; unknown chunks, metadata and a
 /// second `ANIM` are passed over. The canvas, `canvas`, must be under
-/// [`MAX_AREA`]. Gives the frames it read.
+/// [`MAX_AREA`]. Gives the frames it read, and puts the first `ANMF` or
+/// `ICCP` the demuxer reads inside an `ANMF` in `inside` ([`Scan::inside`]).
 fn animation(
     r: &mut dyn In,
     mut at: u64,
     end: u64,
     canvas: (u32, u32),
     chunks: &mut usize,
+    inside: &mut Option<[u8; 4]>,
 ) -> Result<u64, Error> {
     if u64::from(canvas.0) * u64::from(canvas.1) >= MAX_AREA {
         let (w, h) = canvas;
@@ -787,12 +808,22 @@ fn animation(
     }
     let mut anim = false;
     let mut frames = 0u64;
+    // The end of the last `ANMF` read at the top level: a chunk that starts
+    // before it is inside it.
+    let mut frame_end = 0;
     while at < end {
         let mut raw = [0; 8];
         read_at(r, at, &mut raw)?;
         let head = next(raw, &mut (end - at), chunks)?;
+        let in_frame = at < frame_end;
         let body = at + 8;
         at = body + head.body;
+        if in_frame && matches!(&head.fourcc, b"ANMF" | b"ICCP") && inside.is_none() {
+            *inside = Some(head.fourcc);
+        }
+        if !in_frame && &head.fourcc == b"ANMF" {
+            frame_end = at;
+        }
         match &head.fourcc {
             // Its size padded, as the demuxer reads it ([`ANIM_SIZE`]).
             b"ANIM" if head.body < ANIM_SIZE => {
@@ -808,8 +839,8 @@ fn animation(
             b"ANMF" => at = animation_frame(r, body, &head, end, canvas, &mut frames)?.resume,
             b"VP8X" | b"ALPH" | b"VP8 " | b"VP8L" => {
                 return Err(Error::Broken(format!(
-                    "a {} chunk outside the animation's frames",
-                    name(&head.fourcc)
+                    "{} chunk outside the animation's frames",
+                    a(&head.fourcc)
                 )));
             }
             _ => {}
@@ -1088,8 +1119,8 @@ fn take(
     }
     if head.size > max {
         return Err(Error::TooLarge(format!(
-            "a {} chunk of {} bytes, over the {max} Compress carries",
-            name(&head.fourcc),
+            "{} chunk of {} bytes, over the {max} Compress carries",
+            a(&head.fourcc),
             head.size
         )));
     }
@@ -1147,8 +1178,8 @@ pub(super) fn assemble(
             b"VP8 " | b"VP8L" if image.is_none() => image = Some((head.fourcc, body)),
             other => {
                 return Err(Error::Broken(format!(
-                    "libwebp wrote a {} chunk Grape didn't expect",
-                    name(other)
+                    "libwebp wrote {} chunk Grape didn't expect",
+                    a(other)
                 )));
             }
         }
@@ -1203,6 +1234,17 @@ pub(super) fn assemble(
 /// A fourcc for a message, its trailing space trimmed.
 fn name(fourcc: &[u8; 4]) -> String {
     String::from_utf8_lossy(fourcc).trim_end().to_owned()
+}
+
+/// A fourcc for a message after "a" or "an", as it's read: "an ANMF", "an
+/// XMP", "a VP8L".
+fn a(fourcc: &[u8; 4]) -> String {
+    let name = name(fourcc);
+    let an = matches!(
+        name.as_bytes().first(),
+        Some(b'A' | b'E' | b'I' | b'O' | b'U' | b'X')
+    );
+    format!("{} {name}", if an { "an" } else { "a" })
 }
 
 fn usize_of(n: u64) -> Result<usize, Error> {
@@ -1576,14 +1618,18 @@ mod tests {
         // libwebp ends a frame at its image and reads the rest as top-level
         // chunks, a frame it shows or a profile it may apply, where the
         // `image` crate trusts the size and reads neither: readers disagree.
-        for inner in [
-            frame(0, 0, &[vp8l(2, 2, false)]),
-            chunk(b"ICCP", b"profile"),
+        // The plan refuses them, before anything is written.
+        for (inner, why) in [
+            (
+                frame(0, 0, &[vp8l(2, 2, false)]),
+                "an ANMF chunk inside an ANMF",
+            ),
+            (chunk(b"ICCP", b"profile"), "an ICCP chunk inside an ANMF"),
         ] {
             let src = animation(0x20, &[frame(0, 0, &[image(), inner])]);
-            let got = run(&src);
+            let got = Plan::new(&mut Cursor::new(&src));
             assert!(
-                matches!(&got, Err(Error::Broken(why)) if why.contains("inside an ANMF")),
+                matches!(&got, Err(Error::Broken(said)) if said == why),
                 "{got:?}"
             );
         }
@@ -1757,9 +1803,12 @@ mod tests {
 
     #[test]
     fn broken_webps_are_refused() {
+        // By the plan, before anything is written: cut inside its image's
+        // bitstream, past what the walk reads, too.
         let good = webp(&[vp8x(0), image()]);
         for n in 0..good.len() {
-            assert!(run(&good[..n]).is_err(), "cut at {n}");
+            let planned = Plan::new(&mut Cursor::new(&good[..n]));
+            assert!(matches!(planned, Err(Error::Broken(_))), "cut at {n}");
         }
         // The last pad byte missing is fine, and it's written: libwebp
         // refuses a chunk without its pad. In a frame too.
@@ -2139,6 +2188,7 @@ mod tests {
                 late_alpha: false,
                 animated: false,
                 frames: 0,
+                inside: None,
                 carried: Carried {
                     flags: 0x2C,
                     iccp: Some(b"profile".to_vec()),
