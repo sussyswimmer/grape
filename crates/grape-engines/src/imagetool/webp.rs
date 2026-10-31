@@ -626,10 +626,12 @@ fn animation(
 /// or `VP8L`, and the first other chunk ends it. Gives where the demuxer
 /// reads on, as top-level chunks: after the frame's image, inside the
 /// `ANMF` if anything follows it there. With no image chunk it isn't a
-/// frame; with an `ALPH` and no image, an `ALPH` after the image or before
-/// a `VP8L`, an image past the `ANMF`'s end, an image whose bitstream has
-/// no header, or a frame past the canvas, it's [`Error::Broken`]. Counts
-/// the frames in `frames`.
+/// frame; with fewer than 8 bytes after its header to the RIFF's end (an
+/// empty last frame too: the demuxer wants a chunk header there), an
+/// `ALPH` and no image, an `ALPH` after the image or before a `VP8L`, an
+/// image past the `ANMF`'s end, an image whose bitstream has no header, or
+/// a frame past the canvas, it's [`Error::Broken`]. Counts the frames in
+/// `frames`.
 fn animation_frame(
     r: &mut dyn In,
     at: u64,
@@ -651,6 +653,13 @@ fn animation_frame(
         return Err(Error::Broken("a frame too large".into()));
     }
     let mut p = at + FRAME_HEADER;
+    if end.saturating_sub(p) < 8 {
+        // The demuxer wants a chunk header after the frame's, even for an
+        // empty frame ("more data" in a whole file: refused).
+        return Err(Error::Broken(
+            "an ANMF frame with too few bytes after its header to the RIFF's end".into(),
+        ));
+    }
     let (mut alpha, mut image) = (None, None);
     while p < end {
         let mut raw = [0; 8];
@@ -1392,6 +1401,14 @@ mod tests {
                 frame(0, 0, &[chunk(b"JUNK", b"j")]),
                 frame(0, 0, &[vp8(9, 9)]),
             ]),
+            // An empty frame with a whole chunk after it, which ends it.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                chunk(b"ANMF", &[0; 16]),
+                chunk(b"JUNK", b""),
+            ]),
             // A 5-byte ANIM and a 15-byte ANMF: the demuxer goes by their
             // sizes padded, 6 and 16.
             webp(&[
@@ -1460,6 +1477,27 @@ mod tests {
             ]),
             webp(&[canvas(0x02, 9, 9), anim()]),
             webp(&[canvas(0x12, 9, 9), chunk(b"EXIF", &[0; 3])]),
+            // A last frame with fewer than 8 bytes after its header: the
+            // demuxer wants another chunk's header there, even after an
+            // empty frame (15 bytes is 16 padded), and Pillow refuses it.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                chunk(b"ANMF", &[0; 15]),
+            ]),
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                chunk(b"ANMF", &[0; 16]),
+            ]),
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                chunk(b"ANMF", &[0; 22]),
+            ]),
             // A second VP8X.
             webp(&[
                 canvas(0x02, 9, 9),

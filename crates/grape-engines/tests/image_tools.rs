@@ -4209,6 +4209,27 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
                 canvas.clone(),
             ]),
         ),
+        // An empty frame of 15 or 16 bytes last: the demuxer wants a chunk
+        // header after a frame's (Pillow refuses it), image-webp any ANMF
+        // of 24 bytes or more. Compress said "… is animated."
+        (
+            "empty15.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&red_vp8]),
+                riff_chunk(b"ANMF", &[0; 15]),
+            ]),
+        ),
+        (
+            "empty16.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&red_vp8]),
+                riff_chunk(b"ANMF", &[0; 16]),
+            ]),
+        ),
     ] {
         let message = format!("{name} isn't a readable WEBP image.");
         for to in [Format::Png, Format::Jpg] {
@@ -4240,6 +4261,53 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
                 canvas.clone(),
                 anim.clone(),
                 riff_chunk(b"ANMF", &[0; 15]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        // image-webp also refuses an ANIM of any size but 6, any ANMF
+        // under 24 bytes and a first one under 32 (a frame the demuxer
+        // passes over, holding no image), where Pillow shows red.
+        (
+            "anim7.webp",
+            riff(&[
+                canvas.clone(),
+                riff_chunk(b"ANIM", &[0; 7]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        (
+            "anim16.webp",
+            riff(&[
+                canvas.clone(),
+                riff_chunk(b"ANIM", &[0; 16]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        (
+            "anmf16.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                riff_chunk(b"ANMF", &[0; 16]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        (
+            "anmf16-after.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&red_vp8]),
+                riff_chunk(b"ANMF", &[0; 16]),
+                riff_chunk(b"JUNK", b""),
+            ]),
+        ),
+        (
+            "anmf24.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                riff_chunk(b"ANMF", &[[0; 16].as_slice(), b"JUNK\0\0\0\0"].concat()),
                 anmf(0, &[&red_vp8]),
             ]),
         ),
