@@ -11,7 +11,9 @@ use std::path::Path;
 
 use common::{assert_no_leftovers, plan_one, planned_file, SourceState, TestDir};
 use grape_core::{Operation, ToolKey};
-use grape_engines::{run_job, EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
+use grape_engines::{
+    run_job, EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note, SidecarPaths,
+};
 use image::codecs::jpeg::JpegEncoder;
 use image::metadata::Orientation;
 use image::{ImageDecoder, ImageEncoder, Rgb, RgbImage};
@@ -20,9 +22,24 @@ use image::{ImageDecoder, ImageEncoder, Rgb, RgbImage};
 /// didn't change, that no temp file was left, and that a failed job wrote
 /// nothing.
 fn run(dir: &TestDir, name: &str, bytes: &[u8], op: Operation) -> Result<JobOutcome, GrapeError> {
+    run_with(dir, name, bytes, op, &SidecarPaths::default())
+}
+
+/// [`run`] with these sidecars.
+fn run_with(
+    dir: &TestDir,
+    name: &str,
+    bytes: &[u8],
+    op: Operation,
+    sidecars: &SidecarPaths,
+) -> Result<JobOutcome, GrapeError> {
     let (src, job) = plan_one(dir, name, bytes, op);
     let before = SourceState::of(&src);
-    let result = run_job(&job, &EngineCtx::default(), &mut |_| {});
+    let ctx = EngineCtx {
+        sidecars: sidecars.clone(),
+        ..EngineCtx::default()
+    };
+    let result = run_job(&job, &ctx, &mut |_| {});
     before.assert_unchanged();
     assert_no_leftovers(&dir.path);
     if result.is_err() {
@@ -2218,6 +2235,66 @@ fn remove_metadata_refuses_a_heic_it_cant_strip_and_writes_nothing() {
         assert_eq!(err.user_message, message);
         fs::remove_file(dir.join(name)).unwrap();
     }
+}
+
+#[test]
+fn compress_on_a_heic_runs_with_the_image_helper() {
+    use grape_core::CompressPreset::Balanced;
+    let dir = TestDir::new("compress-heic");
+    // `heif`'s hvcC says 9 bits (its bytes 17 and 18 are 1); at 8 here.
+    let (deep, _) = heif(b"heic", &LIBHEIF, &[0xA1; 100], b"");
+    let mut photo = deep.clone();
+    let at = photo.windows(4).position(|w| w == b"hvcC").unwrap() + 4;
+    photo[at + 17..at + 19].copy_from_slice(&[0xF8, 0xF8]);
+    // A helper that isn't there: what starts it fails.
+    let helper = SidecarPaths {
+        heif: Some(std::path::absolute(dir.join("no-grape-heif")).unwrap()),
+        ..SidecarPaths::default()
+    };
+    let says = |name: &str, bytes: &[u8], sidecars: &SidecarPaths| {
+        let e = run_with(&dir, name, bytes, compress_op(Balanced), sidecars).unwrap_err();
+        fs::remove_file(dir.join(name)).unwrap();
+        (e.kind, e.user_message)
+    };
+    // Without it, Compress on HEIC isn't in this build.
+    assert_eq!(
+        says("photo.heic", &photo, &SidecarPaths::default()),
+        (
+            ErrorKind::NotYetSupported,
+            "Tools arrive in a later build.".to_owned()
+        )
+    );
+    // With it, the pre-scan refuses first, and then the helper starts.
+    assert_eq!(
+        says("photo.heic", &deep, &helper),
+        (
+            ErrorKind::NotYetSupported,
+            "photo.heic is a 10-bit (HDR) photo, which Compress can't keep yet.".to_owned()
+        )
+    );
+    assert_eq!(
+        says("photo.heic", &photo, &helper),
+        (
+            ErrorKind::NotYetSupported,
+            "Grape's image helper couldn't start.".to_owned()
+        )
+    );
+    // HEIF named as a JPEG is compressed as HEIC (the content decides),
+    // with the helper or not.
+    assert_eq!(
+        says("photo.jpg", &photo, &SidecarPaths::default()),
+        (
+            ErrorKind::NotYetSupported,
+            "Grape's image helper is missing.".to_owned()
+        )
+    );
+    assert_eq!(
+        says("photo.jpg", &photo, &helper),
+        (
+            ErrorKind::NotYetSupported,
+            "Grape's image helper couldn't start.".to_owned()
+        )
+    );
 }
 
 /// A `w`×`h` photo-like picture: a gradient with fine texture, which a

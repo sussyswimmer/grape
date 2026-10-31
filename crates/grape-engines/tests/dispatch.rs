@@ -272,6 +272,41 @@ const IMAGE_TOOLS: [(ToolKey, Format); 10] = [
     (ToolKey::RemoveMetadata, Format::Heic),
 ];
 
+/// The image tools that need Grape's image helper (D28).
+const HEIF_TOOLS: [(ToolKey, Format); 1] = [(ToolKey::Compress, Format::Heic)];
+
+#[test]
+fn compress_on_heic_runs_only_with_the_image_helper() {
+    let helper = SidecarPaths {
+        heif: Some(PathBuf::from("x")),
+        ..SidecarPaths::default()
+    };
+    let bare = runnable_tools(&SidecarPaths::default());
+    let with = runnable_tools(&helper);
+    // The helper alone adds Compress and Create PDF on HEIC, and nothing
+    // else (no tool on AVIF, D41).
+    let added: Vec<(ToolKey, Format)> =
+        with.iter().filter(|p| !bare.contains(p)).copied().collect();
+    assert_eq!(added.len(), 1 + HEIF_TOOLS.len(), "{added:?}");
+    assert!(added.contains(&(ToolKey::CreatePdf, Format::Heic)));
+    for pair in HEIF_TOOLS {
+        assert!(added.contains(&pair), "{pair:?}");
+        assert!(!supports(&Operation::tool(pair.0), Some(pair.1)));
+    }
+    // Remove Metadata on HEIC needs none.
+    assert!(bare.contains(&(ToolKey::RemoveMetadata, Format::Heic)));
+    // With every sidecar: the seven, Create PDF on four image formats, SVG
+    // and HEIC, the media, image and helper's tools.
+    let every = SidecarPaths {
+        heif: Some(PathBuf::from("x")),
+        ..all_sidecars()
+    };
+    assert_eq!(
+        runnable_tools(&every).len(),
+        7 + 4 + 2 + MEDIA_TOOLS.len() + IMAGE_TOOLS.len() + HEIF_TOOLS.len()
+    );
+}
+
 /// The tools that run with `ffmpeg` and `ffprobe` (D26).
 const MEDIA_TOOLS: [(ToolKey, Format); 25] = [
     (ToolKey::Compress, Format::Mp4),

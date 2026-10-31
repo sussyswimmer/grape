@@ -362,7 +362,6 @@ pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
 /// in place, once Compress has turned the pixels upright (D28's HEIC). An
 /// Orientation that isn't there, or isn't one SHORT, is left as it is: a
 /// reader that finds none takes the picture as it's stored.
-#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
 pub(crate) fn patch_orientation(tiff: &mut [u8], orientation: u16) {
     let Some((order, first)) = header(tiff) else {
         return;
@@ -397,7 +396,6 @@ pub(crate) fn patch_orientation(tiff: &mut [u8], orientation: u16) {
 /// pixels it turned (D28's HEIC): the thumbnail is still stored as the
 /// picture was, and would show turned the wrong way. An IFD0 cut short is
 /// left as it is.
-#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
 pub(crate) fn unlink_ifd1(tiff: &mut [u8]) {
     let Some((order, first)) = header(tiff) else {
         return;
@@ -413,7 +411,6 @@ pub(crate) fn unlink_ifd1(tiff: &mut [u8]) {
 
 /// Where IFD0 starts in `tiff` (at `first`, in `order`) and how many
 /// entries it has: none past [`MAX_ENTRIES`], or with its count cut off.
-#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
 fn ifd0(tiff: &[u8], order: Order, first: u32) -> Option<(usize, u16)> {
     let start = usize::try_from(first).ok()?;
     let count = order.u16(tiff.get(start..start.checked_add(2)?)?);

@@ -44,9 +44,6 @@
 //!   `meta`, written twice (the first time for its size); then, for the
 //!   check, the written file's `meta` and model and two 64 KiB buffers.
 
-// Compress on HEIC (`heic_compress`, D28's next commit) calls it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Cursor, Write};
 use std::ops::Range;
@@ -708,6 +705,7 @@ impl Graft {
     }
 
     /// The ids the added items have, in order.
+    #[cfg(test)]
     pub(crate) fn ids(&self) -> &[u32] {
         &self.ids
     }

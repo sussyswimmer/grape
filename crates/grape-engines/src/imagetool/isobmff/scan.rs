@@ -76,9 +76,6 @@
 //! content, until [`Scan::load`] has read the carried data, [`MAX_CARRIED`]
 //! at most, which it holds instead.
 
-// Compress on HEIC (`heic_compress`, D28's next commit) calls it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read};

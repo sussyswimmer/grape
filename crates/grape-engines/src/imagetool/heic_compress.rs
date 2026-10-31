@@ -81,9 +81,6 @@
 //!   the decoded pixels 0.3 s, and the graft, write and check of a 36 MiB
 //!   `out.heic` 0.06 s.
 
-// Dispatched by D28's next commit.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
