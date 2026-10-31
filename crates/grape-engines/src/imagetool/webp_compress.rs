@@ -149,7 +149,7 @@ fn least_lossy_file(carried: &Carried) -> u64 {
 /// ([`least_lossy_file`]). It holds what Small would, under the same peak
 /// check; a file Small couldn't write (too large, a failed encode) is no
 /// reason to try it. Its progress goes to 0.9–0.98, and a cancel stops it
-/// as it stops Small.
+/// as it stops Small, its last report too.
 #[allow(clippy::too_many_arguments)] // `run`'s, plus the trial's own.
 fn small_would_do(
     src: &Path,
@@ -186,8 +186,9 @@ fn small_would_do(
         progress,
         (0.93, 0.98),
     ) {
+        // A cancel during the last report is a cancel, as for Small.
+        _ if cancel.is_cancelled() => Err(crate::cancelled(src)),
         Ok((file, _, _)) => Ok(file.len() as u64 <= most),
-        Err(_) if cancel.is_cancelled() => Err(crate::cancelled(src)),
         Err(_) => Ok(false),
     }
 }

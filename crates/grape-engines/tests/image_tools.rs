@@ -3586,6 +3586,24 @@ fn a_cancel_during_the_try_small_trial_is_a_cancel() {
 }
 
 #[test]
+fn a_cancel_at_the_try_small_trials_last_report_is_a_cancel() {
+    use grape_core::CompressPreset::{Balanced, High};
+    // Balanced and High can't make this q75 photo smaller, and Small is
+    // tried after them: its last report (0.98) comes once its file is
+    // made. A cancel there ended the job "already compact" (NoChange).
+    let src = smooth_photo(800, 450, 75.0);
+    for preset in [Balanced, High] {
+        let dir = TestDir::new("compress-webp-trial-last");
+        let (_, job) = plan_one(&dir, "q75.webp", &src, compress_op(preset));
+        let mut seen = Vec::new();
+        let err = run_job(&job, &EngineCtx::default(), &mut |p| seen.push(p)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::NoChange, "{preset:?}: {}", err.detail);
+        assert_eq!(seen.last(), Some(&0.98), "{preset:?}: {seen:?}");
+        cancelled_at("q75.webp", &src, compress_op(preset), seen.len());
+    }
+}
+
+#[test]
 fn compress_reads_a_webp_only_to_its_riffs_end() {
     use grape_core::CompressPreset::High;
     // A photo in the RIFF; past its end, where libwebp (so Pillow,
