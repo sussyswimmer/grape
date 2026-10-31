@@ -44,7 +44,6 @@
 //! one pixel at 254 came out of Small softer (38.2 and 38.1 dB against a
 //! Lanczos3-scaled reference, opaque 38.7), as did a cutout's inside.
 
-use std::borrow::Cow;
 use std::collections::VecDeque;
 
 use image::imageops::FilterType;
@@ -131,40 +130,20 @@ pub(super) fn scale(
     cap: Option<u32>,
     cancel: &CancelToken,
 ) -> Option<DynamicImage> {
-    scaled(Cow::Owned(img), cap, cancel)
-}
-
-/// [`scale`] of a picture the caller keeps: it holds `img` through every
-/// step, where [`scale`] lets go of it once a picture over twice `cap` is
-/// averaged down ([`peak`] counts it from then on no more).
-pub(super) fn scale_kept(
-    img: &DynamicImage,
-    cap: Option<u32>,
-    cancel: &CancelToken,
-) -> Option<DynamicImage> {
-    scaled(Cow::Borrowed(img), cap, cancel)
-}
-
-/// [`scale`] and [`scale_kept`].
-fn scaled(
-    img: Cow<'_, DynamicImage>,
-    cap: Option<u32>,
-    cancel: &CancelToken,
-) -> Option<DynamicImage> {
     let long = img.width().max(img.height());
     let Some(cap) = cap.filter(|&cap| long > cap) else {
-        return Some(img.into_owned());
+        return Some(img);
     };
-    match &*img {
-        DynamicImage::ImageRgba8(rgba) if transparent(rgba) => {
+    match img {
+        DynamicImage::ImageRgba8(rgba) if transparent(&rgba) => {
             let (nw, nh) = scaled_size(rgba.width(), rgba.height(), cap);
             let steps = Steps::of(rgba.dimensions(), (nw, nh));
-            let (mut out, near) = area(rgba, nw, nh, cancel, |s, lo, hi| steps.finish(s, lo, hi))?;
+            let (mut out, near) = area(&rgba, nw, nh, cancel, |s, lo, hi| steps.finish(s, lo, hi))?;
             let opaque = reach(near, nw as usize, LANCZOS_REACH);
             if opaque.iter().any(|&o| o) {
                 // Lanczos3 where it sees only opaque pixels, as without
                 // transparency.
-                let sharp = lanczos(img, cap, cancel)?.into_rgba8();
+                let sharp = lanczos(DynamicImage::ImageRgba8(rgba), cap, cancel)?.into_rgba8();
                 if sharp.dimensions() == out.dimensions() {
                     let pixels = out.as_chunks_mut::<4>().0.iter_mut();
                     let sharp = sharp.as_raw().as_chunks::<4>().0;
@@ -178,7 +157,7 @@ fn scaled(
             fill_transparent(&mut out, cancel)?;
             Some(DynamicImage::ImageRgba8(out))
         }
-        _ => lanczos(img, cap, cancel),
+        other => lanczos(other, cap, cancel),
     }
 }
 
@@ -188,17 +167,10 @@ const LANCZOS_REACH: u8 = 4;
 
 /// `img`, over `cap` on its long side, averaged down by [`shrink_factor`]
 /// and then fitted inside `cap`×`cap` with Lanczos3; `None` if cancelled.
-fn lanczos(img: Cow<'_, DynamicImage>, cap: u32, cancel: &CancelToken) -> Option<DynamicImage> {
+fn lanczos(img: DynamicImage, cap: u32, cancel: &CancelToken) -> Option<DynamicImage> {
     let long = img.width().max(img.height());
     let k = u32::try_from(shrink_factor(u64::from(long), u64::from(cap))).unwrap_or(u32::MAX);
-    let img = if k > 1 {
-        let small = shrink(&img, k, cancel)?;
-        // A picture of its own is let go of once averaged.
-        drop(img);
-        Cow::Owned(small)
-    } else {
-        img
-    };
+    let img = if k > 1 { shrink(img, k, cancel)? } else { img };
     if cancel.is_cancelled() {
         return None;
     }
@@ -536,21 +508,25 @@ pub(super) fn average(
 }
 
 /// `img` averaged down by `k` ([`average`]); `None` if cancelled.
-pub(super) fn shrink(img: &DynamicImage, k: u32, cancel: &CancelToken) -> Option<DynamicImage> {
+pub(super) fn shrink(img: DynamicImage, k: u32, cancel: &CancelToken) -> Option<DynamicImage> {
     let (w, h) = img.dimensions();
     let (nw, nh) = (w.div_ceil(k), h.div_ceil(k));
     // `from_raw` is given exactly the buffer it wants.
     match img {
-        DynamicImage::ImageLuma8(b) => GrayImage::from_raw(nw, nh, average(b, w, h, 1, k, cancel)?)
-            .map(DynamicImage::ImageLuma8),
-        DynamicImage::ImageRgb8(b) => {
-            RgbImage::from_raw(nw, nh, average(b, w, h, 3, k, cancel)?).map(DynamicImage::ImageRgb8)
+        DynamicImage::ImageLuma8(b) => {
+            GrayImage::from_raw(nw, nh, average(&b, w, h, 1, k, cancel)?)
+                .map(DynamicImage::ImageLuma8)
         }
-        DynamicImage::ImageRgba8(b) => RgbaImage::from_raw(nw, nh, average(b, w, h, 4, k, cancel)?)
-            .map(DynamicImage::ImageRgba8),
+        DynamicImage::ImageRgb8(b) => RgbImage::from_raw(nw, nh, average(&b, w, h, 3, k, cancel)?)
+            .map(DynamicImage::ImageRgb8),
+        DynamicImage::ImageRgba8(b) => {
+            RgbaImage::from_raw(nw, nh, average(&b, w, h, 4, k, cancel)?)
+                .map(DynamicImage::ImageRgba8)
+        }
         // Not what a JPEG decodes to: an RGB copy first.
         other => {
             let rgb = other.to_rgb8();
+            drop(other);
             RgbImage::from_raw(nw, nh, average(&rgb, w, h, 3, k, cancel)?)
                 .map(DynamicImage::ImageRgb8)
         }
@@ -606,27 +582,6 @@ mod tests {
         assert_eq!(out.as_rgb8().unwrap().get_pixel(25, 8).0, [9, 8, 7]);
         cancel.cancel();
         assert!(scale(img, Some(50), &cancel).is_none());
-    }
-
-    #[test]
-    fn a_kept_picture_is_scaled_as_one_let_go_of() {
-        let cancel = CancelToken::default();
-        // With transparency and a photo-like inside (area and Lanczos3),
-        // and opaque, by Lanczos3 alone and averaged first.
-        let rgba = RgbaImage::from_fn(300, 100, |x, y| {
-            let v = ((x * 7 + y * 13) % 256) as u8;
-            image::Rgba([v, 255 - v, 90, if x < 20 { 0 } else { 255 }])
-        });
-        let rgb = DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
-        for img in [DynamicImage::ImageRgba8(rgba), DynamicImage::ImageRgb8(rgb)] {
-            for cap in [None, Some(300), Some(200), Some(50)] {
-                let kept = scale_kept(&img, cap, &cancel).unwrap();
-                assert_eq!(kept, scale(img.clone(), cap, &cancel).unwrap(), "{cap:?}");
-            }
-            let cancelled = CancelToken::default();
-            cancelled.cancel();
-            assert!(scale_kept(&img, Some(50), &cancelled).is_none());
-        }
     }
 
     #[test]
@@ -1228,17 +1183,17 @@ mod tests {
     fn shrinking_keeps_gray_rgb_and_rgba_as_they_are() {
         let cancel = CancelToken::default();
         let rgb = RgbImage::from_raw(2, 1, vec![10, 20, 30, 30, 40, 50]).unwrap();
-        let out = shrink(&DynamicImage::ImageRgb8(rgb.clone()), 2, &cancel).unwrap();
+        let out = shrink(DynamicImage::ImageRgb8(rgb.clone()), 2, &cancel).unwrap();
         assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
         let gray = GrayImage::from_raw(2, 1, vec![10, 30]).unwrap();
-        let out = shrink(&DynamicImage::ImageLuma8(gray), 2, &cancel).unwrap();
+        let out = shrink(DynamicImage::ImageLuma8(gray), 2, &cancel).unwrap();
         assert_eq!(out.as_luma8().unwrap().as_raw(), &[20]);
         let rgba = RgbaImage::from_raw(2, 1, vec![10, 20, 30, 40, 30, 40, 50, 60]).unwrap();
-        let out = shrink(&DynamicImage::ImageRgba8(rgba), 2, &cancel).unwrap();
+        let out = shrink(DynamicImage::ImageRgba8(rgba), 2, &cancel).unwrap();
         assert_eq!(out.as_rgba8().unwrap().as_raw(), &[20, 30, 40, 50]);
         // Anything else is averaged as RGB.
         let wide = DynamicImage::ImageRgb8(rgb).to_rgb16();
-        let out = shrink(&DynamicImage::ImageRgb16(wide), 2, &cancel).unwrap();
+        let out = shrink(DynamicImage::ImageRgb16(wide), 2, &cancel).unwrap();
         assert_eq!(out.as_rgb8().unwrap().as_raw(), &[20, 30, 40]);
     }
 }

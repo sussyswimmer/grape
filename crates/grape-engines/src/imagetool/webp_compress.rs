@@ -25,8 +25,8 @@
 //!   nearest them, and by Lanczos3 elsewhere ([`scale`]). The qualities
 //!   are JPEG's, so a preset means the same across formats. A picture
 //!   with transparency its cap scales down is also encoded as it is, at
-//!   any ratio, when that fits D16's limit and its scaled file doesn't
-//!   rule it out ([`may_win`]), and the smaller file kept ([`lossy_file`]).
+//!   any ratio, first, wherever High would encode it ([`fits_as_it_is`]),
+//!   and the smaller file kept ([`lossy_file`]).
 //!   Kept when it's at most 90 % of the source's size. "Try Small" only
 //!   when Small's own file is: when Balanced or High ends `NoChange`, Small
 //!   is run as a trial, its file measured and never written
@@ -65,11 +65,11 @@
 //!   2.5 s in returning after 12.1 to 13.8 s), 11.6 s for a photo's
 //!   luminance as alpha, 8.8 s for uniform noise and 0.1 s for a
 //!   sticker's; lossless at 4096², 4.2 s for a picture of many sharp shapes
-//!   (3.0 s for a real photo); lossy with alpha encoded as it is beside
-//!   its scaled file ([`lossy_file`]) at 13.7 MP, 16.6 s at Small at
-//!   12,000 × 1140 and 17.4 s at Balanced at 16,383 × 836 while libwebp
-//!   encoded the grained plane (a cancel 5 s in returning after 14.4 and
-//!   15.9 s). The decode before them runs to its end once
+//!   (3.0 s for a real photo); lossy with alpha encoded as it is before
+//!   its scaled picture ([`lossy_file`]) at 13.9 MP, 19.0 and 19.7 s at
+//!   Small at 12,232 × 1140 and 16,383 × 851 and 19.7 and 20.6 s at
+//!   Balanced there while libwebp encoded the grained plane (a cancel 5 s
+//!   in returning after 14.6 to 15.5 s). The decode before them runs to its end once
 //!   started, with no report: a 9850² grained source took 6.3 s at Small,
 //!   and a cancel 1 s in returned after 5.3 s.
 
@@ -87,7 +87,7 @@ use super::scale;
 use super::strip::{self, Error};
 use super::webp::{self, Carried, ALPHA_FLAG};
 use crate::cancel::Cancellable;
-use crate::image::{MAX_ICC, WORKING_SET_LIMIT};
+use crate::image::WORKING_SET_LIMIT;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
@@ -146,19 +146,16 @@ fn tries_unscaled(width: u32, height: u32, alpha: bool, cap: Option<u32>) -> boo
     alpha && cap.is_some_and(|cap| width.max(height) > cap)
 }
 
-/// What Compress holds at its peak when it keeps a `width`×`height`
-/// picture with alpha for an encode as it is ([`lossy_file`]): the picture
-/// beside each step of its scale to `cap` and that encode
-/// ([`scale::scale_kept`]), and then the picture and libwebp's share for
-/// it ([`peak`] with no cap). The scaled file, held beside that encode, is
-/// counted once it's made.
-fn peak_kept(width: u32, height: u32, cap: Option<u32>) -> u64 {
-    let picture = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .saturating_mul(4);
-    peak(width, height, 4, false, cap)
-        .saturating_add(picture)
-        .max(peak(width, height, 4, false, None))
+/// Whether Compress also encodes a `width`×`height` picture with alpha as
+/// it is, with `metadata` bytes held beside it and an ICC profile of
+/// `profile` bytes read with it ([`lossy_file`]): wherever High encodes it,
+/// as High counts it ([`peak`] with no cap; the profile `crate::image`
+/// read, not the largest one).
+fn fits_as_it_is(width: u32, height: u32, metadata: u64, profile: u64) -> bool {
+    peak(width, height, 4, false, None)
+        .saturating_add(metadata)
+        .saturating_add(profile)
+        <= WORKING_SET_LIMIT
 }
 
 /// A lossy preset's quality and the long side it scales down to.
@@ -391,10 +388,10 @@ pub(crate) fn run(
 /// what Compress at `preset` holds for it, its metadata `carried` among
 /// it, is checked against D16's limit ([`peak`]). Read as libwebp reads
 /// it, or refused as conversions refuse it (`webp::reading`). With it,
-/// whether keeping a lossy one with alpha for its encode as it is
-/// ([`peak_kept`]) fits the limit too, counted with the rest (and the
-/// largest profile), which [`lossy_file`] then holds to: one that doesn't
-/// is only scaled, as before, and never refused for it.
+/// whether a lossy one with alpha its cap scales down fits D16's limit
+/// encoded as it is too, counted with the rest and the profile it was read
+/// with ([`fits_as_it_is`]), which [`lossy_file`] then holds to: one that
+/// doesn't is only scaled, as before, and never refused for it.
 fn decode(
     src: &Path,
     from: Format,
@@ -407,147 +404,112 @@ fn decode(
     let (_, cap) = plan(preset);
     // The metadata is held throughout, and again in the file written.
     let metadata = carried.len().saturating_mul(2);
-    let unscaled = Cell::new(false);
+    let tries = Cell::new(None);
     let tool_peak = |width: u32, height: u32, color: ColorType| {
         let bpp = u64::from(color.bytes_per_pixel());
-        let scaled = peak(width, height, bpp, lossless, cap).saturating_add(metadata);
         if !lossless && bpp == 4 && tries_unscaled(width, height, color.has_alpha(), cap) {
-            let both = peak_kept(width, height, cap)
-                .saturating_add(metadata)
-                .saturating_add(MAX_ICC as u64);
-            unscaled.set(both <= WORKING_SET_LIMIT);
+            tries.set(Some((width, height)));
         }
-        scaled
+        peak(width, height, bpp, lossless, cap).saturating_add(metadata)
     };
-    let (img, _icc) =
+    let (img, icc) =
         crate::image::decode_stored(src, from, Format::Webp, names, cancel, &tool_peak)
             .map_err(|e| publish::or_cancelled(cancel, src, e))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    Ok((rgb_or_rgba(img), unscaled.get()))
+    // The profile `crate::image` counted with High's peak, as it counts it.
+    let profile = icc.map_or(0, |icc| icc.len() as u64);
+    let as_it_is = tries
+        .get()
+        .is_some_and(|(w, h)| fits_as_it_is(w, h, metadata, profile));
+    Ok((rgb_or_rgba(img), as_it_is))
 }
 
 /// What the lossy `preset` writes of the decoded picture `img`: scaled to
 /// its cap ([`scale`]), encoded at its quality by the method the scaled
 /// picture calls for ([`LOSSY_METHOD`]), libwebp's progress going to
 /// `span` of `progress`, and put in a file with `carried` ([`assembled`]).
-/// A picture with transparency the cap scales down is kept through that,
-/// when `unscaled` says it fits D16's limit ([`decode`], [`peak_kept`]),
-/// and encoded as it is too, unless the scaled file shows it can't come
-/// out smaller ([`may_win`]) or the scaled file held beside it doesn't
-/// fit, and the smaller of the two files kept: the two encodes share
-/// `span`, the scaled one the first half. Gives the file and the picture's
-/// size.
+/// A picture with transparency the cap scales down is encoded as it is
+/// first, when `as_it_is` says that fits D16's limit ([`decode`],
+/// [`fits_as_it_is`]), and the smaller of the two files kept, the scaled
+/// one on a tie: the two encodes share `span`, the one as it is the first
+/// half. The scaled encode is made beside that file when that fits
+/// ([`fits_scaled_beside`]), or else that file goes. Gives the file and
+/// the picture's size.
 fn lossy_file(
-    (img, unscaled): (DynamicImage, bool),
+    (img, as_it_is): (DynamicImage, bool),
     preset: CompressPreset,
     carried: &mut Carried,
-    (src, names, cancel): (&Path, &Names, &CancelToken),
+    ctx: (&Path, &Names, &CancelToken),
     progress: &mut dyn FnMut(f32),
     span: (f32, f32),
 ) -> Result<(Vec<u8>, u32, u32), GrapeError> {
+    let (src, names, _) = ctx;
     let (quality, cap) = plan(preset);
     let (from_w, from_h) = img.dimensions();
     let transparent = matches!(&img, DynamicImage::ImageRgba8(rgba) if scale::transparent(rgba));
-    let (scaled, kept) = if unscaled && tries_unscaled(from_w, from_h, transparent, cap) {
-        (scale::scale_kept(&img, cap, cancel), Some(img))
-    } else {
-        (scale::scale(img, cap, cancel), None)
-    };
-    let scaled = opaque_as_rgb(scaled.ok_or_else(|| crate::cancelled(src))?);
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-    let half = if kept.is_some() {
-        (span.0 + span.1) / 2.0
-    } else {
-        span.1
-    };
-    progress(span.0);
-    let (width, height) = scaled.dimensions();
-    let encoded = encode_lossy(
-        &scaled,
-        quality,
-        (src, names, cancel),
-        progress,
-        (span.0, half),
-    )?;
-    drop(scaled);
-    progress(half);
-    let mut out = (encoded, width, height);
-    if let Some(img) = kept {
-        // Held beside it: the picture, libwebp's share and the scaled file.
-        let held = peak(from_w, from_h, 4, false, None)
-            .saturating_add(carried.len().saturating_mul(2))
-            .saturating_add(out.0.len() as u64)
-            .saturating_add(MAX_ICC as u64);
-        if held <= WORKING_SET_LIMIT && may_win(&out.0, (from_w, from_h), (width, height)) {
-            let file = encode_lossy(
-                &img,
-                quality,
-                (src, names, cancel),
-                progress,
-                (half, span.1),
-            )?;
-            if file.len() < out.0.len() {
-                out = (file, from_w, from_h);
+    let (encoded, width, height) = if as_it_is && tries_unscaled(from_w, from_h, transparent, cap) {
+        let half = (span.0 + span.1) / 2.0;
+        progress(span.0);
+        let first = encode_lossy(&img, quality, ctx, progress, (span.0, half))?;
+        progress(half);
+        let metadata = carried.len().saturating_mul(2);
+        if fits_scaled_beside(from_w, from_h, cap, metadata, first.len() as u64) {
+            let scaled = scaled_file(img, quality, cap, ctx, progress, (half, span.1))?;
+            if first.len() < scaled.0.len() {
+                (first, from_w, from_h)
+            } else {
+                scaled
             }
+        } else {
+            drop(first);
+            scaled_file(img, quality, cap, ctx, progress, (half, span.1))?
         }
-        drop(img);
-        progress(span.1);
-    }
-    let (encoded, width, height) = out;
+    } else {
+        scaled_file(img, quality, cap, ctx, progress, span)?
+    };
     let out = assembled(encoded, width, height, carried, src, names)?;
     Ok((out, width, height))
 }
 
-/// Whether a picture `from` pixels across and down, scaled to `to` and
-/// encoded as `scaled` (libwebp's file), may come out smaller encoded as
-/// it is ([`lossy_file`]). Encoded as it is, its alpha plane can come out
-/// smaller than scaled (text, whose glyphs repeat exactly), but its color
-/// takes at least [`COLOR_FLOOR`] times √r what the scaled color does, r
-/// the ratio of their long sides (measured, not proven). So when the
-/// scaled file's color alone (all of it but its `ALPH` chunk), that many
-/// times over, is already as large as the whole scaled file, the picture
-/// as it is can't come out smaller, even with no alpha plane at all, and
-/// isn't encoded.
-fn may_win(scaled: &[u8], from: (u32, u32), to: (u32, u32)) -> bool {
-    let ratio = f64::from(from.0.max(from.1)) / f64::from(to.0.max(to.1).max(1));
-    let color = scaled.len().saturating_sub(alpha_chunk(scaled)) as f64;
-    COLOR_FLOOR * ratio.sqrt() * color < scaled.len() as f64
+/// `img` scaled to fit `cap` ([`scale`]) and encoded at `quality`
+/// ([`encode_lossy`]), libwebp's progress going to `span` of `progress`:
+/// libwebp's file and the scaled picture's size.
+fn scaled_file(
+    img: DynamicImage,
+    quality: f32,
+    cap: Option<u32>,
+    (src, names, cancel): (&Path, &Names, &CancelToken),
+    progress: &mut dyn FnMut(f32),
+    span: (f32, f32),
+) -> Result<(Vec<u8>, u32, u32), GrapeError> {
+    let scaled = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
+    let scaled = opaque_as_rgb(scaled);
+    if cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    progress(span.0);
+    let (width, height) = scaled.dimensions();
+    let encoded = encode_lossy(&scaled, quality, (src, names, cancel), progress, span)?;
+    progress(span.1);
+    Ok((encoded, width, height))
 }
 
-/// The least color a picture encoded as it is takes, over its scaled
-/// encode's, at a ratio of long sides r: this times √r ([`may_win`]).
-/// Measured through Compress (the scaled and the unscaled file of each,
-/// round 6) on 348 lossy pictures with transparency (Pillow 12.3 at q90:
-/// text, line art, photos with every kind of alpha) at 1.0 to 8.0 times
-/// Small's and Balanced's caps, 599 pairs: the least was 0.75 at 1.05 to
-/// 1 (a bar chart with 1 px gridlines every 12 px, whose scaled lines
-/// blur) and, from 1.5625 to 1 up, where 0.8 √r passes 1 and a picture
-/// can be ruled out at all, 1.15 at 1.61 (that chart), 1.40 at 2.03 and
-/// 4.49 at 6.84 (one with gridlines every 50 px), each at least 1.14
-/// times 0.8 √r; a photo's was 2.6 or more. It ruled out 90 pairs and none
-/// of the 220 whose unscaled file was the smaller (up to 4.05 to 1, for
-/// antialiased text).
-const COLOR_FLOOR: f64 = 0.8;
-
-/// The bytes of the `ALPH` chunk in libwebp's `file`, its header
-/// included; none when there's no such chunk.
-fn alpha_chunk(file: &[u8]) -> usize {
-    let mut at = 12usize;
-    while let Some(head) = file.get(at..at.saturating_add(8)) {
-        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
-        if &head[..4] == b"ALPH" {
-            return size.saturating_add(8);
-        }
-        at = at
-            .saturating_add(8)
-            .saturating_add(size)
-            .saturating_add(size & 1);
-    }
-    0
+/// Whether the scale of a `width`×`height` picture with alpha to `cap` and
+/// that encode ([`peak`]) fit D16's limit beside `metadata` bytes and its
+/// file as it is, `first` bytes ([`lossy_file`]).
+fn fits_scaled_beside(
+    width: u32,
+    height: u32,
+    cap: Option<u32>,
+    metadata: u64,
+    first: u64,
+) -> bool {
+    peak(width, height, 4, false, cap)
+        .saturating_add(metadata)
+        .saturating_add(first)
+        <= WORKING_SET_LIMIT
 }
 
 /// `img` (8-bit RGB or RGBA) encoded lossily at `quality`, by the method
@@ -738,7 +700,7 @@ mod tests {
     use image::{Rgb, RgbImage, Rgba, RgbaImage};
 
     use super::*;
-    use crate::image::WORKING_SET_LIMIT;
+    use crate::image::{MAX_ICC, WORKING_SET_LIMIT};
     use crate::imagetool::webp::Carried;
 
     /// A photo-like picture: smooth shapes with a fine, faint texture.
@@ -849,85 +811,60 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_kept_for_its_encode_as_it_is_is_counted_beside_every_step() {
-        let fits = |w: u32, h: u32, cap| {
-            peak_kept(w, h, Some(cap)).saturating_add(MAX_ICC as u64) <= WORKING_SET_LIMIT
+    fn a_picture_is_encoded_as_it_is_too_wherever_high_encodes_it() {
+        // High's own check: the picture and libwebp's share, the metadata
+        // and the profile `crate::image` read ([`decode`]).
+        let high = |w: u32, h: u32, metadata: u64, profile: u64| {
+            peak(w, h, 4, false, None) + metadata + profile <= WORKING_SET_LIMIT
         };
-        // Its encode as it is, the most it holds: about 13.7 MP at any
-        // ratio.
-        for (w, h, cap) in [
-            (4095, 3352, 2048),
-            (5000, 2740, 2048),
-            (12_000, 1_140, 2048),
-            (8191, 1675, 4096),
-            (16_383, 836, 4096),
-        ] {
-            assert!(fits(w, h, cap), "{w}x{h}");
-            assert_eq!(
-                peak_kept(w, h, Some(cap)),
-                peak(w, h, 4, false, None),
-                "{w}x{h}"
-            );
-        }
-        for (w, h, cap) in [
-            (4096, 3500, 2048),
-            (12_000, 1_200, 2048),
-            (16_383, 900, 4096),
-        ] {
-            assert!(!fits(w, h, cap), "{w}x{h}");
-        }
-        // The picture beside its scale and the scaled encode.
-        let (w, h) = (2100u32, 100u32);
-        let picture = u64::from(w) * u64::from(h) * 4;
-        assert!(peak_kept(w, h, Some(2048)) >= peak(w, h, 4, false, Some(2048)) + picture);
-    }
-
-    /// A file as libwebp lays one out: RIFF, VP8X, `alpha` bytes of ALPH
-    /// (none: no chunk) and `color` bytes of VP8.
-    fn laid_out(alpha: Option<usize>, color: usize) -> Vec<u8> {
-        let chunk = |fourcc: &[u8; 4], n: usize| {
-            let mut out = fourcc.to_vec();
-            out.extend(u32::try_from(n).unwrap().to_le_bytes());
-            out.resize(8 + n + (n & 1), 7);
-            out
+        // The widest picture High admits at each height, and the next.
+        let widest = |h: u32, metadata: u64, profile: u64| {
+            let (mut lo, mut hi) = (1u32, 1 << 20);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                if high(mid, h, metadata, profile) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            lo
         };
-        let body = [
-            b"WEBP".to_vec(),
-            chunk(b"VP8X", 10),
-            alpha.map(|n| chunk(b"ALPH", n)).unwrap_or_default(),
-            chunk(b"VP8 ", color),
-        ]
-        .concat();
-        [
-            b"RIFF".to_vec(),
-            u32::try_from(body.len()).unwrap().to_le_bytes().to_vec(),
-            body,
-        ]
-        .concat()
-    }
-
-    #[test]
-    fn a_picture_is_encoded_as_it_is_unless_its_color_alone_rules_it_out() {
-        assert_eq!(alpha_chunk(&laid_out(Some(301), 1000)), 309);
-        assert_eq!(alpha_chunk(&laid_out(None, 1000)), 0);
-        assert_eq!(alpha_chunk(&[0; 11]), 0);
-        // At 4 to 1, the color as it is takes at least 1.6 times the
-        // scaled one's: an alpha plane of up to about 37 % of the scaled
-        // file can't make up for it.
-        let at4 = ((8192, 100), (2048, 25));
-        for (alpha, may) in [(Some(300), false), (Some(500), true), (None, false)] {
-            let file = laid_out(alpha, 700);
-            assert_eq!(may_win(&file, at4.0, at4.1), may, "{alpha:?}");
+        // No profile: up to 2³⁰ ÷ 77 = 13,944,699 px (4125 × 3380), where
+        // the largest profile's room stopped it at 13,727,720 (4061 ×
+        // 3380) whatever the picture had; a 3 KB profile, the largest one
+        // and metadata take theirs.
+        for (h, metadata, profile, want) in [
+            (3380, 0, 0, Some(4125)),
+            (3225, 0, 0, Some(4323)),
+            (2775, 0, 0, Some(5025)),
+            (1690, 0, 0, Some(8251)),
+            (1140, 0, 0, Some(12_232)),
+            (836, 0, 0, Some(16_680)),
+            (3390, 0, 0, Some(4113)),
+            (1690, 0, 3144, Some(8251)),
+            (3380, 0, MAX_ICC as u64, Some(4061)),
+            (2775, 2 * 65_536, 3144, None),
+            (1140, 2 * 1_000_000, MAX_ICC as u64, None),
+        ] {
+            let w = widest(h, metadata, profile);
+            if let Some(want) = want {
+                assert_eq!(w, want, "{h} {profile}");
+            }
+            assert!(fits_as_it_is(w, h, metadata, profile), "{w}x{h}");
+            assert!(!fits_as_it_is(w + 1, h, metadata, profile), "{w}x{h}");
         }
-        // Under 1.5625 to 1 the floor is under 1: always tried.
-        let file = laid_out(None, 5000);
-        assert!(may_win(&file, (3150, 10), (2048, 7)));
-        assert!(!may_win(&file, (3250, 10), (2048, 6)));
-        // Text, its alpha plane most of the scaled file, is always tried
-        // (round 6's corpus: the unscaled file won up to 4.05 to 1, its
-        // alpha plane 93 % or more of the scaled file).
-        let text = laid_out(Some(9300), 700);
-        assert!(may_win(&text, (16_383, 100), (2048, 13)));
+        // Then the scaled picture's encode beside that file: at Balanced
+        // a hair over its cap (4113 × 3390, 1.004 to 1), with up to about
+        // 9 MB of it.
+        let (w, h) = (4113, 3390);
+        let room = WORKING_SET_LIMIT - peak(w, h, 4, false, Some(4096));
+        assert_eq!(room, 8_978_432);
+        assert!(fits_scaled_beside(w, h, Some(4096), 0, room));
+        assert!(!fits_scaled_beside(w, h, Some(4096), 0, room + 1));
+        assert!(!fits_scaled_beside(w, h, Some(4096), 1, room));
+        // Small's scale of it, far less.
+        assert!(fits_scaled_beside(w, h, Some(2048), 0, 500_000_000));
     }
 
     #[test]

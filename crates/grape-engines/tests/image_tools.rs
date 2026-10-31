@@ -3687,30 +3687,66 @@ fn compress_keeps_a_webp_with_transparency_unscaled_when_that_is_smaller() {
     };
     let (_, size) = run("corners.webp", &corners(2100, 300), Small);
     assert_eq!(size, (2048, 293));
-    // At 2.1 to 1 its scaled file's color alone rules the picture as it is
-    // out, so it isn't encoded: no report comes from a second encode
-    // (0.7 to 0.9), where the text's comes.
-    for (name, src, second) in [
-        ("corners.webp", corners(4300, 600), false),
-        ("wide.webp", text, true),
-    ] {
+    // Nothing rules the encode as it is out: the photo's scaled file won
+    // at 2.1 to 1 too, after both encodes, as the text's lost.
+    let (_, size) = run("corners.webp", &corners(4300, 600), Small);
+    assert_eq!(size, (2048, 286));
+    for (name, src) in [("corners.webp", corners(4300, 600)), ("wide.webp", text)] {
         let (_, job) = plan_one(&dir, name, &src, compress_op(Small));
         let mut seen = Vec::new();
         let outcome = run_job(&job, &EngineCtx::default(), &mut |p| seen.push(p)).unwrap();
         fs::remove_file(&outcome.outputs[0]).unwrap();
         fs::remove_file(dir.join(name)).unwrap();
-        assert_eq!(
-            seen.iter().any(|&p| p > 0.7 && p < 0.9),
-            second,
-            "{name}: {seen:?}"
-        );
+        assert!(seen.iter().any(|&p| p > 0.7 && p < 0.9), "{name}: {seen:?}");
     }
+}
+
+/// A picture of 1 px lines (30, 30, 30) every `every` px from `offset`
+/// on (240, 240, 250), with transparent rounded corners of radius 8 (in
+/// each corner's 8 × 8, the pixels more than 8 from its inner corner
+/// pixel), as Pillow saves it at q90 (method 4).
+fn gridlines(w: u32, h: u32, every: u32, offset: u32) -> Vec<u8> {
+    let r = 8i64;
+    let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
+        let line = x % every == offset || y % every == offset;
+        let [r_, g, b] = if line { [30, 30, 30] } else { [240, 240, 250] };
+        let (x, y, w, h) = (i64::from(x), i64::from(y), i64::from(w), i64::from(h));
+        let cx = if x < r { r } else { w - 1 - r };
+        let cy = if y < r { r } else { h - 1 - r };
+        let corner = (x < r || x >= w - r) && (y < r || y >= h - r);
+        let out = corner && (x - cx).pow(2) + (y - cy).pow(2) > r * r;
+        image::Rgba([r_, g, b, if out { 0 } else { 255 }])
+    });
+    lossy_webp(rgba.as_raw(), w, h, true, 90.0)
+}
+
+#[test]
+fn compress_keeps_gridlines_with_rounded_corners_unscaled_when_that_is_smaller() {
+    use grape_core::CompressPreset::Small;
+    // The review's: 1 px gridlines every 24 px, 3600 × 640 (1.76 to 1).
+    // Scaled, the lines blur into bands that cost more than the lines
+    // themselves, so the file as it is was the smaller (62.4 % of the
+    // source), but the scaled file's color, 0.8 √r times over, ruled it
+    // out, and Small ended "already as small as Grape makes it".
+    let dir = TestDir::new("compress-webp-grid");
+    let src = gridlines(3600, 640, 24, 0);
+    let outcome =
+        compress(&dir, "grid.webp", &src, Small).unwrap_or_else(|e| panic!("{}", e.detail));
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    let back = image::load_from_memory(&out).unwrap();
+    assert_eq!((back.width(), back.height()), (3600, 640));
+    assert!(
+        out.len() * 10 <= src.len() * 7,
+        "{} of {}",
+        out.len(),
+        src.len()
+    );
 }
 
 #[test]
 fn compress_reports_both_encodes_of_a_webp_in_order_and_stops_at_a_cancel() {
     use grape_core::CompressPreset::Small;
-    // Scaled (0.5 to 0.7), then encoded as it is (0.7 to 0.9): the
+    // Encoded as it is (0.5 to 0.7), then scaled (0.7 to 0.9): the
     // progress never goes back, and a cancel during either encode ends
     // the job, with nothing written.
     let src = hard_text(2100, 300, 92.0, false);
