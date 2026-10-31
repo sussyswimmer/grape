@@ -20,7 +20,9 @@
 //!   over it, and refuses a file that ends with an empty one), what the
 //!   demuxer reads as top-level chunks after a frame's image inside its
 //!   `ANMF` (an `ANMF` is walked by its size padded, as the demuxer walks
-//!   it), everything in a simple file from the chunk that ends its image's
+//!   it), an `ICCP` among them as other metadata when the demuxer doesn't
+//!   apply it (VP8X's ICC flag is off, or an `ICCP` comes before it: no
+//!   reader does), everything in a simple file from the chunk that ends its image's
 //!   frame on, which no reader reads (whole chunks said by their kind, the
 //!   rest as other metadata), and anything after the RIFF's end.
 //! - **Not decoded:** a `VP8L` whose own alpha bit says none under VP8X's
@@ -29,10 +31,11 @@
 //!   byte for byte, so its output shows what the source shows in every
 //!   reader, whether they agree on it or not.
 //! - **Refused:** what a conversion refuses before decoding ([`reading`]),
-//!   and an `ANMF` or `ICCP` chunk the demuxer reads at the top level
-//!   inside an `ANMF`, after its frame: the `image` crate trusts the
-//!   `ANMF`'s size and reads neither, where the demuxer shows the one as a
-//!   frame and may apply the other, so readers disagree on the file. (An
+//!   and an `ANMF` chunk the demuxer reads at the top level inside an
+//!   `ANMF`, after its frame, or an `ICCP` there it applies as the file's
+//!   profile ([`Scan::inside`]): the `image` crate trusts the `ANMF`'s
+//!   size and reads neither, where the demuxer shows the one as a frame
+//!   and the other as the profile, so readers disagree on the file. (An
 //!   `ANIM` there, a second one, both pass over: it goes.)
 //! - **Patched afterwards:** the RIFF size, each frame's size, and VP8X's
 //!   flags: XMP off, and EXIF on only when the minimal EXIF
@@ -100,8 +103,8 @@ impl Plan {
     /// Walks the WebP `r` as a conversion does before decoding it: what
     /// that refuses (readers disagree on it, or libwebp's demuxer refuses
     /// it) is [`Error::Broken`], before anything is written, and so are an
-    /// `ANMF` or `ICCP` chunk the demuxer reads inside an `ANMF`
-    /// ([`Scan::inside`]) and a file shorter than its RIFF says, which
+    /// `ANMF` chunk the demuxer reads inside an `ANMF`, or an `ICCP` there
+    /// it applies ([`Scan::inside`]), and a file shorter than its RIFF says, which
     /// libwebp's still decoder and its demuxer refuse and the walk doesn't
     /// read to its end. Everything the file makes Remove Metadata refuse
     /// is refused here: what [`Plan::write`] then finds broken is Grape's
@@ -318,14 +321,17 @@ fn extended(
             // `image` crate never reads.
             b"VP8X" => {}
             b"ANIM" if in_frame => {}
-            // A frame the demuxer shows and the `image` crate doesn't, or
-            // a profile it may apply: readers disagree on the file, which
-            // [`Plan::new`] refused.
-            b"ANMF" | b"ICCP" if in_frame => {
-                return Err(Error::Broken(format!(
-                    "{} chunk inside an ANMF, past the plan",
-                    a(&head.fourcc)
-                )));
+            // A frame the demuxer shows and the `image` crate doesn't:
+            // readers disagree on the file, which [`Plan::new`] refused.
+            b"ANMF" if in_frame => {
+                return Err(Error::Broken(
+                    "an ANMF chunk inside an ANMF, past the plan".into(),
+                ));
+            }
+            // A profile no reader applies ([`Plan::new`] refused one the
+            // demuxer applies): VP8X's ICC flag is off, or one came first.
+            b"ICCP" if in_frame => {
+                found.fields.insert(MetaField::Other);
             }
             b"ANMF" => {
                 let frame = animation_frame(r, body, &head, end, canvas, &mut frames)?;
@@ -506,12 +512,14 @@ pub(super) struct Scan {
     pub(super) animated: bool,
     /// An animation's frames, as the demuxer counts them; 0 for a still.
     pub(super) frames: u64,
-    /// The first `ANMF` or `ICCP` chunk the demuxer reads at the top level
-    /// inside an animation's `ANMF`, after its frame's image: it shows the
-    /// one as a frame and may apply the other as the file's profile, where
-    /// the `image` crate, trusting the `ANMF`'s size, reads neither.
+    /// The first `ANMF` chunk the demuxer reads at the top level inside an
+    /// animation's `ANMF`, after its frame's image, or `ICCP` there that it
+    /// applies as the file's profile (VP8X flags one, and it's the first
+    /// `ICCP` the demuxer reads: its `WebPDemuxGetChunk` gives the first),
+    /// where the `image` crate, trusting the `ANMF`'s size, reads neither.
     /// Conversions take the first frame, which both show; Remove Metadata
-    /// refuses the file ([`Plan::new`]).
+    /// refuses the file ([`Plan::new`]). An `ICCP` the demuxer doesn't
+    /// apply, no reader does: it goes.
     pub(super) inside: Option<[u8; 4]>,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
@@ -621,8 +629,13 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 if flags & ANIMATION_FLAG != 0 {
                     found.animated = true;
                     let canvas = (side(&data[4..7]), side(&data[7..10]));
-                    found.frames =
-                        animation(r, at, at + left, canvas, &mut chunks, &mut found.inside)?;
+                    let icc = flags & ICC_FLAG != 0;
+                    found.frames = animation(r, at, at + left, canvas, icc, &mut chunks).map(
+                        |(frames, inside)| {
+                            found.inside = inside;
+                            frames
+                        },
+                    )?;
                     return Ok(found);
                 }
             }
@@ -807,16 +820,17 @@ const MAX_AREA: u64 = 1 << 32;
 /// padded, a frame that's broken ([`animation_frame`]) and an animation
 /// with no frame are all [`Error::Broken`]; unknown chunks, metadata and a
 /// second `ANIM` are passed over. The canvas, `canvas`, must be under
-/// [`MAX_AREA`]. Gives the frames it read, and puts the first `ANMF` or
-/// `ICCP` the demuxer reads inside an `ANMF` in `inside` ([`Scan::inside`]).
+/// [`MAX_AREA`]. `icc` is VP8X's ICC flag. Gives the frames it read, and
+/// the first `ANMF` the demuxer reads inside an `ANMF`, or `ICCP` there it
+/// applies ([`Scan::inside`]).
 fn animation(
     r: &mut dyn In,
     mut at: u64,
     end: u64,
     canvas: (u32, u32),
+    icc: bool,
     chunks: &mut usize,
-    inside: &mut Option<[u8; 4]>,
-) -> Result<u64, Error> {
+) -> Result<(u64, Option<[u8; 4]>), Error> {
     if u64::from(canvas.0) * u64::from(canvas.1) >= MAX_AREA {
         let (w, h) = canvas;
         return Err(Error::Broken(format!("a {w}x{h} canvas")));
@@ -826,6 +840,10 @@ fn animation(
     // The end of the last `ANMF` read at the top level: a chunk that starts
     // before it is inside it.
     let mut frame_end = 0;
+    let mut inside = None;
+    // Whether an `ICCP` was read, inside a frame or not: the demuxer
+    // applies the first, when VP8X flags one.
+    let mut profile = false;
     while at < end {
         let mut raw = [0; 8];
         read_at(r, at, &mut raw)?;
@@ -833,8 +851,10 @@ fn animation(
         let in_frame = at < frame_end;
         let body = at + 8;
         at = body + head.body;
-        if in_frame && matches!(&head.fourcc, b"ANMF" | b"ICCP") && inside.is_none() {
-            *inside = Some(head.fourcc);
+        let applied = &head.fourcc == b"ICCP" && icc && !profile;
+        profile |= &head.fourcc == b"ICCP";
+        if in_frame && (&head.fourcc == b"ANMF" || applied) && inside.is_none() {
+            inside = Some(head.fourcc);
         }
         if !in_frame && &head.fourcc == b"ANMF" {
             frame_end = at;
@@ -864,7 +884,7 @@ fn animation(
     if frames == 0 {
         return Err(Error::Broken("an animation with no frame".into()));
     }
-    Ok(frames)
+    Ok((frames, inside))
 }
 
 /// An `ANMF` chunk as libwebp's demuxer reads it ([`animation_frame`]).
@@ -1636,24 +1656,82 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_holding_a_frame_or_a_profile_is_refused() {
+    fn a_frame_holding_a_frame_or_a_profile_the_demuxer_applies_is_refused() {
         // libwebp ends a frame at its image and reads the rest as top-level
-        // chunks, a frame it shows or a profile it may apply, where the
-        // `image` crate trusts the size and reads neither: readers disagree.
-        // The plan refuses them, before anything is written.
-        for (inner, why) in [
+        // chunks, a frame it shows or a profile it applies as the file's
+        // (VP8X flags one, and no ICCP came first), where the `image` crate
+        // trusts the size and reads neither: readers disagree. The plan
+        // refuses them, before anything is written.
+        let profile = || chunk(b"ICCP", b"profile");
+        let first = || chunk(b"ICCP", b"the file's");
+        let anim = || chunk(b"ANIM", &[0; 6]);
+        let red = || frame(0, 0, &[image()]);
+        for (src, why) in [
             (
-                frame(0, 0, &[vp8l(2, 2, false)]),
+                animation(0, &[frame(0, 0, &[image(), red()])]),
                 "an ANMF chunk inside an ANMF",
             ),
-            (chunk(b"ICCP", b"profile"), "an ICCP chunk inside an ANMF"),
+            (
+                animation(0x20, &[frame(0, 0, &[image(), profile()])]),
+                "an ICCP chunk inside an ANMF",
+            ),
+            // The demuxer reads its profile at the top level, in a frame
+            // or not, and applies the first.
+            (
+                webp(&[
+                    vp8x(0x22),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                    first(),
+                ]),
+                "an ICCP chunk inside an ANMF",
+            ),
+            // In an ANMF with no image, the demuxer passes over the frame
+            // and reads on at its header's end.
+            (
+                webp(&[vp8x(0x22), anim(), red(), frame(0, 0, &[profile()]), red()]),
+                "an ICCP chunk inside an ANMF",
+            ),
         ] {
-            let src = animation(0x20, &[frame(0, 0, &[image(), inner])]);
             let got = Plan::new(&mut Cursor::new(&src));
             assert!(
                 matches!(&got, Err(Error::Broken(said)) if said == why),
                 "{got:?}"
             );
+        }
+        // One it doesn't apply, no reader does: VP8X's ICC flag off, or an
+        // ICCP before it. It goes, as other metadata (it was refused).
+        for (src, want) in [
+            (
+                animation(0, &[frame(0, 0, &[image(), profile()])]),
+                animation(0, &[red()]),
+            ),
+            (
+                webp(&[vp8x(0x02), anim(), red(), frame(0, 0, &[profile()]), red()]),
+                webp(&[vp8x(0x02), anim(), red(), red()]),
+            ),
+            (
+                webp(&[
+                    vp8x(0x22),
+                    first(),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                ]),
+                webp(&[vp8x(0x22), first(), anim(), red()]),
+            ),
+            (
+                webp(&[
+                    vp8x(0x02),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                    first(),
+                ]),
+                webp(&[vp8x(0x02), anim(), red(), first()]),
+            ),
+        ] {
+            let (out, fields) = run(&src).unwrap();
+            assert_eq!(out, want);
+            assert_eq!(fields, [MetaField::Other].into());
         }
         // A VP8X there the demuxer refuses, as conversions do.
         let src = animation(0, &[frame(0, 0, &[image(), vp8x(0x02)])]);
