@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "overlay",
+  "description": "The overlay may tell Rust when a wheel is on screen (wheel_painted), for the modifier-to-wheel latency log. It decides nothing.",
+  "windows": ["overlay"],
+  "permissions": ["allow-wheel-painted"]
+}

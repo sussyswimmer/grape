@@ -1,0 +1,118 @@
+{
+  "_comment": [
+    "The third-party builds Grape fetches, pinned. This file is the one source of truth for them.",
+    "DEV TESTING ONLY for the FFmpeg entries: the BtbN and martin-riedl builds below are never bundled. Both link GPL-2.0-only code (libzvbi) into a GPL-3.0 build and about 100 libraries Grape doesn't use, so Grape builds its own minimal FFmpeg instead (D24, lane B), and these entries will point at that build's assets on Grape's own GitHub Release.",
+    "The FFmpeg pin is DECISIONS D22 (lane B), the PDFium pin is D29. How the builds are fetched and checked is D25 (and D29 for libraries).",
+    "Read by scripts/fetch-sidecars.ps1 (Windows) and scripts/fetch-sidecars.sh (macOS). Change a pin here, never in the scripts.",
+    "archives: one entry per download: its https URL, the SHA-256 of the archive itself (checked before anything is extracted) and its size in bytes. The URL's ending says how to extract it: .zip, or .tgz / .tar.gz (the OS's own tar: %SystemRoot%\\System32\\tar.exe, /usr/bin/tar).",
+    "sidecars: programs Grape runs. Per program, its version (the first line of '<name> -hide_banner -version' must name it) and, per target triple, the archive it comes from and its path inside that archive. One archive can supply several files. They land in binaries/ as <name>-<triple>[.exe], Tauri's externalBin names.",
+    "libraries: shared libraries Grape loads (PDFium). Per library, its version (shown only; a library can't be run) and, per target, the archive, the path inside it and the SHA-256 of that extracted file, checked before it's placed. They land in binaries/ as <file stem>-<triple><extension>: pdfium-x86_64-pc-windows-msvc.dll, libpdfium-universal-apple-darwin.dylib. The Mac library is given as universal-apple-darwin (the script doesn't merge libraries with lipo), is signed ad hoc again, and is also copied to binaries/macos/<file name>, because bundle.macOS.frameworks keeps a file's name.",
+    "license: a file inside the archive that the script keeps as binaries/<name>-LICENSE.txt for the bundle step. It is not the licenses/ folder, which is committed and written by hand (licenses/README.md).",
+    "macOS sidecars: the two Apple triples are merged with lipo into <name>-universal-apple-darwin and signed ad hoc. All three files stay in binaries/, because tauri-build looks for the per-arch ones.",
+    "HEIC on Windows is grape-heif, built by CI from tools/grape-heif (D33), never fetched: nothing for it goes here. The Mac converts HEIC with ImageIO.",
+    "A sidecar and a library can't share a name: -Only / --only <name> fetches just that one.",
+    "After changing this file, run the fetch script on both OSes. CI keys its caches on the hashes of this file and both fetch scripts: the Sidecars job fetches everything, and the Rust and build jobs fetch only pdfium."
+  ],
+  "format": 2,
+  "archives": {
+    "btbn-win64-gpl": {
+      "_comment": "BtbN FFmpeg-Builds, the month-end build of 2026-09-30, kept for about 2 years. Never pin a daily build or 'latest'. GPLv3.",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0.zip",
+      "sha256": "a0e45723c72141975f51d8666302e614711745f3102b704ca3f82c897a58d278",
+      "size": 194034585
+    },
+    "riedl-arm64-ffmpeg": {
+      "_comment": "martin-riedl.de 9.0.2 release build for Apple silicon, by its per-build URL (never /redirect/latest). The zip holds one file at its root.",
+      "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip",
+      "sha256": "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924",
+      "size": 28395699
+    },
+    "riedl-arm64-ffprobe": {
+      "url": "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffprobe.zip",
+      "sha256": "fcbe839537485eaee7a7a8bc5cbc0f90d53617e80943e8a5b2e31cb851197ea6",
+      "size": 28317701
+    },
+    "riedl-amd64-ffmpeg": {
+      "_comment": "martin-riedl.de 9.0.2 release build for Intel. Riedl's Intel release builds stop in January 2027, so a later pin needs another Intel source.",
+      "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1789931006_9.0.2/ffmpeg.zip",
+      "sha256": "7c6b4125b191cbf773832dc51f424cf2b6bb7da43007d1e066f95909e47cacd4",
+      "size": 33816391
+    },
+    "riedl-amd64-ffprobe": {
+      "url": "https://ffmpeg.martin-riedl.de/download/macos/amd64/1789931006_9.0.2/ffprobe.zip",
+      "sha256": "2322438ed2f6319a691291b247d09c69dcaa3a982460d1f269a7e1af335cfdfd",
+      "size": 33719233
+    },
+    "pdfium-8086-win-x64": {
+      "_comment": "bblanchon/pdfium-binaries, release chromium/8086 (PDFium 157.0.8086.0, no V8, no XFA), 2026-10-05. Its SHA-256 is a subject of the release's SLSA attestation (pdfium-attestation.json). Never pin 'latest'.",
+      "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8086/pdfium-win-x64.tgz",
+      "sha256": "1fd8af952832dbb0eb16d9249f68fe09e5f5ebf7c3dd9f6066ea2720cc28487d",
+      "size": 3866531
+    },
+    "pdfium-8086-mac-univ": {
+      "_comment": "The same release's universal (arm64 + x86_64) macOS build. Not the pdfium-v8-* assets, which have V8 and XFA.",
+      "url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8086/pdfium-mac-univ.tgz",
+      "sha256": "ceb8dff448db2a2b15ac52e1360427edc3461f2b51cb4579b1462f1a931087d5",
+      "size": 7115223
+    }
+  },
+  "sidecars": {
+    "ffmpeg": {
+      "version": "9.0.2",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "archive": "btbn-win64-gpl",
+          "path": "ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0/bin/ffmpeg.exe",
+          "license": "ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0/LICENSE.txt"
+        },
+        "aarch64-apple-darwin": {
+          "archive": "riedl-arm64-ffmpeg",
+          "path": "ffmpeg"
+        },
+        "x86_64-apple-darwin": {
+          "archive": "riedl-amd64-ffmpeg",
+          "path": "ffmpeg"
+        }
+      }
+    },
+    "ffprobe": {
+      "version": "9.0.2",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "archive": "btbn-win64-gpl",
+          "path": "ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0/bin/ffprobe.exe"
+        },
+        "aarch64-apple-darwin": {
+          "archive": "riedl-arm64-ffprobe",
+          "path": "ffprobe"
+        },
+        "x86_64-apple-darwin": {
+          "archive": "riedl-amd64-ffprobe",
+          "path": "ffprobe"
+        }
+      }
+    }
+  },
+  "libraries": {
+    "pdfium": {
+      "_comment": [
+        "PDFium, which the PDF worker loads by absolute path (D29). The license texts are in licenses/pdfium/, from the Windows archive.",
+        "It must export every function pdfium-render 0.9.4 binds with its pdfium_7881 feature (crates/grape-engines/Cargo.toml). Check the exports again on any bump of either side.",
+        "chromium/8100 passes D9's 14 days from 2026-10-26T20:25Z; bump to it then (D29)."
+      ],
+      "version": "chromium/8086",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "archive": "pdfium-8086-win-x64",
+          "path": "bin/pdfium.dll",
+          "sha256": "1f2aee4286b8cf0413ab4562b7121aa454f9cfd9afd6ca8609bcef80927b3f80"
+        },
+        "universal-apple-darwin": {
+          "archive": "pdfium-8086-mac-univ",
+          "path": "lib/libpdfium.dylib",
+          "sha256": "f45efe943c5041b8eed3299e455056820a695a3de0c06b624d611d6de1b205db"
+        }
+      }
+    }
+  }
+}

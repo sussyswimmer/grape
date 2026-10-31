@@ -1,0 +1,1 @@
+{"seq":4,"title":"Merge PDFs","items":[{"id":1,"name":"report.pdf"},{"id":2,"name":"cover.pdf"},{"id":3,"name":"appendix.pdf"}],"panel":{"tool":"mergePDF","mergedNames":["report Merged.pdf","cover Merged.pdf","appendix Merged.pdf"]}}

@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Grape <grape@invalid>
+Date: Mon, 26 Oct 2026 10:44:32 +0000
+Subject: [PATCH] tar: mark the version line as Grape's build
+
+"bsdtar --version" now prints
+  bsdtar 3.8.10-grape.1 - libarchive 3.8.10
+(the trailing space is upstream's). Grape's sidecar gate refuses a
+bsdtar whose version line has no "-grape" marker, so a stock bsdtar
+can never be bundled by mistake. libarchive's own version string
+(archive_version_string, archive_version_details) is unchanged.
+
+[Grape-owned patch. Bump ".1" with every change to the patch series.]
+---
+ tar/bsdtar.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tar/bsdtar.c b/tar/bsdtar.c
+index e91efa4..7b472b7 100644
+--- a/tar/bsdtar.c
++++ b/tar/bsdtar.c
+@@ -1080,7 +1080,7 @@ usage(void)
+ static void
+ version(void)
+ {
+-	printf("bsdtar %s - %s \n",
++	printf("bsdtar %s-grape.1 - %s \n",
+ 	    BSDTAR_VERSION_STRING,
+ 	    archive_version_details());
+ 	exit(0);

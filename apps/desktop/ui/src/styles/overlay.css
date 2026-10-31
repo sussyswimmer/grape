@@ -1,0 +1,190 @@
+/*
+ * The overlay window: transparent, the size of one monitor, and it only
+ * ever shows the wheel. These wheel tokens build on tokens.css (Grape's
+ * palette only) and follow the OS light/dark theme.
+ */
+:root {
+  /*
+   * Near-invisible fill (about one level of 255) so every pixel of the
+   * overlay hit-tests as Grape's and a drop never falls through to the
+   * window below (design note D15). Set it to `transparent` only if the
+   * PC check proves it isn't needed.
+   */
+  --overlay-hit-fill: rgba(0, 0, 0, 0.004);
+
+  /* No backdrop blur in a transparent window, so the glass is denser. */
+  --wheel-glass-fill: var(--glass-fill-solid);
+  --wheel-glass-stroke: var(--glass-stroke);
+  --wheel-shadow: var(--shadow-strong);
+
+  --wheel-segment-fill: var(--segment-fill);
+  --wheel-segment-stroke: var(--segment-stroke);
+  --wheel-segment-highlight: var(--segment-highlight);
+  --wheel-placeholder-opacity: 0.45;
+
+  --wheel-label: var(--grape-900);
+  --wheel-label-highlight: var(--color-on-accent);
+  --wheel-center-label: var(--grape-700);
+  --wheel-message: var(--color-text);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --wheel-label: var(--grape-100);
+    --wheel-center-label: var(--grape-100);
+  }
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: var(--overlay-hit-fill);
+  user-select: none;
+  cursor: default;
+  font-family: var(--font-ui);
+}
+
+/* The mount point covers the whole window; the wheel is placed inside it. */
+#wheel-root {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+/* Placed by render.ts at (anchor − backdropR) in CSS px. */
+#wheel-root > .wheel {
+  position: absolute;
+  display: block;
+  overflow: visible;
+  transform-origin: 50% 50%;
+  filter: drop-shadow(0 8px 22px var(--wheel-shadow));
+}
+
+.wheel-backdrop {
+  fill: var(--wheel-glass-fill);
+  stroke: var(--wheel-glass-stroke);
+  stroke-width: 1;
+}
+
+.wheel-segment {
+  fill: var(--wheel-segment-fill);
+  stroke: var(--wheel-segment-stroke);
+  stroke-width: 1;
+}
+
+.wheel-segment.is-highlighted {
+  fill: var(--wheel-segment-highlight);
+  stroke: var(--wheel-segment-highlight);
+}
+
+.wheel-placeholder {
+  fill: var(--wheel-segment-fill);
+  stroke: var(--wheel-segment-stroke);
+  stroke-width: 1;
+  opacity: var(--wheel-placeholder-opacity);
+}
+
+.wheel-label,
+.wheel-center,
+.wheel-message {
+  text-anchor: middle;
+  dominant-baseline: central;
+  pointer-events: none;
+}
+
+/* Sizes match TEXT in src/wheel/scene.ts (line heights and wrap widths). */
+.wheel-label {
+  fill: var(--wheel-label);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+}
+
+.wheel.dense .wheel-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.wheel-label.is-highlighted {
+  fill: var(--wheel-label-highlight);
+}
+
+.wheel-center {
+  fill: var(--wheel-center-label);
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.03em;
+}
+
+.wheel-message {
+  fill: var(--wheel-message);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* A new wheel scales and fades in; a swap or highlight redraws in place. */
+@keyframes wheel-enter {
+  from {
+    opacity: 0;
+    transform: scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.wheel.wheel-enter {
+  animation: wheel-enter 90ms ease-out both;
+}
+
+/* render.ts skips the class too; this keeps reduced motion even if it didn't. */
+@media (prefers-reduced-motion: reduce) {
+  .wheel.wheel-enter {
+    animation: none;
+  }
+}
+
+/*
+ * High contrast on Windows: the browser leaves SVG fills and strokes as
+ * they are, so the wheel takes the system's colors here. The highlighted
+ * segment is filled with Highlight, like a selection anywhere else. The
+ * hit fill keeps its alpha (only its color changes), so the overlay stays
+ * see-through.
+ */
+@media (forced-colors: active) {
+  #wheel-root > .wheel {
+    filter: none;
+  }
+
+  .wheel-backdrop,
+  .wheel-segment,
+  .wheel-placeholder {
+    fill: Canvas;
+    stroke: CanvasText;
+  }
+
+  .wheel-placeholder {
+    stroke: GrayText;
+    opacity: 1;
+  }
+
+  .wheel-segment.is-highlighted {
+    fill: Highlight;
+    stroke: Highlight;
+  }
+
+  .wheel-label,
+  .wheel-center,
+  .wheel-message {
+    fill: CanvasText;
+  }
+
+  .wheel-label.is-highlighted {
+    fill: HighlightText;
+  }
+}

@@ -1,0 +1,49 @@
+# cargo-deny config for grape-heif.exe's Rust crates (DECISIONS D23, D33).
+# tools/grape-heif is its own workspace, so the root deny.toml never sees
+# it. CI's Licenses job runs, from the repo root:
+#
+#   cargo deny --manifest-path tools/grape-heif/Cargo.toml --locked check licenses bans sources --config tools/grape-heif/deny.toml
+
+[graph]
+# grape-heif.exe is Windows only.
+targets = ["x86_64-pc-windows-msvc"]
+# Test-only crates never ship.
+exclude-dev = true
+
+[licenses]
+# Exactly the licenses this graph uses, build tools included. The program
+# itself is GPL-3.0-or-later because of the C libraries it links (libheif,
+# libde265, x265, dav1d, libaom; licenses/grape-heif), which aren't Rust
+# crates; its Rust crates are all permissive.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+# target-lexicon comes in through libheif-sys's build script (system-deps
+# 8 → cfg-expr). It runs while grape-heif is built and none of its code is
+# in grape-heif.exe, so about.toml leaves it out of rust-crates.md.
+exceptions = [
+    { crate = "target-lexicon", allow = ["Apache-2.0 WITH LLVM-exception"] },
+]
+
+[licenses.private]
+# Grape's own crates (grape-heif, grape-heif-proto) are MIT and never
+# published.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# grape-heif-proto is a path dependency, with no version.
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

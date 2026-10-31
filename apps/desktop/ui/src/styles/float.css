@@ -1,0 +1,325 @@
+/*
+ * The float shelf: a transparent tool window 280 px wide (Rust sets its
+ * height from the item count) holding one rounded glass panel, inset 6 px
+ * on every side for its shadow. Header 44 px, rows 40 px, the "Drag all"
+ * row 40 px; the list scrolls past six rows. Grape's palette only, via
+ * tokens.css.
+ */
+:root {
+  --float-fill: var(--glass-fill-pill);
+  --float-stroke: var(--glass-stroke);
+  --float-shadow: var(--shadow-soft);
+  --float-divider: var(--color-border);
+  --float-text: var(--color-text);
+  --float-muted: var(--color-text-muted);
+  --float-glyph: var(--color-accent);
+  --float-hover: var(--track-fill);
+  --float-focus: var(--color-accent);
+  --float-handle: var(--color-accent);
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  cursor: default;
+  font-family: var(--font-ui);
+  color: var(--float-text);
+}
+
+#float-root {
+  position: fixed;
+  inset: 0;
+}
+
+/* While a press waits to become a drag, the hand stays closed everywhere. */
+#float-root[data-gesture="pressed"],
+#float-root[data-gesture="pressed"] * {
+  cursor: grabbing;
+}
+
+.float-panel {
+  box-sizing: border-box;
+  position: absolute;
+  inset: 6px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--float-fill);
+  box-shadow: 0 1px 4px var(--float-shadow);
+  overflow: hidden;
+}
+
+/* The stroke is drawn on top and takes no room, so 44 + n × 40 (+ 40) fills the panel exactly. */
+.float-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--float-stroke);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* --- Header ---------------------------------------------------------------- */
+
+.float-header {
+  box-sizing: border-box;
+  flex: none;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px 0 0;
+  border-bottom: 1px solid var(--float-divider);
+}
+
+/* The window-move region: everything left of the close button, padding included. */
+.float-title {
+  box-sizing: border-box;
+  flex: 1;
+  align-self: stretch;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  margin: 0;
+  padding: 0 4px 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.float-icon-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--float-muted);
+  cursor: default;
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.float-icon-button:hover {
+  background: var(--float-hover);
+  color: var(--float-text);
+}
+
+.float-icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+:focus-visible {
+  outline: 2px solid var(--float-focus);
+  outline-offset: -2px;
+}
+
+/* --- Rows ------------------------------------------------------------------ */
+
+.float-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--float-divider) transparent;
+}
+
+.float-row {
+  box-sizing: border-box;
+  height: 40px;
+  margin: 0 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 4px 0 10px;
+  border-radius: 8px;
+  cursor: grab;
+  transition: background-color 120ms ease;
+}
+
+.float-row:hover {
+  background: var(--float-hover);
+}
+
+.float-row.is-missing {
+  cursor: default;
+}
+
+.float-glyph {
+  flex: none;
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  color: var(--float-glyph);
+}
+
+.float-glyph svg,
+.float-drag-all svg {
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.float-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.float-row.is-missing .float-glyph,
+.float-row.is-missing .float-name {
+  opacity: 0.5;
+}
+
+.float-missing {
+  flex: none;
+  color: var(--float-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.float-missing[hidden],
+.float-footer[hidden] {
+  display: none;
+}
+
+/* A row's × shows on hover or focus, and always on a missing item. */
+.float-remove {
+  width: 26px;
+  height: 26px;
+  opacity: 0;
+}
+
+.float-row:hover .float-remove,
+.float-row:focus-within .float-remove,
+.float-row.is-missing .float-remove {
+  opacity: 1;
+}
+
+/* --- Drag all ---------------------------------------------------------------- */
+
+.float-footer {
+  box-sizing: border-box;
+  flex: none;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  border-top: 1px solid var(--float-divider);
+}
+
+.float-drag-all {
+  flex: 1;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 8px;
+  color: var(--float-handle);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: grab;
+  transition: background-color 120ms ease;
+}
+
+.float-drag-all svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+.float-drag-all:hover {
+  background: var(--float-hover);
+}
+
+.float-drag-all.is-disabled {
+  color: var(--float-muted);
+  cursor: default;
+}
+
+.float-drag-all.is-disabled:hover {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .float-icon-button,
+  .float-row,
+  .float-drag-all {
+    transition: none;
+  }
+}
+
+/*
+ * High contrast on Windows: the browser draws the panel, text and borders
+ * in the system's colors but drops the hover fills, so hover gets a thin
+ * outline and focus a thicker Highlight one. A missing item and a
+ * disabled "Drag all" use GrayText instead of fading. The panel is solid,
+ * so the plate the browser draws behind text doesn't show.
+ */
+@media (forced-colors: active) {
+  .float-panel {
+    background: Canvas;
+  }
+
+  .float-panel::after,
+  .float-header,
+  .float-footer {
+    border-color: CanvasText;
+  }
+
+  .float-icon-button {
+    color: ButtonText;
+  }
+
+  .float-row:hover,
+  .float-icon-button:hover,
+  .float-drag-all:hover {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+
+  .float-drag-all.is-disabled:hover {
+    outline: none;
+  }
+
+  /* After the hover rules and as specific, so a hovered row or × still shows its focus. */
+  .float-row:focus-visible,
+  .float-icon-button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  .float-row.is-missing .float-glyph,
+  .float-row.is-missing .float-name,
+  .float-drag-all.is-disabled {
+    color: GrayText;
+    opacity: 1;
+  }
+}

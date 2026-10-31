@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Grape's own bsdtar (DECISIONS D27): libarchive's release tarball plus the patches below, applied in order. This file is the one source of truth for it; build.sh and build.ps1 read it.",
+    "libarchive: the release tarball's https URL, SHA-256 and size, checked before anything is extracted. libarchive.org/downloads has the same file.",
+    "patches: file names in patches/, in the order they apply, each with its SHA-256 (checked before applying) and where it comes from. Bump marker (and patch 0007) with every change to the series.",
+    "version_line: the exact first line of 'bsdtar --version' per OS, trailing space included. CI fails on anything else.",
+    "windows_dlls: the only DLLs bsdtar.exe may import (dumpbin /dependents). macOS: only /usr/lib/libSystem.B.dylib.",
+    "No GitHub Release until M7: CI builds it in the same run as the installer and DMG that bundle it."
+  ],
+  "format": 1,
+  "libarchive": {
+    "version": "3.8.10",
+    "released": "2026-10-14",
+    "url": "https://github.com/libarchive/libarchive/releases/download/v3.8.10/libarchive-3.8.10.tar.gz",
+    "sha256": "a1bffbe5152cfe869751179e7b16648c87c461cb8c46eee75062efbe164cc57c",
+    "size": 9301407
+  },
+  "marker": "grape.1",
+  "patches": [
+    { "file": "0001-b59b9e16-tar-check-pathname-guard-outside-regex-if.patch", "sha256": "621028e08cfc17dc5f02f66797c88ae831304ed5d72969590c1f415c575f0546", "from": "upstream b59b9e16 (PR #3696, merged 8c4d7d77 2026-10-18), guard moved outside #if HAVE_REGEX_H" },
+    { "file": "0002-777dc1a0-string-report-EILSEQ-on-windows-conversions.patch", "sha256": "3e55fd226e80fc824348565544c0506085dc63383a8bf90a8a55715753a6e63a", "from": "upstream 777dc1a (PR #3696, merged 8c4d7d77 2026-10-18), test hunks dropped" },
+    { "file": "0003-ef743732-rar-bound-stored-symlink-target-size.patch", "sha256": "780ea7e11d6056e8946513c065d9250896bb36a4b84d6e4c0ece7d3f02489dc5", "from": "upstream ef743732 (PR #3709, merged 6066a428 2026-10-18)" },
+    { "file": "0005-grape-tar-utf8-active-code-page-manifest.patch", "sha256": "775bbb5498c2fd03f72dea1c6dc562703bf7b81a5f83059386c4820e1b304288", "from": "Grape" },
+    { "file": "0006-grape-tar-at-archive-rar-and-rar5-only.patch", "sha256": "d58dee199634da6c4d941a3d4ebf34cbe57bec22b8633f2f9cdcede3e4f68268", "from": "Grape" },
+    { "file": "0007-grape-tar-version-marker.patch", "sha256": "f3a399c95fc03ff135d56c9c027bead689cfe23141f2ebe352523d6295f63bd2", "from": "Grape" }
+  ],
+  "version_line": {
+    "windows": "bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled ",
+    "macos": "bsdtar 3.8.10-grape.1 - libarchive 3.8.10 CommonCrypto/system libb2/bundled ",
+    "linux": "bsdtar 3.8.10-grape.1 - libarchive 3.8.10 libb2/bundled "
+  },
+  "macos_deployment_target": "13.0",
+  "windows_dlls": ["KERNEL32.dll", "ADVAPI32.dll", "bcrypt.dll"]
+}

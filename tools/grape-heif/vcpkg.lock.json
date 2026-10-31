@@ -1,0 +1,53 @@
+{
+  "_comment": "D33, D41. vcpkg's last master commit on or before D9's cutoff (2026-10-12). Bump under D9; the libheif and aom overlays are in vcpkg/ports.",
+  "vcpkg": {
+    "repo": "https://github.com/microsoft/vcpkg.git",
+    "commit": "e456309491fd875487bf02b8a0dca76c1b1b00cc",
+    "date": "2026-10-10T01:05:47Z"
+  },
+  "triplet": "x64-windows-static",
+  "install": "libheif[core,hevc,aom,dav1d]",
+  "sources": [
+    {
+      "port": "libheif",
+      "version": "1.23.7",
+      "url": "https://github.com/strukturag/libheif/releases/download/v1.23.7/libheif-1.23.7.tar.gz",
+      "sha512": "953f2a59a426de6e2baf717801ee6248eb0713e22e1ccb5213ebd5fa199b1100f443a4e69ee19ff1eb9796ce4e5620a44e8762c03060649214105330df6ee62d",
+      "sha256": "f7483e818503ea6224c8863e4a56ac02c7089021a98472c811c12aa19faf2475",
+      "size": 2439383,
+      "license": "LGPL-3.0-or-later (tools MIT)"
+    },
+    {
+      "port": "libde265",
+      "version": "1.1.3",
+      "url": "https://github.com/strukturag/libde265/archive/v1.1.3.tar.gz",
+      "sha512": "58eabdac466c0b59e0bc82e4d2b6d4fc9cbf6ee0af9562e36d63c0601c92c2fe21bd3dfca2a119934ee4a9dcc73e7207f6ea25dba78382752e901374896c4471",
+      "license": "LGPL-3.0-or-later (tools MIT)"
+    },
+    {
+      "port": "x265",
+      "version": "4.3",
+      "commit": "e9b88125dc21393b3fd8d68e98083bdfb89778a8",
+      "url": "https://github.com/Multicorewareinc/x265/archive/4.3.tar.gz",
+      "sha512": "270d0db180ecebfc5c2f1fe6451be66042fab69273d073428f4af00420fa0f8b792ecdc71ec1a15ee2860e3b6a325c56295143f117e94fa3616f0ccecb2ded75",
+      "license": "GPL-2.0-or-later"
+    },
+    {
+      "port": "dav1d",
+      "version": "1.5.4",
+      "commit": "54706fc6bc0cdecab7e9593974a4039cc038fca7",
+      "url": "https://github.com/videolan/dav1d/archive/1.5.4.tar.gz",
+      "sha512": "7ee5906640495919462b2242c44a8c3cc577fdda52fc25257792f6df919429d54e4a48c315a7a11759385f044f68d3d6573fd720853f447e2d8520a13693827f",
+      "license": "BSD-2-Clause (x86inc.asm ISC); AOM Patent License 1.0"
+    },
+    {
+      "port": "aom",
+      "version": "3.15.2",
+      "url": "https://storage.googleapis.com/aom-releases/libaom-3.15.2.tar.gz",
+      "sha512": "4ba185a642c9dd32d1ab708916a5aed1a65d3cd6d2599d632f33c83849e6702ca91528ad09a007eb39ac2723f0b10de9a7905ed26abfef42a164f13e21aacb7a",
+      "sha256": "67bb54b245f33ed98600e08269e6139986e48114e14042474ddd8885801dfddc",
+      "size": 6629974,
+      "license": "BSD-2-Clause (fastfeat BSD-3-Clause, vector MIT, x86inc ISC); AOM Patent License 1.0"
+    }
+  ]
+}

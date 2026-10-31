@@ -1,0 +1,102 @@
+[package]
+name = "grape-engines"
+description = "Executes grape-core job plans: images, FFmpeg sidecar, PDF, archives, subtitles"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+# Real audio and video conversions through FFmpeg; needs GRAPE_TEST_FFMPEG
+# and GRAPE_TEST_FFPROBE set to the sidecars' absolute paths.
+engines-it = []
+# Integration tests that need a PDFium library: `GRAPE_TEST_PDFIUM` names it
+# (the tests fail, not skip, without it). They run the PDF worker built from
+# src/bin/grape-pdf-worker.rs (DECISIONS D29).
+pdf-it = []
+# The RAR tests that run the real bsdtar: GRAPE_TEST_BSDTAR names it (the tests
+# fail, not skip, without it). Unit tests in src/archive/rar/it.rs (D27).
+rar-it = []
+# The HEIC tests that run the real helper (tests/heif.rs, D33): GRAPE_TEST_HEIF
+# names it (grape-heif.exe on Windows, grape-platform's grape-heif-worker on
+# macOS) and GRAPE_TEST_HEIF_FIXTURES the folder CI's grape-heif job made. The
+# tests fail, not skip, without them.
+heif-it = []
+
+[dependencies]
+grape-core.workspace = true
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "bmp", "tiff"] }
+zune-jpeg = "0.5.15"
+# PNG Compress (D26): lossless re-encoding with its metadata. Already in
+# Cargo.lock through image.
+png = "0.18.1"
+thiserror.workspace = true
+zip = { version = "=9.0.2", default-features = false, features = ["deflate-flate2", "deflate64"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"] }
+# RAR (D27). Both were already in Cargo.lock (flate2; lopdf → stringprep).
+crc32fast = "1.5.2"
+# Compress on TIFF (D28): LZW decoding, with TIFF's early code-size switch.
+# Already in Cargo.lock through image's tiff.
+weezl = "0.1.12"
+unicode-normalization = "0.1.25"
+# PDF (D29). PDFium is bound at run time from an absolute path, only inside
+# the PDF worker process. Never enable image_*, pdfium_enable_v8,
+# pdfium_enable_xfa, pdfium_use_skia, pdfium_use_win32, static or bindings.
+pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+# Never enable embed_image: it pulls image 0.25 with default features.
+lopdf = { version = "=0.45.0", default-features = false }
+serde.workspace = true
+serde_json.workspace = true
+# HEIC (D33): the protocol with Grape's HEIC helper, a separate process.
+grape-heif-proto.workspace = true
+# WebP Compress (D28): libwebp's encoder, behind grape-webp's safe API, so
+# this crate keeps `forbid(unsafe_code)`.
+grape-webp.workspace = true
+# SVG (D39): parsed and drawn only inside the SVG worker process.
+# Never turn on `svgz` (unbounded gunzip) or resvg's default features.
+resvg = { version = "=0.48.1", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+# Embedded images' header size, inside the data-URI resolver (already in the
+# lock through usvg).
+imagesize = "=0.15.0"
+
+[dev-dependencies]
+# The TIFF tools' test oracle (D28): it decodes every page. Already in
+# Cargo.lock through image, with the same features.
+tiff = "0.11.3"
+
+# tests/heif.rs runs the HEIC helper on Windows in the Job Object an
+# installed Grape puts it in (D33).
+[target.'cfg(windows)'.dev-dependencies]
+grape-platform.workspace = true
+
+[[bin]]
+# The PDF worker on its own, for the `pdf-it` tests. The app runs the same
+# `grape_engines::pdf::worker_main` as `Grape --grape-pdf-worker`.
+name = "grape-pdf-worker"
+path = "src/bin/grape-pdf-worker.rs"
+required-features = ["pdf-it"]
+
+[[bin]]
+# The SVG worker on its own, for tests/svg.rs (no feature: it needs no
+# library). The app runs the same `grape_engines::svg::worker_main` as
+# `Grape --grape-svg-worker` (D39).
+name = "grape-svg-worker"
+path = "src/bin/grape-svg-worker.rs"
+
+[[test]]
+name = "pdf"
+required-features = ["pdf-it"]
+
+[[test]]
+# Images → PDF drawn by a real PDFium (D37): GRAPE_TEST_PDFIUM.
+name = "create_pdf_render"
+required-features = ["pdf-it"]
+
+[[test]]
+name = "heif"
+required-features = ["heif-it"]
+
+[lints]
+workspace = true

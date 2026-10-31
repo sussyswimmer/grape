@@ -1,0 +1,475 @@
+//! Remove Metadata on images (D26, D28): the source streamed through its
+//! container's stripper into a temp file, then published with a note of
+//! what went. A TIFF is walked first and rewritten from the plan its walk
+//! made ([`tiff::strip`]); a HEIF file is read first and copied with its
+//! `meta` rebuilt in place ([`heic`]); a WebP is walked first as every
+//! conversion walks it ([`webp::Plan`]). Each of their outputs is read
+//! again before it's published.
+//!
+//! The container comes from the file's first bytes, not its name: a PNG
+//! named `.jpg` is stripped as a PNG (and keeps its name). Reads and
+//! writes go through [`Cancellable`], so a cancel stops the copy at the
+//! next read or write; the temp file removes itself on every error.
+
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Cursor, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use grape_core::{Format, Job};
+
+use super::{gif, heic, jpeg, png, tiff, webp, Kind};
+use crate::cancel::Cancellable;
+use crate::output::TempFile;
+use crate::publish::{self, Names};
+use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, MetaField, Note};
+
+/// What a stripper found in what it dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Found {
+    pub(crate) fields: BTreeSet<MetaField>,
+}
+
+/// Why a stripper stopped. Nothing it wrote is published.
+#[derive(Debug)]
+pub(crate) enum Error {
+    /// The file isn't what its first bytes say: truncated, or broken.
+    Broken(String),
+    /// The file is past one of the caps that bound what Grape holds of it.
+    TooLarge(String),
+    /// The file is one Grape won't change yet: the end of a sentence that
+    /// starts with its name, such as "is a camera raw (DNG) file, which
+    /// Grape can't change yet."
+    Refused(String),
+    /// Reading the source failed (or was cancelled).
+    Read(io::Error),
+    /// Writing the temp file failed (or was cancelled).
+    Write(io::Error),
+}
+
+/// Where a stripper writes: WebP's goes back to fix its header.
+pub(crate) trait Out: Write + Seek {}
+
+impl<T: Write + Seek> Out for T {}
+
+/// What a stripper that seeks reads from: TIFF's walks its IFDs.
+pub(crate) trait In: BufRead + Seek {
+    /// Reads exactly `buf.len()` bytes at `at`, and stays after them.
+    fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        self.seek(SeekFrom::Start(at))?;
+        self.read_exact(buf)
+    }
+}
+
+/// From what's buffered when it holds the bytes, or else straight from
+/// the file: refilled, the buffer would read 64 KiB for each short value
+/// or block read out of the file's order, and only what's asked for is.
+impl<R: Read + Seek> In for BufReader<R> {
+    fn read_exact_at(&mut self, at: u64, buf: &mut [u8]) -> io::Result<()> {
+        let here = self.stream_position()?;
+        match i64::try_from(i128::from(at) - i128::from(here)) {
+            // What's buffered stays when `at` is in it.
+            Ok(by) => self.seek_relative(by)?,
+            Err(_) => {
+                self.seek(SeekFrom::Start(at))?;
+            }
+        }
+        if self.buffer().len() >= buf.len() {
+            return self.read_exact(buf);
+        }
+        // Dropped, so that the file is at `at`, and dropped even when it's
+        // used up: kept, a later seek back into it would take its bytes as
+        // the ones before where the file is now, `buf.len()` too early.
+        self.seek(SeekFrom::Start(at))?;
+        self.get_mut().read_exact(buf)
+    }
+}
+
+impl<T: AsRef<[u8]>> In for Cursor<T> {}
+
+/// Reads exactly `buf.len()` bytes; the end of the file is [`Error::Broken`].
+pub(crate) fn read_exact(r: &mut dyn BufRead, buf: &mut [u8]) -> Result<(), Error> {
+    r.read_exact(buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => Error::Broken("the file ends early".into()),
+        _ => Error::Read(e),
+    })
+}
+
+/// Reads exactly `buf.len()` bytes at `at` ([`In::read_exact_at`]): a
+/// short read out of the file's order reads only what it asks for. The
+/// end of the file is [`Error::Broken`].
+pub(crate) fn read_at(r: &mut dyn In, at: u64, buf: &mut [u8]) -> Result<(), Error> {
+    r.read_exact_at(at, buf).map_err(|e| match e.kind() {
+        io::ErrorKind::UnexpectedEof => Error::Broken("the file ends early".into()),
+        _ => Error::Read(e),
+    })
+}
+
+/// Reads one byte; the end of the file is [`Error::Broken`].
+pub(crate) fn read_u8(r: &mut dyn BufRead) -> Result<u8, Error> {
+    let mut b = [0];
+    read_exact(r, &mut b)?;
+    Ok(b[0])
+}
+
+/// Whether anything but `padding` bytes follows the container's end:
+/// reads on, as far as the end of the file, up to the first byte that
+/// isn't padding.
+pub(crate) fn more_after(r: &mut dyn BufRead, padding: &[u8]) -> Result<bool, Error> {
+    loop {
+        let buf = r.fill_buf().map_err(Error::Read)?;
+        if buf.is_empty() {
+            return Ok(false);
+        }
+        if buf.iter().any(|b| !padding.contains(b)) {
+            return Ok(true);
+        }
+        let n = buf.len();
+        r.consume(n);
+    }
+}
+
+/// The formats Remove Metadata runs on through this engine, by name; the
+/// content decides the container.
+pub(crate) fn strips(from: Format) -> bool {
+    matches!(
+        from,
+        Format::Jpg | Format::Png | Format::Webp | Format::Gif | Format::Tiff | Format::Heic
+    )
+}
+
+/// How a source is stripped: streamed through its container's stripper,
+/// or, for a TIFF, a HEIF file or a WebP, written from the plan its
+/// reading made.
+enum Stripper {
+    Jpeg,
+    Png,
+    Webp(webp::Plan),
+    Gif,
+    Tiff(tiff::strip::Plan),
+    Heic(heic::Plan),
+}
+
+/// Runs Remove Metadata on the image `src` (named as `from`) into `dest`.
+pub(crate) fn run(
+    job: &Job,
+    src: &Path,
+    dest: &Path,
+    from: Format,
+    ctx: &EngineCtx,
+    progress: &mut dyn FnMut(f32),
+) -> Result<JobOutcome, GrapeError> {
+    let names = Names::new(src, dest, from, from);
+    let dir = publish::dest_dir(dest, &names)?;
+    if ctx.cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    let file =
+        File::open(src).map_err(|e| names.read_failed(format!("open {}: {e}", src.display())))?;
+    let size = file
+        .metadata()
+        .map_err(|e| names.read_failed(format!("stat {}: {e}", src.display())))?
+        .len();
+    let mut reader = BufReader::with_capacity(
+        64 * 1024,
+        Counting {
+            inner: Cancellable::new(file, &ctx.cancel),
+            read: 0,
+            size,
+            progress,
+        },
+    );
+    let head = reader
+        .fill_buf()
+        .map_err(|e| read_error(&names, src, &ctx.cancel, e))?;
+    let Some(kind) = Kind::of(head) else {
+        return Err(names.decode_failed(format!(
+            "{}: not a JPEG, PNG, WebP, GIF, TIFF or HEIF",
+            src.display()
+        )));
+    };
+    // A TIFF, a HEIF file or a WebP is read first: one Grape won't strip
+    // is refused before anything is created.
+    let mut stripper = match kind {
+        Kind::Jpeg => Stripper::Jpeg,
+        Kind::Png => Stripper::Png,
+        Kind::Webp => Stripper::Webp(
+            webp::Plan::new(&mut reader).map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
+        ),
+        Kind::Gif => Stripper::Gif,
+        Kind::Tiff => Stripper::Tiff(
+            tiff::strip::Plan::new(&mut reader, size)
+                .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
+        ),
+        // AVIF content, or another codec's, is stripped too: nothing is
+        // decoded.
+        Kind::Heif(_) => Stripper::Heic(
+            heic::Plan::new(&mut reader, size)
+                .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
+        ),
+    };
+    if let Stripper::Webp(plan) = &stripper {
+        if plan.decides_by_pixels() {
+            // A conversion decides on this one only once it's decoded it,
+            // so it's decoded as a conversion decodes it: one whose pixels
+            // readers show differently is refused as conversions refuse it.
+            crate::image::decode_stored(src, from, Format::Webp, &names, &ctx.cancel, &|_, _, _| 0)
+                .map_err(|e| publish::or_cancelled(&ctx.cancel, src, e))?;
+        }
+    }
+    publish::ensure_dir(job, ctx, dir, &names)?;
+    let (temp, out) = TempFile::create(dir, from.output_ext())
+        .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
+    let mut writer = BufWriter::with_capacity(64 * 1024, Cancellable::new(out, &ctx.cancel));
+    let found = match &mut stripper {
+        Stripper::Jpeg => jpeg::strip(&mut reader, &mut writer),
+        Stripper::Png => png::strip(&mut reader, &mut writer),
+        Stripper::Webp(plan) => plan.write(&mut reader, &mut writer),
+        Stripper::Gif => gif::strip(&mut reader, &mut writer),
+        Stripper::Tiff(plan) => plan.write(&mut reader, &mut writer, &ctx.cancel),
+        Stripper::Heic(plan) => plan.write(&mut reader, &mut writer),
+    }
+    .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
+    let found = found.map_err(|e| failed(e, &names, src, temp.path(), &ctx.cancel))?;
+    close(writer, None, temp.path(), &names, src, &ctx.cancel)?;
+    drop(reader);
+    check(&stripper, temp.path(), &names, src, &ctx.cancel)?;
+    if ctx.cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    let mut outcome = publish::finalize(&temp, job, src, dest, dir, &names)?;
+    progress(1.0);
+    outcome
+        .notes
+        .push(Note::MetadataRemoved(found.fields.into_iter().collect()));
+    Ok(outcome)
+}
+
+/// Flushes what `writer` holds into the temp file at `path`, cuts the file
+/// at `len` when given (Compress on TIFF may leave bytes past its end), and
+/// syncs it: the last step before a temp file is checked and published. A
+/// cancel that lands in the flush is the job's cancel, not a write that
+/// failed.
+pub(crate) fn close(
+    writer: BufWriter<Cancellable<File>>,
+    len: Option<u64>,
+    path: &Path,
+    names: &Names,
+    src: &Path,
+    cancel: &CancelToken,
+) -> Result<(), GrapeError> {
+    let failed = |e: String| publish::or_cancelled(cancel, src, names.write_failed(e));
+    let out = writer
+        .into_inner()
+        .map_err(|e| failed(format!("write {}: {}", path.display(), e.error())))?
+        .into_inner();
+    if let Some(len) = len {
+        out.set_len(len)
+            .map_err(|e| failed(format!("write {}: {e}", path.display())))?;
+    }
+    out.sync_all()
+        .map_err(|e| failed(format!("sync {}: {e}", path.display())))
+}
+
+/// The error for the user when a stripper stopped: `src` is the source,
+/// `temp` the file it wrote into.
+fn failed(e: Error, names: &Names, src: &Path, temp: &Path, cancel: &CancelToken) -> GrapeError {
+    let e = match e {
+        Error::Broken(why) => names.decode_failed(format!("{}: {why}", src.display())),
+        Error::TooLarge(why) => names.too_large(format!("{}: {why}", src.display())),
+        Error::Refused(why) => refused(names, src, &why),
+        Error::Read(e) => names.read_failed(format!("read {}: {e}", src.display())),
+        Error::Write(e) => names.write_failed(format!("write {}: {e}", temp.display())),
+    };
+    publish::or_cancelled(cancel, src, e)
+}
+
+/// Reads the TIFF, HEIF file or WebP Grape wrote at `path` again, against
+/// the plan it came from (D28), and a HEIF file's source `src` too:
+/// anything amiss is Grape's own failure, and nothing is published. The
+/// other containers are streamed, and have no plan.
+fn check(
+    stripper: &Stripper,
+    path: &Path,
+    names: &Names,
+    src: &Path,
+    cancel: &CancelToken,
+) -> Result<(), GrapeError> {
+    let wrong = |why: String| {
+        let e = names.encode_failed(format!("check {}: {why}", path.display()));
+        publish::or_cancelled(cancel, src, e)
+    };
+    let open = |at: &Path| -> Result<_, GrapeError> {
+        let file = File::open(at).map_err(|e| wrong(format!("open {}: {e}", at.display())))?;
+        let len = file
+            .metadata()
+            .map_err(|e| wrong(format!("stat {}: {e}", at.display())))?
+            .len();
+        let reader = BufReader::with_capacity(64 * 1024, Cancellable::new(file, cancel));
+        Ok((reader, len))
+    };
+    let checked = match stripper {
+        Stripper::Tiff(plan) => {
+            let (mut reader, len) = open(path)?;
+            plan.check(&mut reader, len)
+        }
+        Stripper::Heic(plan) => {
+            let (mut reader, len) = open(path)?;
+            let (mut source, _) = open(src)?;
+            plan.check(&mut source, &mut reader, len)
+        }
+        Stripper::Webp(plan) => {
+            let (mut reader, _) = open(path)?;
+            plan.check(&mut reader)
+        }
+        Stripper::Jpeg | Stripper::Png | Stripper::Gif => Ok(()),
+    };
+    checked.map_err(|e| match e {
+        Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => wrong(why),
+        Error::Read(e) | Error::Write(e) => wrong(e.to_string()),
+    })
+}
+
+/// The error for a file the tool won't change: "`source` `why`" (D28).
+pub(crate) fn refused(names: &Names, src: &Path, why: &str) -> GrapeError {
+    GrapeError::new(
+        ErrorKind::NotYetSupported,
+        format!("{} {why}", names.source),
+        format!("{}: refused: {why}", src.display()),
+    )
+}
+
+/// A read error, or the cancel that caused it.
+fn read_error(names: &Names, src: &Path, cancel: &CancelToken, e: io::Error) -> GrapeError {
+    let e = names.read_failed(format!("read {}: {e}", src.display()));
+    publish::or_cancelled(cancel, src, e)
+}
+
+/// A reader that reports how much of `size` bytes it has read, up to 95 %.
+struct Counting<'a, R> {
+    inner: R,
+    read: u64,
+    size: u64,
+    progress: &'a mut dyn FnMut(f32),
+}
+
+impl<R: Read> Read for Counting<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.read += n as u64;
+        if self.size > 0 {
+            let done = (self.read as f64 / self.size as f64).min(1.0) * 0.95;
+            (self.progress)(done as f32);
+        }
+        Ok(n)
+    }
+}
+
+/// Seeking is passed through; what was read still counts.
+impl<R: Seek> Seek for Counting<'_, R> {
+    fn seek(&mut self, pos: io::SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    /// A file that counts the bytes read from it.
+    struct Tally {
+        file: Cursor<Vec<u8>>,
+        read: u64,
+    }
+
+    impl Read for Tally {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.file.read(buf)?;
+            self.read += n as u64;
+            Ok(n)
+        }
+    }
+
+    impl Seek for Tally {
+        fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+            self.file.seek(pos)
+        }
+    }
+
+    #[test]
+    fn a_cancel_in_the_last_flush_is_a_cancel() {
+        let name = format!("grape-close-{}.tif", crate::output::unique_suffix());
+        let path = std::env::temp_dir().join(name);
+        let cancel = CancelToken::new();
+        let file = File::create_new(&path).unwrap();
+        let mut writer = BufWriter::new(Cancellable::new(file, &cancel));
+        writer.write_all(b"still in the buffer").unwrap();
+        cancel.cancel();
+        let src = Path::new("scan.tif");
+        let names = Names::new(src, &path, Format::Tiff, Format::Tiff);
+        let result = close(writer, Some(5), &path, &names, src, &cancel);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(result.unwrap_err().kind, ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn a_read_the_buffer_cant_serve_reads_only_what_it_asks_for() {
+        let bytes: Vec<u8> = (0..1000).map(|i| (i % 251) as u8).collect();
+        let file = Tally {
+            file: Cursor::new(bytes.clone()),
+            read: 0,
+        };
+        let mut r = BufReader::with_capacity(64, file);
+        // Reads `len` bytes at `at`: they're the file's, and gives the
+        // bytes read from it so far.
+        let take = |r: &mut BufReader<Tally>, at: u64, len: usize| {
+            let mut buf = vec![0; len];
+            read_at(r, at, &mut buf).unwrap();
+            assert_eq!(buf, bytes[at as usize..][..len]);
+            r.get_ref().read
+        };
+        // Far apart, last first: each reads only itself.
+        assert_eq!(take(&mut r, 900, 10), 10);
+        assert_eq!(take(&mut r, 800, 10), 20);
+        // On from there, a read fills the buffer: 810 to 874.
+        let mut next = [0; 4];
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[810..814]);
+        assert_eq!(r.get_ref().read, 84);
+        // Within it, behind and ahead: nothing more is read.
+        assert_eq!(take(&mut r, 811, 5), 84);
+        assert_eq!(take(&mut r, 870, 4), 84);
+        // Partly in it: only what's asked for.
+        assert_eq!(take(&mut r, 872, 10), 94);
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[882..886]);
+        // Past the end of the file.
+        assert!(matches!(
+            read_at(&mut r, 995, &mut [0; 10]),
+            Err(Error::Broken(_))
+        ));
+    }
+
+    #[test]
+    fn a_read_back_after_one_past_a_used_up_buffer_reads_the_files_bytes() {
+        let bytes: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let mut r = BufReader::with_capacity(64, Cursor::new(bytes.clone()));
+        let mut buf = [0; 8];
+        // 0 to 64 buffered, then used up to its end.
+        assert_eq!(r.fill_buf().unwrap().len(), 64);
+        read_at(&mut r, 60, &mut buf[..4]).unwrap();
+        assert!(r.buffer().is_empty());
+        assert_eq!(buf[..4], bytes[60..64]);
+        // Straight from the file, the buffer used up.
+        read_at(&mut r, 64, &mut buf).unwrap();
+        assert_eq!(buf, bytes[64..72]);
+        // Back into where the buffer was: the file's bytes, not 8 early.
+        read_at(&mut r, 50, &mut buf).unwrap();
+        assert_eq!(buf, bytes[50..58]);
+        let mut next = [0; 4];
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[58..62]);
+    }
+}

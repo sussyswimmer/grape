@@ -1,0 +1,44 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Grape <grape@invalid>
+Date: Mon, 26 Oct 2026 10:44:15 +0000
+Subject: [PATCH] tar: read only RAR and RAR5 in @archive mode
+
+append_archive_filename() enabled every read format and every read
+filter, then set mtree:checkfs after TAR_READER_OPTIONS had been
+applied. Through @archive that let an input be read as mtree (which
+opens local files named by contents= or by the entry's own path), as
+a seekable ZIP that outbids RAR4 (issue #2249), or through a filter
+that runs an external program found on PATH.
+
+Enable only the rar and rar5 readers, enable no filter, and do not set
+mtree:checkfs. TAR_READER_OPTIONS still applies (rar:hdrcharset=...).
+Only append_archive_filename() changes; -x, -t and the disk reader are
+untouched.
+
+[Grape-owned patch. bsdtar is used only as
+"bsdtar -c -P -f - --format pax @-".]
+---
+ tar/write.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/tar/write.c b/tar/write.c
+index 0f79dc9..37b7c31 100644
+--- a/tar/write.c
++++ b/tar/write.c
+@@ -644,10 +644,13 @@ append_archive_filename(struct bsdtar *bsdtar, struct archive *a,
+ 		filename = NULL; /* Library uses NULL for stdio. */
+ 
+ 	ina = archive_read_new();
+-	archive_read_support_format_all(ina);
+-	archive_read_support_filter_all(ina);
++	/* Grape: @archive reads RAR (v4 and v5) only. No other format
++	 * and no decompression filter, so no input can start an external
++	 * program, and no mtree, so no input can make bsdtar open a
++	 * local file. */
++	archive_read_support_format_rar(ina);
++	archive_read_support_format_rar5(ina);
+ 	set_reader_options(bsdtar, ina);
+-	archive_read_set_options(ina, "mtree:checkfs");
+ 	if (bsdtar->passphrase != NULL)
+ 		rc = archive_read_add_passphrase(ina, bsdtar->passphrase);
+ 	else

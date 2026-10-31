@@ -1,0 +1,664 @@
+/*
+ * The tool panel (D31): a transparent window 352 px wide (Rust sets its
+ * height per tool) holding one rounded glass surface, inset 6 px on every
+ * side for its shadow. Header 52 px, footer 60 px; the body is 118 px for
+ * Compress (its note takes up to two lines), 100 for Audio Channels, 110
+ * for Normalize, and 90 + rows × 36 for Merge (the list scrolls past six
+ * rows). The page fills whatever size Rust gives it. Grape's palette
+ * only, via tokens.css.
+ */
+:root {
+  --panel-fill: var(--glass-fill-pill);
+  --panel-stroke: var(--glass-stroke);
+  --panel-shadow: var(--shadow-soft);
+  --panel-text: var(--color-text);
+  --panel-muted: var(--color-text-muted);
+  --panel-divider: var(--color-border);
+  --panel-accent: var(--color-accent);
+  --panel-on-accent: var(--color-on-accent);
+  --panel-checked: var(--color-accent);
+  --panel-selected: var(--track-fill);
+  --panel-hover: var(--track-fill);
+  --panel-track: var(--track-fill);
+  --panel-focus: var(--color-accent);
+  --panel-error: var(--color-error);
+}
+
+html,
+body {
+  margin: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  user-select: none;
+  cursor: default;
+  font-family: var(--font-ui);
+  color: var(--panel-text);
+}
+
+#panel-root {
+  position: fixed;
+  inset: 0;
+}
+
+#panel-root[hidden] {
+  display: none;
+}
+
+.panel-surface {
+  box-sizing: border-box;
+  position: absolute;
+  inset: 6px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--panel-fill);
+  box-shadow: 0 1px 4px var(--panel-shadow);
+  overflow: hidden;
+  transition: opacity 120ms ease;
+}
+
+/* The stroke is drawn on top and takes no room, so header + body + footer fill the surface exactly. */
+.panel-surface::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--panel-stroke);
+  border-radius: inherit;
+  pointer-events: none;
+}
+
+/* Another window has the keyboard: the surface dims a little and the hint says how to take it. */
+#panel-root[data-active="false"] .panel-surface {
+  opacity: 0.94;
+}
+
+/* Run or Cancel was sent: nothing takes a press until Rust answers. */
+#panel-root[data-state="running"] .panel-surface button,
+#panel-root[data-state="closing"] .panel-surface button,
+#panel-root[data-state="running"] .panel-body,
+#panel-root[data-state="closing"] .panel-body {
+  pointer-events: none;
+}
+
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--panel-focus);
+  outline-offset: -2px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --- Header ---------------------------------------------------------------- */
+
+.panel-header {
+  box-sizing: border-box;
+  flex: none;
+  height: 52px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  align-content: center;
+  column-gap: 8px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--panel-divider);
+}
+
+.panel-title {
+  grid-column: 1;
+  grid-row: 1;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-count {
+  grid-column: 1;
+  grid-row: 2;
+  margin: 0;
+  color: var(--panel-muted);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-header .panel-icon-button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+}
+
+.panel-icon-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--panel-muted);
+  cursor: default;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.panel-icon-button:hover:not(:disabled) {
+  background: var(--panel-hover);
+  color: var(--panel-text);
+}
+
+.panel-icon-button:disabled {
+  opacity: 0.4;
+}
+
+.panel-icon-button svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* --- Body -------------------------------------------------------------------- */
+
+.panel-body {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 10px 14px 0;
+  overflow: hidden;
+}
+
+.panel-label {
+  flex: none;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.panel-note {
+  flex: none;
+  margin: 8px 0 0;
+  color: var(--panel-muted);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * Compress's notes take up to two lines: Small's says what it scales down,
+ * wider than one line in some fonts. Rust's window has room for two.
+ */
+#panel-root[data-tool="compress"] .panel-note {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+}
+
+/* Compress and Audio Channels: a segmented control of native radios. */
+.panel-segments {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  height: 36px;
+  margin-top: 8px;
+  padding: 2px;
+  box-sizing: border-box;
+  border-radius: 10px;
+  background: var(--panel-track);
+}
+
+.panel-segment {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+}
+
+/* The radio stays in the page for keys and screen readers; its text is what shows. */
+.panel-segment-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+}
+
+.panel-segment-text {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.panel-segment:hover .panel-segment-text {
+  background: var(--panel-hover);
+}
+
+.panel-segment.is-checked .panel-segment-text {
+  background: var(--panel-checked);
+  color: var(--panel-on-accent);
+}
+
+.panel-segment-input:focus-visible + .panel-segment-text {
+  outline: 2px solid var(--panel-focus);
+  outline-offset: 1px;
+}
+
+/* Normalize Volume: a native range input with the value on the right. */
+.panel-label-row {
+  flex: none;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.panel-lufs-value {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel-range {
+  flex: none;
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 24px;
+  margin: 8px 0 0;
+  accent-color: var(--panel-accent);
+}
+
+.panel-scale {
+  flex: none;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 2px;
+  color: var(--panel-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.panel-range + .panel-scale + .panel-note {
+  margin-top: 6px;
+}
+
+/* Merge PDFs: the order list, its drop line, and Move up / Move down. */
+.panel-label + .visually-hidden + .panel-list-frame {
+  margin-top: 6px;
+}
+
+/* Exactly min(n, 6) rows tall; the room left under the tools is the body's bottom margin. */
+.panel-list-frame {
+  position: relative;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.panel-list {
+  box-sizing: border-box;
+  max-height: calc(36px * 6);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--panel-divider) transparent;
+  /* A finger or pen drag is the page's reorder, not a pan: with the default
+     the browser takes the pan and sends pointercancel. The list still
+     scrolls by edge auto-scroll, the wheel and the keyboard. */
+  touch-action: none;
+}
+
+.panel-row {
+  position: relative;
+  box-sizing: border-box;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px 0 6px;
+  border-radius: 8px;
+  cursor: grab;
+  transition: background-color 120ms ease;
+}
+
+.panel-row:hover {
+  background: var(--panel-hover);
+}
+
+.panel-row.is-selected {
+  background: var(--panel-selected);
+}
+
+/* Hover has the same fill, so the selected row also carries an accent bar:
+   after Alt+↑/↓ the row under a resting pointer must not look selected. */
+.panel-row.is-selected::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 9px;
+  bottom: 9px;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--panel-accent);
+}
+
+/* The list holds the keyboard; its selected row shows where. */
+.panel-list:focus-visible {
+  outline: none;
+}
+
+.panel-list:focus-visible .panel-row.is-selected {
+  outline: 2px solid var(--panel-focus);
+  outline-offset: -2px;
+}
+
+.panel-row.is-lifted {
+  opacity: 0.45;
+}
+
+#panel-root[data-gesture="lifted"],
+#panel-root[data-gesture="lifted"] * {
+  cursor: grabbing;
+}
+
+.panel-grip {
+  flex: none;
+  display: inline-flex;
+  width: 14px;
+  height: 18px;
+  color: var(--panel-muted);
+}
+
+.panel-grip svg {
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}
+
+.panel-position {
+  flex: none;
+  min-width: 14px;
+  color: var(--panel-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.panel-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.panel-drop-line {
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  top: 0;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--panel-accent);
+  pointer-events: none;
+}
+
+.panel-drop-line[hidden] {
+  display: none;
+}
+
+.panel-list-tools {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 36px;
+  margin-top: 8px;
+}
+
+.panel-output {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--panel-muted);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- Footer ------------------------------------------------------------------ */
+
+.panel-footer {
+  box-sizing: border-box;
+  flex: none;
+  height: 60px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border-top: 1px solid var(--panel-divider);
+}
+
+.panel-hint {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  color: var(--panel-muted);
+  font-size: 11px;
+  line-height: 14px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+
+.panel-hint.is-error {
+  color: var(--panel-error);
+}
+
+.panel-button {
+  flex: none;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--panel-divider);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--panel-text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: default;
+  transition:
+    background-color 120ms ease,
+    opacity 120ms ease;
+}
+
+.panel-button:hover:not(:disabled) {
+  background: var(--panel-hover);
+}
+
+.panel-button.is-primary {
+  border-color: var(--panel-accent);
+  background: var(--panel-accent);
+  color: var(--panel-on-accent);
+  font-weight: 600;
+}
+
+.panel-button.is-primary:hover:not(:disabled) {
+  background: var(--panel-accent);
+  opacity: 0.9;
+}
+
+.panel-button:focus-visible {
+  outline-offset: 2px;
+}
+
+.panel-button:disabled {
+  opacity: 0.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel-surface,
+  .panel-icon-button,
+  .panel-segment-text,
+  .panel-row,
+  .panel-button {
+    transition: none;
+  }
+}
+
+/*
+ * High contrast on Windows: the browser draws the surface, text and
+ * borders in the system's colors but drops fills, so the checked segment
+ * and the selected row take Highlight, hover gets a thin outline and focus
+ * a thicker Highlight one (HighlightText inside those two, which are
+ * Highlight already). Disabled buttons and muted text use GrayText.
+ * The range input keeps the system's own look.
+ */
+@media (forced-colors: active) {
+  .panel-surface {
+    background: Canvas;
+    color: CanvasText;
+  }
+
+  .panel-surface::after,
+  .panel-header,
+  .panel-footer,
+  .panel-button,
+  .panel-segments {
+    border-color: CanvasText;
+  }
+
+  .panel-segments {
+    border: 1px solid CanvasText;
+  }
+
+  .panel-count,
+  .panel-note,
+  .panel-scale,
+  .panel-output,
+  .panel-hint,
+  .panel-position,
+  .panel-grip {
+    color: GrayText;
+  }
+
+  .panel-hint.is-error {
+    color: CanvasText;
+  }
+
+  .panel-icon-button {
+    color: ButtonText;
+  }
+
+  .panel-segment:hover .panel-segment-text,
+  .panel-row:hover,
+  .panel-icon-button:hover:not(:disabled),
+  .panel-button:hover:not(:disabled) {
+    outline: 1px solid CanvasText;
+    outline-offset: -1px;
+  }
+
+  .panel-segment.is-checked .panel-segment-text,
+  .panel-row.is-selected {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+
+  .panel-row.is-selected .panel-position,
+  .panel-row.is-selected .panel-grip {
+    color: HighlightText;
+  }
+
+  /* Highlight already sets the selected row apart from a hovered one. */
+  .panel-row.is-selected::before {
+    display: none;
+  }
+
+  /* After the hover rules and as specific, so a hovered control still shows its focus. */
+  :focus-visible,
+  .panel-segment-input:focus-visible + .panel-segment-text,
+  .panel-list:focus-visible .panel-row.is-selected,
+  .panel-icon-button:focus-visible,
+  .panel-button:focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  /* The selected row and the checked segment are already Highlight, so their focus ring is drawn inside in HighlightText. */
+  .panel-list:focus-visible .panel-row.is-selected,
+  .panel-segment.is-checked .panel-segment-input:focus-visible + .panel-segment-text {
+    outline-color: HighlightText;
+    outline-offset: -4px;
+  }
+
+  .panel-button:disabled,
+  .panel-icon-button:disabled {
+    color: GrayText;
+    border-color: GrayText;
+    opacity: 1;
+  }
+
+  .panel-drop-line {
+    background: Highlight;
+  }
+
+  .panel-range {
+    forced-color-adjust: auto;
+  }
+}

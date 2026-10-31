@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "float",
+  "description": "The float shelf listens for float://view and float://drag-ended, moves itself by its header (start_dragging), and works on its items by id, never by path: float_view, float_remove, float_clear, float_reveal and float_drag_out. Rust keeps the paths.",
+  "windows": ["float"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-start-dragging",
+    "allow-float-view",
+    "allow-float-remove",
+    "allow-float-clear",
+    "allow-float-reveal",
+    "allow-float-drag-out"
+  ]
+}

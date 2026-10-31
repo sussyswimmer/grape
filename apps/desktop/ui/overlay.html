@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- An empty icon, so WebView2 never asks for /favicon.ico, which
+         Grape doesn't ship, and Tauri doesn't log a missing asset. -->
+    <link rel="icon" href="data:," />
+    <title>Grape Overlay</title>
+  </head>
+  <body>
+    <!--
+      The overlay covers the whole monitor while the wheel is open. The
+      wheel is drawn into #wheel-root from wheel://open (src/wheel/).
+    -->
+    <div id="wheel-root"></div>
+    <script type="module" src="/src/overlay.ts"></script>
+  </body>
+</html>

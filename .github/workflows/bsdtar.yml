@@ -1,0 +1,129 @@
+name: bsdtar
+
+# Grape's own bsdtar (DECISIONS D27): libarchive 3.8.10 plus scripts/bsdtar/patches,
+# built per OS, checked, smoke-tested in Grape's exact environment and uploaded as
+# artifacts for the jobs of the run that called this. No GitHub Release of the
+# builds until M7; release.yml builds it clean from its tag for the installer
+# and the DMG.
+#
+# targets: "all" (the default, and a manual run) builds both. ci.yml calls it
+# once per OS ("windows", "macos"), so that a Mac failure never holds back the
+# Windows installer, and the other way round.
+on:
+  workflow_call:
+    inputs:
+      cache:
+        description: Use the build cache (release.yml builds clean).
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (release.yml passes its tag); empty for the caller's own ref.
+        type: string
+        default: ""
+      targets:
+        description: all, windows or macos (see above).
+        type: string
+        default: all
+  workflow_dispatch:
+    inputs:
+      cache:
+        description: Use the build cache.
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (a tag, say); empty for the branch this runs on.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: bsdtar (Windows x64)
+    if: inputs.targets != 'macos'
+    runs-on: windows-latest
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # Keyed on everything in scripts/bsdtar and on the copyright lines, which only
+      # the full build checks (a hit skips it). Saved only after every check passed.
+      - id: cache
+        if: inputs.cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target/bsdtar
+          key: bsdtar-${{ runner.os }}-${{ hashFiles('scripts/bsdtar/**', 'licenses/libarchive/copyright-lines.txt') }}
+      - name: Build
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: ./scripts/bsdtar/build.ps1 -Root target/bsdtar
+      - name: Check (dependencies, manifest, version line)
+        shell: pwsh
+        run: ./scripts/bsdtar/build.ps1 -Root target/bsdtar -CheckOnly
+      # The PC's own shell: the script must work in Windows PowerShell 5.1 too.
+      - name: Check again (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./scripts/bsdtar/build.ps1 -Root target/bsdtar -CheckOnly
+      - name: Smoke test (Grape's environment, stdin piped)
+        run: python -I scripts/bsdtar/smoke.py --bsdtar target/bsdtar/out/bsdtar-x86_64-pc-windows-msvc.exe --tarball target/bsdtar/dl/libarchive-3.8.10.tar.gz --sources scripts/bsdtar/sources.json
+      - if: inputs.cache && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/bsdtar
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bsdtar-x86_64-pc-windows-msvc
+          path: |
+            target/bsdtar/out/bsdtar-x86_64-pc-windows-msvc.exe
+            target/bsdtar/out/BUILDINFO.txt
+            target/bsdtar/out/SHA256SUMS
+          if-no-files-found: error
+
+  macos:
+    name: bsdtar (macOS universal)
+    if: inputs.targets != 'windows'
+    runs-on: macos-latest
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # Keyed on everything in scripts/bsdtar and on the copyright lines, which only
+      # the full build checks (a hit skips it). Saved only after every check passed.
+      - id: cache
+        if: inputs.cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target/bsdtar
+          key: bsdtar-${{ runner.os }}-${{ hashFiles('scripts/bsdtar/**', 'licenses/libarchive/copyright-lines.txt') }}
+      # /bin/bash is macOS's own bash 3.2; the runner's bash on PATH is newer.
+      - name: Build (arm64 and x86_64, merged and signed ad hoc)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: /bin/bash ./scripts/bsdtar/build.sh --root target/bsdtar
+      - name: Check (libSystem only, architectures, minimum macOS, signatures, version line)
+        run: /bin/bash ./scripts/bsdtar/build.sh --root target/bsdtar --check-only
+      # en_US.UTF-8 must exist for Grape's environment (D27).
+      - name: Smoke test (Grape's environment, stdin piped)
+        run: python3 -I scripts/bsdtar/smoke.py --bsdtar target/bsdtar/out/bsdtar-universal-apple-darwin --tarball target/bsdtar/dl/libarchive-3.8.10.tar.gz --sources scripts/bsdtar/sources.json
+      - if: inputs.cache && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/bsdtar
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      # Artifacts lose the executable bit: consumers chmod +x.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bsdtar-apple-darwin
+          path: |
+            target/bsdtar/out/bsdtar-aarch64-apple-darwin
+            target/bsdtar/out/bsdtar-x86_64-apple-darwin
+            target/bsdtar/out/bsdtar-universal-apple-darwin
+            target/bsdtar/out/BUILDINFO.txt
+            target/bsdtar/out/SHA256SUMS
+          if-no-files-found: error
