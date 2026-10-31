@@ -358,6 +358,68 @@ pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
     }
 }
 
+/// Sets IFD0's Orientation (0x0112, one SHORT) of `tiff` to `orientation`,
+/// in place, once Compress has turned the pixels upright (D28's HEIC). An
+/// Orientation that isn't there, or isn't one SHORT, is left as it is: a
+/// reader that finds none takes the picture as it's stored.
+#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
+pub(crate) fn patch_orientation(tiff: &mut [u8], orientation: u16) {
+    let Some((order, first)) = header(tiff) else {
+        return;
+    };
+    let Some((start, count)) = ifd0(tiff, order, first) else {
+        return;
+    };
+    for n in 0..usize::from(count) {
+        let at = start + 2 + n * 12;
+        let Some(entry) = tiff.get(at..at + 12) else {
+            return;
+        };
+        if (
+            order.u16(&entry[0..2]),
+            order.u16(&entry[2..4]),
+            order.u32(&entry[4..8]),
+        ) != (0x0112, 3, 1)
+        {
+            continue;
+        }
+        let b = match order {
+            Order::Little => orientation.to_le_bytes(),
+            Order::Big => orientation.to_be_bytes(),
+        };
+        tiff[at + 8..at + 10].copy_from_slice(&b);
+    }
+}
+
+/// Unlinks IFD1, the thumbnail's IFD, from `tiff` in place: IFD0's next
+/// offset becomes 0, so no reader finds the thumbnail, whose bytes stay
+/// where they were. For an Exif whose Orientation Compress set to 1 over
+/// pixels it turned (D28's HEIC): the thumbnail is still stored as the
+/// picture was, and would show turned the wrong way. An IFD0 cut short is
+/// left as it is.
+#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
+pub(crate) fn unlink_ifd1(tiff: &mut [u8]) {
+    let Some((order, first)) = header(tiff) else {
+        return;
+    };
+    let Some((start, count)) = ifd0(tiff, order, first) else {
+        return;
+    };
+    let next = start + 2 + usize::from(count) * 12;
+    if let Some(field) = tiff.get_mut(next..next + 4) {
+        field.fill(0);
+    }
+}
+
+/// Where IFD0 starts in `tiff` (at `first`, in `order`) and how many
+/// entries it has: none past [`MAX_ENTRIES`], or with its count cut off.
+#[cfg_attr(not(test), allow(dead_code))] // Compress on HEIC (D28) calls it once it runs.
+fn ifd0(tiff: &[u8], order: Order, first: u32) -> Option<(usize, u16)> {
+    let start = usize::try_from(first).ok()?;
+    let count = order.u16(tiff.get(start..start.checked_add(2)?)?);
+    (count <= MAX_ENTRIES).then_some((start, count))
+}
+
 /// The EXIF Remove Metadata writes back (D26, U2), as a big-endian TIFF:
 /// the Orientation when it isn't 1, and the DCF Adobe RGB tags
 /// (ColorSpace uncalibrated, Interop `R03`) when `adobe_rgb`. `None` when
@@ -733,6 +795,54 @@ pub(crate) mod tests {
         assert_eq!(plain, before);
         let mut junk = b"II*\0\xff\xff\xff\xff".to_vec();
         patch_dimensions(&mut junk, 1, 1);
+    }
+
+    #[test]
+    fn compress_sets_the_orientation_and_unlinks_the_thumbnail_in_place() {
+        for order in *b"IM" {
+            let mut t = camera(order);
+            let len = t.len();
+            assert!(walk(&t).fields.contains(&Thumbnail));
+            patch_orientation(&mut t, 1);
+            assert_eq!((t.len(), walk(&t).orientation), (len, Some(1)));
+            unlink_ifd1(&mut t);
+            let exif = walk(&t);
+            assert_eq!(t.len(), len);
+            assert!(!exif.fields.contains(&Thumbnail), "{:?}", exif.fields);
+            // The rest is still there.
+            assert!(exif.fields.contains(&Location) && exif.fields.contains(&Camera));
+            assert_eq!(exif.orientation, Some(1));
+        }
+        // An Orientation that isn't one SHORT, none at all, and garbage:
+        // nothing happens.
+        for mut t in [
+            tiff(b'I', &[&[(0x0112, V::Long(6))]], None),
+            tiff(b'M', &[&[(0x010F, V::Ascii("x"))]], None),
+            b"II*\0\xff\xff\xff\xff".to_vec(),
+            b"MM\0*\0\0\0\x08\x7f\xff".to_vec(),
+            b"II*\0\x08\0\0\0\x01\0".to_vec(),
+        ] {
+            let before = t.clone();
+            patch_orientation(&mut t, 1);
+            assert_eq!(t, before);
+            if before.len() < 14 {
+                unlink_ifd1(&mut t);
+                assert_eq!(t, before);
+            }
+        }
+        // IFD0 with no next offset after it: nothing to unlink.
+        let mut short = tiff(b'I', &[&[(0x0112, V::Short(6))]], None);
+        short.truncate(8 + 2 + 12);
+        let before = short.clone();
+        unlink_ifd1(&mut short);
+        assert_eq!(short, before);
+        // Every prefix of a real one.
+        let real = camera(b'I');
+        for n in 0..real.len() {
+            let mut t = real[..n].to_vec();
+            patch_orientation(&mut t, 1);
+            unlink_ifd1(&mut t);
+        }
     }
 
     #[test]

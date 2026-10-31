@@ -25,7 +25,8 @@ src/
                     write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF).
                     isobmff/ (D28): boxes.rs (top-level boxes by seeking, boxes in memory), items.rs (the file-level meta:
                     items, locations, references, properties), scan.rs (Compress on HEIC before the helper starts: what
-                    it carries, its refusals); heic.rs (Remove Metadata on HEIC, meta rebuilt in place).
+                    it carries, its refusals), graft.rs (the helper's out.heic with the source's metadata items put back,
+                    meta written again, checked); heic.rs (Remove Metadata on HEIC, meta rebuilt in place).
                     webp_compress.rs (D28): Compress on WebP, libwebp through grape-webp, the metadata put back by webp.rs's
                     scan and assemble
   headers.rs        header readers that bound what the image decoders keep
