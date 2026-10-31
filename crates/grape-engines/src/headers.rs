@@ -214,12 +214,13 @@ fn read_webp_layout<R: Read + Seek>(r: &mut BufReader<R>) -> Option<WebpLayout> 
         return Some(WebpLayout::Still { lossy_alpha: false });
     }
     // With alpha, image-webp decodes losslessly when a `VP8L` chunk is
-    // anywhere in the range it scans: from the end of `VP8X` to that point
-    // plus the RIFF size less 12, or the end of the file.
+    // anywhere in the range it scans: from the end of `VP8X` to the RIFF's
+    // end, where Grape's reader ends the file for it (`image::read_end`),
+    // or the file's.
     let le = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
     let rounded = |size: u64| size + (size & 1);
     let mut at = 20 + rounded(le(&header[16..20]));
-    let end = at.saturating_add(le(&header[4..8]).saturating_sub(12));
+    let end = le(&header[4..8]) + 8;
     for _ in 0..MAX_WEBP_CHUNKS {
         if at >= end {
             return Some(WebpLayout::Still { lossy_alpha: true });
@@ -598,16 +599,23 @@ mod tests {
     }
 
     #[test]
-    fn a_vp8l_chunk_past_the_decoders_scan_doesnt_count() {
-        // image-webp scans from the end of `VP8X` to that point plus the
-        // RIFF size less 12: here 10 bytes past the RIFF data. A `VP8L`
-        // chunk further on is never read, so the image decodes as `VP8 `
-        // with its alpha chunk.
+    fn a_vp8l_chunk_past_the_riffs_end_doesnt_count() {
+        // The decoder reads the file only to the RIFF's end: a `VP8L`
+        // chunk past it, even just past it, where image-webp's own walk
+        // would reach, is never read, so the image decodes as `VP8 ` with
+        // its alpha chunk.
         let lossy = extended(0x10, &[riff(b"ALPH", &[0; 3]), riff(b"VP8 ", &[0; 10])]);
-        let beyond = [lossy.clone(), vec![0; 16], riff(b"VP8L", &[0; 5])].concat();
+        let beyond = [lossy.clone(), riff(b"VP8L", &[0; 5])].concat();
         assert_eq!(webp(&beyond), Some(WebpLayout::Still { lossy_alpha: true }));
-        // Within reach, it counts.
-        let within = [lossy, riff(b"VP8L", &[0; 5])].concat();
+        // Within the RIFF, it counts.
+        let within = extended(
+            0x10,
+            &[
+                riff(b"ALPH", &[0; 3]),
+                riff(b"VP8 ", &[0; 10]),
+                riff(b"VP8L", &[0; 5]),
+            ],
+        );
         assert_eq!(
             webp(&within),
             Some(WebpLayout::Still { lossy_alpha: false })

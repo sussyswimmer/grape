@@ -426,6 +426,37 @@ fn a_panicking_hook_cancels_without_unwinding_through_libwebp() {
 }
 
 #[test]
+fn large_lossy_pictures_start_with_fewer_4x4_mode_bits() {
+    // None up to about 16.7 MP: 4096² is 65,536 macroblocks.
+    assert_eq!(partition_limit(1, 1), 0);
+    assert_eq!(partition_limit(4096, 4096), 0);
+    assert_eq!(partition_limit(5000, 3000), 0);
+    // Over it, the cap at most 4 times the first partition's share a
+    // macroblock, and as close to it as libwebp's steps allow.
+    for (w, h, limit) in [
+        (4144, 4144, 1),
+        (6000, 4000, 16),
+        (6500, 6500, 37),
+        (16_383, 16_383, 75),
+    ] {
+        assert_eq!(partition_limit(w, h), limit, "{w}x{h}");
+        let macroblocks = u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16));
+        let share = PARTITION0_LIMIT / macroblocks;
+        let left = 100 - limit as u64;
+        let cap = |left: u64| I4_HEADER_BITS * left * left / 10_000;
+        assert!(
+            cap(left) >= 4 * share && cap(left - 1) < 4 * share,
+            "{w}x{h}"
+        );
+    }
+    // In the config, for lossy only.
+    let cfg = config(&LOSSY, 6500, 6500).unwrap();
+    assert_eq!(cfg.partition_limit, 37);
+    assert_eq!(config(&LOSSY, 640, 480).unwrap().partition_limit, 0);
+    assert_eq!(config(&LOSSLESS, 6500, 6500).unwrap().partition_limit, 0);
+}
+
+#[test]
 fn the_version_is_1_6_0() {
     assert_eq!(version(), (1, 6, 0));
 }

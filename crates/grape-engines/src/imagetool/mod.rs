@@ -31,13 +31,19 @@ mod webp;
 mod webp_compress;
 
 use std::fs::File;
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::path::Path;
 
 use grape_core::{Format, Job, ToolKey, ToolParams};
 use grape_heif_proto::{Sniff, SNIFF_BYTES};
 
-use crate::{EngineCtx, GrapeError, JobOutcome};
+use crate::cancel::Cancellable;
+use crate::publish::Names;
+use crate::{CancelToken, EngineCtx, GrapeError, JobOutcome};
+
+#[allow(unused_imports)] // For lane A's `svg::resolve` (D28).
+pub(crate) use webp::readable as webp_readable;
+pub(crate) use webp::Reading as WebpReading;
 
 /// True when this engine runs `tool` on a file named as `from`. `_heif`
 /// says whether this install has the HEIC helper (D33), as
@@ -80,6 +86,28 @@ pub(crate) fn run(
         },
         _ => Err(crate::not_yet_supported(job, Some(from))),
     }
+}
+
+/// How a decode must read the WebP `file` (`src`, named in `names`) to
+/// show what libwebp shows, as Compress reads it too ([`webp::reading`]),
+/// or why it can't: "… isn't a readable WEBP image." for what Compress's
+/// scan refuses as broken. Reads chunk headers only; the file is left
+/// wherever the walk stops.
+pub(crate) fn webp_reading(
+    file: &File,
+    src: &Path,
+    names: &Names,
+    cancel: &CancelToken,
+) -> Result<WebpReading, GrapeError> {
+    webp::reading(&mut BufReader::new(Cancellable::new(file, cancel))).map_err(|e| match e {
+        strip::Error::Broken(why) | strip::Error::Refused(why) => {
+            names.decode_failed(format!("decode {}: {why}", src.display()))
+        }
+        strip::Error::TooLarge(why) => names.too_large(format!("decode {}: {why}", src.display())),
+        strip::Error::Read(e) | strip::Error::Write(e) => {
+            names.read_failed(format!("read {}: {e}", src.display()))
+        }
+    })
 }
 
 /// The image containers the tools read, by a file's first bytes.

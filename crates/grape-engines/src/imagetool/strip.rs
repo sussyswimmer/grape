@@ -2,8 +2,9 @@
 //! container's stripper into a temp file, then published with a note of
 //! what went. A TIFF is walked first and rewritten from the plan its walk
 //! made ([`tiff::strip`]); a HEIF file is read first and copied with its
-//! `meta` rebuilt in place ([`heic`]). Either output is read again before
-//! it's published.
+//! `meta` rebuilt in place ([`heic`]); a WebP is walked first as every
+//! conversion walks it ([`webp::Plan`]). Each of their outputs is read
+//! again before it's published.
 //!
 //! The container comes from the file's first bytes, not its name: a PNG
 //! named `.jpg` is stripped as a PNG (and keeps its name). Reads and
@@ -76,10 +77,10 @@ impl<R: Read + Seek> In for BufReader<R> {
         if self.buffer().len() >= buf.len() {
             return self.read_exact(buf);
         }
-        if !self.buffer().is_empty() {
-            // Dropped, so that the file is at `at`.
-            self.seek(SeekFrom::Start(at))?;
-        }
+        // Dropped, so that the file is at `at`, and dropped even when it's
+        // used up: kept, a later seek back into it would take its bytes as
+        // the ones before where the file is now, `buf.len()` too early.
+        self.seek(SeekFrom::Start(at))?;
         self.get_mut().read_exact(buf)
     }
 }
@@ -138,11 +139,12 @@ pub(crate) fn strips(from: Format) -> bool {
 }
 
 /// How a source is stripped: streamed through its container's stripper,
-/// or, for a TIFF or a HEIF file, written from the plan its reading made.
+/// or, for a TIFF, a HEIF file or a WebP, written from the plan its
+/// reading made.
 enum Stripper {
     Jpeg,
     Png,
-    Webp,
+    Webp(webp::Plan),
     Gif,
     Tiff(tiff::strip::Plan),
     Heic(heic::Plan),
@@ -186,12 +188,14 @@ pub(crate) fn run(
             src.display()
         )));
     };
-    // A TIFF or a HEIF file is read first: one Grape won't strip is
-    // refused before anything is created.
+    // A TIFF, a HEIF file or a WebP is read first: one Grape won't strip
+    // is refused before anything is created.
     let mut stripper = match kind {
         Kind::Jpeg => Stripper::Jpeg,
         Kind::Png => Stripper::Png,
-        Kind::Webp => Stripper::Webp,
+        Kind::Webp => Stripper::Webp(
+            webp::Plan::new(&mut reader).map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
+        ),
         Kind::Gif => Stripper::Gif,
         Kind::Tiff => Stripper::Tiff(
             tiff::strip::Plan::new(&mut reader, size)
@@ -204,6 +208,15 @@ pub(crate) fn run(
                 .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
         ),
     };
+    if let Stripper::Webp(plan) = &stripper {
+        if plan.decides_by_pixels() {
+            // A conversion decides on this one only once it's decoded it,
+            // so it's decoded as a conversion decodes it: one whose pixels
+            // readers show differently is refused as conversions refuse it.
+            crate::image::decode_stored(src, from, Format::Webp, &names, &ctx.cancel, &|_, _, _| 0)
+                .map_err(|e| publish::or_cancelled(&ctx.cancel, src, e))?;
+        }
+    }
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
@@ -211,7 +224,7 @@ pub(crate) fn run(
     let found = match &mut stripper {
         Stripper::Jpeg => jpeg::strip(&mut reader, &mut writer),
         Stripper::Png => png::strip(&mut reader, &mut writer),
-        Stripper::Webp => webp::strip(&mut reader, &mut writer),
+        Stripper::Webp(plan) => plan.write(&mut reader, &mut writer),
         Stripper::Gif => gif::strip(&mut reader, &mut writer),
         Stripper::Tiff(plan) => plan.write(&mut reader, &mut writer, &ctx.cancel),
         Stripper::Heic(plan) => plan.write(&mut reader, &mut writer),
@@ -271,10 +284,10 @@ fn failed(e: Error, names: &Names, src: &Path, temp: &Path, cancel: &CancelToken
     publish::or_cancelled(cancel, src, e)
 }
 
-/// Reads the TIFF or HEIF file Grape wrote at `path` again, against the
-/// plan it came from (D28), and a HEIF file's source `src` too: anything
-/// amiss is Grape's own failure, and nothing is published. The other
-/// containers are streamed, and have no plan.
+/// Reads the TIFF, HEIF file or WebP Grape wrote at `path` again, against
+/// the plan it came from (D28), and a HEIF file's source `src` too:
+/// anything amiss is Grape's own failure, and nothing is published. The
+/// other containers are streamed, and have no plan.
 fn check(
     stripper: &Stripper,
     path: &Path,
@@ -305,7 +318,11 @@ fn check(
             let (mut source, _) = open(src)?;
             plan.check(&mut source, &mut reader, len)
         }
-        Stripper::Jpeg | Stripper::Png | Stripper::Webp | Stripper::Gif => Ok(()),
+        Stripper::Webp(plan) => {
+            let (mut reader, _) = open(path)?;
+            plan.check(&mut reader)
+        }
+        Stripper::Jpeg | Stripper::Png | Stripper::Gif => Ok(()),
     };
     checked.map_err(|e| match e {
         Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => wrong(why),
@@ -433,5 +450,26 @@ mod tests {
             read_at(&mut r, 995, &mut [0; 10]),
             Err(Error::Broken(_))
         ));
+    }
+
+    #[test]
+    fn a_read_back_after_one_past_a_used_up_buffer_reads_the_files_bytes() {
+        let bytes: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let mut r = BufReader::with_capacity(64, Cursor::new(bytes.clone()));
+        let mut buf = [0; 8];
+        // 0 to 64 buffered, then used up to its end.
+        assert_eq!(r.fill_buf().unwrap().len(), 64);
+        read_at(&mut r, 60, &mut buf[..4]).unwrap();
+        assert!(r.buffer().is_empty());
+        assert_eq!(buf[..4], bytes[60..64]);
+        // Straight from the file, the buffer used up.
+        read_at(&mut r, 64, &mut buf).unwrap();
+        assert_eq!(buf, bytes[64..72]);
+        // Back into where the buffer was: the file's bytes, not 8 early.
+        read_at(&mut r, 50, &mut buf).unwrap();
+        assert_eq!(buf, bytes[50..58]);
+        let mut next = [0; 4];
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[58..62]);
     }
 }
