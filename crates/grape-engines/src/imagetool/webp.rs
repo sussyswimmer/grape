@@ -39,9 +39,12 @@
 //!   and the other as the profile, so readers disagree on the file. (An
 //!   `ANIM` there, a second one, both pass over: it goes.)
 //! - **Patched afterwards:** the RIFF size, each frame's size, and VP8X's
-//!   flags: XMP off, and EXIF on only when the minimal EXIF
-//!   ([`exif::minimal`]) went back where the old one was. Without a VP8X
-//!   (a simple WebP) there's no flag to set, so none goes back.
+//!   flags: XMP off, and EXIF off unless the minimal EXIF
+//!   ([`exif::minimal`]) went back where the old one was, and then as the
+//!   source had it: libwebp's demuxer (Pillow's) keeps an EXIF only under
+//!   the flag, and image-webp reads one whatever it says, so each reads
+//!   the output's as it read the source's. Without a VP8X (a simple WebP)
+//!   no reader reads an EXIF, so none goes back.
 //! - **Checked:** the file written must be walked as the source was, with
 //!   the same frames, image and canvas, or nothing is published: Grape
 //!   never writes a WebP it would refuse itself.
@@ -157,9 +160,12 @@ impl Plan {
         let size = u32::try_from(written - 8).map_err(|_| Error::Broken("too big".into()))?;
         seek_write(w, 4, &size.to_le_bytes())?;
         if let Some(Flags { at, flags, exif }) = flags {
-            let mut new = flags & !XMP_FLAG & !EXIF_FLAG;
-            if exif {
-                new |= EXIF_FLAG;
+            // EXIF's as the source had it when the minimal EXIF went back:
+            // on where it was off, the demuxer (Pillow) read an orientation
+            // from the output it never read from the source.
+            let mut new = flags & !XMP_FLAG;
+            if !exif {
+                new &= !EXIF_FLAG;
             }
             seek_write(w, at, &[new])?;
         }
@@ -1508,6 +1514,56 @@ mod tests {
         let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &t)]);
         let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x00), image()]));
+    }
+
+    #[test]
+    fn the_exif_flag_stays_as_the_source_had_it() {
+        // An EXIF under no flag: libwebp's demuxer (Pillow) keeps none,
+        // image-webp reads it. Its minimal EXIF goes back, which image-webp
+        // reads as it read the source's, and the flag stays off: it was
+        // turned on, and Pillow read an orientation from the output it
+        // never read from the source.
+        let six = tiff(
+            b'M',
+            &[&[(0x010F, V::Ascii("Nikon")), (0x0112, V::Short(6))]],
+            None,
+        );
+        let minimal = exif::minimal(Some(6), false).unwrap();
+        let prefixed = |t: &[u8]| [b"Exif\0\0".as_slice(), t].concat();
+        let red = || frame(0, 0, &[image()]);
+        for (src, want) in [
+            (
+                webp(&[
+                    vp8x(0x10),
+                    chunk(b"EXIF", &six),
+                    chunk(b"ALPH", b"al"),
+                    image(),
+                ]),
+                webp(&[
+                    vp8x(0x10),
+                    chunk(b"EXIF", &minimal),
+                    chunk(b"ALPH", b"al"),
+                    image(),
+                ]),
+            ),
+            (
+                webp(&[vp8x(0x00), image(), chunk(b"EXIF", &prefixed(&six))]),
+                webp(&[vp8x(0x00), image(), chunk(b"EXIF", &prefixed(&minimal))]),
+            ),
+            (
+                animation(0, &[chunk(b"EXIF", &prefixed(&six)), red(), red()]),
+                animation(0, &[chunk(b"EXIF", &prefixed(&minimal)), red(), red()]),
+            ),
+            // Flagged, it stays on.
+            (
+                animation(0x08, &[red(), chunk(b"EXIF", &six)]),
+                animation(0x08, &[red(), chunk(b"EXIF", &minimal)]),
+            ),
+        ] {
+            let (out, fields) = run(&src).unwrap();
+            assert_eq!(out, want, "{src:?}");
+            assert_eq!(fields, [MetaField::Camera].into(), "{src:?}");
+        }
     }
 
     #[test]
