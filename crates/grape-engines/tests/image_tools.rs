@@ -256,6 +256,46 @@ fn remove_metadata_strips_a_png_even_one_named_jpg() {
     }
 }
 
+#[test]
+fn remove_metadata_turns_a_png_for_each_reader_as_its_source_was() {
+    // An orientation of 6, as an eXIf bare or behind `Exif\0\0`, or as
+    // ImageMagick's raw profile: the `image` crate, so every conversion,
+    // reads it from a bare eXIf alone, and Pillow from all three. The
+    // minimal EXIF goes back in the same form, so each reader turns the
+    // output as it turned the source (written as a bare eXIf, conversions
+    // turned the two others' output and not their source).
+    let dir = TestDir::new("strip-png-form");
+    let exif = exif(6);
+    let mut raw = format!("\nexif\n{:8}\n", exif.len() - 4).into_bytes();
+    for b in &exif[4..] {
+        raw.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    for (name, carried, turned) in [
+        ("bare.png", chunk(b"eXIf", &exif[10..]), true),
+        ("prefixed.png", chunk(b"eXIf", &exif[4..]), false),
+        (
+            "profile.png",
+            chunk(
+                b"tEXt",
+                &[b"Raw profile type exif\0".as_slice(), &raw].concat(),
+            ),
+            false,
+        ),
+    ] {
+        let src = png_with(&plain_png(), &[carried]);
+        let outcome = strip(&dir, name, &src).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        let want = if turned {
+            Orientation::Rotate90
+        } else {
+            Orientation::NoTransforms
+        };
+        assert_eq!(orientation(&src), want, "{name}");
+        assert_eq!(orientation(&out), want, "{name}");
+        assert!(!out.windows(3).any(|w| w == b"Can"), "{name}");
+    }
+}
+
 /// A RIFF chunk, padded to even.
 fn riff_chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut out = fourcc.to_vec();
