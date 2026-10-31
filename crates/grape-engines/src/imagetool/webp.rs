@@ -1146,7 +1146,6 @@ fn decode_flags(scan: &Scan) -> Option<u8> {
 /// conversion refuses before decoding, and a `VP8L` whose own alpha bit
 /// says none under VP8X's alpha flag, whose pixels such a decoder can't be
 /// asked to check.
-#[allow(dead_code)] // For lane A's `svg::resolve` (D28).
 pub(crate) fn readable(data: &Arc<Vec<u8>>) -> Result<Arc<Vec<u8>>, String> {
     let Some(riff) = data.get(4..8).filter(|_| sniff(data)) else {
         return Ok(Arc::clone(data));
