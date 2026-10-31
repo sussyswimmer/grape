@@ -224,6 +224,9 @@ enum DecodeFailure {
     /// The header asks for more memory than Grape allows; the detail says
     /// how much.
     TooLarge(String),
+    /// A still `VP8L` decoded with its alpha to see (`Reading::unflagged`)
+    /// holds transparency, which readers show differently.
+    Unflagged,
 }
 
 impl From<ImageError> for DecodeFailure {
@@ -457,9 +460,10 @@ fn decode_as(
                 Orientation::NoTransforms
             };
             let (width, height) = decoder.dimensions();
-            // Decoded with its alpha to see, it's handed on opaque, as it
-            // was decoded before: image-webp held the same RGBA buffer then,
-            // and copied its color out of it.
+            // Decoded with its alpha to see, it's counted as it was decoded
+            // before, RGB: image-webp held the same RGBA buffer then, and
+            // copied its color out of it, as it's copied out below before
+            // it's turned.
             let color = match decoder.color_type() {
                 ColorType::Rgba8 if unflagged => ColorType::Rgb8,
                 color => color,
@@ -491,6 +495,15 @@ fn decode_as(
             })?;
             decoder.set_limits(limits)?;
             let mut img = DynamicImage::from_decoder(decoder)?;
+            if unflagged {
+                if transparent(&img) {
+                    return Err(DecodeFailure::Unflagged);
+                }
+                // Opaque, it's handed on as RGB, dropped to it before it's
+                // turned: a quarter turn of the RGBA held two RGBA copies,
+                // 8 bytes a pixel, where the RGB's peak is the 7 counted.
+                img = DynamicImage::ImageRgb8(img.into_rgb8());
+            }
             img.apply_orientation(orientation);
             Ok((img, icc))
         },
@@ -503,19 +516,15 @@ fn decode_as(
                 src.display()
             )))
         }
-        Ok(Ok((img, icc))) if unflagged => {
-            if transparent(&img) {
-                // libwebp's still decoder shows its pixels' alpha, its
-                // demuxer and image-webp go by the VP8L's bit.
-                Err(names.decode_failed(format!(
-                    "decode {}: transparent in libwebp's still decoder, opaque in its demuxer",
-                    src.display()
-                )))
-            } else {
-                Ok((DynamicImage::ImageRgb8(img.into_rgb8()), icc))
-            }
-        }
         Ok(Ok(decoded)) => Ok(decoded),
+        Ok(Err(DecodeFailure::Unflagged)) => {
+            // libwebp's still decoder shows its pixels' alpha, its
+            // demuxer and image-webp go by the VP8L's bit.
+            Err(names.decode_failed(format!(
+                "decode {}: transparent in libwebp's still decoder, opaque in its demuxer",
+                src.display()
+            )))
+        }
         Ok(Err(DecodeFailure::TooLarge(detail))) => {
             Err(names.too_large(format!("decode {}: {detail}", src.display())))
         }
