@@ -464,6 +464,78 @@ fn remove_metadata_strips_every_page_of_a_tiff_and_keeps_its_pixels() {
     }
 }
 
+#[test]
+fn remove_metadata_reads_a_tiff_back_behind_its_first_64_kib_as_it_is() {
+    use tiff::tags::Tag;
+    // A gray 16 × 8 BigTIFF laid out as Pillow and tifffile lay one out,
+    // its IFD and values first (an ICC profile among them), then its second
+    // strip, then bytes no entry points to up to 64 KiB, where its first
+    // strip starts: the end of what the tool's first read of the file
+    // buffered. Its walk reads nothing past there; its copy reads the first
+    // strip from there on, then the second strip and the profile behind
+    // it, which a buffer kept past its end gave 64 bytes early.
+    let entries: [(u16, u16, Vec<u8>); 11] = [
+        (256, 4, le(16, 4)),
+        (257, 4, le(8, 4)),
+        (258, 3, le(8, 2)),
+        (259, 3, le(1, 2)),
+        (262, 3, le(1, 2)),
+        (273, 16, [le(65_536, 8), le(1_000, 8)].concat()),
+        (277, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (279, 16, [le(64, 8), le(64, 8)].concat()),
+        (305, 2, b"secret software\0".to_vec()),
+        (34675, 7, (0..600u32).map(|i| (i % 253) as u8).collect()),
+    ];
+    let mut src = [&b"II+\0\x08\0\0\0"[..], &le(16, 8)].concat();
+    src.extend(le(entries.len() as u64, 8));
+    let mut value_at = 16 + 8 + 20 * entries.len() as u64 + 8;
+    let mut values: Vec<u8> = Vec::new();
+    for (tag, kind, value) in &entries {
+        src.extend(tag.to_le_bytes());
+        src.extend(kind.to_le_bytes());
+        let size = match kind {
+            2 | 7 => 1,
+            3 => 2,
+            4 => 4,
+            _ => 8,
+        };
+        src.extend(le(value.len() as u64 / size, 8));
+        if value.len() <= 8 {
+            let mut field = value.clone();
+            field.resize(8, 0);
+            src.extend(field);
+        } else {
+            src.extend(le(value_at, 8));
+            value_at += value.len() as u64;
+            values.extend(value);
+        }
+    }
+    src.extend(le(0, 8));
+    src.extend(values);
+    let filler = |src: &mut Vec<u8>, to: usize| {
+        let from = src.len();
+        src.extend((from..to).map(|i| (i % 241) as u8 ^ 0x5A));
+    };
+    filler(&mut src, 1_000);
+    src.extend((0..64u8).map(|i| 128 + i));
+    filler(&mut src, 65_536);
+    src.extend((0..64u8).map(|i| i * 2));
+    let dir = TestDir::new("strip-tiff-64k");
+    let outcome = strip(&dir, "pillow.tif", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![MetaField::Software])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(tiff_pages(&out), tiff_pages(&src));
+    let icc = |bytes: &[u8]| {
+        let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes)).unwrap();
+        decoder.get_tag_u8_vec(Tag::IccProfile).unwrap()
+    };
+    assert_eq!(icc(&out), icc(&src));
+}
+
 /// A classic gray 64 × 64 TIFF of two uncompressed strips, every byte of
 /// them there, whose byte counts say the second is half its size: libtiff
 /// takes that at its word, and Pillow and ImageMagick read past it.
@@ -1979,6 +2051,29 @@ fn remove_metadata_cuts_a_motion_photo_and_says_so() {
     );
     let out = fs::read(&outcome.outputs[0]).unwrap();
     assert_eq!(out.len(), src.len() - after.len());
+    assert_eq!(out[at[0].clone()], src[at[0].clone()]);
+}
+
+#[test]
+fn remove_metadata_reads_a_heic_back_behind_its_first_64_kib_as_it_is() {
+    use MetaField::*;
+    // A motion photo whose mdat ends at 64 KiB, where the tool's first
+    // read of the file buffered up to: the walk reads the video's box
+    // header from there, then meta, behind it, which a buffer kept past
+    // its end gave 16 bytes early, so the file was refused as unreadable.
+    let dir = TestDir::new("strip-heic-64k");
+    let after = bmff(b"mpvd", b"SecretVideo");
+    let primary = |len: usize| (0..len).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+    let short = heif(b"heic", &IPHONE, &primary(100), b"").0.len();
+    let (src, at) = heif(b"heic", &IPHONE, &primary(100 + 65_536 - short), &after);
+    assert_eq!(src.len() - after.len(), 65_536);
+    let outcome = strip(&dir, "motion.heic", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp, Embedded])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out.len(), 65_536);
     assert_eq!(out[at[0].clone()], src[at[0].clone()]);
 }
 
