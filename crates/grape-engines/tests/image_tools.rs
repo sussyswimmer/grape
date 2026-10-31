@@ -3117,6 +3117,47 @@ fn compress_keeps_a_lossy_webps_alpha_exactly() {
 }
 
 #[test]
+fn compress_encodes_a_picture_its_scale_left_opaque_as_opaque() {
+    use grape_core::CompressPreset::Small;
+    let dir = TestDir::new("compress-webp-opaque");
+    // One pixel at 254 in a photo: scaled by 2.5, nothing of it is left,
+    // so Small encodes it as it encodes the opaque photo, at the opaque
+    // method (libwebp's 6), not 5 with an alpha plane: 3.7 % larger before.
+    // (The colors around the pixel are scaled by area, so not byte for
+    // byte.)
+    let (w, h) = (5120u32, 160u32);
+    let rgb = photo(w, h);
+    let opaque = lossy_webp(rgb.as_raw(), w, h, false, 95.0);
+    let mut alpha = vec![255u8; (w * h) as usize];
+    alpha[(80 * w + 2560) as usize] = 254;
+    let rgba: Vec<u8> = rgb
+        .as_raw()
+        .chunks(3)
+        .zip(&alpha)
+        .flat_map(|(p, &a)| [p[0], p[1], p[2], a])
+        .collect();
+    let alph = webp_chunk(&lossy_webp(&rgba, w, h, true, 95.0), b"ALPH").unwrap();
+    let dot = riff(&[
+        vp8x_chunk(0x10, w, h),
+        riff_chunk(b"ALPH", &alph),
+        riff_chunk(b"VP8 ", &webp_chunk(&opaque, b"VP8 ").unwrap()),
+    ]);
+    let plain = compress(&dir, "plain.webp", &opaque, Small).unwrap();
+    let with_dot = compress(&dir, "dot.webp", &dot, Small).unwrap();
+    let (plain, with_dot) = (
+        fs::read(&plain.outputs[0]).unwrap(),
+        fs::read(&with_dot.outputs[0]).unwrap(),
+    );
+    assert!(webp_chunk(&with_dot, b"ALPH").is_none());
+    assert!(
+        with_dot.len() * 100 <= plain.len() * 101,
+        "{} bytes, {} opaque",
+        with_dot.len(),
+        plain.len()
+    );
+}
+
+#[test]
 fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
     use grape_core::CompressPreset::{Balanced, Small};
     // The review's picture: a white and a red disc with hard edges on

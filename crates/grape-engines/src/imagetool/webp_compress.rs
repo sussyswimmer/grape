@@ -9,11 +9,12 @@
 //! | Lossy (`VP8 `) | long side ≤ 2048, q70 | ≤ 4096, q80 | as it is, q85 |
 //! | Lossless (`VP8L`) | lossless | lossless | lossless |
 //!
-//! - **Lossy:** libwebp's method 6, or 5 when the picture has
-//!   transparency ([`LOSSY_METHOD`]): libwebp encodes the alpha plane at
-//!   the picture's method, losslessly, and at 6 that took 9 to 18 times as
-//!   long as at 5, for 0.05 % (a sticker's alpha) to 10 % (soft alpha)
-//!   less. Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
+//! - **Lossy:** libwebp's method 6, or 5 when the picture it encodes has
+//!   transparency ([`LOSSY_METHOD`]; one its scale left opaque is encoded
+//!   as opaque): libwebp encodes the alpha plane at the picture's method,
+//!   losslessly, and at 6, even a simple one, that took 8 to 80 times as
+//!   long as at 5, with no progress report, for 0.5 to 5 % smaller files.
+//!   Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
 //!   exact, the color under fully transparent pixels free to change; a
 //!   picture with transparency is scaled by area near its transparency,
 //!   its color weighed by its alpha, its alpha kept to the values the
@@ -78,8 +79,15 @@ use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 
-/// libwebp's method for a lossy picture, by whether it has transparency
-/// ([module docs](self)).
+/// libwebp's method for a lossy picture, by whether the picture encoded
+/// has transparency ([module docs](self)). At 6, libwebp encodes an alpha
+/// plane with quality 100's lossless search for each of its filters, on a
+/// thread that reports no progress: for a 3734² photo (the most High admits
+/// with alpha; release build, 4 vCPUs), 19 to 25 s with rounded corners,
+/// one pixel at 254 or a hard-edged cutout, 31 s with a sticker's soft edge
+/// and 290 to 700 s with noise, grain or a photo's luminance, against 1 to
+/// 14 s at 5, for files 0.5 to 5.0 % smaller: past every wait D28 names,
+/// so 5 it is.
 const LOSSY_METHOD: (u8, u8) = (6, 5);
 
 /// libwebp's lossless preset (cwebp's `-z`): 8 is method 5 at quality 90.
@@ -252,14 +260,15 @@ pub(crate) fn run(
         return Err(crate::cancelled(src));
     }
     let img = rgb_or_rgba(img);
-    let (transparent, hard_alpha) = alpha_kind(&img);
+    let hard_alpha = alpha_kind(&img).1;
     let try_small =
         !lossless && preset != CompressPreset::Small && small_does_more(&scan, before, hard_alpha);
     progress(0.4);
     let img = if lossless {
         img
     } else {
-        scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?
+        let scaled = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
+        opaque_as_rgb(scaled)
     };
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
@@ -273,7 +282,9 @@ pub(crate) fn run(
                 level: LOSSLESS_LEVEL,
             }
         } else {
-            let method = if transparent {
+            // By the picture encoded: one whose scale left it opaque has
+            // no alpha plane to encode.
+            let method = if img.color().has_alpha() {
                 LOSSY_METHOD.1
             } else {
                 LOSSY_METHOD.0
@@ -360,6 +371,18 @@ fn rgb_or_rgba(img: DynamicImage) -> DynamicImage {
         DynamicImage::ImageRgb8(_) | DynamicImage::ImageRgba8(_) => img,
         other if other.color().has_alpha() => DynamicImage::ImageRgba8(other.to_rgba8()),
         other => DynamicImage::ImageRgb8(other.to_rgb8()),
+    }
+}
+
+/// `img` (8-bit RGB or RGBA) as RGB when every pixel is opaque: libwebp
+/// then writes no alpha plane, and Compress encodes it at the opaque
+/// method ([`LOSSY_METHOD`]).
+fn opaque_as_rgb(img: DynamicImage) -> DynamicImage {
+    match img {
+        DynamicImage::ImageRgba8(rgba) if rgba.pixels().all(|p| p.0[3] == u8::MAX) => {
+            DynamicImage::ImageRgb8(DynamicImage::ImageRgba8(rgba).to_rgb8())
+        }
+        other => other,
     }
 }
 
