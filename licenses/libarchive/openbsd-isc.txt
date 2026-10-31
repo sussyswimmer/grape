@@ -1,0 +1,45 @@
+ISC-style notices of two pieces of OpenBSD code in libarchive 3.8.10 sources
+that are compiled into Grape's bsdtar. Each piece is used only where the
+system lacks its own: arc4random_buf (Windows uses bcrypt, macOS has it) and
+readpassphrase (Windows has its own branch, macOS has it). So the Windows and
+macOS builds normally contain neither, but the files are compiled, and the
+notices are kept. Copied from the files named above them, without the C
+comment markers.
+
+------------------------------------------------------------------------
+libarchive/archive_random.c (arc4random, from OpenBSD)
+------------------------------------------------------------------------
+
+Copyright (c) 1996, David Mazieres <dm@uun.org>
+Copyright (c) 2008, Damien Miller <djm@openbsd.org>
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+------------------------------------------------------------------------
+libarchive_fe/passphrase.c (readpassphrase, from OpenBSD)
+------------------------------------------------------------------------
+
+Copyright (c) 2000-2002, 2007, 2010
+	Todd C. Miller <millert@openbsd.org>
+
+Permission to use, copy, modify, and distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.

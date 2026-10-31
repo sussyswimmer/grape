@@ -1,0 +1,78 @@
+# cargo-deny config (DECISIONS D23). CI's Licenses job runs:
+#
+#   cargo deny --locked check licenses bans sources
+#
+# Advisories need the RustSec database from the network on every run, so CI
+# runs `cargo deny --locked check advisories` as a step of its own that never
+# fails the job. Read its result before a release.
+
+[graph]
+# The targets Grape ships for.
+targets = [
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+]
+# Test-only crates never ship.
+exclude-dev = true
+
+[licenses]
+# Exactly the licenses the dependency graph uses, build tools included.
+# No GPL, AGPL or LGPL: nothing copyleft may be linked into Grape's own
+# binaries (golden rule 6). MPL-2.0 is allowed only for the crates below.
+# BSD-2-Clause joined in a D23 amendment (D41, shared with D39): rav1e,
+# v_frame and av1-grain, the Mac worker's AVIF encoder (macOS only), and
+# arrayref, through resvg's tiny-skia (D39, every OS).
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-2-Clause",
+    "Zlib",
+    "Unicode-3.0",
+    "ISC",
+]
+confidence-threshold = 0.8
+# A license allowed here that nothing uses any more is an error, so the
+# list stays exact.
+unused-allowed-license = "deny"
+unused-license-exception = "deny"
+# MPL-2.0 (DECISIONS O6), unmodified, from crates.io. option-ext is compiled
+# into Grape through Tauri's dirs crate. The other four run only inside
+# Tauri's macros while Grape is built. Keep this list the same as the
+# per-crate `accepted` entries in about.toml.
+exceptions = [
+    { crate = "option-ext", allow = ["MPL-2.0"] },
+    { crate = "cssparser", allow = ["MPL-2.0"] },
+    { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+    { crate = "dtoa-short", allow = ["MPL-2.0"] },
+    { crate = "selectors", allow = ["MPL-2.0"] },
+]
+
+# libwebp-sys (D28) says MIT, but it compiles in the libwebp 1.6.0 it
+# vendors, which is BSD-3-Clause (vendor/COPYING; the hash is cargo-deny's
+# xxHash32 of it, so a changed file drops the clarification, and `cargo deny
+# list` shows MIT alone again). Keep it the same as about.toml's.
+[[licenses.clarify]]
+crate = "libwebp-sys"
+expression = "MIT AND BSD-3-Clause"
+license-files = [{ path = "vendor/COPYING", hash = 0x7272837f }]
+
+[licenses.private]
+# Grape's own crates are MIT (LICENSE) and never published.
+ignore = true
+
+[bans]
+# Tauri and image pull in a few crates twice (bitflags, png, syn and others).
+# Report them, but don't fail on them.
+multiple-versions = "warn"
+wildcards = "deny"
+# Grape's own crates depend on each other by path, with no version.
+allow-wildcard-paths = true
+
+[sources]
+# Only crates.io.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

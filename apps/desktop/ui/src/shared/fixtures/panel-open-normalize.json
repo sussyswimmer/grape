@@ -1,0 +1,1 @@
+{"seq":3,"title":"Normalize Volume","items":[{"id":1,"name":"episode 12.mp3"},{"id":2,"name":"intro.m4a"}],"panel":{"tool":"normalizeAudio","targetLufs":-16,"minLufs":-24,"maxLufs":-10,"stepLufs":1}}

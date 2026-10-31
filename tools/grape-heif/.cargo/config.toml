@@ -1,0 +1,6 @@
+# The static C runtime (D33): grape-heif.exe needs no Visual C++
+# redistributable, and vcpkg-rs then picks the x64-windows-static triplet that
+# build.ps1 installs libheif into. Don't set RUSTFLAGS when building: it
+# replaces this list instead of adding to it (build.ps1 removes it).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-Ctarget-feature=+crt-static"]

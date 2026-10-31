@@ -1,0 +1,1170 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  rust-windows:
+    name: Rust (Windows)
+    runs-on: windows-latest
+    steps:
+      # The PDF tests load a downloaded library, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Same toolchain as rust-toolchain.toml, so clippy's lints match local runs.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      # PDFium only (D29): the PDF tests don't need FFmpeg. Its own cache key,
+      # so a folder with only PDFium never stands in for the Sidecars job's.
+      # The script checks a restored folder against its stamp.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      # The default clippy run doesn't enable pdf-it or engines-it, so
+      # tests/pdf.rs and tests/media.rs aren't linted there. engines-it
+      # needs no FFmpeg to compile: its tests read GRAPE_TEST_FFMPEG only
+      # when they run, which the engines-it job does with this run's build.
+      - name: Clippy (pdf-it, engines-it)
+        run: cargo clippy -p grape-engines --features pdf-it,engines-it --all-targets --locked -- -D warnings
+      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM. On
+      # Windows each worker runs in a Job Object as the app makes it. The
+      # 100 MP page runs next, on its own, so the log keeps its peak.
+      - name: PDF tests (PDFium)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: cargo test -p grape-engines --features pdf-it --locked -- --skip the_largest_page_renders_under_the_memory_cap
+      - name: PDF's largest page under the 6 GiB Job cap (prints the peak)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: cargo test -p grape-engines --features pdf-it --locked --test pdf -- --exact the_largest_page_renders_under_the_memory_cap --nocapture
+      # cargo runs its tests inside a job of its own, so above the worker's
+      # job is always nested, without UI limits. The runner starts this step
+      # inside a job too, so with GRAPE_TEST_JOB_UI=1 the test starts a
+      # child of this binary breaking away from it, whose PDF workers would
+      # then be in no other job, as in an installed Grape, and must get the
+      # UI limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
+      - name: PDF tests outside cargo (the UI-limited job)
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}\apps\desktop\src-tauri\binaries\pdfium-x86_64-pc-windows-msvc.dll
+        run: |
+          $bin = @(cargo test -p grape-engines --features pdf-it --test pdf --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'pdf' -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no pdf test binary.'; exit 1 }
+          & $bin --exact the_worker_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The pdf test binary ran no test of that name.'; exit 1 }
+
+  ui-windows:
+    name: UI (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the pnpm version from package.json's packageManager field.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm -C apps/desktop/ui typecheck
+      - name: Test
+        run: pnpm -C apps/desktop/ui test
+      - name: Build
+        run: pnpm -C apps/desktop/ui build
+      - name: Sidecar gate tests (D25)
+        run: node --test scripts/check-sidecars.test.mjs
+
+  # The macOS port (DECISIONS D18): lint and test on a Mac, like Windows.
+  rust-macos:
+    name: Rust (macOS)
+    runs-on: macos-latest
+    steps:
+      # The PDF tests load a downloaded library, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Every crate's tests, even after one fails: the Mac runs are new.
+      - name: Test
+        run: cargo test --workspace --locked --no-fail-fast
+      # PDFium only (D29), as on Windows. /bin/bash is macOS's own bash 3.2.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        run: /bin/bash ./scripts/fetch-sidecars.sh --only pdfium
+      # The pdf-it tests fail, not skip, without GRAPE_TEST_PDFIUM.
+      - name: PDF tests (PDFium)
+        env:
+          GRAPE_TEST_PDFIUM: ${{ github.workspace }}/apps/desktop/src-tauri/binaries/libpdfium-universal-apple-darwin.dylib
+        run: cargo test -p grape-engines --features pdf-it --locked --no-fail-fast
+
+  # Grape's own bsdtar for RAR (DECISIONS D27), built in this run, one call
+  # per OS so that each bundle waits only for its own.
+  bsdtar-windows:
+    name: bsdtar (Windows)
+    uses: ./.github/workflows/bsdtar.yml
+    with:
+      targets: windows
+  bsdtar-macos:
+    name: bsdtar (macOS)
+    uses: ./.github/workflows/bsdtar.yml
+    with:
+      targets: macos
+
+  # The RAR engine against the bsdtar just built (feature rar-it).
+  rar-it:
+    name: RAR tests (${{ matrix.name }})
+    needs: [bsdtar-windows, bsdtar-macos]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: bsdtar-x86_64-pc-windows-msvc
+            file: bsdtar-x86_64-pc-windows-msvc.exe
+          - name: macOS
+            os: macos-latest
+            artifact: bsdtar-apple-darwin
+            file: bsdtar-universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The tests run a program built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8      # v8.0.2, 2026-10-07 (checked)
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/bsdtar
+      # Artifacts lose the executable bit.
+      - name: Make it executable
+        if: runner.os == 'macOS'
+        run: chmod +x "$RUNNER_TEMP"/bsdtar/bsdtar-*
+      # The default clippy run doesn't enable rar-it.
+      - name: Clippy (rar-it)
+        run: cargo clippy -p grape-engines --features rar-it --all-targets --locked -- -D warnings
+      # The rar-it tests fail, not skip, without GRAPE_TEST_BSDTAR.
+      - name: RAR tests (real bsdtar)
+        env:
+          GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
+        run: cargo test -p grape-engines --features rar-it --locked --lib archive::rar
+      # As the PDF one in rust-windows: outside cargo, with
+      # GRAPE_TEST_JOB_UI=1, a child of the lib's test binary would break
+      # away from the runner's job, so each bsdtar's own job must get the UI
+      # limits. GitHub's runner allows no breakaway, so this step only
+      # warns, and the PC checks the UI-limited job (docs/TESTING.md).
+      - name: RAR tests outside cargo (the UI-limited job)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+          GRAPE_TEST_BSDTAR: ${{ runner.temp }}/bsdtar/${{ matrix.file }}
+        run: |
+          $bin = @(cargo test -p grape-engines --features rar-it --lib --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'grape_engines' -and $_.profile.test -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no grape_engines test binary.'; exit 1 }
+          & $bin --exact archive::rar::it::bsdtar_runs_in_the_ui_limited_job_outside_cargo --nocapture --test-threads=1 | Tee-Object -Variable out
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A name that matches no test runs none and still exits 0.
+          if (-not ($out -match '^test result: ok\. 1 passed;')) { Write-Output '::error::The grape_engines test binary ran no test of that name.'; exit 1 }
+
+  # Grape's own image helper for Windows, HEIC and AVIF (DECISIONS D33, D41),
+  # built in this run with its source bundle and the HEIC and AVIF test
+  # fixtures.
+  grape-heif:
+    name: grape-heif
+    uses: ./.github/workflows/grape-heif.yml
+
+  # The HEIC and AVIF engine and the Job Object against the grape-heif.exe
+  # just built (feature heif-it).
+  heif-it-windows:
+    name: HEIC and AVIF tests (Windows)
+    needs: grape-heif
+    runs-on: windows-latest
+    steps:
+      # The tests run a program built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8      # v8.0.2, 2026-10-07 (checked)
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      - uses: actions/download-artifact@v8
+        with:
+          name: heif-fixtures
+          path: ${{ runner.temp }}/heif-fixtures
+      # The default clippy run doesn't enable heif-it.
+      - name: Clippy (heif-it)
+        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it --all-targets --locked -- -D warnings
+      # The heif-it tests fail, not skip, without GRAPE_TEST_HEIF. The log
+      # keeps what they print: the 35.6 MP AVIF encode's and decode's peaks
+      # in the Job Object, and what each damaged fixture was called (D41).
+      - name: HEIC and AVIF engine tests (real grape-heif.exe)
+        env:
+          GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}\heif-fixtures
+        run: cargo test -p grape-engines --features heif-it --locked -- --nocapture
+      # 35.6 MP under the 2 GiB Job cap; prints the peak (heic-spec J24).
+      - name: Job Object tests (real grape-heif.exe)
+        env:
+          GRAPE_TEST_HEIF: ${{ runner.temp }}\grape-heif\grape-heif.exe
+        run: cargo test -p grape-platform --features heif-it --test job_object --locked -- --nocapture
+      # cargo runs its tests inside a job of its own, so above the helper's
+      # job is always nested, without UI limits. The runner starts this step
+      # inside a job too, so with GRAPE_TEST_JOB_UI=1 the test starts its
+      # helper breaking away from it: then it's in no other job, as in an
+      # installed Grape, and must get the UI limits. If the runner's job
+      # doesn't allow that, the test warns and the PC checks it. The 35.6 MP
+      # encode isn't run twice.
+      - name: Job Object tests outside cargo (the UI-limited job)
+        env:
+          GRAPE_TEST_JOB_UI: "1"
+        run: |
+          $bin = @(cargo test -p grape-platform --features heif-it --test job_object --locked --no-run --message-format=json |
+            ConvertFrom-Json |
+            Where-Object { $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'job_object' -and $_.executable } |
+            ForEach-Object { $_.executable }) | Select-Object -Last 1
+          if (-not $bin) { Write-Output '::error::cargo named no job_object test binary.'; exit 1 }
+          & $bin --nocapture --test-threads=1 --skip grape_heif_encodes_the_largest_picture_under_the_cap
+          exit $LASTEXITCODE
+
+  # ImageIO (Grape's image helper worker on macOS) against the HEIC and AVIF
+  # fixtures libheif wrote on Windows. HEIC encoding needs a hardware HEVC
+  # encoder, which GitHub's macOS VMs lack: those tests accept "This Mac
+  # can't write HEIC files." here, and Mac HEIC encoding is manual QA
+  # (docs/TESTING.md). AVIF is written by rav1e in the worker (avif-encode,
+  # D41), so its round trips run here end to end.
+  heif-it-macos:
+    name: HEIC and AVIF tests (macOS)
+    needs: grape-heif
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: heif-fixtures
+          path: ${{ runner.temp }}/heif-fixtures
+      # The Mac app's features: the worker writes AVIF with rav1e (D41).
+      - name: Clippy (heif-it)
+        run: cargo clippy -p grape-engines -p grape-platform --features grape-engines/heif-it,grape-platform/heif-it,grape-platform/avif-encode --all-targets --locked -- -D warnings
+      - name: Build the test worker (ImageIO and rav1e behind the image helper's protocol)
+        run: cargo build -p grape-platform --features heif-it,avif-encode --bin grape-heif-worker --locked
+      # The heif-it tests fail, not skip, without their variables.
+      # One test at a time, as the worker runs one job.
+      - name: ImageIO tests (libheif's fixtures, rav1e's AVIF read back)
+        env:
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
+        run: cargo test -p grape-platform --features heif-it,avif-encode --locked --no-fail-fast -- --test-threads=1
+      # Also after a failure above: the worker is a process of its own, so
+      # its jobs say what ImageIO did even if a test process crashed.
+      - name: HEIC and AVIF engine tests (the ImageIO and rav1e worker)
+        if: ${{ !cancelled() }}
+        env:
+          GRAPE_TEST_HEIF: ${{ github.workspace }}/target/debug/grape-heif-worker
+          GRAPE_TEST_HEIF_FIXTURES: ${{ runner.temp }}/heif-fixtures
+        run: cargo test -p grape-engines --features heif-it --locked --no-fail-fast -- --nocapture
+      # A crashed test or worker leaves a report naming the frame it died in.
+      - name: Crash reports
+        if: failure()
+        run: |
+          sleep 5
+          shopt -s nullglob
+          for f in ~/Library/Logs/DiagnosticReports/*.ips /Library/Logs/DiagnosticReports/*.ips; do
+            echo "::group::$(basename "$f")"
+            head -c 100000 "$f"
+            echo
+            echo "::endgroup::"
+          done
+
+  # What ImageIO says about AVIF on each kind of runner (D41): the types it
+  # reads and writes, and sips's list. Informational, never failing: it
+  # settles which macOS versions and machines decode AVIF, and whether
+  # ImageIO lists it as a destination (Grape writes AVIF with rav1e either
+  # way). No macOS 13 runner exists, so 13.x is manual QA (docs/TESTING.md).
+  avif-probe-macos:
+    name: AVIF probe (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-26-intel, macos-15, macos-15-intel]
+    steps:
+      - name: ImageIO's and sips's AVIF types
+        run: |
+          sw_vers
+          uname -m
+          probe="$RUNNER_TEMP/imageio-types.swift"
+          cat > "$probe" <<'SWIFT'
+          import ImageIO
+          let reads = (CGImageSourceCopyTypeIdentifiers() as? [String]) ?? []
+          let writes = (CGImageDestinationCopyTypeIdentifiers() as? [String]) ?? []
+          print("ImageIO reads: \(reads.joined(separator: " "))")
+          print("ImageIO writes: \(writes.joined(separator: " "))")
+          print("public.avif: read \(reads.contains("public.avif")), write \(writes.contains("public.avif"))")
+          print("public.heic: read \(reads.contains("public.heic")), write \(writes.contains("public.heic"))")
+          SWIFT
+          swift "$probe" || echo "::warning::swift couldn't run the ImageIO probe."
+          sips --formats | grep -i -E 'avif|heic|heif' || echo "sips lists no AVIF, HEIC or HEIF."
+
+  # Grape's own FFmpeg (DECISIONS D24), built in this run: the Windows exes
+  # cross-built on Linux, the two Mac halves on their own runners joined with
+  # lipo, and the GPL source bundle, the same from every target. Two calls, so
+  # that the Windows installer never waits for a Mac job: the Mac one starts
+  # after the Windows one, which uploads the run's one source bundle.
+  ffmpeg-windows:
+    name: ffmpeg (Windows)
+    uses: ./.github/workflows/ffmpeg.yml
+    with:
+      targets: windows
+  ffmpeg-macos:
+    name: ffmpeg (macOS)
+    needs: ffmpeg-windows
+    uses: ./.github/workflows/ffmpeg.yml
+    with:
+      targets: macos
+      windows-sources: ${{ needs.ffmpeg-windows.outputs.windows-sources }}
+
+  # The FFmpeg engine (D22) against the ffmpeg and ffprobe just built, the
+  # ones the bundles carry (feature engines-it: every audio and video pair,
+  # the hostile inputs, cancel, the names, and that the build has everything
+  # Grape uses). On the Mac the universal files run their arm64 half; the
+  # merge job ran the x86_64 one. The Windows leg needs only the Windows
+  # FFmpeg: when the Mac one didn't build, the Mac leg fails at once and says
+  # so, and the Windows leg still runs.
+  engines-it:
+    name: FFmpeg tests (${{ matrix.name }})
+    needs: [ffmpeg-windows, ffmpeg-macos]
+    if: ${{ !cancelled() && needs.ffmpeg-windows.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact: ffmpeg-x86_64-pc-windows-msvc
+            suffix: x86_64-pc-windows-msvc.exe
+          - name: macOS
+            os: macos-latest
+            artifact: ffmpeg-apple-darwin
+            suffix: universal-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: The Mac FFmpeg was built
+        if: matrix.name == 'macOS' && needs.ffmpeg-macos.result != 'success'
+        run: |
+          echo "::error::The macOS FFmpeg didn't build in this run (ffmpeg (macOS): ${{ needs.ffmpeg-macos.result }}), so there's nothing to test."
+          exit 1
+      # The tests run programs built in this run, so the job keeps no git
+      # credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ runner.temp }}/ffmpeg
+      # Artifacts lose the executable bit.
+      - name: Make them executable
+        if: runner.os == 'macOS'
+        run: chmod +x "$RUNNER_TEMP"/ffmpeg/ffmpeg-*-apple-darwin "$RUNNER_TEMP"/ffmpeg/ffprobe-*-apple-darwin
+      # rust-windows lints engines-it on Windows; rust-macos doesn't.
+      - name: Clippy (engines-it)
+        if: runner.os == 'macOS'
+        run: cargo clippy -p grape-engines --features engines-it --all-targets --locked -- -D warnings
+      # The engines-it tests fail, not skip, without both variables.
+      - name: FFmpeg tests (Grape's own FFmpeg)
+        env:
+          GRAPE_TEST_FFMPEG: ${{ runner.temp }}/ffmpeg/ffmpeg-${{ matrix.suffix }}
+          GRAPE_TEST_FFPROBE: ${{ runner.temp }}/ffmpeg/ffprobe-${{ matrix.suffix }}
+        run: cargo test -p grape-engines --features engines-it --locked --test media --no-fail-fast
+
+  # A Windows build anyone can download from the run's Artifacts: the
+  # per-user NSIS installer (no admin needed), with PDFium (D29) and the
+  # sidecars next to Grape.exe, each built in this run: Grape's own FFmpeg
+  # (D24), bsdtar (D27) and grape-heif.exe (D33). It's unsigned until M7, so
+  # SmartScreen asks first: docs/PLATFORM_WINDOWS.md → "Running a CI build".
+  build-windows:
+    name: Build (Windows installer)
+    needs: [ffmpeg-windows, bsdtar-windows, grape-heif]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      # Restore and save apart: the cache is saved right after the fetch, so
+      # the pdfium-Windows key, which rust-windows shares, never holds the
+      # sidecars copied in below.
+      - id: pdfium-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: pdfium-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      - if: steps.pdfium-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: ${{ steps.pdfium-cache.outputs.cache-primary-key }}
+      # The sidecars from this run's ffmpeg, bsdtar and grape-heif workflows.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg
+      - uses: actions/download-artifact@v8
+        with:
+          name: bsdtar-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/bsdtar
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      # Each checked against its SHA256SUMS and the hash its job reported,
+      # then copied under the name Tauri's externalBin wants.
+      - name: Put the sidecars in binaries
+        shell: pwsh
+        env:
+          FFMPEG_SUMS: ${{ needs.ffmpeg-windows.outputs.windows-sums }}
+          GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
+        run: |
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          function Test-Sums([string]$dir) {
+            $lines = @(Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS') | Where-Object { $_ -ne '' })
+            if ($lines.Count -eq 0) { Fail "$dir\SHA256SUMS lists nothing." }
+            foreach ($line in $lines) {
+              if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { Fail "$dir\SHA256SUMS has a line it shouldn't: $line" }
+              $want = $Matches[1]
+              $file = $Matches[2]
+              $got = Hash (Join-Path $dir $file)
+              if ($got -ne $want) { Fail "$file has SHA-256 $got, not the $want its SHA256SUMS says." }
+              Write-Output "$got  $file"
+            }
+          }
+          $ffmpeg = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          $sums = Hash (Join-Path $ffmpeg 'SHA256SUMS')
+          if ($sums -ne $env:FFMPEG_SUMS) { Fail "The FFmpeg artifact's SHA256SUMS has SHA-256 $sums, not the $env:FFMPEG_SUMS the ffmpeg workflow wrote." }
+          Test-Sums $ffmpeg
+          $bsdtar = Join-Path $env:RUNNER_TEMP 'bsdtar'
+          Test-Sums $bsdtar
+          $heif = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
+          $sha = Hash $heif
+          if ($sha -ne $env:GRAPE_HEIF_SHA256) { Fail "grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built." }
+          $bins = 'apps/desktop/src-tauri/binaries'
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffmpeg-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffprobe-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $bsdtar 'bsdtar-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath $heif -Destination (Join-Path $bins 'grape-heif-x86_64-pc-windows-msvc.exe')
+          Get-ChildItem -File -LiteralPath $bins | Format-Table -AutoSize Name, Length
+      # D28: libwebp-sys's build script compiles libwebp with
+      # -march=$TARGET_CPU, so a build with it set (to native, say) would
+      # ship a Grape that runs only on CPUs like this runner's.
+      - name: Refuse a TARGET_CPU
+        shell: pwsh
+        run: |
+          if (Test-Path Env:TARGET_CPU) { Write-Output "::error::TARGET_CPU is set ($env:TARGET_CPU): libwebp would be built for this runner's CPU (-march), not every PC. Unset it."; exit 1 }
+      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
+      # bundle.resources. The Windows sidecars overlay is the one overlay
+      # that sets externalBin (ffmpeg, ffprobe, bsdtar, grape-heif), adds
+      # their license folders, and runs the sidecar gate (D25) first. Never a
+      # second overlay that also sets externalBin: it would replace the list.
+      - name: Build Grape and the installer
+        working-directory: apps/desktop
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.sidecars.windows.conf.json
+      # tauri-build copies the resources and the sidecars next to grape.exe,
+      # and the installer carries the same files. Every sidecar and license
+      # folder this build ships is checked there and, when 7-Zip can read it,
+      # in the installer itself. The overlay must list exactly these, so a
+      # sidecar can't be added or dropped without this list changing too.
+      - name: Check every sidecar and license folder is in the build
+        shell: pwsh
+        run: |
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          $sidecars = @('ffmpeg', 'ffprobe', 'bsdtar', 'grape-heif')
+          $folders = @('pdfium', 'ffmpeg', 'libarchive', 'grape-heif')
+          $overlay = (Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.sidecars.windows.conf.json | ConvertFrom-Json).bundle
+          $listed = @($overlay.externalBin | ForEach-Object { ($_ -split '/')[-1] })
+          if (($listed -join ' ') -cne ($sidecars -join ' ')) { Bad "tauri.sidecars.windows.conf.json lists $($listed -join ', '), but this check expects $($sidecars -join ', ')." }
+          $shipped = @($overlay.resources.PSObject.Properties | ForEach-Object { $_.Value })
+          $want = @($folders | Where-Object { $_ -ne 'pdfium' } | ForEach-Object { "licenses/$_/" })
+          if (($shipped -join ' ') -cne ($want -join ' ')) { Bad "tauri.sidecars.windows.conf.json ships $($shipped -join ', '), but this check expects $($want -join ', ')." }
+
+          $expected = [System.Collections.Generic.List[string]]::new()
+          foreach ($f in 'pdfium.dll', 'THIRD_PARTY_NOTICES.md', 'LICENSE.txt') {
+            $expected.Add($f)
+            if (-not (Test-Path -LiteralPath "target/release/$f" -PathType Leaf)) { Bad "target/release/$f is missing from the build." }
+          }
+          foreach ($name in $sidecars) {
+            $expected.Add("$name.exe")
+            $built = "target/release/$name.exe"
+            if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+            elseif ((Hash $built) -ne (Hash "apps/desktop/src-tauri/binaries/$name-x86_64-pc-windows-msvc.exe")) { Bad "$built isn't the $name this run built." }
+          }
+          foreach ($folder in $folders) {
+            foreach ($file in @(Get-ChildItem -File -LiteralPath "licenses/$folder")) {
+              $rel = "licenses/$folder/$($file.Name)"
+              $expected.Add($rel)
+              $built = "target/release/$rel"
+              if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+              elseif ((Hash $built) -ne (Hash $file.FullName)) { Bad "$built differs from $rel." }
+            }
+          }
+
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { Bad "Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count)." } else {
+            $paths = @()
+            $listed = $false
+            if (Get-Command 7z -ErrorAction SilentlyContinue) {
+              $listing = @(& 7z l -tNsis -slt -ba $setup[0].FullName 2> $null)
+              $listed = $LASTEXITCODE -eq 0
+              $paths = @($listing | Where-Object { $_ -like 'Path = *' } | ForEach-Object { $_.Substring(7).Replace('/', '\') })
+            }
+            if (-not $listed -or $paths.Count -eq 0) {
+              Write-Output "::warning::7-Zip couldn't list $($setup[0].Name), so only target/release was checked."
+            } else {
+              $missing = @($expected | Where-Object { $p = $_.Replace('/', '\'); -not ($paths | Where-Object { $_ -eq $p -or $_.EndsWith("\$p") }) })
+              if ($missing.Count -eq $expected.Count) {
+                Write-Output "::warning::None of the files was found in 7-Zip's listing of $($setup[0].Name), which may name them another way; only target/release was checked."
+                $paths | ForEach-Object { Write-Output "  $_" }
+              } else {
+                foreach ($m in $missing) { Bad "$($setup[0].Name) doesn't carry $m." }
+                if ($missing.Count -eq 0) { Write-Output "$($setup[0].Name) carries all $($expected.Count) files checked." }
+              }
+            }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          exit 0
+      # The launch smoke test, from here to the uninstall: the installer this
+      # build made, installed the way a user would, its helpers run from the
+      # install folder, Grape started twice, then uninstalled. Nothing in it
+      # goes online: the runner has WebView2, so the installer fetches
+      # nothing, and Grape and its helpers never do. The steps after the
+      # install run even when one before them failed, so one run shows every
+      # failure.
+      - id: install
+        name: Install Grape for this user, silently
+        shell: pwsh
+        timeout-minutes: 10
+        run: |
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { Fail "Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count)." }
+          # Tauri's NSIS installer: /S is silent, and installMode currentUser
+          # (tauri.conf.json) puts Grape in %LOCALAPPDATA%\<productName>.
+          $conf = Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $dir = Join-Path $env:LOCALAPPDATA $conf.productName
+          if (Test-Path -LiteralPath $dir) { Fail "$dir is there before the install, so this wouldn't check this build's files." }
+          $p = Start-Process -FilePath $setup[0].FullName -ArgumentList '/S' -PassThru
+          # Read now, or ExitCode can come back empty after the exit.
+          $null = $p.Handle
+          if (-not $p.WaitForExit(300000)) { Stop-Process -Id $p.Id -Force; Fail "$($setup[0].Name) /S didn't finish in 5 minutes." }
+          if ($p.ExitCode -ne 0) { Fail "$($setup[0].Name) /S exited with code $($p.ExitCode)." }
+          # Being there is enough: the step above compared the bytes. Tauri
+          # installs the main binary under Cargo's name, grape.exe, and
+          # Windows doesn't mind the case.
+          $missing = [System.Collections.Generic.List[string]]::new()
+          foreach ($f in 'Grape.exe', 'uninstall.exe', 'ffmpeg.exe', 'ffprobe.exe', 'bsdtar.exe', 'grape-heif.exe', 'pdfium.dll', 'THIRD_PARTY_NOTICES.md', 'LICENSE.txt') {
+            if (-not (Test-Path -LiteralPath (Join-Path $dir $f) -PathType Leaf)) { $missing.Add($f) }
+          }
+          foreach ($folder in 'pdfium', 'ffmpeg', 'libarchive', 'grape-heif') {
+            foreach ($file in @(Get-ChildItem -File -LiteralPath "licenses/$folder")) {
+              if (-not (Test-Path -LiteralPath (Join-Path $dir 'licenses' $folder $file.Name) -PathType Leaf)) { $missing.Add("licenses\$folder\$($file.Name)") }
+            }
+          }
+          Get-ChildItem -File -Recurse -LiteralPath $dir | ForEach-Object { Write-Output "  $($_.FullName.Substring($dir.Length + 1))  $($_.Length)" }
+          if ($missing.Count -gt 0) { Fail "$dir lacks $($missing -join ', ')." }
+          Write-Output "Installed in $dir."
+          exit 0
+      # From the install folder: each sidecar's version line (Grape's own
+      # builds, as the gate reads them), the image helper's protocol 2 probe,
+      # and one small job each for the SVG and PDF workers, which are
+      # Grape.exe itself (D39, D29); the PDF job loads the installed
+      # pdfium.dll. Each program gets a minute, and the sources must be
+      # unchanged after.
+      - name: Run the installed sidecars and workers
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          # Runs $file with $arguments and $stdin for at most $seconds and
+          # prints what it said. Returns its exit code and first and last
+          # stdout lines, or nothing when it had to be killed.
+          function Invoke-Program([string]$file, [string[]]$arguments, [string]$stdin, [int]$seconds) {
+            $psi = [System.Diagnostics.ProcessStartInfo]::new($file)
+            foreach ($a in $arguments) { $psi.ArgumentList.Add($a) }
+            $psi.UseShellExecute = $false
+            $psi.RedirectStandardInput = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            # UTF-8 without a BOM: a request can't start with one.
+            $psi.StandardInputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $out = $p.StandardOutput.ReadToEndAsync()
+            $err = $p.StandardError.ReadToEndAsync()
+            try { $p.StandardInput.Write($stdin); $p.StandardInput.Close() } catch { Write-Host "  (it closed its stdin early: $($_.Exception.Message))" }
+            $name = "$(Split-Path -Leaf $file) $($arguments -join ' ')"
+            if (-not $p.WaitForExit($seconds * 1000)) {
+              $p.Kill($true)
+              Write-Host "::error::$name didn't finish in $seconds s, so it was killed."
+              $script:bad++
+              return
+            }
+            $p.WaitForExit()
+            $lines = @($out.Result -split '\r?\n' | Where-Object { $_ -ne '' })
+            Write-Host "$name (exit $($p.ExitCode)):"
+            $lines | ForEach-Object { Write-Host "  $_" }
+            if ($err.Result.Trim()) { Write-Host "  stderr: $($err.Result.Trim())" }
+            [pscustomobject]@{ Code = $p.ExitCode; First = "$($lines | Select-Object -First 1)"; Last = "$($lines | Select-Object -Last 1)" }
+          }
+          function BigEndian([byte[]]$b, [int]$at) { ([uint32]$b[$at] -shl 24) -bor ([uint32]$b[$at + 1] -shl 16) -bor ([uint32]$b[$at + 2] -shl 8) -bor [uint32]$b[$at + 3] }
+          $conf = Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $dir = Join-Path $env:LOCALAPPDATA $conf.productName
+          $grape = Join-Path $dir 'Grape.exe'
+          $smoke = (New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'grape-smoke')).FullName
+
+          $banners = [ordered]@{
+            'ffmpeg.exe' = '^ffmpeg version \S*-grape(\.\d+)?(\s|$)'
+            'ffprobe.exe' = '^ffprobe version \S*-grape(\.\d+)?(\s|$)'
+            'bsdtar.exe' = '^bsdtar \S+-grape(\.\d+)? - libarchive '
+            'grape-heif.exe' = '^grape-heif version \S*-grape(\.\d+)?(\s|$)'
+          }
+          foreach ($name in $banners.Keys) {
+            $arguments = if ($name -eq 'bsdtar.exe') { @('--version') } else { @('-hide_banner', '-version') }
+            $r = Invoke-Program (Join-Path $dir $name) $arguments '' 60
+            if ($r -and ($r.Code -ne 0 -or $r.First -cnotmatch $banners[$name])) { Bad "The installed $name says '$($r.First)' (exit $($r.Code)): not Grape's own build, or it didn't run." }
+          }
+
+          # The probe grape-heif.yml sends, with grape-heif-proto's
+          # Limits::DEFAULT: HEIC and AVIF must go both ways.
+          $work = (New-Item -ItemType Directory -Force -Path (Join-Path $smoke 'heif-probe')).FullName
+          $limits = [ordered]@{ maxSourceBytes = 536870912; maxPixels = 134217728; maxEncodePixels = 35651584; maxEncodeSide = 16888; maxIccBytes = 16707345; maxDecoderMemory = 1073741824 }
+          $request = [ordered]@{ protocol = 2; workDir = $work; op = [ordered]@{ kind = 'probe' }; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $r = Invoke-Program (Join-Path $dir 'grape-heif.exe') @('--grape-heif-worker') $request 60
+          $caps = '^\{"done":\{"caps":\{"heic":\{"decode":true,"encode":true\},"avif":\{"decode":true,"encode":true\},"codec":"libheif '
+          if ($r -and ($r.Code -ne 0 -or $r.Last -cnotmatch $caps)) { Bad "The installed grape-heif.exe exited $($r.Code) and didn't answer the probe with HEIC and AVIF both ways." }
+
+          # The SVG worker: a 40 x 30 SVG is drawn at twice its size (it's
+          # under 256 px), opaque, so pixels.rgba holds 80 x 60 x 3 bytes
+          # after its 24-byte header (grape-heif-proto's pixels.rs). The
+          # limits are the app's (svg::protocol::Limits::DEFAULT).
+          $svg = Join-Path $smoke 'tiny.svg'
+          [System.IO.File]::WriteAllText($svg, '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="30"><rect width="40" height="30" fill="#5b2a86"/><circle cx="20" cy="15" r="9" fill="#f2c14e"/></svg>')
+          $svgHash = Hash $svg
+          $work = (New-Item -ItemType Directory -Force -Path (Join-Path $smoke 'svg-work')).FullName
+          $limits = [ordered]@{ maxSourceBytes = 67108864; maxTextBytes = 67108864; maxNodes = 2000000; maxSide = 16384; maxPixels = 67108864; maxNestedSvgs = 64; maxDataBytes = 134217728; maxEmbeddedSide = 16384; maxEmbeddedPixels = 67108864; maxHeapBytes = 2147483648 }
+          $request = [ordered]@{ protocol = 1; source = $svg; workDir = $work; mode = 'raster'; limits = $limits } | ConvertTo-Json -Compress -Depth 5
+          $r = Invoke-Program $grape @('--grape-svg-worker') $request 60
+          $pixels = Join-Path $work 'pixels.rgba'
+          if ($r -and ($r.Code -ne 0 -or $r.Last -cne '{"done":{"width":80,"height":60,"channels":3,"leftOut":0,"scaled":false}}')) {
+            Bad "Grape.exe --grape-svg-worker exited $($r.Code) and didn't draw the 40 x 30 SVG at 80 x 60."
+          } elseif ($r -and -not (Test-Path -LiteralPath $pixels -PathType Leaf)) {
+            Bad "The SVG worker said done but wrote no pixels.rgba."
+          } elseif ($r) {
+            $b = [System.IO.File]::ReadAllBytes($pixels)
+            $header = "$([System.Text.Encoding]::ASCII.GetString($b, 0, 7)) $($b[7]) $([BitConverter]::ToUInt32($b, 8)) $([BitConverter]::ToUInt32($b, 12)) $([BitConverter]::ToUInt32($b, 16)) $([BitConverter]::ToUInt32($b, 20))"
+            $corner = '#{0:x2}{1:x2}{2:x2}' -f $b[24], $b[25], $b[26]
+            Write-Output "pixels.rgba: $($b.Length) bytes, header $header, first pixel $corner"
+            if ($b.Length -ne 24 + 80 * 60 * 3 -or $header -cne 'GRAPEPX 1 80 60 3 0') { Bad "pixels.rgba isn't 80 x 60 RGB: $($b.Length) bytes, header $header." }
+            elseif ($corner -cne '#5b2a86') { Bad "pixels.rgba's first pixel is $corner, not the SVG's #5b2a86." }
+          }
+          if ((Hash $svg) -ne $svgHash) { Bad 'The SVG worker changed its source.' }
+
+          # The PDF worker: one 1-inch page rendered to PNG at the app's 300
+          # DPI with the installed pdfium.dll, so 300 x 300, with the app's
+          # bounds (pdf::run's Limits). The PDF is written here, its
+          # cross-reference offsets counted.
+          $content = '0.36 0.16 0.53 rg 0 0 72 72 re f'
+          $objects = @(
+            '<< /Type /Catalog /Pages 2 0 R >>',
+            '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] /Resources << >> /Contents 4 0 R >>',
+            "<< /Length $($content.Length) >>`nstream`n$content`nendstream"
+          )
+          $text = [System.Text.StringBuilder]::new("%PDF-1.7`n")
+          $offsets = foreach ($i in 0..($objects.Count - 1)) {
+            $text.Length
+            $null = $text.Append("$($i + 1) 0 obj`n$($objects[$i])`nendobj`n")
+          }
+          $xref = $text.Length
+          $null = $text.Append("xref`n0 $($objects.Count + 1)`n0000000000 65535 f `n")
+          foreach ($o in $offsets) { $null = $text.Append(('{0:D10} 00000 n ' -f $o) + "`n") }
+          $null = $text.Append("trailer`n<< /Size $($objects.Count + 1) /Root 1 0 R >>`nstartxref`n$xref`n%%EOF`n")
+          $pdf = Join-Path $smoke 'tiny.pdf'
+          [System.IO.File]::WriteAllText($pdf, $text.ToString())
+          $pdfHash = Hash $pdf
+          $out = (New-Item -ItemType Directory -Force -Path (Join-Path $smoke 'pdf-out')).FullName
+          $bounds = [ordered]@{ dpi = 300.0; maxPages = 2000; maxSplitPages = 100000; maxPagePixels = 100000000; maxSide = 65535; maxOutputBytes = 8589934592; maxTextBytes = 268435456; maxDecompressed = 536870912; maxHeapBytes = 4294967296 }
+          $request = [ordered]@{ pdfium = (Join-Path $dir 'pdfium.dll'); outDir = $out; op = [ordered]@{ kind = 'render'; source = $pdf; format = 'png' }; bounds = $bounds } | ConvertTo-Json -Compress -Depth 5
+          $r = Invoke-Program $grape @('--grape-pdf-worker') $request 60
+          $png = Join-Path $out 'page-1.png'
+          if ($r -and ($r.Code -ne 0 -or $r.Last -cnotmatch '^\{"done":\{"pages":1,')) {
+            Bad "Grape.exe --grape-pdf-worker exited $($r.Code) and didn't render the one-page PDF (an error of kind library means pdfium.dll didn't load)."
+          } elseif ($r -and -not (Test-Path -LiteralPath $png -PathType Leaf)) {
+            Bad 'The PDF worker said done but wrote no page-1.png.'
+          } elseif ($r) {
+            $b = [System.IO.File]::ReadAllBytes($png)
+            $size = "$(BigEndian $b 16) x $(BigEndian $b 20)"
+            Write-Output "page-1.png: $($b.Length) bytes, $size"
+            if ([System.Text.Encoding]::ASCII.GetString($b, 1, 3) -cne 'PNG' -or $size -cne '300 x 300') { Bad "page-1.png isn't a 300 x 300 PNG ($size)." }
+          }
+          if ((Hash $pdf) -ne $pdfHash) { Bad 'The PDF worker changed its source.' }
+          if ($script:bad -gt 0) { exit 1 }
+          exit 0
+      # Grape.exe started as a user would, from the install folder. Setup's
+      # lines must reach the log and Grape must still run 10 s later; then a
+      # second Grape.exe must hand over to it and exit (single-instance), and
+      # the first logs that. No one can click the tray's Quit here, so the
+      # step ends Grape with Stop-Process and prints the whole log. GitHub's
+      # Windows runners should run jobs in a signed-in session with a
+      # desktop, so the tray and the mouse hook should work; no run here has
+      # shown it yet. Without a desktop the step says so: a hook that won't
+      # start is logged and Grape runs on without the wheel (wheel.rs), and
+      # the tray icon waits for a taskbar (tray-icon), so neither ends Grape.
+      - name: Start the installed Grape, then a second one
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          $conf = Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $dir = Join-Path $env:LOCALAPPDATA $conf.productName
+          $exe = Join-Path $dir 'Grape.exe'
+          # tauri-plugin-log's file: <productName>.log in its LogDir,
+          # %LOCALAPPDATA%\<identifier>\logs.
+          $log = Join-Path $env:LOCALAPPDATA $conf.identifier 'logs' "$($conf.productName).log"
+          # Nothing stored yet means a first launch: launch at login goes on
+          # and the welcome card opens Settings (settings.rs).
+          $first = -not (Test-Path -LiteralPath (Join-Path $env:APPDATA $conf.identifier 'settings.json'))
+          $start = if (Test-Path -LiteralPath $log) { (Get-Item -LiteralPath $log).Length } else { 0 }
+          # This launch's part of the log. Grape holds the file open, so it's
+          # read sharing it back.
+          function Read-Log([long]$from = $start) {
+            if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { return '' }
+            $fs = [System.IO.FileStream]::new($log, 'Open', 'Read', 'ReadWrite, Delete')
+            try { $null = $fs.Seek($from, 'Begin'); [System.IO.StreamReader]::new($fs).ReadToEnd().Replace("`r", '') } finally { $fs.Dispose() }
+          }
+          # Waits up to $seconds for a line matching $pattern; '' when it
+          # never came or Grape exited first.
+          function Wait-Log([string]$pattern, [int]$seconds) {
+            $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
+            do {
+              $text = Read-Log
+              if ($text -cmatch "(?m)$pattern") { return $text }
+              if ($grape.HasExited) { return '' }
+              Start-Sleep -Milliseconds 500
+            } while ([DateTime]::UtcNow -lt $deadline)
+            return ''
+          }
+          $session = (Get-Process -Id $PID).SessionId
+          $explorer = @(Get-Process -Name explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -eq $session }).Count -gt 0
+          $desktop = [Environment]::UserInteractive -and $session -ne 0 -and $explorer
+          Write-Output "Session $session, interactive: $([Environment]::UserInteractive), explorer.exe in it: $explorer. First launch: $first."
+          if (-not $desktop) { Write-Output '::warning::This runner has no desktop with a taskbar: the tray icon and the mouse hook may not work, and the log says what Grape did about it.' }
+
+          $grape = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru
+          $null = $grape.Handle
+          try {
+            # Setup's last line (lib.rs). A tray icon that can't be made
+            # ends setup before it, with a panic. It usually comes 4-7 s
+            # after the start. Tauri builds the windows in tauri.conf.json,
+            # WebView2 first, before setup logs anything, and one first
+            # launch here once logged nothing in 45 s, so the wait is 120 s
+            # and a slow start is a warning, with the WebView2 processes
+            # listed so the next one says whether WebView2 was still
+            # starting.
+            $running = '\]\[grape_app\]\[INFO\] Grape \S+ is running$'
+            $launched = [DateTime]::UtcNow
+            function Show-Webviews {
+              try {
+                $views = @(Get-CimInstance Win32_Process -Filter "Name = 'msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.CreationDate -and $_.CreationDate.ToUniversalTime() -ge $launched.AddSeconds(-1) })
+                Write-Output "WebView2 processes started since Grape: $($views.Count) (Grape's own children: $(@($views | Where-Object { $_.ParentProcessId -eq $grape.Id }).Count))."
+                $grape.Refresh()
+                if (-not $grape.HasExited) { Write-Output "Grape: $($grape.Threads.Count) threads, $([int]$grape.TotalProcessorTime.TotalSeconds) s of CPU." }
+              } catch {
+                Write-Output "Couldn't list the WebView2 processes: $_"
+              }
+            }
+            if (-not (Wait-Log $running 120)) {
+              if ($grape.HasExited) { Fail "Grape exited with code $($grape.ExitCode) before setup finished." }
+              Show-Webviews
+              if (-not (Test-Path -LiteralPath $log)) { Fail "No log at $log after 120 s: Grape never got as far as starting its logger." }
+              Fail "The log never said 'Grape <version> is running' in 120 s: setup didn't finish."
+            }
+            $took = [int]([DateTime]::UtcNow - $launched).TotalSeconds
+            if ($took -gt 45) {
+              Write-Output "::warning::Grape took $took s to finish setup on this launch (usually 4-7 s)."
+              Show-Webviews
+            }
+            Start-Sleep -Seconds 10
+            if ($grape.HasExited) { Fail "Grape exited with code $($grape.ExitCode) within 10 s of finishing setup." }
+            $title = (Get-Process -Id $grape.Id).MainWindowTitle
+            if ($title) { Write-Output "Grape's window in front: $title" }
+
+            $text = Read-Log
+            # A line's target is the module that logs it, nested ones
+            # included (ui_windows::windows_overlay).
+            $want = [ordered]@{
+              "sidecars line naming all five" = '\]\[grape_app::sidecars\]\[INFO\] sidecars: found ffmpeg, ffprobe, grape-heif, bsdtar, pdfium$'
+              "overlay's tool-window, no-activate style (D11)" = '\]\[grape_app::ui_windows::windows_overlay\]\[INFO\] overlay ex-style \(at startup\): 0x[0-9a-f]+ TOOLWINDOW\|NOACTIVATE(\||$)'
+              "toast's tool-window, no-activate style (D11)" = '\]\[grape_app::ui_windows::windows_overlay\]\[INFO\] toast ex-style \(at startup\): 0x[0-9a-f]+ TOOLWINDOW\|NOACTIVATE(\||$)'
+              "overlay's drop target (D13)" = '\]\[grape_app::wheel\]\[INFO\] overlay drop target on [1-9][0-9]* of [0-9]+ window\(s\)$'
+            }
+            if ($first) {
+              $want["first launch's launch at login"] = '\]\[grape_app::settings\]\[INFO\] settings: first launch; launch at login is on$'
+              $want["welcome card opening Settings"] = '\]\[grape_app::settings\]\[INFO\] settings: the welcome card isn''t dismissed yet; opening Settings$'
+            }
+            foreach ($what in $want.Keys) {
+              if ($text -cnotmatch "(?m)$($want[$what])") { Bad "The log lacks the $what." }
+            }
+            # The mouse hook needs a desktop; without one, its failure is a
+            # warning, as Grape runs on without the wheel.
+            if ($text -cnotmatch '(?m)\]\[grape_app::wheel\]\[INFO\] drag monitor running$') {
+              if ($desktop) { Bad 'The drag monitor (the low-level mouse hook) didn''t start.' }
+              else { Write-Output "::warning::The drag monitor didn't start, and this runner has no desktop; Grape kept running, as wheel.rs promises." }
+            }
+            # auto-launch writes a Run value named after productName: in HKLM
+            # when it may (here, where jobs run as an administrator with UAC
+            # off), else in HKCU, as for a user.
+            $runs = @(foreach ($root in 'HKCU:', 'HKLM:') {
+              $key = "$root\Software\Microsoft\Windows\CurrentVersion\Run"
+              $value = (Get-ItemProperty -LiteralPath $key -Name $conf.productName -ErrorAction SilentlyContinue).($conf.productName)
+              if ($value) { "$key\$($conf.productName) = $value" }
+            })
+            $runs | ForEach-Object { Write-Output "Launch at login: $_" }
+            if ($first -and -not ($runs -match ' --at-login$')) { Bad "The first launch left no Run value that starts Grape with --at-login." }
+
+            $second = Start-Process -FilePath $exe -WorkingDirectory $dir -PassThru
+            $null = $second.Handle
+            if (-not $second.WaitForExit(10000)) {
+              Stop-Process -Id $second.Id -Force
+              Bad 'A second Grape.exe was still running after 10 s: it didn''t hand over to the first and exit.'
+            } elseif ($second.ExitCode -ne 0) {
+              Bad "The second Grape.exe exited with code $($second.ExitCode), not 0."
+            } else {
+              Write-Output 'The second Grape.exe exited with code 0.'
+            }
+            if (-not (Wait-Log '\]\[grape_app\]\[INFO\] second launch: opening Settings in the running instance$' 10)) { Bad 'The first Grape never logged the second launch.' }
+            # Settings opens on a task after that line, so it gets a moment
+            # before the log is read for errors.
+            Start-Sleep -Seconds 3
+            if ($grape.HasExited) { Fail "The first Grape exited with code $($grape.ExitCode) after the second launch." }
+            foreach ($line in @((Read-Log) -split '\r?\n' | Where-Object { $_ -cmatch '\]\[ERROR\] ' })) {
+              if (-not $desktop -and $line -cmatch 'drag monitor') { Write-Output "::warning::$line" } else { Bad "Grape logged an error: $line" }
+            }
+            if ($script:bad -eq 0) { Write-Output 'Grape ran through its first launch, and a second one handed over to it.' }
+          } finally {
+            if (-not $grape.HasExited) {
+              Stop-Process -Id $grape.Id -Force
+              $null = $grape.WaitForExit(10000)
+            }
+            Write-Output "Grape's log, $($log):"
+            if (Test-Path -LiteralPath $log -PathType Leaf) { Read-Log 0 } else { Write-Output '(no log file)' }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          exit 0
+      # The uninstaller in the install folder, silently (/S). NSIS runs a
+      # copy of it from the temp folder and exits, so the files go a moment
+      # later. Tauri's uninstaller removes the HKCU Run value only, so a
+      # Run value the first launch left in HKLM (above) is removed here:
+      # the step warns about what it found, and that never fails it.
+      - name: Uninstall Grape, silently
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        shell: pwsh
+        timeout-minutes: 5
+        run: |
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          $conf = Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.conf.json | ConvertFrom-Json
+          $dir = Join-Path $env:LOCALAPPDATA $conf.productName
+          $exe = Join-Path $dir 'Grape.exe'
+          # The uninstaller won't remove a running Grape.
+          Get-Process -Name grape -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | ForEach-Object { Write-Output "Grape (pid $($_.Id)) still runs; stopping it."; Stop-Process -Id $_.Id -Force; $null = $_.WaitForExit(10000) }
+          $p = Start-Process -FilePath (Join-Path $dir 'uninstall.exe') -ArgumentList '/S' -PassThru
+          $null = $p.Handle
+          if (-not $p.WaitForExit(120000)) { Fail "uninstall.exe /S didn't finish in 2 minutes." }
+          if ($p.ExitCode -ne 0) { Fail "uninstall.exe /S exited with code $($p.ExitCode)." }
+          # The temp copy deletes Grape.exe first and the folder last, so
+          # this waits for the folder.
+          $deadline = [DateTime]::UtcNow.AddSeconds(60)
+          while ((Test-Path -LiteralPath $dir) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path -LiteralPath $exe) { Fail "$exe is still there 60 s after the uninstaller ran." }
+          if (Test-Path -LiteralPath $dir) {
+            $left = @(Get-ChildItem -Force -Recurse -LiteralPath $dir -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName.Substring($dir.Length + 1) })
+            Write-Output "::warning::$dir is still there 60 s after the uninstaller ran, with: $(if ($left) { $left -join ', ' } else { 'nothing in it' })"
+          } else {
+            Write-Output "Uninstalled: $dir is gone."
+          }
+          foreach ($key in 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run', 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run', 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run') {
+            $item = Get-ItemProperty -LiteralPath $key -Name $conf.productName -ErrorAction SilentlyContinue
+            if ($null -eq $item) { Write-Output "$($key): no $($conf.productName) value."; continue }
+            Write-Output "::warning::$($key): $($conf.productName) = $($item.($conf.productName)) is still there after the uninstall (Tauri's uninstaller only removes HKCU's Run value). Removing it."
+            try { Remove-ItemProperty -LiteralPath $key -Name $conf.productName } catch { Write-Output "  Couldn't remove it: $($_.Exception.Message)" }
+          }
+          exit 0
+      # Uploaded whenever the build and its content checks passed (the
+      # install needs both), even when a launch check above failed: the job
+      # is still red, and a check that trips on the runner rather than on
+      # Grape shouldn't leave nothing to try.
+      - if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: Grape-Windows-x64
+          path: target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  # A Mac build anyone can download from the run's Artifacts: a universal
+  # (Apple silicon + Intel) Grape.app in a DMG, with PDFium in
+  # Contents/Frameworks (D29) and the sidecars in Contents/MacOS, each built
+  # in this run: Grape's own FFmpeg (D24) and bsdtar (D27). It's ad-hoc
+  # signed, not notarized, so the first open needs the steps in
+  # docs/PLATFORM_MACOS.md → "Running a CI build". The build and its checks
+  # are in macos-app.yml.
+  build-macos:
+    name: Build (macOS DMG)
+    needs: [ffmpeg-macos, bsdtar-macos]
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      ffmpeg-sums: ${{ needs.ffmpeg-macos.outputs.macos-sums }}
+
+  # Third-party licenses (DECISIONS D23): every crate's license is allowed,
+  # every crate comes from crates.io, and THIRD_PARTY_NOTICES.md matches
+  # Cargo.lock. Linux is enough: both tools read the Windows and Mac graphs
+  # from deny.toml and about.toml.
+  licenses:
+    name: Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt binaries at the pinned versions, checked against the
+      # action's SHA-256 list. No fallback to building or other installers.
+      - uses: taiki-e/install-action@v2.87.27
+        with:
+          tool: cargo-deny@0.20.2,cargo-about@0.9.2
+          fallback: none
+      - name: Licenses, bans and sources
+        run: cargo deny --locked check licenses bans sources
+      # Needs the RustSec database from the network, so it never fails the
+      # job. A finding shows as a failed step: read it, and take the fix
+      # right away (DECISIONS D9).
+      - name: Advisories (not blocking)
+        continue-on-error: true
+        run: cargo deny --locked check advisories
+      - name: THIRD_PARTY_NOTICES.md is up to date
+        run: |
+          cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs
+          if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md || [ -n "$(git status --porcelain -- THIRD_PARTY_NOTICES.md)" ]; then
+            echo "::error file=THIRD_PARTY_NOTICES.md::THIRD_PARTY_NOTICES.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Cargo.toml -c about.toml -o THIRD_PARTY_NOTICES.md about.hbs"
+            exit 1
+          fi
+      # grape-heif.exe's Rust crates (D33): tools/grape-heif is its own
+      # workspace, with its own deny.toml and about.toml.
+      - name: grape-heif's licenses, bans and sources
+        run: cargo deny --manifest-path tools/grape-heif/Cargo.toml --config tools/grape-heif/deny.toml --locked check licenses bans sources
+      - name: licenses/grape-heif/rust-crates.md is up to date
+        run: |
+          cargo about generate --locked --fail --manifest-path tools/grape-heif/Cargo.toml -c tools/grape-heif/about.toml -o licenses/grape-heif/rust-crates.md tools/grape-heif/about.hbs
+          if ! git diff --exit-code -- licenses/grape-heif/rust-crates.md || [ -n "$(git status --porcelain -- licenses/grape-heif/rust-crates.md)" ]; then
+            echo "::error file=licenses/grape-heif/rust-crates.md::licenses/grape-heif/rust-crates.md is out of date. Regenerate it from the repo root and commit it: cargo about generate --locked --fail --manifest-path tools/grape-heif/Cargo.toml -c tools/grape-heif/about.toml -o licenses/grape-heif/rust-crates.md tools/grape-heif/about.hbs"
+            exit 1
+          fi
+
+  # Sidecars (DECISIONS D25): fetch everything pinned in scripts/sidecars.lock
+  # (FFmpeg, ffprobe and PDFium), check it, and list it. Nothing is built
+  # here. The lock's FFmpeg builds are for dev testing only: the installers
+  # and DMGs carry Grape's own, from the ffmpeg workflow (D24), and the build
+  # jobs above fetch only PDFium from the lock (D29).
+  sidecars:
+    name: Sidecars (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      # The job runs the downloaded programs, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      # Saved only by a run that fetched and checked everything. The script
+      # checks a restored folder against its stamp and fetches again if
+      # anything differs. The key has the scripts too: a restored folder
+      # skips the download, extraction and -version checks, so a changed
+      # script must miss the cache to be tested here.
+      - uses: actions/cache@v6
+        with:
+          path: apps/desktop/src-tauri/binaries
+          key: sidecars-${{ runner.os }}-${{ hashFiles('scripts/sidecars.lock', 'scripts/fetch-sidecars.ps1', 'scripts/fetch-sidecars.sh') }}
+      # Windows PowerShell 5.1, which every PC has.
+      - name: Fetch and check (Windows PowerShell 5.1)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1
+      - name: Run again in PowerShell 7 (must find them current)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $out = ./scripts/fetch-sidecars.ps1 6>&1 | Out-String
+          Write-Output $out
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if ($out -notmatch 'already current') {
+            Write-Output "::error::A second run fetched the sidecars again instead of finding them current."
+            exit 1
+          }
+      - name: List the sidecars
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -File -LiteralPath apps/desktop/src-tauri/binaries | Format-Table -AutoSize Name, Length
+          Get-Content -LiteralPath apps/desktop/src-tauri/binaries/sidecars.stamp
+      # /bin/bash is macOS's own bash 3.2; the runner's bash on PATH is newer.
+      - name: Fetch and check (macOS)
+        if: runner.os == 'macOS'
+        run: /bin/bash ./scripts/fetch-sidecars.sh
+      - name: Run again (must find them current)
+        if: runner.os == 'macOS'
+        run: |
+          out=$(/bin/bash ./scripts/fetch-sidecars.sh)
+          echo "$out"
+          case "$out" in
+            *"already current"*) ;;
+            *)
+              echo "::error::A second run fetched the sidecars again instead of finding them current."
+              exit 1
+              ;;
+          esac
+      - name: List the sidecars
+        if: runner.os == 'macOS'
+        run: |
+          ls -lR apps/desktop/src-tauri/binaries
+          lipo -info apps/desktop/src-tauri/binaries/*-universal-apple-darwin apps/desktop/src-tauri/binaries/*-universal-apple-darwin.dylib
+          codesign -dv apps/desktop/src-tauri/binaries/macos/libpdfium.dylib
+          cat apps/desktop/src-tauri/binaries/sidecars.stamp
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      # The lock's FFmpeg builds are for dev testing only (D24). The bundling
+      # gate, which reads the OS's sidecars overlay here
+      # (tauri.sidecars.windows.conf.json or tauri.sidecars.macos.conf.json),
+      # must refuse them for lacking the -grape marker. It also reports bsdtar
+      # and, on Windows, grape-heif as missing here: they come from the bsdtar
+      # and grape-heif workflows (D27, D33), never from the lock. The step
+      # still wants exit 1 and both FFmpeg refusals.
+      - name: The bundling gate refuses the dev builds (D25)
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Windows) triple=x86_64-pc-windows-msvc ;;
+            macOS) triple=universal-apple-darwin ;;
+          esac
+          set +e
+          out=$(node scripts/check-sidecars.mjs --target "$triple" 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          if [ "$code" -ne 1 ]; then
+            echo "::error::The gate should refuse the dev builds with exit code 1, but exited with $code."
+            exit 1
+          fi
+          case "$out" in
+            *"ffmpeg: this isn't Grape's own build"*"ffprobe: this isn't Grape's own build"*) ;;
+            *)
+              echo "::error::The gate didn't refuse the dev builds for lacking the -grape marker."
+              exit 1
+              ;;
+          esac

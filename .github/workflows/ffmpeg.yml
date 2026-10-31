@@ -1,0 +1,870 @@
+name: ffmpeg
+
+# Grape's own FFmpeg (DECISIONS D24): ffmpeg and ffprobe built from the
+# tarballs pinned in scripts/ffmpeg/sources.json by scripts/ffmpeg/build.sh,
+# one job per target, checked, and uploaded as artifacts for the jobs of the
+# run that called this, with the GPL source bundle (grape-ffmpeg-sources.tar).
+# The Windows exes are cross-built on Linux; the two Mac halves build natively
+# on their own runners and are joined with lipo. release.yml attaches the
+# source bundle to its draft, and both builds, zipped (D45).
+#
+# Artifacts:
+#   ffmpeg-x86_64-pc-windows-msvc   ffmpeg-/ffprobe-x86_64-pc-windows-msvc.exe,
+#                                   BUILDINFO.txt, SHA256SUMS, licenses/ffmpeg/
+#   ffmpeg-apple-darwin             ffmpeg-/ffprobe- aarch64-, x86_64- and
+#                                   universal-apple-darwin (Tauri's names: a
+#                                   universal build wants all three, D25),
+#                                   BUILDINFO-macos-*.txt (their hashes are
+#                                   of the halves as built; SHA256SUMS is of
+#                                   the files as signed here),
+#                                   licenses/ffmpeg/ (artifacts lose the
+#                                   executable bit: consumers chmod +x)
+#   ffmpeg-source                   grape-ffmpeg-sources.tar and its .sha256
+#   ffmpeg-logs-<target>            build.sh's logs, notices-found.json among
+#                                   them (scripts/ffmpeg/README.md, "License
+#                                   notices"), from every run that built
+#
+# targets: "all" (the default, and a manual run) builds everything here. ci.yml
+# calls it twice instead, so that its Windows installer never waits for a Mac
+# job: "windows" (windows-x86_64 and windows-check), then "macos" (the halves,
+# sources and merge) once that call has passed, with its windows-sources
+# output. A Mac call needs that run's ffmpeg-source, which only windows-x86_64
+# uploads, so the DMG still waits for the Windows build.
+on:
+  workflow_call:
+    inputs:
+      cache:
+        description: Use the dist and download caches (release.yml builds clean).
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (release.yml passes its tag); empty for the caller's own ref.
+        type: string
+        default: ""
+      targets:
+        description: all, windows or macos (see above).
+        type: string
+        default: all
+      windows-sources:
+        description: For targets macos, the windows call's windows-sources output.
+        type: string
+        default: ""
+    outputs:
+      sources-sha256:
+        description: grape-ffmpeg-sources.tar's SHA-256 (the ffmpeg-source artifact).
+        value: ${{ jobs.sources.outputs.sha256 }}
+      windows-sums:
+        description: The SHA-256 of the ffmpeg-x86_64-pc-windows-msvc artifact's SHA256SUMS.
+        value: ${{ jobs.windows-x86_64.outputs.sums }}
+      windows-sources:
+        description: The uploaded source bundle's SHA-256, content hash and date, for a macos call's windows-sources.
+        value: ${{ jobs.windows-x86_64.outputs.sources-sha256 }} ${{ jobs.windows-x86_64.outputs.sources-content }} ${{ jobs.windows-x86_64.outputs.sources-epoch }}
+      macos-sums:
+        description: The SHA-256 of the ffmpeg-apple-darwin artifact's SHA256SUMS.
+        value: ${{ jobs.merge.outputs.sums }}
+  workflow_dispatch:
+    inputs:
+      cache:
+        description: Use the dist and download caches.
+        type: boolean
+        default: true
+      ref:
+        description: What to check out (a tag, say); empty for the branch this runs on.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Cross-built with mingw-w64 in the win32 thread model. Exactly
+  # ubuntu-24.04, never ubuntu-latest: licenses/ffmpeg describes this image's
+  # toolchain (mingw-w64 11.0.1, GCC 13.2.0), whose runtimes the exe links.
+  windows-x86_64:
+    name: FFmpeg (windows-x86_64, built on Linux)
+    if: inputs.targets != 'macos'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sources-sha256: ${{ steps.bundle.outputs.sha256 }}
+      sources-content: ${{ steps.bundle.outputs.content }}
+      sources-epoch: ${{ steps.bundle.outputs.epoch }}
+      sums: ${{ steps.stage.outputs.sums }}
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # dist/ from an earlier run of the same scripts/ffmpeg and licenses/ffmpeg
+      # (which is everything the build and its source bundle come from): a hit
+      # skips the build. Saved only once the build and the checks below passed.
+      - id: dist
+        if: inputs.cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            dist/windows-x86_64
+            dist/grape-ffmpeg-sources.tar
+          key: ffmpeg-dist-v1-windows-x86_64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/**', 'licenses/ffmpeg/**') }}
+      # The tarballs, for GRAPE_FFMPEG_TARBALLS: build.sh copies a file it
+      # finds there instead of downloading it, and checks it the same way
+      # (size and SHA-256 against sources.json).
+      - id: tarballs
+        if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ffmpeg-tarballs-v1-windows-x86_64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/sources.json') }}
+      - name: Install the tools and mingw-w64 (win32 threads)
+        if: steps.dist.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential nasm meson ninja-build pkg-config \
+            python3 curl ca-certificates xz-utils bzip2 \
+            gcc-mingw-w64-x86-64-win32 g++-mingw-w64-x86-64-win32 binutils-mingw-w64-x86-64 mingw-w64-x86-64-dev
+          # libvpx has C++ sources (vp9's ratectrl_rtc.cc), so its build needs
+          # g++ as well; FFmpeg's -static link leaves no libstdc++ DLL either
+          # way (build.sh checks the exe's imports).
+          # Only the win32 thread model keeps winpthreads out of the exe
+          # (build.sh checks it too).
+          if update-alternatives --list x86_64-w64-mingw32-gcc > /dev/null 2>&1; then
+            sudo update-alternatives --set x86_64-w64-mingw32-gcc /usr/bin/x86_64-w64-mingw32-gcc-win32
+          fi
+          if [ -e /usr/bin/x86_64-w64-mingw32-g++-win32 ]; then
+            sudo update-alternatives --set x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32-g++-win32
+          fi
+      # The exe links parts of mingw-w64's runtime and GCC's libgcc statically.
+      # licenses/ffmpeg has their notices and the source bundle the runtime's
+      # source, for mingw-w64 11.0.1 (sources.json's runtime_sources) and GCC
+      # 13.2.0 (licenses/ffmpeg/SOURCE.md, "The source"). If the image moves
+      # on, change those first (D24, "Revisit if").
+      - name: The toolchain is the one licenses/ffmpeg describes
+        if: steps.dist.outputs.cache-hit != 'true'
+        run: |
+          want=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["runtime_sources"]["mingw-w64"]["version"])' scripts/ffmpeg/sources.json)
+          have=$(printf '#include <_mingw.h>\n' | x86_64-w64-mingw32-gcc -E -dM - |
+            awk '$2 == "__MINGW64_VERSION_MAJOR" { a = $3 } $2 == "__MINGW64_VERSION_MINOR" { b = $3 }
+              $2 == "__MINGW64_VERSION_BUGFIX" { c = $3 } END { if (a != "") print a "." b "." c }')
+          # shellcheck disable=SC2016 # dpkg-query's own ${...} fields
+          gcc=$(dpkg-query -W -f '${Version}' gcc-mingw-w64-x86-64-win32)
+          echo "mingw-w64 runtime $have (sources.json pins $want), gcc-mingw-w64-x86-64-win32 $gcc"
+          x86_64-w64-mingw32-gcc -v 2>&1 | sed -n 's/^Thread model: /thread model: /p'
+          if [ "$have" != "$want" ]; then
+            echo "::error::This image's mingw-w64 runtime is $have, but scripts/ffmpeg/sources.json and licenses/ffmpeg describe $want."
+            exit 1
+          fi
+          case "$gcc" in
+            13.2.0-*) ;;
+            *)
+              echo "::error::This image's mingw-w64 GCC is $gcc, but licenses/ffmpeg (gcc-runtime-exception.txt, SOURCE.md) describes 13.2.0."
+              exit 1
+              ;;
+          esac
+      - name: Build (scripts/ffmpeg/build.sh windows-x86_64)
+        if: steps.dist.outputs.cache-hit != 'true'
+        env:
+          GRAPE_FFMPEG_TARBALLS: ${{ runner.temp }}/ffmpeg-tarballs
+        run: |
+          mkdir -p "$GRAPE_FFMPEG_TARBALLS"
+          scripts/ffmpeg/build.sh windows-x86_64
+      - if: ${{ !cancelled() && steps.dist.outputs.cache-hit != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-logs-windows-x86_64
+          path: build/ffmpeg/windows-x86_64/logs
+          if-no-files-found: ignore
+          retention-days: 14
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        name: Keep the checked tarballs for the next run
+        run: cp build/ffmpeg/windows-x86_64/downloads/* "$RUNNER_TEMP/ffmpeg-tarballs/"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ${{ steps.tarballs.outputs.cache-primary-key }}
+      # Built here or restored, dist/ must hold both programs as BUILDINFO.txt
+      # names them, and the source bundle.
+      - name: Check dist against BUILDINFO.txt
+        run: |
+          out=dist/windows-x86_64
+          for f in ffmpeg.exe ffprobe.exe BUILDINFO.txt ../grape-ffmpeg-sources.tar; do
+            [ -s "$out/$f" ] || { echo "::error::$out/$f is missing."; exit 1; }
+          done
+          head -n 1 "$out/BUILDINFO.txt" | grep -qx "Grape's FFmpeg build for windows-x86_64 (DECISIONS D24)" ||
+            { echo "::error::$out/BUILDINFO.txt isn't windows-x86_64's."; exit 1; }
+          for f in ffmpeg.exe ffprobe.exe; do
+            want=$(awk -v f="$f" 'length($1) == 64 && $2 == f { print $1 }' "$out/BUILDINFO.txt")
+            got=$(sha256sum < "$out/$f" | cut -d ' ' -f 1)
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "::error::$out/$f has SHA-256 $got, but BUILDINFO.txt says '$want'."
+              exit 1
+            fi
+            echo "$got  $f"
+          done
+          grep -E '^(FFmpeg |Grape commit:|configuration:)' "$out/BUILDINFO.txt"
+      # The bundle's SHA-256, for the sources job. A bundle from the cache was
+      # written by another commit's run, so its files' dates differ; the hash
+      # of its contents (each member's name, type, mode, size and SHA-256,
+      # without the date) can always be compared.
+      - id: bundle
+        name: Hash the source bundle
+        run: |
+          python3 -I - dist/grape-ffmpeg-sources.tar >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import sys
+          import tarfile
+
+          path = sys.argv[1]
+          whole = hashlib.sha256()
+          with open(path, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  whole.update(chunk)
+          content = hashlib.sha256()
+          epochs = set()
+          with tarfile.open(path) as tar:
+              for m in tar:
+                  epochs.add(int(m.mtime))
+                  data = tar.extractfile(m).read() if m.isfile() else b""
+                  line = "%s\0%s\0%o\0%d\0%s\n" % (m.name, m.type.decode(), m.mode, m.size, hashlib.sha256(data).hexdigest())
+                  content.update(line.encode("utf-8"))
+          if len(epochs) != 1:
+              sys.exit("the source bundle's members don't share one date: %s" % sorted(epochs))
+          print("sha256=" + whole.hexdigest())
+          print("content=" + content.hexdigest())
+          print("epoch=%d" % epochs.pop())
+          PY
+          cat "$GITHUB_OUTPUT"
+      # Tauri's externalBin names. The exes are GPL-2.0-or-later, so their
+      # artifact carries the license texts and SOURCE.md, which names the
+      # source bundle (the ffmpeg-source artifact of the same run).
+      - id: stage
+        name: Stage the artifacts
+        run: |
+          stage="$RUNNER_TEMP/ffmpeg-artifact"
+          mkdir -p "$stage/licenses/ffmpeg"
+          cp dist/windows-x86_64/ffmpeg.exe "$stage/ffmpeg-x86_64-pc-windows-msvc.exe"
+          cp dist/windows-x86_64/ffprobe.exe "$stage/ffprobe-x86_64-pc-windows-msvc.exe"
+          cp dist/windows-x86_64/BUILDINFO.txt "$stage/"
+          cp -R licenses/ffmpeg/. "$stage/licenses/ffmpeg/"
+          (cd "$stage" && sha256sum ffmpeg-x86_64-pc-windows-msvc.exe ffprobe-x86_64-pc-windows-msvc.exe > SHA256SUMS)
+          cat "$stage/SHA256SUMS"
+          echo "sums=$(sha256sum < "$stage/SHA256SUMS" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          src="$RUNNER_TEMP/ffmpeg-source"
+          mkdir -p "$src"
+          cp dist/grape-ffmpeg-sources.tar "$src/"
+          (cd "$src" && sha256sum grape-ffmpeg-sources.tar > grape-ffmpeg-sources.tar.sha256)
+          cat "$src/grape-ffmpeg-sources.tar.sha256"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            dist/windows-x86_64
+            dist/grape-ffmpeg-sources.tar
+          key: ${{ steps.dist.outputs.cache-primary-key }}
+      # Uploaded once, from here: the sources job checks that the Mac runs
+      # wrote the same one. It's tarballs already, so it isn't compressed again.
+      # Before the exes, so they never sit in a run without their source.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-source
+          path: |
+            ${{ runner.temp }}/ffmpeg-source/grape-ffmpeg-sources.tar
+            ${{ runner.temp }}/ffmpeg-source/grape-ffmpeg-sources.tar.sha256
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg-artifact
+          if-no-files-found: error
+
+  # build.sh runs the programs only on Linux and macOS, so the Windows exes
+  # first run here: the gate's checks (the -grape marker, licenses/ffmpeg,
+  # the notices sections), the protocols, the configure line, and a
+  # conversion.
+  windows-check:
+    name: FFmpeg (windows-x86_64, run on Windows)
+    needs: windows-x86_64
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      # Runs programs built in this run, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg
+      - name: Check the exes against SHA256SUMS
+        shell: pwsh
+        env:
+          SUMS_SHA256: ${{ needs.windows-x86_64.outputs.sums }}
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          $sums = Join-Path $dir 'SHA256SUMS'
+          $have = (Get-FileHash -Algorithm SHA256 -LiteralPath $sums).Hash.ToLowerInvariant()
+          if ($have -ne $env:SUMS_SHA256) { Write-Output "::error::SHA256SUMS has SHA-256 $have, not the $env:SUMS_SHA256 the build job wrote."; exit 1 }
+          foreach ($line in Get-Content -LiteralPath $sums) {
+            if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { Write-Output "::error::SHA256SUMS has a line it shouldn't: $line"; exit 1 }
+            $want = $Matches[1]
+            $file = $Matches[2]
+            $got = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dir $file)).Hash.ToLowerInvariant()
+            if ($got -ne $want) { Write-Output "::error::$file has SHA-256 $got, not $want."; exit 1 }
+            Write-Output "$got  $file"
+          }
+      - name: Run them (the gate, the protocols, the configure line, a conversion)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          $bins = 'apps/desktop/src-tauri/binaries'
+          New-Item -ItemType Directory -Force -Path $bins | Out-Null
+          foreach ($name in 'ffmpeg', 'ffprobe') {
+            Copy-Item -LiteralPath (Join-Path $dir "$name-x86_64-pc-windows-msvc.exe") -Destination $bins
+          }
+          # The gate as the installer build runs it, for FFmpeg's two entries.
+          $env:TAURI_CONFIG = '{"bundle":{"externalBin":["binaries/ffmpeg","binaries/ffprobe"]}}'
+          node scripts/check-sidecars.mjs --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Remove-Item Env:TAURI_CONFIG
+
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          $ffmpeg = (Resolve-Path (Join-Path $dir 'ffmpeg-x86_64-pc-windows-msvc.exe')).Path
+          $ffprobe = (Resolve-Path (Join-Path $dir 'ffprobe-x86_64-pc-windows-msvc.exe')).Path
+
+          # Only the file and pipe protocols, in and out (golden rule 3).
+          $lines = @(& $ffmpeg -hide_banner -protocols)
+          $start = [array]::IndexOf($lines, 'Input:')
+          if ($LASTEXITCODE -ne 0 -or $start -lt 0) { Bad "ffmpeg -protocols failed: $($lines -join ' / ')" } else {
+            $listed = @($lines[($start + 1)..($lines.Count - 1)] | Where-Object { $_ -notmatch ':$' } | ForEach-Object { $_.Trim() } | Sort-Object -Unique)
+            Write-Output "ffmpeg -protocols (input and output): $($listed -join ' ')"
+            if (($listed -join ' ') -cne 'file pipe') { Bad "ffmpeg -protocols lists: $($listed -join ' ')" }
+          }
+
+          # The configure line BUILDINFO.txt recorded, from the program itself.
+          $want = @(Get-Content -LiteralPath (Join-Path $dir 'BUILDINFO.txt') | Where-Object { $_ -like 'configuration: *' }) | Select-Object -First 1
+          foreach ($exe in $ffmpeg, $ffprobe) {
+            $have = @(& $exe -hide_banner -version | Where-Object { $_ -like 'configuration: *' }) | Select-Object -First 1
+            if (-not $want -or $have -cne $want) { Bad "$(Split-Path -Leaf $exe) -version prints another configure line than BUILDINFO.txt: $have" }
+          }
+
+          # A conversion with the encoders the MP4 pair uses, read back by ffprobe.
+          $work = Join-Path $env:RUNNER_TEMP 'ffmpeg-smoke'
+          New-Item -ItemType Directory -Force -Path $work | Out-Null
+          $out = Join-Path $work 'smoke.mp4'
+          & $ffmpeg -hide_banner -nostdin -loglevel error -f lavfi -i 'testsrc=size=64x48:rate=10:duration=1' -f lavfi -i 'sine=duration=1' -c:v libx264 -c:a aac -shortest $out
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $out -PathType Leaf)) { Bad 'ffmpeg.exe couldn''t make an MP4.' } else {
+            $codecs = @(& $ffprobe -hide_banner -loglevel error -show_entries stream=codec_name -of csv=p=0 $out | ForEach-Object { $_.Trim() })
+            Write-Output "smoke.mp4: $($codecs -join ', ')"
+            if (($codecs -join ',') -cne 'h264,aac') { Bad "ffprobe.exe reads smoke.mp4 as: $($codecs -join ', ')" }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          Write-Output 'Every check passed.'
+          exit 0
+
+  # Natively on Apple silicon: build.sh doesn't cross-compile between Mac
+  # architectures. After windows-x86_64, which uploads the one source bundle:
+  # the halves are GPL programs too, so no run holds them without it. In a
+  # macos call windows-x86_64 ran in the caller's windows call instead.
+  macos-arm64:
+    name: FFmpeg (macos-arm64)
+    needs: windows-x86_64
+    if: ${{ !cancelled() && (inputs.targets == 'macos' || inputs.targets != 'windows' && needs.windows-x86_64.result == 'success') }}
+    runs-on: macos-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sources-sha256: ${{ steps.bundle.outputs.sha256 }}
+      sources-content: ${{ steps.bundle.outputs.content }}
+      sources-epoch: ${{ steps.bundle.outputs.epoch }}
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # As in windows-x86_64.
+      - id: dist
+        if: inputs.cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            dist/macos-arm64
+            dist/grape-ffmpeg-sources.tar
+          key: ffmpeg-dist-v1-macos-arm64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/**', 'licenses/ffmpeg/**') }}
+      - id: tarballs
+        if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ffmpeg-tarballs-v1-macos-arm64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/sources.json') }}
+      - name: This runner is Apple silicon
+        run: |
+          [ "$(uname -m)" = arm64 ] || { echo "::error::macos-arm64 builds natively on Apple silicon, and this runner is $(uname -m)."; exit 1; }
+          sw_vers
+          xcodebuild -version
+      # Xcode's command line tools are on the runner. nasm is for x86_64 only.
+      # pkgconf only when nothing gives pkg-config yet: Homebrew refuses it
+      # next to an older pkg-config formula.
+      - name: Install the tools
+        if: steps.dist.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          tools=(meson ninja)
+          command -v pkg-config > /dev/null 2>&1 || tools+=(pkgconf)
+          brew install "${tools[@]}"
+          python3 --version
+      - name: Build (scripts/ffmpeg/build.sh macos-arm64)
+        if: steps.dist.outputs.cache-hit != 'true'
+        env:
+          GRAPE_FFMPEG_TARBALLS: ${{ runner.temp }}/ffmpeg-tarballs
+        run: |
+          mkdir -p "$GRAPE_FFMPEG_TARBALLS"
+          scripts/ffmpeg/build.sh macos-arm64
+      # The first Mac run also checks the AArch64 sources' notices for real:
+      # if it stops there, its notices-found.json is in this artifact.
+      - if: ${{ !cancelled() && steps.dist.outputs.cache-hit != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-logs-macos-arm64
+          path: build/ffmpeg/macos-arm64/logs
+          if-no-files-found: ignore
+          retention-days: 14
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        name: Keep the checked tarballs for the next run
+        run: cp build/ffmpeg/macos-arm64/downloads/* "$RUNNER_TEMP/ffmpeg-tarballs/"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ${{ steps.tarballs.outputs.cache-primary-key }}
+      - name: Check dist against BUILDINFO.txt
+        run: |
+          out=dist/macos-arm64
+          for f in ffmpeg ffprobe BUILDINFO.txt ../grape-ffmpeg-sources.tar; do
+            [ -s "$out/$f" ] || { echo "::error::$out/$f is missing."; exit 1; }
+          done
+          head -n 1 "$out/BUILDINFO.txt" | grep -qx "Grape's FFmpeg build for macos-arm64 (DECISIONS D24)" ||
+            { echo "::error::$out/BUILDINFO.txt isn't macos-arm64's."; exit 1; }
+          for f in ffmpeg ffprobe; do
+            want=$(awk -v f="$f" 'length($1) == 64 && $2 == f { print $1 }' "$out/BUILDINFO.txt")
+            got=$(shasum -a 256 < "$out/$f" | cut -d ' ' -f 1)
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "::error::$out/$f has SHA-256 $got, but BUILDINFO.txt says '$want'."
+              exit 1
+            fi
+            echo "$got  $f"
+          done
+          grep -E '^(FFmpeg |Grape commit:|configuration:)' "$out/BUILDINFO.txt"
+      # As in windows-x86_64.
+      - id: bundle
+        name: Hash the source bundle
+        run: |
+          python3 -I - dist/grape-ffmpeg-sources.tar >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import sys
+          import tarfile
+
+          path = sys.argv[1]
+          whole = hashlib.sha256()
+          with open(path, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  whole.update(chunk)
+          content = hashlib.sha256()
+          epochs = set()
+          with tarfile.open(path) as tar:
+              for m in tar:
+                  epochs.add(int(m.mtime))
+                  data = tar.extractfile(m).read() if m.isfile() else b""
+                  line = "%s\0%s\0%o\0%d\0%s\n" % (m.name, m.type.decode(), m.mode, m.size, hashlib.sha256(data).hexdigest())
+                  content.update(line.encode("utf-8"))
+          if len(epochs) != 1:
+              sys.exit("the source bundle's members don't share one date: %s" % sorted(epochs))
+          print("sha256=" + whole.hexdigest())
+          print("content=" + content.hexdigest())
+          print("epoch=%d" % epochs.pop())
+          PY
+          cat "$GITHUB_OUTPUT"
+      # For the merge job only. GPL programs, so the license texts go along.
+      - name: Stage the half for the merge job
+        run: |
+          stage="$RUNNER_TEMP/ffmpeg-half"
+          mkdir -p "$stage/licenses/ffmpeg"
+          cp dist/macos-arm64/ffmpeg "$stage/ffmpeg-aarch64-apple-darwin"
+          cp dist/macos-arm64/ffprobe "$stage/ffprobe-aarch64-apple-darwin"
+          cp dist/macos-arm64/BUILDINFO.txt "$stage/"
+          cp -R licenses/ffmpeg/. "$stage/licenses/ffmpeg/"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            dist/macos-arm64
+            dist/grape-ffmpeg-sources.tar
+          key: ${{ steps.dist.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-half-macos-arm64
+          path: ${{ runner.temp }}/ffmpeg-half
+          if-no-files-found: error
+          retention-days: 7
+
+  # Natively on Intel: uname -m must say x86_64, so Rosetta on Apple silicon
+  # isn't enough. macos-15-intel is GitHub's Intel image; when it's retired,
+  # take the next one (D24, "Revisit if"). After windows-x86_64, as above.
+  macos-x86_64:
+    name: FFmpeg (macos-x86_64)
+    needs: windows-x86_64
+    if: ${{ !cancelled() && (inputs.targets == 'macos' || inputs.targets != 'windows' && needs.windows-x86_64.result == 'success') }}
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sources-sha256: ${{ steps.bundle.outputs.sha256 }}
+      sources-content: ${{ steps.bundle.outputs.content }}
+      sources-epoch: ${{ steps.bundle.outputs.epoch }}
+    steps:
+      # Builds third-party code, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      # As in windows-x86_64.
+      - id: dist
+        if: inputs.cache
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            dist/macos-x86_64
+            dist/grape-ffmpeg-sources.tar
+          key: ffmpeg-dist-v1-macos-x86_64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/**', 'licenses/ffmpeg/**') }}
+      - id: tarballs
+        if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ffmpeg-tarballs-v1-macos-x86_64-${{ runner.os }}-${{ hashFiles('scripts/ffmpeg/sources.json') }}
+      - name: This runner is Intel
+        run: |
+          [ "$(uname -m)" = x86_64 ] || { echo "::error::macos-x86_64 builds natively on Intel, and this runner is $(uname -m)."; exit 1; }
+          sw_vers
+          xcodebuild -version
+      # As in macos-arm64, with nasm for the x86 assembly.
+      - name: Install the tools
+        if: steps.dist.outputs.cache-hit != 'true'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          tools=(nasm meson ninja)
+          command -v pkg-config > /dev/null 2>&1 || tools+=(pkgconf)
+          brew install "${tools[@]}"
+          python3 --version
+      - name: Build (scripts/ffmpeg/build.sh macos-x86_64)
+        if: steps.dist.outputs.cache-hit != 'true'
+        env:
+          GRAPE_FFMPEG_TARBALLS: ${{ runner.temp }}/ffmpeg-tarballs
+        run: |
+          mkdir -p "$GRAPE_FFMPEG_TARBALLS"
+          scripts/ffmpeg/build.sh macos-x86_64
+      - if: ${{ !cancelled() && steps.dist.outputs.cache-hit != 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-logs-macos-x86_64
+          path: build/ffmpeg/macos-x86_64/logs
+          if-no-files-found: ignore
+          retention-days: 14
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        name: Keep the checked tarballs for the next run
+        run: cp build/ffmpeg/macos-x86_64/downloads/* "$RUNNER_TEMP/ffmpeg-tarballs/"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true' && steps.tarballs.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/ffmpeg-tarballs
+          key: ${{ steps.tarballs.outputs.cache-primary-key }}
+      - name: Check dist against BUILDINFO.txt
+        run: |
+          out=dist/macos-x86_64
+          for f in ffmpeg ffprobe BUILDINFO.txt ../grape-ffmpeg-sources.tar; do
+            [ -s "$out/$f" ] || { echo "::error::$out/$f is missing."; exit 1; }
+          done
+          head -n 1 "$out/BUILDINFO.txt" | grep -qx "Grape's FFmpeg build for macos-x86_64 (DECISIONS D24)" ||
+            { echo "::error::$out/BUILDINFO.txt isn't macos-x86_64's."; exit 1; }
+          for f in ffmpeg ffprobe; do
+            want=$(awk -v f="$f" 'length($1) == 64 && $2 == f { print $1 }' "$out/BUILDINFO.txt")
+            got=$(shasum -a 256 < "$out/$f" | cut -d ' ' -f 1)
+            if [ -z "$want" ] || [ "$want" != "$got" ]; then
+              echo "::error::$out/$f has SHA-256 $got, but BUILDINFO.txt says '$want'."
+              exit 1
+            fi
+            echo "$got  $f"
+          done
+          grep -E '^(FFmpeg |Grape commit:|configuration:)' "$out/BUILDINFO.txt"
+      # As in windows-x86_64.
+      - id: bundle
+        name: Hash the source bundle
+        run: |
+          python3 -I - dist/grape-ffmpeg-sources.tar >> "$GITHUB_OUTPUT" <<'PY'
+          import hashlib
+          import sys
+          import tarfile
+
+          path = sys.argv[1]
+          whole = hashlib.sha256()
+          with open(path, "rb") as f:
+              for chunk in iter(lambda: f.read(1 << 20), b""):
+                  whole.update(chunk)
+          content = hashlib.sha256()
+          epochs = set()
+          with tarfile.open(path) as tar:
+              for m in tar:
+                  epochs.add(int(m.mtime))
+                  data = tar.extractfile(m).read() if m.isfile() else b""
+                  line = "%s\0%s\0%o\0%d\0%s\n" % (m.name, m.type.decode(), m.mode, m.size, hashlib.sha256(data).hexdigest())
+                  content.update(line.encode("utf-8"))
+          if len(epochs) != 1:
+              sys.exit("the source bundle's members don't share one date: %s" % sorted(epochs))
+          print("sha256=" + whole.hexdigest())
+          print("content=" + content.hexdigest())
+          print("epoch=%d" % epochs.pop())
+          PY
+          cat "$GITHUB_OUTPUT"
+      - name: Stage the half for the merge job
+        run: |
+          stage="$RUNNER_TEMP/ffmpeg-half"
+          mkdir -p "$stage/licenses/ffmpeg"
+          cp dist/macos-x86_64/ffmpeg "$stage/ffmpeg-x86_64-apple-darwin"
+          cp dist/macos-x86_64/ffprobe "$stage/ffprobe-x86_64-apple-darwin"
+          cp dist/macos-x86_64/BUILDINFO.txt "$stage/"
+          cp -R licenses/ffmpeg/. "$stage/licenses/ffmpeg/"
+      - if: inputs.cache && steps.dist.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            dist/macos-x86_64
+            dist/grape-ffmpeg-sources.tar
+          key: ${{ steps.dist.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-half-macos-x86_64
+          path: ${{ runner.temp }}/ffmpeg-half
+          if-no-files-found: error
+          retention-days: 7
+
+  # The two halves joined with lipo into <name>-universal-apple-darwin, which
+  # is signed ad hoc (lipo breaks the halves' signatures, D25). The per-arch
+  # files go along under their own names: tauri-build wants them while a
+  # universal build compiles each arch. Then each half runs where this
+  # runner can run it (the Intel one under Rosetta, when there is one). Only
+  # once the sources job has checked the uploaded source bundle against both
+  # halves' own: ffmpeg-apple-darwin never appears without its source.
+  merge:
+    name: FFmpeg (macOS universal)
+    needs: [macos-arm64, macos-x86_64, sources]
+    if: ${{ !cancelled() && needs.sources.result == 'success' }}
+    runs-on: macos-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sums: ${{ steps.stage.outputs.sums }}
+    steps:
+      # Runs programs built in this run, so it keeps no git credentials.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-half-macos-arm64
+          path: ${{ runner.temp }}/arm64
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-half-macos-x86_64
+          path: ${{ runner.temp }}/x86_64
+      - id: stage
+        name: Join the halves with lipo and sign ad hoc
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          stage="$RUNNER_TEMP/ffmpeg-artifact"
+          mkdir -p "$stage/licenses/ffmpeg"
+          for name in ffmpeg ffprobe; do
+            arm="$stage/$name-aarch64-apple-darwin"
+            intel="$stage/$name-x86_64-apple-darwin"
+            fat="$stage/$name-universal-apple-darwin"
+            cp "$RUNNER_TEMP/arm64/$name-aarch64-apple-darwin" "$arm"
+            cp "$RUNNER_TEMP/x86_64/$name-x86_64-apple-darwin" "$intel"
+            # Each half as its build recorded it, before signing changes it.
+            for pair in "arm64:$arm" "x86_64:$intel"; do
+              half=${pair%%:*}
+              file=${pair#*:}
+              want=$(awk -v f="$name" 'length($1) == 64 && $2 == f { print $1 }' "$RUNNER_TEMP/$half/BUILDINFO.txt")
+              got=$(shasum -a 256 < "$file" | cut -d ' ' -f 1)
+              [ -n "$want" ] && [ "$want" = "$got" ] || fail "$(basename "$file") has SHA-256 $got, but its BUILDINFO.txt says '$want'."
+            done
+            chmod 755 "$arm" "$intel"
+            [ "$(lipo -archs "$arm")" = arm64 ] || fail "$name-aarch64-apple-darwin isn't arm64 only."
+            [ "$(lipo -archs "$intel")" = x86_64 ] || fail "$name-x86_64-apple-darwin isn't x86_64 only."
+            codesign --force --sign - "$arm" || fail "codesign couldn't sign $name-aarch64-apple-darwin."
+            codesign --force --sign - "$intel" || fail "codesign couldn't sign $name-x86_64-apple-darwin."
+            lipo -create -output "$fat" "$arm" "$intel" || fail "lipo couldn't join $name's halves."
+            chmod 755 "$fat"
+            case "$(lipo -archs "$fat")" in
+              "x86_64 arm64" | "arm64 x86_64") ;;
+              *) fail "$name-universal-apple-darwin holds '$(lipo -archs "$fat")', not arm64 and x86_64." ;;
+            esac
+            codesign --force --sign - "$fat" || fail "codesign couldn't sign $name-universal-apple-darwin."
+            for f in "$arm" "$intel" "$fat"; do
+              codesign --verify --strict "$f" || fail "$(basename "$f")'s signature doesn't verify."
+            done
+            echo "Made $name-universal-apple-darwin (arm64 + x86_64), signed ad hoc."
+          done
+          cp "$RUNNER_TEMP/arm64/BUILDINFO.txt" "$stage/BUILDINFO-macos-arm64.txt"
+          cp "$RUNNER_TEMP/x86_64/BUILDINFO.txt" "$stage/BUILDINFO-macos-x86_64.txt"
+          cp -R licenses/ffmpeg/. "$stage/licenses/ffmpeg/"
+          (cd "$stage" && shasum -a 256 ffmpeg-*-apple-darwin ffprobe-*-apple-darwin > SHA256SUMS)
+          cat "$stage/SHA256SUMS"
+          echo "sums=$(shasum -a 256 < "$stage/SHA256SUMS" | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      # The gate as the DMG build runs it (the -grape marker, licenses/ffmpeg,
+      # the notices sections), for FFmpeg's two entries and each file Tauri
+      # takes; then each half: its minimum macOS against Grape's, only the
+      # OS's own libraries, the protocols, the configure line and a conversion.
+      - name: Run them (the gate, the halves, a conversion)
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          stage="$RUNNER_TEMP/ffmpeg-artifact"
+          bins=apps/desktop/src-tauri/binaries
+          mkdir -p "$bins"
+          cp "$stage"/ffmpeg-*-apple-darwin "$stage"/ffprobe-*-apple-darwin "$bins/"
+          rosetta=0
+          if arch -x86_64 /usr/bin/true 2> /dev/null; then rosetta=1; fi
+          export TAURI_CONFIG='{"bundle":{"externalBin":["binaries/ffmpeg","binaries/ffprobe"]}}'
+          node scripts/check-sidecars.mjs --target universal-apple-darwin
+          node scripts/check-sidecars.mjs --target aarch64-apple-darwin
+          if [ "$rosetta" -eq 1 ]; then
+            node scripts/check-sidecars.mjs --target x86_64-apple-darwin
+          else
+            echo "No Rosetta on this runner: the gate didn't run the x86_64 file."
+          fi
+          unset TAURI_CONFIG
+
+          min=$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["bundle"]["macOS"]["minimumSystemVersion"])' apps/desktop/src-tauri/tauri.conf.json)
+          for half in arm64 x86_64; do
+            info="$RUNNER_TEMP/$half/BUILDINFO.txt"
+            for name in ffmpeg ffprobe; do
+              fat="$stage/$name-universal-apple-darwin"
+              minos=$(vtool -arch "$half" -show-build "$fat" | awk '$1 == "minos" { print $2 }')
+              python3 -I -c 'import sys; v = lambda s: tuple(int(x) for x in s.split(".")); sys.exit(0 if v(sys.argv[1]) <= v(sys.argv[2]) else 1)' "${minos:-99}" "$min" ||
+                fail "$name ($half) needs macOS ${minos:-?}, but Grape runs on $min."
+              libs=$(otool -arch "$half" -L "$fat" | awk '/:$/ { next } { print $1 }')
+              echo "$name ($half): minimum macOS $minos; links $(echo "$libs" | tr '\n' ' ')"
+              while IFS= read -r lib; do
+                case "$lib" in
+                  /usr/lib/libSystem.B.dylib) ;;
+                  /usr/lib/* | /System/Library/*) echo "::warning::$name ($half) links $lib, which is macOS's own but not libSystem: say so in licenses/ffmpeg/SOURCE.md." ;;
+                  *) fail "$name ($half) links $lib, which isn't part of macOS." ;;
+                esac
+              done <<< "$libs"
+            done
+            if [ "$half" = x86_64 ] && [ "$rosetta" -eq 0 ]; then
+              echo "No Rosetta on this runner: the x86_64 half doesn't run here (its build job ran it)."
+              continue
+            fi
+            ffmpeg=(arch "-$half" "$stage/ffmpeg-universal-apple-darwin")
+            ffprobe=(arch "-$half" "$stage/ffprobe-universal-apple-darwin")
+            listed=$("${ffmpeg[@]}" -hide_banner -protocols | sed -n '/^Input:/,$p' | grep -v ':$' | sort -u | tr -d ' ' | tr '\n' ' ')
+            echo "ffmpeg ($half) -protocols (input and output): $listed"
+            [ "$listed" = "file pipe " ] || fail "ffmpeg ($half) -protocols lists: $listed"
+            want=$(sed -n 's/^configuration: //p' "$info")
+            for prog in ffmpeg ffprobe; do
+              if [ "$prog" = ffmpeg ]; then cmd=("${ffmpeg[@]}"); else cmd=("${ffprobe[@]}"); fi
+              have=$("${cmd[@]}" -hide_banner -version | sed -n 's/^configuration: //p')
+              [ -n "$want" ] && [ "$have" = "$want" ] || fail "$prog ($half) -version prints another configure line than its BUILDINFO.txt."
+            done
+            work="$RUNNER_TEMP/ffmpeg-smoke-$half"
+            mkdir -p "$work"
+            "${ffmpeg[@]}" -hide_banner -nostdin -loglevel error -f lavfi -i testsrc=size=64x48:rate=10:duration=1 \
+              -f lavfi -i sine=duration=1 -c:v libx264 -c:a aac -shortest "$work/smoke.mp4" ||
+              fail "ffmpeg ($half) couldn't make an MP4."
+            codecs=$("${ffprobe[@]}" -hide_banner -loglevel error -show_entries stream=codec_name -of csv=p=0 "$work/smoke.mp4" | tr '\n' ',')
+            echo "smoke.mp4 ($half): $codecs"
+            [ "$codecs" = "h264,aac," ] || fail "ffprobe ($half) reads smoke.mp4 as: $codecs"
+          done
+          echo "Every check passed."
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ffmpeg-apple-darwin
+          path: ${{ runner.temp }}/ffmpeg-artifact
+          if-no-files-found: error
+
+  # Reproducible: every target's run writes the same grape-ffmpeg-sources.tar,
+  # and the one uploaded (from windows-x86_64) is checked here. Bundles of one
+  # commit must match byte for byte; a bundle restored from the cache was
+  # written by another commit's run, whose date it carries, so then only the
+  # contents are compared. In a macos call the Windows job's hashes come from
+  # the caller (windows-sources). Both halves passed means windows-x86_64 did
+  # too, in an all call.
+  sources:
+    name: FFmpeg's source bundle (the same from every target)
+    needs: [windows-x86_64, macos-arm64, macos-x86_64]
+    if: ${{ !cancelled() && needs.macos-arm64.result == 'success' && needs.macos-x86_64.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sha256: ${{ steps.compare.outputs.sha256 }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-source
+          path: ${{ runner.temp }}/ffmpeg-source
+      - id: compare
+        name: Compare the three bundles, and the uploaded one
+        env:
+          WINDOWS: ${{ inputs.targets == 'macos' && inputs.windows-sources || format('{0} {1} {2}', needs.windows-x86_64.outputs.sources-sha256, needs.windows-x86_64.outputs.sources-content, needs.windows-x86_64.outputs.sources-epoch) }}
+          ARM64: ${{ needs.macos-arm64.outputs.sources-sha256 }} ${{ needs.macos-arm64.outputs.sources-content }} ${{ needs.macos-arm64.outputs.sources-epoch }}
+          X86_64: ${{ needs.macos-x86_64.outputs.sources-sha256 }} ${{ needs.macos-x86_64.outputs.sources-content }} ${{ needs.macos-x86_64.outputs.sources-epoch }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          read -r w_sha w_content w_epoch <<< "$WINDOWS"
+          read -r a_sha a_content a_epoch <<< "$ARM64"
+          read -r i_sha i_content i_epoch <<< "$X86_64"
+          printf '%-15s %s  contents %s  dated %s\n' windows-x86_64 "$w_sha" "$w_content" "$w_epoch" \
+            macos-arm64 "$a_sha" "$a_content" "$a_epoch" macos-x86_64 "$i_sha" "$i_content" "$i_epoch"
+          for v in "$w_sha" "$w_content" "$a_sha" "$a_content" "$i_sha" "$i_content"; do
+            [ "${#v}" -eq 64 ] || fail "A build job didn't report its source bundle's hashes."
+          done
+          [ "$w_content" = "$a_content" ] && [ "$w_content" = "$i_content" ] ||
+            fail "The targets' source bundles hold different files: build.sh must write the same one for every target."
+          if [ "$w_epoch" = "$a_epoch" ] && [ "$w_epoch" = "$i_epoch" ]; then
+            [ "$w_sha" = "$a_sha" ] && [ "$w_sha" = "$i_sha" ] ||
+              fail "The targets' source bundles are dated alike and hold the same files, but differ byte for byte."
+            echo "All three are byte for byte the same."
+          else
+            echo "::notice::The source bundles hold the same files; some came from the cache of another commit's run, so their dates differ and only their contents were compared."
+          fi
+          cd "$RUNNER_TEMP/ffmpeg-source"
+          sha256sum -c grape-ffmpeg-sources.tar.sha256
+          got=$(sha256sum < grape-ffmpeg-sources.tar | cut -d ' ' -f 1)
+          [ "$got" = "$w_sha" ] || fail "The ffmpeg-source artifact has SHA-256 $got, not windows-x86_64's $w_sha."
+          echo "sha256=$got" >> "$GITHUB_OUTPUT"

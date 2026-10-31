@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- An empty icon, so WebView2 never asks for /favicon.ico, which
+         Grape doesn't ship, and Tauri doesn't log a missing asset. -->
+    <link rel="icon" href="data:," />
+    <title>Grape Settings</title>
+  </head>
+  <body>
+    <main class="settings">
+      <header class="settings-header">
+        <svg class="settings-mark" viewBox="0 0 64 64" aria-hidden="true">
+          <rect class="mark-tile" width="64" height="64" rx="14" />
+          <path class="mark-leaf" d="M32 15c3-5 9-7 14-5-2 5-8 8-14 5z" />
+          <g class="mark-grapes">
+            <circle cx="24" cy="25" r="7" />
+            <circle cx="40" cy="25" r="7" />
+            <circle cx="32" cy="35" r="7" />
+            <circle cx="22" cy="38" r="6" />
+            <circle cx="42" cy="38" r="6" />
+            <circle cx="32" cy="48" r="6" />
+          </g>
+        </svg>
+        <h1>Grape</h1>
+      </header>
+      <!-- Drawn from Rust's settings view by src/settings/view.ts. -->
+      <div id="settings-root"></div>
+      <p class="note">
+        Grape works offline. Your files never leave this computer.
+      </p>
+    </main>
+    <script type="module" src="/src/settings.ts"></script>
+  </body>
+</html>

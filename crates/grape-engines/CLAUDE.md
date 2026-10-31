@@ -1,0 +1,67 @@
+# grape-engines
+
+Executes `JobPlan`s from `grape-core`: images, FFmpeg sidecar, PDF, archives, subtitles, and v2 documents. **Lane B (Codex) owns this crate.**
+
+## Hard rules
+- **Never touch the source.** Open inputs read-only. Write to `{dest_dir}/.grape-tmp-{uuid}.{ext}`, fsync, then atomically rename to the final name from the plan, **never replacing an existing file** (no-clobber rename; re-plan the name if it was taken meanwhile). On error or cancel, delete the temp file. Every test hashes the source before and after.
+- **No network.** The engine code makes no HTTP calls at all.
+- **Sidecars come from `SidecarPaths`** injected by the app. Never use `PATH` lookups, which would pick up whatever FFmpeg the user has installed.
+- **Licensing:** read `docs/ENGINES.md` → Licensing rules before adding any crate or binary. Log it in `docs/DECISIONS.md`.
+- **Cancellation:** every engine takes a `CancelToken`. FFmpeg children get killed. Long Rust loops check the token at least every 50 ms of work.
+- **Progress:** call `run_job`'s `progress` callback with fractions in 0.0..=1.0 (it may never be called). FFmpeg uses `-progress pipe:1` + `ffprobe` duration.
+
+## Layout
+```
+src/
+  lib.rs            supports, run_job(job, ctx, progress) -> JobOutcome; engine_for picks the engine
+  publish.rs        shared by every engine: destination folder, no-clobber finalize, user-message names
+  output.rs         temp files and the no-clobber hard link
+  cancel.rs         Cancellable reader/writer
+  image.rs          image crate (raster). publish_pixels and pixels_fit serve heif.rs and svg/; decode_stored serves Compress
+  imagetool/        Grape's own image tools (D26): strip.rs + jpeg/png/webp/gif.rs (Remove Metadata, a streamed container
+                    strip, image data byte for byte), exif.rs (EXIF walker and the minimal EXIF, pure), compress.rs (JPEG)
+                    and png_compress.rs (PNG, lossless), scale.rs (Compress's scaling and its peak); mod.rs sniffs the
+                    content, which decides the code that runs. tiff/ (D28): read.rs (a TIFF's model, by seeking),
+                    write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF).
+                    isobmff/ (D28): boxes.rs (top-level boxes by seeking, boxes in memory), items.rs (the file-level meta:
+                    items, locations, references, properties); heic.rs (Remove Metadata on HEIC, meta rebuilt in place).
+                    webp_compress.rs (D28): Compress on WebP, libwebp through grape-webp, the metadata put back by webp.rs's
+                    scan and assemble
+  headers.rs        header readers that bound what the image decoders keep
+  subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
+  media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);
+                    tags.rs (the tags probe, keys only), loudness.rs (Normalize's plan, pure) and tools.rs +
+                    tools/argv.rs (the five FFmpeg tools, D26)
+  pdf/              PDF in a worker process: PDFium, lopdf (D29; lane A's module by agreement), started on helper.rs and contained by the app's hook
+                    (a 6 GiB Job Object on Windows); images → PDF and Create PDF run in Grape's own process (pdf/create.rs with writer.rs, jpeg.rs, flate.rs: no PDF is parsed, D37)
+  heif.rs           HEIC and AVIF through a helper process (D33, D41; lane A's module by agreement); its decode half also gives pdf/create.rs a HEIC's or an AVIF's pixels,
+                    and HEIC Compress (D28) has Encoder (check_encode probes once per helper; encode takes a quality and hands the bytes back)
+                    and Decoder::decode_within (held to the tool's peak); the tests' fake helper writes real HEIF (fake_quality reads its quality)
+  svg/              SVG in a worker process: resvg (D39; lane A's module by agreement): protocol.rs (the worker's own JSON), worker.rs
+                    (`Grape --grape-svg-worker`: read, gunzip, parse, draw), resolve.rs (data: references only, a job-wide budget),
+                    size.rs (the size rule, pure), run.rs (the parent: start, watch, read the pixels)
+  helper.rs         helper-process plumbing, WorkDir, the shared pixel-file reader, the containment hook set_contain and its 90% memory rule (lane A's):
+                    the image helper, the SVG and PDF workers and bsdtar are contained by it, failing closed; FFmpeg too, failing open
+  archive/          zip/tar/gz convert + extract, and RAR input through Grape's bsdtar sidecar (archive/rar/: header preflight, spawn/contain/pump/watchdog, tap; a 1 GiB
+                    Job Object on Windows) (D27; lane A's module by agreement): one name check for every entry, Limits, never writes a link
+  docs.rs           v2, behind feature "v2"
+tests/              real conversions on fixtures generated in each test (no fixtures/ folder);
+                    feature "engines-it" adds the ones that need the FFmpeg sidecar
+                    feature "rar-it" runs the RAR tests (unit tests in src/archive/rar/it.rs) against a real bsdtar (GRAPE_TEST_BSDTAR)
+                    (on Windows one test puts each bsdtar in the app's Job Object)
+                    feature "pdf-it" runs tests/pdf.rs with a real PDFium (GRAPE_TEST_PDFIUM) and the grape-pdf-worker bin
+                    (on Windows each worker in the app's Job Object)
+                    on Windows, GRAPE_TEST_JOB_UI=1 outside cargo checks both in the UI-limited job, in a child that breaks away
+                    from the parent's job; GitHub's runner allows no breakaway, so there it only warns
+                    tests/svg.rs runs the real SVG worker, the grape-svg-worker bin (src/bin/, no feature needed; D39)
+```
+
+## FFmpeg argument builders
+Pure functions in `media/args.rs`: `passes(src, to, &Probe, out, palette) -> Result<Vec<Pass>, Missing>`, from what `ffprobe` said (`media/probe.rs`). Unit-test the exact argv, and keep the invariants: both whitelists, `file:` URLs, a forced `-f`, and only the temp path as output. The arguments are in `docs/ENGINES.md`. Hardware encoders come later: then an `EncoderCaps`, probed once with a test encode, picks them, with x264 as the fallback.
+
+## Gotchas
+- EXIF orientation: conversions apply it and drop the EXIF; Compress keeps the stored pixels and carries the EXIF, Orientation included (`decode_stored`), so it never turns them itself; Remove Metadata writes back an Orientation-only EXIF, except on a TIFF, which keeps its Orientation tag (274) and gets the DCF Adobe RGB Exif back when its color needs it. No tool may turn a photo.
+- PDF → images: 300 DPI; one page writes a file, several pages write a folder named per the naming rules.
+- GIF output: two-pass palette. Warn for clips over 30 s, because GIFs get huge.
+- Archives: reject entries with `..` or absolute paths (zip-slip). Cap total extracted size (decompression bombs).
+- Windows paths: use `\\?\` long-path forms when a path is over 260 chars.

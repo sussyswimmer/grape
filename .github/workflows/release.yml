@@ -1,0 +1,488 @@
+name: Release
+
+# A version tag (v1.2.3) builds the Windows installer and the macOS DMG and
+# makes a DRAFT GitHub Release with them (D45), and with the complete source
+# of the GPL programs they carry: Grape's own FFmpeg, in both
+# (grape-ffmpeg-sources.tar, D24), and grape-heif.exe, the installer's image
+# helper for HEIC and AVIF (D33, D41). The draft also gets Grape's own FFmpeg
+# builds, zipped (D45). Every sidecar is built here, clean, from the tag.
+# Nothing is published here: Maxwell checks the draft, writes "What's new"
+# and publishes it by hand. The steps are in
+# docs/PLATFORM_WINDOWS.md → "Releasing".
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Build an existing tag again, for example after a failed run. A draft that
+  # already exists gets its files replaced; its notes are kept.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to build, like v0.2.0"
+        required: true
+        type: string
+
+# One run per tag at a time. A second run waits instead of racing the first.
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  # The pushed tag, or the one typed in for a re-run.
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  # Fails in seconds, before anything builds (grape-heif's clean build takes
+  # about an hour), unless the tag, minus the v, is the version in all four
+  # files and in Cargo.lock.
+  version:
+    name: Check the tag matches the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - name: Check the tag matches the version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:TAG -notmatch '^v(\d+\.\d+\.\d+)$') {
+            Write-Output "::error::Release tags look like v1.2.3. '$env:TAG' doesn't."
+            exit 1
+          }
+          $want = $Matches[1]
+          $found = [ordered]@{}
+          foreach ($file in 'apps/desktop/src-tauri/tauri.conf.json', 'apps/desktop/package.json', 'apps/desktop/ui/package.json') {
+            $found[$file] = (Get-Content -Raw -LiteralPath $file | ConvertFrom-Json).version
+          }
+          $cargo = Get-Content -Raw -LiteralPath Cargo.toml
+          $found['Cargo.toml [workspace.package]'] = $null
+          if ($cargo -match '(?ms)^\[workspace\.package\]\s*$(.*?)(?=^\[|\z)') {
+            if ($Matches[1] -match '(?m)^\s*version\s*=\s*"([^"]*)"') {
+              $found['Cargo.toml [workspace.package]'] = $Matches[1]
+            }
+          }
+          # Grape's own crates are the Cargo.lock entries with no source line.
+          $lock = Get-Content -Raw -LiteralPath Cargo.lock
+          $crates = [regex]::Matches($lock, '(?m)^\[\[package\]\]\r?\nname = "([^"]+)"\r?\nversion = "([^"]+)"\r?\n(?!source = )')
+          if ($crates.Count -eq 0) {
+            Write-Output "::error::Found none of Grape's crates in Cargo.lock."
+            exit 1
+          }
+          foreach ($crate in $crates) {
+            # grape-heif-proto's version follows its protocol, not Grape's
+            # releases (heic-spec J2), and tools/grape-heif/Cargo.lock pins it.
+            if ($crate.Groups[1].Value -eq 'grape-heif-proto') { continue }
+            $found["Cargo.lock ($($crate.Groups[1].Value))"] = $crate.Groups[2].Value
+          }
+          $wrong = 0
+          foreach ($entry in $found.GetEnumerator()) {
+            $have = if ($entry.Value) { $entry.Value } else { '(none)' }
+            Write-Output ('{0,-40} {1}' -f $entry.Key, $have)
+            if ($entry.Value -ne $want) {
+              Write-Output "::error::$($entry.Key) says $have, but the tag says $want."
+              $wrong++
+            }
+          }
+          if ($wrong -gt 0) {
+            Write-Output "Set the version in all four files, run cargo update --workspace so Cargo.lock follows, commit, and tag again."
+            exit 1
+          }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$want"
+
+  # grape-heif.exe (D33), built clean from the tag: no vcpkg or cargo cache,
+  # as PDFium is fetched fresh below. Its GPL source bundle goes on the draft.
+  grape-heif:
+    name: grape-heif
+    needs: version
+    uses: ./.github/workflows/grape-heif.yml
+    with:
+      cache: false
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+  # Grape's own FFmpeg (D24), built clean from the tag (no dist or download
+  # cache), with its GPL source bundle, which goes on the draft. It builds
+  # the Mac halves too, for the DMG, and their source bundles must match the
+  # Windows one.
+  ffmpeg:
+    name: ffmpeg
+    needs: version
+    uses: ./.github/workflows/ffmpeg.yml
+    with:
+      cache: false
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+  # Grape's bsdtar (D27), built clean from the tag, for both OSes.
+  bsdtar:
+    name: bsdtar
+    needs: version
+    uses: ./.github/workflows/bsdtar.yml
+    with:
+      cache: false
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+
+  # The same build as ci.yml's build-windows job, from the tag. It has a
+  # read-only token: the build runs third-party build scripts.
+  build:
+    name: Build (Windows installer)
+    needs: [version, grape-heif, ffmpeg, bsdtar]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99"
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      # Fetched fresh for a release, not from ci.yml's cache. The script
+      # checks every hash in scripts/sidecars.lock (D25, D29).
+      - name: Fetch PDFium
+        shell: powershell
+        run: ./scripts/fetch-sidecars.ps1 -Only pdfium
+      # The sidecars from this run's ffmpeg, bsdtar and grape-heif workflows.
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg
+      - uses: actions/download-artifact@v8
+        with:
+          name: bsdtar-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/bsdtar
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/grape-heif
+      # Each checked against its SHA256SUMS and the hash its job reported,
+      # then copied under the name Tauri's externalBin wants.
+      - name: Put the sidecars in binaries
+        shell: pwsh
+        env:
+          FFMPEG_SUMS: ${{ needs.ffmpeg.outputs.windows-sums }}
+          GRAPE_HEIF_SHA256: ${{ needs.grape-heif.outputs.sha256 }}
+        run: |
+          function Fail([string]$m) { Write-Output "::error::$m"; exit 1 }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          function Test-Sums([string]$dir) {
+            $lines = @(Get-Content -LiteralPath (Join-Path $dir 'SHA256SUMS') | Where-Object { $_ -ne '' })
+            if ($lines.Count -eq 0) { Fail "$dir\SHA256SUMS lists nothing." }
+            foreach ($line in $lines) {
+              if ($line -notmatch '^([0-9a-f]{64})  (\S+)$') { Fail "$dir\SHA256SUMS has a line it shouldn't: $line" }
+              $want = $Matches[1]
+              $file = $Matches[2]
+              $got = Hash (Join-Path $dir $file)
+              if ($got -ne $want) { Fail "$file has SHA-256 $got, not the $want its SHA256SUMS says." }
+              Write-Output "$got  $file"
+            }
+          }
+          $ffmpeg = Join-Path $env:RUNNER_TEMP 'ffmpeg'
+          $sums = Hash (Join-Path $ffmpeg 'SHA256SUMS')
+          if ($sums -ne $env:FFMPEG_SUMS) { Fail "The FFmpeg artifact's SHA256SUMS has SHA-256 $sums, not the $env:FFMPEG_SUMS the ffmpeg workflow wrote." }
+          Test-Sums $ffmpeg
+          $bsdtar = Join-Path $env:RUNNER_TEMP 'bsdtar'
+          Test-Sums $bsdtar
+          $heif = Join-Path $env:RUNNER_TEMP 'grape-heif\grape-heif.exe'
+          $sha = Hash $heif
+          if ($sha -ne $env:GRAPE_HEIF_SHA256) { Fail "grape-heif.exe's SHA-256 is $sha, not the $env:GRAPE_HEIF_SHA256 the grape-heif job built." }
+          $bins = 'apps/desktop/src-tauri/binaries'
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffmpeg-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $ffmpeg 'ffprobe-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath (Join-Path $bsdtar 'bsdtar-x86_64-pc-windows-msvc.exe') -Destination $bins
+          Copy-Item -LiteralPath $heif -Destination (Join-Path $bins 'grape-heif-x86_64-pc-windows-msvc.exe')
+          Get-ChildItem -File -LiteralPath $bins | Format-Table -AutoSize Name, Length
+      # D28: libwebp-sys's build script compiles libwebp with
+      # -march=$TARGET_CPU, so a build with it set (to native, say) would
+      # ship a Grape that runs only on CPUs like this runner's.
+      - name: Refuse a TARGET_CPU
+        shell: pwsh
+        run: |
+          if (Test-Path Env:TARGET_CPU) { Write-Output "::error::TARGET_CPU is set ($env:TARGET_CPU): libwebp would be built for this runner's CPU (-march), not every PC. Unset it."; exit 1 }
+      # The PDFium overlay adds pdfium.dll and licenses/pdfium/ to
+      # bundle.resources. The Windows sidecars overlay is the one overlay
+      # that sets externalBin (ffmpeg, ffprobe, bsdtar, grape-heif), adds
+      # their license folders, and runs the sidecar gate (D25) first. Never a
+      # second overlay that also sets externalBin: it would replace the list.
+      - name: Build Grape and the installer
+        working-directory: apps/desktop
+        run: pnpm tauri build --bundles nsis --ci --config src-tauri/tauri.pdfium.windows.conf.json --config src-tauri/tauri.sidecars.windows.conf.json
+      # tauri-build copies the resources and the sidecars next to grape.exe,
+      # and the installer carries the same files. Every sidecar and license
+      # folder this build ships is checked there and, when 7-Zip can read it,
+      # in the installer itself. The overlay must list exactly these, so a
+      # sidecar can't be added or dropped without this list changing too.
+      - name: Check every sidecar and license folder is in the build
+        shell: pwsh
+        run: |
+          $script:bad = 0
+          function Bad([string]$m) { Write-Output "::error::$m"; $script:bad++ }
+          function Hash([string]$p) { (Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant() }
+          $sidecars = @('ffmpeg', 'ffprobe', 'bsdtar', 'grape-heif')
+          $folders = @('pdfium', 'ffmpeg', 'libarchive', 'grape-heif')
+          $overlay = (Get-Content -Raw -LiteralPath apps/desktop/src-tauri/tauri.sidecars.windows.conf.json | ConvertFrom-Json).bundle
+          $listed = @($overlay.externalBin | ForEach-Object { ($_ -split '/')[-1] })
+          if (($listed -join ' ') -cne ($sidecars -join ' ')) { Bad "tauri.sidecars.windows.conf.json lists $($listed -join ', '), but this check expects $($sidecars -join ', ')." }
+          $shipped = @($overlay.resources.PSObject.Properties | ForEach-Object { $_.Value })
+          $want = @($folders | Where-Object { $_ -ne 'pdfium' } | ForEach-Object { "licenses/$_/" })
+          if (($shipped -join ' ') -cne ($want -join ' ')) { Bad "tauri.sidecars.windows.conf.json ships $($shipped -join ', '), but this check expects $($want -join ', ')." }
+
+          $expected = [System.Collections.Generic.List[string]]::new()
+          foreach ($f in 'pdfium.dll', 'THIRD_PARTY_NOTICES.md', 'LICENSE.txt') {
+            $expected.Add($f)
+            if (-not (Test-Path -LiteralPath "target/release/$f" -PathType Leaf)) { Bad "target/release/$f is missing from the build." }
+          }
+          foreach ($name in $sidecars) {
+            $expected.Add("$name.exe")
+            $built = "target/release/$name.exe"
+            if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+            elseif ((Hash $built) -ne (Hash "apps/desktop/src-tauri/binaries/$name-x86_64-pc-windows-msvc.exe")) { Bad "$built isn't the $name this run built." }
+          }
+          foreach ($folder in $folders) {
+            foreach ($file in @(Get-ChildItem -File -LiteralPath "licenses/$folder")) {
+              $rel = "licenses/$folder/$($file.Name)"
+              $expected.Add($rel)
+              $built = "target/release/$rel"
+              if (-not (Test-Path -LiteralPath $built -PathType Leaf)) { Bad "$built is missing from the build." }
+              elseif ((Hash $built) -ne (Hash $file.FullName)) { Bad "$built differs from $rel." }
+            }
+          }
+
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) { Bad "Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count)." } else {
+            $paths = @()
+            $listed = $false
+            if (Get-Command 7z -ErrorAction SilentlyContinue) {
+              $listing = @(& 7z l -tNsis -slt -ba $setup[0].FullName 2> $null)
+              $listed = $LASTEXITCODE -eq 0
+              $paths = @($listing | Where-Object { $_ -like 'Path = *' } | ForEach-Object { $_.Substring(7).Replace('/', '\') })
+            }
+            if (-not $listed -or $paths.Count -eq 0) {
+              Write-Output "::warning::7-Zip couldn't list $($setup[0].Name), so only target/release was checked."
+            } else {
+              $missing = @($expected | Where-Object { $p = $_.Replace('/', '\'); -not ($paths | Where-Object { $_ -eq $p -or $_.EndsWith("\$p") }) })
+              if ($missing.Count -eq $expected.Count) {
+                Write-Output "::warning::None of the files was found in 7-Zip's listing of $($setup[0].Name), which may name them another way; only target/release was checked."
+                $paths | ForEach-Object { Write-Output "  $_" }
+              } else {
+                foreach ($m in $missing) { Bad "$($setup[0].Name) doesn't carry $m." }
+                if ($missing.Count -eq 0) { Write-Output "$($setup[0].Name) carries all $($expected.Count) files checked." }
+              }
+            }
+          }
+          if ($script:bad -gt 0) { exit 1 }
+          exit 0
+      # Tauri names the installer Grape_<version>_x64-setup.exe. The release
+      # file has one name for every version, so the latest-release link works.
+      - name: Name the installer and hash it
+        run: |
+          $setup = @(Get-ChildItem -File -Path target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($setup.Count -ne 1) {
+            Write-Output "::error::Expected one *-setup.exe in target/release/bundle/nsis, found $($setup.Count): $($setup.Name -join ', ')"
+            exit 1
+          }
+          $out = Join-Path $env:RUNNER_TEMP 'grape-release'
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $exe = Join-Path $out 'Grape-Setup-x64.exe'
+          Copy-Item -LiteralPath $setup[0].FullName -Destination $exe
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exe).Hash.ToLowerInvariant()
+          # sha256sum's format, with LF and no BOM, so `sha256sum -c` reads it too.
+          [System.IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), "$hash  Grape-Setup-x64.exe`n")
+          Write-Output "Copied $($setup[0].Name) to Grape-Setup-x64.exe"
+          Write-Output "$hash  Grape-Setup-x64.exe"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Grape-Setup-x64
+          path: |
+            ${{ runner.temp }}/grape-release/Grape-Setup-x64.exe
+            ${{ runner.temp }}/grape-release/SHA256SUMS.txt
+          if-no-files-found: error
+
+  # The same build as ci.yml's build-macos job (macos-app.yml, D45), from the
+  # tag, with PDFium fetched fresh. With release: true it names the DMG
+  # Grape-macOS-universal.dmg and hashes it for the draft. It's ad-hoc
+  # signed and not notarized, as CI's (D4). It has a read-only token too.
+  build-macos:
+    name: Build (macOS DMG)
+    needs: [version, ffmpeg, bsdtar]
+    uses: ./.github/workflows/macos-app.yml
+    with:
+      cache: false
+      release: true
+      ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      ffmpeg-sums: ${{ needs.ffmpeg.outputs.macos-sums }}
+
+  # The only job that can write: it makes or updates the draft and runs no
+  # build code.
+  release:
+    name: Draft the GitHub Release
+    needs: [version, build, build-macos, grape-heif, ffmpeg]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      HEIF_VERSION: ${{ needs.grape-heif.outputs.version }}
+      FFMPEG_SOURCES_SHA256: ${{ needs.ffmpeg.outputs.sources-sha256 }}
+    steps:
+      # Only for the notes template, as it was at the tag.
+      - uses: actions/checkout@v7
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+          sparse-checkout: .github
+      - uses: actions/download-artifact@v8
+        with:
+          name: Grape-Setup-x64
+          path: release
+      - name: Check the installer against SHA256SUMS.txt
+        working-directory: release
+        run: sha256sum -c SHA256SUMS.txt
+      # The DMG (D45). Its line goes after the installer's, which stays first:
+      # the notes' PowerShell check reads the file's first hash.
+      - uses: actions/download-artifact@v8
+        with:
+          name: Grape-macOS-universal-release
+          path: ${{ runner.temp }}/macos
+      - name: Check the DMG and add it to SHA256SUMS.txt
+        run: |
+          dmg=Grape-macOS-universal.dmg
+          cd "$RUNNER_TEMP/macos"
+          test -f "$dmg" || { echo "::error::$dmg is missing from the Grape-macOS-universal-release artifact."; exit 1; }
+          # Exactly the DMG's one line, so nothing else gets into SHA256SUMS.txt.
+          [ "$(cat SHA256SUMS)" = "$(sha256sum "$dmg")" ] ||
+            { echo "::error::The artifact's SHA256SUMS should be exactly '$(sha256sum "$dmg")', but it's: $(cat SHA256SUMS)"; exit 1; }
+          sha256sum -c SHA256SUMS
+          mv "$dmg" "$GITHUB_WORKSPACE/release/"
+          cat SHA256SUMS >> "$GITHUB_WORKSPACE/release/SHA256SUMS.txt"
+          cd "$GITHUB_WORKSPACE/release"
+          sha256sum -c SHA256SUMS.txt
+      # The installer carries grape-heif.exe, which is GPL, so its complete
+      # source goes on the same release (GPL-3.0 section 6; heic-spec J37).
+      - uses: actions/download-artifact@v8
+        with:
+          name: grape-heif-source
+          path: release
+      - name: Check the grape-heif source bundle and add it to SHA256SUMS.txt
+        working-directory: release
+        run: |
+          bundle="grape-heif-${HEIF_VERSION}-source.tar.gz"
+          test -f "$bundle" || { echo "::error::$bundle is missing from the grape-heif-source artifact."; exit 1; }
+          sha256sum -c "$bundle.sha256"
+          cat "$bundle.sha256" >> SHA256SUMS.txt
+          rm "$bundle.sha256"
+          sha256sum -c SHA256SUMS.txt
+      # The installer and the DMG carry Grape's own FFmpeg, which is
+      # GPL-2.0-or-later, so its complete source goes on the same release too
+      # (GPL-2.0 section 3(a); D24): the bundle the ffmpeg workflow checked
+      # against the Mac runs' (its sources job).
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-source
+          path: release
+      - name: Check FFmpeg's source bundle and add it to SHA256SUMS.txt
+        working-directory: release
+        run: |
+          bundle=grape-ffmpeg-sources.tar
+          test -f "$bundle" || { echo "::error::$bundle is missing from the ffmpeg-source artifact."; exit 1; }
+          sha256sum -c "$bundle.sha256"
+          got=$(sha256sum < "$bundle" | cut -d ' ' -f 1)
+          if [ "$got" != "$FFMPEG_SOURCES_SHA256" ]; then
+            echo "::error::$bundle has SHA-256 $got, not the $FFMPEG_SOURCES_SHA256 the ffmpeg workflow checked."
+            exit 1
+          fi
+          cat "$bundle.sha256" >> SHA256SUMS.txt
+          rm "$bundle.sha256"
+          sha256sum -c SHA256SUMS.txt
+      # Grape's own FFmpeg builds (D24, D45), for building Grape from source:
+      # the run's two FFmpeg artifacts, each checked against its SHA256SUMS
+      # and against the hash the ffmpeg workflow reported, as the build jobs
+      # check them, then zipped as they are (the programs, BUILDINFO,
+      # SHA256SUMS and licenses/ffmpeg/).
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-x86_64-pc-windows-msvc
+          path: ${{ runner.temp }}/ffmpeg-x86_64-pc-windows-msvc
+      - uses: actions/download-artifact@v8
+        with:
+          name: ffmpeg-apple-darwin
+          path: ${{ runner.temp }}/ffmpeg-apple-darwin
+      - name: Zip Grape's FFmpeg builds and add them to SHA256SUMS.txt
+        env:
+          WINDOWS_SUMS: ${{ needs.ffmpeg.outputs.windows-sums }}
+          MACOS_SUMS: ${{ needs.ffmpeg.outputs.macos-sums }}
+        run: |
+          fail() { echo "::error::$*"; exit 1; }
+          # check_build <artifact> <its SHA256SUMS's hash> <files it must hold>...
+          check_build() {
+            artifact=$1 want=$2
+            shift 2
+            dir="$RUNNER_TEMP/$artifact"
+            got=$(sha256sum < "$dir/SHA256SUMS" | cut -d ' ' -f 1)
+            [ "$got" = "$want" ] || fail "The $artifact artifact's SHA256SUMS has SHA-256 $got, not the $want the ffmpeg workflow wrote."
+            (cd "$dir" && sha256sum -c SHA256SUMS) || fail "The $artifact artifact doesn't match its SHA256SUMS."
+            for f in "$@"; do
+              [ -f "$dir/$f" ] || fail "$f is missing from the $artifact artifact."
+            done
+            [ -n "$(find "$dir/licenses/ffmpeg" -type f 2> /dev/null)" ] || fail "The $artifact artifact has no licenses/ffmpeg/."
+          }
+          # zip_build <artifact> <zip>: the artifact's folder as it is.
+          zip_build() {
+            (cd "$RUNNER_TEMP/$1" && zip -q -r -X "$GITHUB_WORKSPACE/release/$2" .)
+            zip -T "release/$2"
+            zipinfo "release/$2"
+            (cd release && sha256sum "$2" >> SHA256SUMS.txt)
+          }
+          mac=(BUILDINFO-macos-arm64.txt BUILDINFO-macos-x86_64.txt)
+          for triple in aarch64-apple-darwin x86_64-apple-darwin universal-apple-darwin; do
+            mac+=("ffmpeg-$triple" "ffprobe-$triple")
+          done
+          check_build ffmpeg-x86_64-pc-windows-msvc "$WINDOWS_SUMS" \
+            ffmpeg-x86_64-pc-windows-msvc.exe ffprobe-x86_64-pc-windows-msvc.exe BUILDINFO.txt
+          check_build ffmpeg-apple-darwin "$MACOS_SUMS" "${mac[@]}"
+          # Artifacts lose the executable bit; the zip keeps it.
+          chmod 755 "$RUNNER_TEMP"/ffmpeg-apple-darwin/ffmpeg-*-apple-darwin "$RUNNER_TEMP"/ffmpeg-apple-darwin/ffprobe-*-apple-darwin
+          zip_build ffmpeg-x86_64-pc-windows-msvc grape-ffmpeg-windows-x64.zip
+          zip_build ffmpeg-apple-darwin grape-ffmpeg-macos-universal.zip
+          cd release
+          sha256sum -c SHA256SUMS.txt
+      - name: Fill in the release notes
+        run: |
+          sed -e "s/{{VERSION}}/${VERSION}/g" -e "s/{{HEIF_VERSION}}/${HEIF_VERSION}/g" .github/release-notes.md > "$RUNNER_TEMP/release-notes.md"
+          if grep -q '{{' "$RUNNER_TEMP/release-notes.md"; then
+            echo "::error::The release notes still have a {{placeholder}} the workflow doesn't fill."
+            exit 1
+          fi
+      - name: Create the draft, or replace a draft's files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          files=(release/Grape-Setup-x64.exe release/Grape-macOS-universal.dmg release/SHA256SUMS.txt "release/grape-heif-${HEIF_VERSION}-source.tar.gz" release/grape-ffmpeg-sources.tar
+            release/grape-ffmpeg-windows-x64.zip release/grape-ffmpeg-macos-universal.zip)
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::$TAG is already published, so its files stay as they are. Release a new version instead."
+              exit 1
+            fi
+            echo "The draft for $TAG exists: replacing its files and keeping its notes."
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" --draft --verify-tag \
+              --title "Grape $VERSION" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              "${files[@]}"
+          fi

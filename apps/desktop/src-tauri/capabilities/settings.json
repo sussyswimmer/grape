@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "settings",
+  "description": "The Settings window reads and changes Grape's settings through the settings_* commands. It never sends a path: folders are picked on the Rust side. It can't call the store or autostart plugins directly.",
+  "windows": ["settings"],
+  "permissions": [
+    "allow-settings-get",
+    "allow-settings-set-key",
+    "allow-settings-set-output-next-to-source",
+    "allow-settings-pick-folder",
+    "allow-settings-use-default-fallback",
+    "allow-settings-set-toggle",
+    "allow-settings-set-terminal",
+    "allow-settings-dismiss-welcome"
+  ]
+}

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Grape lives in the menu bar only: no Dock icon, not even at launch
+	     (ActivationPolicy::Accessory takes over once the app runs). -->
+	<key>LSUIElement</key>
+	<true/>
+	<!-- The reason macOS shows under its "would like to access files in
+	     your … folder" prompt, which comes the first time a drop reads or
+	     writes there (docs/PLATFORM_MACOS.md, "Folder prompts"). Grape's
+	     own words, one plain sentence each. The prompt names the folder,
+	     and the access may be the dropped file, an output written to the
+	     folder chosen in Settings, or Move's destination, so the sentence
+	     names none. -->
+	<key>NSDesktopFolderUsageDescription</key>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
+	<key>NSDocumentsFolderUsageDescription</key>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
+	<key>NSDownloadsFolderUsageDescription</key>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them, in a folder you chose, or in Downloads/Grape when it can't save next to a file.</string>
+	<key>NSRemovableVolumesUsageDescription</key>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
+	<key>NSNetworkVolumesUsageDescription</key>
+	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
+</dict>
+</plist>
