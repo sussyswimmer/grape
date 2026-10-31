@@ -4310,8 +4310,8 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
             ]),
         ),
         // image-webp also refuses an ANIM of any size but 6, any ANMF
-        // under 24 bytes and a first one under 32 (a frame the demuxer
-        // passes over, holding no image), where Pillow shows red.
+        // under 24 bytes and a first one under 32 or holding no image (a
+        // frame the demuxer passes over), where Pillow shows red.
         (
             "anim7.webp",
             riff(&[
@@ -4353,6 +4353,26 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
                 canvas.clone(),
                 anim.clone(),
                 riff_chunk(b"ANMF", &[[0; 16].as_slice(), b"JUNK\0\0\0\0"].concat()),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        // A first frame holding no image, whatever its size: image-webp
+        // reads the first ANMF as the first frame.
+        (
+            "anmf32.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                riff_chunk(b"ANMF", &[0; 32]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        (
+            "anmf64.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                riff_chunk(b"ANMF", &[0; 64]),
                 anmf(0, &[&red_vp8]),
             ]),
         ),
