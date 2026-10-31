@@ -3,8 +3,11 @@
 //! libwebp refuses a file without it); the rest are dropped and said what
 //! they were.
 //!
-//! - **Kept:** `VP8 `, `VP8L`, `VP8X`, `ALPH`, `ANIM` and `ICCP`, and each
-//!   `ANMF` frame with its header and its `ALPH`, `VP8 ` or `VP8L`.
+//! - **Kept:** `VP8 `, `VP8L`, `VP8X` (the first chunk's; any other goes:
+//!   libwebp's still decoder and image-webp pass over it, its demuxer
+//!   refuses the file, and its flags would be patched instead of the ones
+//!   readers go by), `ALPH`, `ANIM` and `ICCP`, and each `ANMF` frame with
+//!   its header and its `ALPH`, `VP8 ` or `VP8L`.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
 //!   `XMP `, unknown chunks (inside a frame too), and anything after the
 //!   RIFF's end.
@@ -81,7 +84,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
         read_exact(r, &mut head)?;
         let Head { fourcc, size, body } = next(head, &mut left, &mut chunks)?;
         match &fourcc {
-            b"VP8X" => {
+            b"VP8X" if chunks == 1 => {
                 if size < 10 {
                     return Err(Error::Broken("a short VP8X".into()));
                 }
@@ -96,6 +99,9 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error
                 copy(r, w, body - 10, &mut written)?;
                 pad(w, size, body, &mut written)?;
             }
+            // Not the first chunk: readers go by the first, or (a simple
+            // file's) by none.
+            b"VP8X" => skip(r, body)?,
             b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
                 image |= matches!(&fourcc, b"VP8 " | b"VP8L");
                 write(w, &head, &mut written)?;
@@ -1082,6 +1088,40 @@ mod tests {
         let src = webp(&[vp8x(0x08), chunk(b"VP8 ", b"frame"), chunk(b"EXIF", &t)]);
         let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x00), chunk(b"VP8 ", b"frame")]));
+    }
+
+    #[test]
+    fn only_the_first_chunks_vp8x_is_kept_and_patched() {
+        use MetaField::*;
+        // A second VP8X, which libwebp's still decoder and image-webp pass
+        // over and its demuxer refuses: its flags were patched, and the
+        // first's (the one readers go by) still flagged the XMP that went.
+        let six = tiff(b'I', &[&[(0x0112, V::Short(6))]], None);
+        let minimal = exif::minimal(Some(6), false).unwrap();
+        let src = webp(&[
+            vp8x(0x0C),
+            chunk(b"VP8 ", b"frame"),
+            vp8x(0x00),
+            chunk(b"EXIF", &six),
+            chunk(b"XMP ", b"<x:xmpmeta/>"),
+        ]);
+        let (out, fields) = run(&src).unwrap();
+        assert_eq!(
+            out,
+            webp(&[
+                vp8x(0x08),
+                chunk(b"VP8 ", b"frame"),
+                chunk(b"EXIF", &minimal)
+            ])
+        );
+        assert_eq!(fields, [Xmp].into());
+        // Before the image too, and after a simple file's image.
+        let src = webp(&[vp8x(0x0C), vp8x(0x10), chunk(b"VP8 ", b"frame")]);
+        let (out, _) = run(&src).unwrap();
+        assert_eq!(out, webp(&[vp8x(0x00), chunk(b"VP8 ", b"frame")]));
+        let src = webp(&[chunk(b"VP8 ", b"frame"), vp8x(0x10)]);
+        let (out, _) = run(&src).unwrap();
+        assert_eq!(out, webp(&[chunk(b"VP8 ", b"frame")]));
     }
 
     #[test]
