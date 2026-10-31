@@ -1,24 +1,41 @@
-//! Remove Metadata on WebP (D26): the image chunks are copied as they
+//! Remove Metadata on WebP (D26): the source is walked first as every
+//! conversion walks it ([`Plan::new`]: libwebp's demuxer's reading), and
+//! what that refuses is refused; then its image chunks are copied as they
 //! are, padding included (a last chunk's missing pad byte is written, as
-//! libwebp refuses a file without it); the rest are dropped and said what
-//! they were.
+//! libwebp refuses a file without it), the rest dropped and said what they
+//! were, and the file written is walked again before it's published
+//! ([`Plan::check`]).
 //!
-//! - **Kept:** `VP8 `, `VP8L`, `VP8X` (the first chunk's; any other goes:
-//!   libwebp's still decoder and image-webp pass over it, its demuxer
-//!   refuses the file, and its flags would be patched instead of the ones
-//!   readers go by), `ALPH`, `ANIM` and `ICCP`, and each `ANMF` frame with
-//!   its header and its `ALPH`, `VP8 ` or `VP8L`.
+//! - **Kept:** in an extended file, `VP8X` (the first chunk's; any other
+//!   goes: libwebp's still decoder and image-webp pass over it, its
+//!   demuxer refuses the file, and its flags would be patched instead of
+//!   the ones readers go by), `ALPH`, `VP8 `, `VP8L`, `ANIM` and `ICCP`,
+//!   and each `ANMF` frame that has an image, with its header and its
+//!   `ALPH` and `VP8 ` or `VP8L`; an animation's first `ANIM` as the 6
+//!   bytes the demuxer reads of it, which image-webp reads at that size
+//!   only; in a simple file, its image, and the `ALPH` chunk after it if
+//!   there is one, which the demuxer takes for the image's frame.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
-//!   `XMP `, unknown chunks (inside a frame too), and anything after the
-//!   RIFF's end.
-//! - **Refused:** a frame holding `ANMF`, `VP8X`, `ANIM` or `ICCP`. libwebp
-//!   ends such a frame at its image and reads the rest as top-level chunks,
-//!   while the `image` crate trusts its size, so dropping them could lose a
-//!   frame.
-//! - **Patched afterwards:** the RIFF size, and VP8X's flags: XMP off, and
-//!   EXIF on only when the minimal EXIF ([`exif::minimal`]) went back where
-//!   the old one was. Without a VP8X (a simple WebP) there's no flag to
-//!   set, so none goes back.
+//!   `XMP `, unknown chunks, an `ANMF` with no image (the demuxer passes
+//!   over it, and refuses a file that ends with an empty one), what the
+//!   demuxer reads as top-level chunks after a frame's image inside its
+//!   `ANMF` (an `ANMF` is walked by its size padded, as the demuxer walks
+//!   it), everything in a simple file from the chunk that ends its image's
+//!   frame on, which no reader reads (whole chunks said by their kind, the
+//!   rest as other metadata), and anything after the RIFF's end.
+//! - **Refused:** what a conversion refuses before decoding ([`reading`]),
+//!   and an `ANMF` or `ICCP` chunk the demuxer reads at the top level
+//!   inside an `ANMF`, after its frame: the `image` crate trusts the
+//!   `ANMF`'s size and reads neither, where the demuxer shows the one as a
+//!   frame and may apply the other, so readers disagree on the file. (An
+//!   `ANIM` there, a second one, both pass over: it goes.)
+//! - **Patched afterwards:** the RIFF size, each frame's size, and VP8X's
+//!   flags: XMP off, and EXIF on only when the minimal EXIF
+//!   ([`exif::minimal`]) went back where the old one was. Without a VP8X
+//!   (a simple WebP) there's no flag to set, so none goes back.
+//! - **Checked:** the file written must be walked as the source was, with
+//!   the same frames, image and canvas, or nothing is published: Grape
+//!   never writes a WebP it would refuse itself.
 //!
 //! Compress on WebP ([`super::webp_compress`], D28) reads a file's chunks
 //! with [`scan`] and puts the source's metadata into libwebp's file with
@@ -65,100 +82,300 @@ pub(super) fn sniff(head: &[u8]) -> bool {
     head.len() >= 12 && head.starts_with(b"RIFF") && &head[8..12] == b"WEBP"
 }
 
-/// Strips the WebP `r` into `w` ([module docs](self)).
-pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Out) -> Result<Found, Error> {
-    let mut found = Found::default();
-    let mut header = [0; 12];
-    read_exact(r, &mut header)?;
-    let mut left = riff(&header)?;
-    let mut written = 0u64;
-    write(w, &header, &mut written)?;
-    let mut flags_at = None;
-    let mut flags = 0u8;
-    let mut wrote_exif = false;
-    let mut seen_exif = false;
+/// Remove Metadata on a WebP ([module docs](self)): what the walk every
+/// conversion reads the source with found ([`reading`]), which the file
+/// written is checked against.
+#[derive(Debug)]
+pub(super) struct Plan {
+    scan: Scan,
+    reading: Reading,
+}
+
+impl Plan {
+    /// Walks the WebP `r` as a conversion does before decoding it: what
+    /// that refuses (readers disagree on it, or libwebp's demuxer refuses
+    /// it) is [`Error::Broken`], before anything is written.
+    pub(super) fn new(r: &mut dyn In) -> Result<Plan, Error> {
+        let (scan, reading) = walked(r)?;
+        Ok(Plan { scan, reading })
+    }
+
+    /// Whether a conversion decides on the source only once it's decoded:
+    /// a `VP8L` whose own alpha bit says none under VP8X's alpha flag,
+    /// refused when its pixels hold transparency ([`Reading::opaque`]).
+    pub(super) fn decides_by_pixels(&self) -> bool {
+        self.reading.opaque
+    }
+
+    /// Strips the WebP `r` into `w` ([module docs](self)).
+    pub(super) fn write(&self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
+        let mut found = Found::default();
+        let mut header = [0; 12];
+        read_at(r, 0, &mut header)?;
+        let end = 12 + riff(&header)?;
+        // The RIFF must be whole: libwebp's still decoder and its demuxer
+        // refuse a file shorter than it says, which the walk doesn't read
+        // to its end.
+        read_at(r, end - 1, &mut [0])?;
+        let mut written = 0u64;
+        write(w, &header, &mut written)?;
+        let flags = match self.scan.vp8x {
+            None => {
+                simple(r, w, end, &mut found, &mut written)?;
+                None
+            }
+            Some(vp8x) => Some(extended(r, w, end, vp8x.canvas, &mut found, &mut written)?),
+        };
+        // `r` is at the RIFF's end.
+        if more_after(r, &[0])? {
+            found.fields.insert(MetaField::Other);
+        }
+        // The RIFF's size, and VP8X's flags.
+        let size = u32::try_from(written - 8).map_err(|_| Error::Broken("too big".into()))?;
+        seek_write(w, 4, &size.to_le_bytes())?;
+        if let Some(Flags { at, flags, exif }) = flags {
+            let mut new = flags & !XMP_FLAG & !EXIF_FLAG;
+            if exif {
+                new |= EXIF_FLAG;
+            }
+            seek_write(w, at, &[new])?;
+        }
+        w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
+        Ok(found)
+    }
+
+    /// Walks the file Remove Metadata wrote, `r`, as the source was walked
+    /// ([`Plan::new`]): it must be read, still or animated as the source
+    /// is, with as many frames, the same image (its size, kind and alpha)
+    /// and the same canvas and flags but EXIF's and XMP's. Anything else
+    /// is [`Error::Broken`], saying what differs.
+    pub(super) fn check(&self, r: &mut dyn In) -> Result<(), Error> {
+        let (scan, reading) =
+            walked(r).map_err(|e| Error::Broken(format!("the file written: {}", reason(e))))?;
+        // What a reader shows: the metadata's flags aside.
+        let view = |scan: &Scan, reading: &Reading| {
+            let vp8x = scan.vp8x.map(|vp8x| Vp8x {
+                flags: vp8x.flags & !(EXIF_FLAG | XMP_FLAG),
+                ..vp8x
+            });
+            let image = (scan.size, scan.lossless, scan.alpha, scan.late_alpha);
+            (vp8x, image, scan.animated, scan.frames, reading.opaque)
+        };
+        if view(&scan, &reading) != view(&self.scan, &self.reading) {
+            return Err(Error::Broken(format!(
+                "{scan:?} written for {:?}",
+                self.scan
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// What an error says, for a message.
+fn reason(e: Error) -> String {
+    match e {
+        Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => why,
+        Error::Read(e) | Error::Write(e) => e.to_string(),
+    }
+}
+
+/// Where an extended file's VP8X flags were written, what they were, and
+/// whether a minimal EXIF went back ([`extended`]).
+struct Flags {
+    at: u64,
+    flags: u8,
+    exif: bool,
+}
+
+/// Copies a simple file's image chunk, from `r`'s 12th byte, and the
+/// `ALPH` chunk after it if there is one (libwebp's demuxer takes it for
+/// the image's frame and reads on: [`after_simple_image`]), into `w`, and
+/// drops the rest of the RIFF, to its `end`, from the chunk that ends that
+/// frame on: no reader reads it ([`drop_rest`]).
+fn simple(
+    r: &mut dyn In,
+    w: &mut dyn Out,
+    end: u64,
+    found: &mut Found,
+    written: &mut u64,
+) -> Result<(), Error> {
+    let mut at = 12;
     let mut chunks = 0;
-    let mut image = false;
-    while left > 0 {
-        let mut head = [0; 8];
-        read_exact(r, &mut head)?;
-        let Head { fourcc, size, body } = next(head, &mut left, &mut chunks)?;
-        match &fourcc {
+    for first in [true, false] {
+        if at == end {
+            break;
+        }
+        let mut raw = [0; 8];
+        read_at(r, at, &mut raw)?;
+        let head = next(raw, &mut (end - at), &mut chunks)?;
+        if !first && &head.fourcc != b"ALPH" {
+            break;
+        }
+        copy_chunk(r, w, at, &head, written)?;
+        at += 8 + head.body;
+    }
+    drop_rest(r, at, end, found)
+}
+
+/// Drops the bytes of `r` from `at` to `end`, which no reader reads, saying
+/// what they held: each whole chunk by its kind (an EXIF walked, an XMP; a
+/// `VP8X` holds none), and whatever isn't one, or follows what isn't, as
+/// other metadata. Leaves `r` at `end`.
+fn drop_rest(r: &mut dyn In, mut at: u64, end: u64, found: &mut Found) -> Result<(), Error> {
+    let mut chunks = 0;
+    while at < end {
+        let mut raw = [0; 8];
+        let head = if end - at < 8 {
+            None
+        } else {
+            read_at(r, at, &mut raw)?;
+            next(raw, &mut (end - at), &mut chunks).ok()
+        };
+        let Some(head) = head else {
+            found.fields.insert(MetaField::Other);
+            break;
+        };
+        match &head.fourcc {
+            b"EXIF" => {
+                read_exif(r, head.size, found)?;
+            }
+            b"XMP " => {
+                found.fields.insert(MetaField::Xmp);
+            }
+            b"VP8X" => {}
+            _ => {
+                found.fields.insert(MetaField::Other);
+            }
+        }
+        at += 8 + head.body;
+    }
+    read_at(r, end - 1, &mut [0])
+}
+
+/// Copies an extended file's kept chunks, from `r`'s 12th byte to the
+/// RIFF's `end`, into `w`, walking them as the shared walk does ([`walk`],
+/// [`animation`]): each frame from its `ANMF` header to its image, written
+/// as an `ANMF` of its own, and what the demuxer reads after it inside the
+/// `ANMF` as the top-level chunks it reads them as. `canvas` is VP8X's.
+/// Says where VP8X's flags went ([`Flags`]).
+fn extended(
+    r: &mut dyn In,
+    w: &mut dyn Out,
+    end: u64,
+    canvas: (u32, u32),
+    found: &mut Found,
+    written: &mut u64,
+) -> Result<Flags, Error> {
+    let mut flags = Flags {
+        at: 0,
+        flags: 0,
+        exif: false,
+    };
+    let mut at = 12;
+    let mut chunks = 0;
+    let mut frames = 0;
+    let mut seen_exif = false;
+    let mut seen_anim = false;
+    // The end of the last `ANMF` read: a chunk that starts before it, the
+    // demuxer reads at the top level, and the `image` crate as the frame's.
+    let mut frame_end = 0;
+    while at < end {
+        let mut raw = [0; 8];
+        read_at(r, at, &mut raw)?;
+        let head = next(raw, &mut (end - at), &mut chunks)?;
+        let body = at + 8;
+        let mut then = body + head.body;
+        let in_frame = at < frame_end;
+        match &head.fourcc {
             b"VP8X" if chunks == 1 => {
-                if size < 10 {
+                if head.size < 10 {
                     return Err(Error::Broken("a short VP8X".into()));
                 }
-                write(w, &head, &mut written)?;
-                flags_at = Some(written);
+                write(w, &raw, written)?;
+                flags.at = *written;
                 // The format's 10 bytes; anything a longer chunk claims is
                 // copied as it comes, never held.
                 let mut data = [0; 10];
                 read_exact(r, &mut data)?;
-                flags = data[0];
-                write(w, &data, &mut written)?;
-                copy(r, w, body - 10, &mut written)?;
-                pad(w, size, body, &mut written)?;
+                flags.flags = data[0];
+                write(w, &data, written)?;
+                copy(r, w, head.body - 10, written)?;
+                pad(w, head.size, head.body, written)?;
             }
-            // Not the first chunk: readers go by the first, or (a simple
-            // file's) by none.
-            b"VP8X" => skip(r, body)?,
-            b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
-                image |= matches!(&fourcc, b"VP8 " | b"VP8L");
-                write(w, &head, &mut written)?;
-                copy(r, w, body, &mut written)?;
-                pad(w, size, body, &mut written)?;
+            // Not the first chunk: readers go by the first. Nor a second
+            // `ANIM` inside a frame, which the demuxer passes over and the
+            // `image` crate never reads.
+            b"VP8X" => {}
+            b"ANIM" if in_frame => {}
+            // A frame the demuxer shows and the `image` crate doesn't, or
+            // a profile it may apply: readers disagree on the file.
+            b"ANMF" | b"ICCP" if in_frame => {
+                return Err(Error::Broken(format!(
+                    "a {} chunk inside an ANMF",
+                    name(&head.fourcc)
+                )));
             }
             b"ANMF" => {
-                image = true;
-                // libwebp's demuxer reads a frame's header within its size
-                // padded: a 15-byte one's pad byte is the header's last.
-                let read = size.max(body.min(FRAME_HEADER));
-                frame(r, w, read, &mut found, &mut written)?;
-                skip(r, body - read)?;
+                let frame = animation_frame(r, body, &head, end, canvas, &mut frames)?;
+                if let Some((image_at, image)) = &frame.image {
+                    write(w, b"ANMF\0\0\0\0", written)?;
+                    let size_at = *written - 4;
+                    write(w, &frame.header, written)?;
+                    if let Some((alpha_at, alpha)) = &frame.alpha {
+                        copy_chunk(r, w, *alpha_at, alpha, written)?;
+                    }
+                    copy_chunk(r, w, *image_at, image, written)?;
+                    // Even: its header and whole chunks.
+                    let kept = u32::try_from(*written - size_at - 4)
+                        .map_err(|_| Error::Broken("a frame too big".into()))?;
+                    seek_write(w, size_at, &kept.to_le_bytes())?;
+                    w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
+                }
+                // With no image, the demuxer passes over it (D26: nothing
+                // of it is kept), and reads what it holds as top-level
+                // chunks, said below.
+                frame_end = body + head.body;
+                then = frame.resume;
+            }
+            b"ANIM" if !seen_anim && flags.flags & ANIMATION_FLAG != 0 => {
+                // An animation's first, which readers go by, as the demuxer
+                // reads it: the first 6 bytes of its size padded (a 5-byte
+                // one's pad byte the loop count's high byte), which
+                // image-webp reads at that size only.
+                let mut data = [0; ANIM_SIZE as usize];
+                read_at(r, body, &mut data)?;
+                write_chunk(w, b"ANIM", &data, written)?;
+                seen_anim = true;
+            }
+            b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
+                copy_chunk(r, w, at, &head, written)?;
             }
             b"EXIF" => {
-                let walked = read_exif(r, size, &mut found)?;
-                skip(r, body - size)?;
-                if !seen_exif && flags_at.is_some() {
+                let walked = read_exif(r, head.size, found)?;
+                // Inside a frame, it's dropped alone.
+                if !seen_exif && !in_frame {
                     let needs = exif::minimal(
                         walked.orientation,
-                        walked.dcf_adobe_rgb() && flags & 0x20 == 0,
+                        walked.dcf_adobe_rgb() && flags.flags & ICC_FLAG == 0,
                     );
                     if let Some(tiff) = needs {
-                        write_chunk(w, b"EXIF", &tiff, &mut written)?;
-                        wrote_exif = true;
+                        write_chunk(w, b"EXIF", &tiff, written)?;
+                        flags.exif = true;
                     }
+                    seen_exif = true;
                 }
-                seen_exif = true;
             }
             b"XMP " => {
-                skip(r, body)?;
                 found.fields.insert(MetaField::Xmp);
             }
             _ => {
-                skip(r, body)?;
                 found.fields.insert(MetaField::Other);
             }
         }
+        at = then;
     }
-    if !image {
-        return Err(Error::Broken("no image data".into()));
-    }
-    if more_after(r, &[0])? {
-        found.fields.insert(MetaField::Other);
-    }
-    // The RIFF's size, and VP8X's flags.
-    let size = u32::try_from(written - 8).map_err(|_| Error::Broken("too big".into()))?;
-    seek_write(w, 4, &size.to_le_bytes())?;
-    if let Some(at) = flags_at {
-        let mut new = flags & !XMP_FLAG & !EXIF_FLAG;
-        if wrote_exif {
-            new |= EXIF_FLAG;
-        }
-        seek_write(w, at, &[new])?;
-    }
-    w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
-    Ok(found)
+    read_at(r, end - 1, &mut [0])?;
+    Ok(flags)
 }
 
 /// What's left of the RIFF after "WEBP", from a file's first 12 bytes.
@@ -174,6 +391,7 @@ fn riff(header: &[u8; 12]) -> Result<u64, Error> {
 }
 
 /// A top-level chunk, from its 8-byte header ([`next`]).
+#[derive(Debug, Clone, Copy)]
 struct Head {
     fourcc: [u8; 4],
     /// The size the header gives.
@@ -224,80 +442,19 @@ fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::
     Ok(walked)
 }
 
-/// Copies an ANMF frame of `size` bytes: its header and its image
-/// chunks, the rest dropped and said. Its size is written again after.
-fn frame(
-    r: &mut dyn BufRead,
+/// Copies the chunk `head` that starts at `at` in `r` into `w`, padded.
+fn copy_chunk(
+    r: &mut dyn In,
     w: &mut dyn Out,
-    size: u64,
-    found: &mut Found,
+    at: u64,
+    head: &Head,
     written: &mut u64,
 ) -> Result<(), Error> {
-    if size < FRAME_HEADER {
-        return Err(Error::Broken("a short ANMF".into()));
-    }
-    write(w, b"ANMF\0\0\0\0", written)?;
-    let size_at = *written - 4;
-    let mut header = [0; FRAME_HEADER as usize];
-    read_exact(r, &mut header)?;
-    write(w, &header, written)?;
-    let mut left = size - FRAME_HEADER;
-    while left > 0 {
-        let mut head = [0; 8];
-        if left < 8 {
-            return Err(Error::Broken("a chunk cut short in an ANMF".into()));
-        }
-        read_exact(r, &mut head)?;
-        let fourcc = [head[0], head[1], head[2], head[3]];
-        let inner = u64::from(u32::from_le_bytes([head[4], head[5], head[6], head[7]]));
-        let padded = inner + (inner & 1);
-        // The frame's last chunk's pad byte may be missing.
-        let body = if left >= 8 + padded {
-            padded
-        } else if left == 8 + inner {
-            inner
-        } else {
-            return Err(Error::Broken(format!(
-                "a chunk of {inner} bytes past its ANMF's end"
-            )));
-        };
-        left -= 8 + body;
-        match &fourcc {
-            b"ALPH" | b"VP8 " | b"VP8L" => {
-                write(w, &head, written)?;
-                copy(r, w, body, written)?;
-                pad(w, inner, body, written)?;
-            }
-            b"EXIF" => {
-                read_exif(r, inner, found)?;
-                skip(r, body - inner)?;
-            }
-            b"XMP " => {
-                skip(r, body)?;
-                found.fields.insert(MetaField::Xmp);
-            }
-            // Chunks only a file's top level holds: decoders disagree on
-            // where such a frame ends, so it can't be kept for sure.
-            b"ANMF" | b"VP8X" | b"ANIM" | b"ICCP" => {
-                return Err(Error::Broken(format!(
-                    "a {} chunk inside an ANMF",
-                    String::from_utf8_lossy(&fourcc).trim_end()
-                )));
-            }
-            _ => {
-                skip(r, body)?;
-                found.fields.insert(MetaField::Other);
-            }
-        }
-    }
-    let kept = u32::try_from(*written - size_at - 4)
-        .map_err(|_| Error::Broken("a frame too big".into()))?;
-    seek_write(w, size_at, &kept.to_le_bytes())?;
-    w.seek(SeekFrom::End(0)).map_err(Error::Write)?;
-    if kept % 2 == 1 {
-        write(w, &[0], written)?;
-    }
-    Ok(())
+    let mut raw = [0; 8];
+    read_at(r, at, &mut raw)?;
+    write(w, &raw, written)?;
+    copy(r, w, head.body, written)?;
+    pad(w, head.size, head.body, written)
 }
 
 /// What Compress needs to know of a WebP before it decodes it ([`scan`]).
@@ -318,6 +475,8 @@ pub(super) struct Scan {
     /// VP8X's animation flag: its chunks are walked as libwebp's demuxer
     /// walks them ([`animation`]), and nothing is carried.
     pub(super) animated: bool,
+    /// An animation's frames, as the demuxer counts them; 0 for a still.
+    pub(super) frames: u64,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
 }
@@ -426,7 +585,7 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 if flags & ANIMATION_FLAG != 0 {
                     found.animated = true;
                     let canvas = (side(&data[4..7]), side(&data[7..10]));
-                    animation(r, at, at + left, canvas, &mut chunks)?;
+                    found.frames = animation(r, at, at + left, canvas, &mut chunks)?;
                     return Ok(found);
                 }
             }
@@ -614,14 +773,14 @@ const MAX_AREA: u64 = 1 << 32;
 /// padded, a frame that's broken ([`animation_frame`]) and an animation
 /// with no frame are all [`Error::Broken`]; unknown chunks, metadata and a
 /// second `ANIM` are passed over. The canvas, `canvas`, must be under
-/// [`MAX_AREA`].
+/// [`MAX_AREA`]. Gives the frames it read.
 fn animation(
     r: &mut dyn In,
     mut at: u64,
     end: u64,
     canvas: (u32, u32),
     chunks: &mut usize,
-) -> Result<(), Error> {
+) -> Result<u64, Error> {
     if u64::from(canvas.0) * u64::from(canvas.1) >= MAX_AREA {
         let (w, h) = canvas;
         return Err(Error::Broken(format!("a {w}x{h} canvas")));
@@ -646,7 +805,7 @@ fn animation(
             b"ANMF" if !anim => {
                 return Err(Error::Broken("an ANMF chunk before the ANIM chunk".into()));
             }
-            b"ANMF" => at = animation_frame(r, body, &head, end, canvas, &mut frames)?,
+            b"ANMF" => at = animation_frame(r, body, &head, end, canvas, &mut frames)?.resume,
             b"VP8X" | b"ALPH" | b"VP8 " | b"VP8L" => {
                 return Err(Error::Broken(format!(
                     "a {} chunk outside the animation's frames",
@@ -659,7 +818,20 @@ fn animation(
     if frames == 0 {
         return Err(Error::Broken("an animation with no frame".into()));
     }
-    Ok(())
+    Ok(frames)
+}
+
+/// An `ANMF` chunk as libwebp's demuxer reads it ([`animation_frame`]).
+struct Frame {
+    /// Its 16-byte header.
+    header: [u8; FRAME_HEADER as usize],
+    /// Its `ALPH` chunk, if it has one: where it starts, and its header.
+    alpha: Option<(u64, Head)>,
+    /// Its image chunk, if it has one: where it starts, and its header.
+    image: Option<(u64, Head)>,
+    /// Where the demuxer reads on, as top-level chunks: after the image,
+    /// or after the header when there's none.
+    resume: u64,
 }
 
 /// Reads the `ANMF` chunk `head` (its body at `at`) of an animation on a
@@ -673,7 +845,7 @@ fn animation(
 /// `ALPH` and no image, an `ALPH` after the image or before a `VP8L`, an
 /// image past the `ANMF`'s end, an image whose bitstream has no header, or
 /// a frame past the canvas, it's [`Error::Broken`]. Counts the frames in
-/// `frames`.
+/// `frames`, and says where the frame's chunks are ([`Frame`]).
 fn animation_frame(
     r: &mut dyn In,
     at: u64,
@@ -681,7 +853,7 @@ fn animation_frame(
     end: u64,
     canvas: (u32, u32),
     frames: &mut u64,
-) -> Result<u64, Error> {
+) -> Result<Frame, Error> {
     // Its size padded, as the demuxer reads it: a 15-byte one's pad byte
     // is its header's last.
     if head.body < FRAME_HEADER {
@@ -710,14 +882,14 @@ fn animation_frame(
         let mut counted = 0;
         let chunk = next(raw, &mut left, &mut counted)?;
         match &chunk.fourcc {
-            b"ALPH" if alpha.is_none() => alpha = Some(p),
+            b"ALPH" if alpha.is_none() => alpha = Some((p, chunk)),
             b"VP8L" if alpha.is_some() => {
                 return Err(Error::Broken("an ALPH chunk before a frame's VP8L".into()));
             }
             b"VP8 " | b"VP8L" if image.is_none() => {
                 let mut bitstream_of = Scan::default();
                 bitstream(r, p + 8, &chunk, &mut bitstream_of)?;
-                image = Some((p, bitstream_of.size));
+                image = Some((p, chunk, bitstream_of.size));
             }
             _ => break,
         }
@@ -731,10 +903,10 @@ fn animation_frame(
         (Some(_), None) => {
             return Err(Error::Broken("a frame with alpha and no image".into()));
         }
-        (Some(a), Some((i, _))) if a > i => {
+        (Some((a, _)), Some((i, _, _))) if a > i => {
             return Err(Error::Broken("a frame's ALPH chunk after its image".into()));
         }
-        (_, Some((_, (w, h)))) => {
+        (_, Some((_, _, (w, h)))) => {
             if x + u64::from(w) > u64::from(canvas.0) || y + u64::from(h) > u64::from(canvas.1) {
                 return Err(Error::Broken(format!(
                     "a {w}x{h} frame at ({x}, {y}) past a {}x{} canvas",
@@ -744,7 +916,12 @@ fn animation_frame(
             *frames += 1;
         }
     }
-    Ok(p)
+    Ok(Frame {
+        header,
+        alpha,
+        image: image.map(|(at, head, _)| (at, head)),
+        resume: p,
+    })
 }
 
 /// How image-webp, which goes by a file's VP8X flags, must read a still
@@ -769,15 +946,21 @@ pub(crate) struct Reading {
 /// show. A decode of an animation takes its first frame, as image-webp
 /// decodes it: its alpha isn't compared.
 pub(crate) fn reading(r: &mut dyn In) -> Result<Reading, Error> {
+    walked(r).map(|(_, reading)| reading)
+}
+
+/// [`reading`], with what the walk found.
+fn walked(r: &mut dyn In) -> Result<(Scan, Reading), Error> {
     let scan = walk(r, false)?;
     if let Some(why) = alpha_disagrees(&scan) {
         return Err(Error::Broken(why.into()));
     }
     let flagged = scan.vp8x.is_some_and(|vp8x| vp8x.flags & ALPHA_FLAG != 0);
-    Ok(Reading {
+    let reading = Reading {
         patch: decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags)),
         opaque: !scan.animated && scan.lossless && flagged && !scan.alpha,
-    })
+    };
+    Ok((scan, reading))
 }
 
 /// Why `scan`'s alpha reads differently in libwebp (by the chunks) and
@@ -839,10 +1022,7 @@ pub(crate) fn readable(data: &Arc<Vec<u8>>) -> Result<Arc<Vec<u8>>, String> {
     let riff = u32::from_le_bytes([riff[0], riff[1], riff[2], riff[3]]);
     let end = usize::try_from(u64::from(riff) + 8).map_or(data.len(), |end| end.min(data.len()));
     let bytes = data.get(..end).unwrap_or_default();
-    let reading = reading(&mut Cursor::new(bytes)).map_err(|e| match e {
-        Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => why,
-        Error::Read(e) | Error::Write(e) => e.to_string(),
-    })?;
+    let reading = reading(&mut Cursor::new(bytes)).map_err(reason)?;
     if reading.opaque {
         return Err("VP8X says alpha, and its VP8L says none".into());
     }
@@ -1129,27 +1309,33 @@ mod tests {
         out
     }
 
+    /// Remove Metadata on `input` as `strip::run` runs it: planned, written
+    /// and the file written checked against the plan.
     fn run(input: &[u8]) -> Result<(Vec<u8>, BTreeSet<MetaField>), Error> {
+        let plan = Plan::new(&mut Cursor::new(input))?;
         let mut out = Cursor::new(Vec::new());
-        let found = strip(&mut Cursor::new(input), &mut out)?;
-        Ok((out.into_inner(), found.fields))
+        let found = plan.write(&mut Cursor::new(input), &mut out)?;
+        let out = out.into_inner();
+        plan.check(&mut Cursor::new(&out))?;
+        Ok((out, found.fields))
+    }
+
+    /// A `VP8 ` chunk the size of [`vp8x`]'s canvas.
+    fn image() -> Vec<u8> {
+        vp8(2, 2)
     }
 
     #[test]
     fn a_plain_webp_comes_out_byte_for_byte() {
         for src in [
-            webp(&[chunk(b"VP8 ", b"frame")]),
-            webp(&[
-                vp8x(0x10),
-                chunk(b"ALPH", b"al"),
-                chunk(b"VP8L", b"lossless"),
-            ]),
+            webp(&[image()]),
+            webp(&[vp8x(0x10), chunk(b"ALPH", b"al"), image()]),
             webp(&[
                 vp8x(0x22),
                 chunk(b"ICCP", b"prof"),
                 chunk(b"ANIM", &[0; 6]),
-                anmf(&[chunk(b"ALPH", b"a"), chunk(b"VP8 ", b"f1")]),
-                anmf(&[chunk(b"VP8L", b"f2")]),
+                frame(0, 0, &[chunk(b"ALPH", b"a"), image()]),
+                frame(0, 0, &[vp8l(2, 2, false)]),
             ]),
         ] {
             let (out, fields) = run(&src).unwrap();
@@ -1168,7 +1354,7 @@ mod tests {
         );
         let src = webp(&[
             vp8x(0x0C),
-            chunk(b"VP8 ", b"frame"),
+            image(),
             chunk(b"EXIF", &[b"Exif\0\0".as_slice(), &camera].concat()),
             chunk(b"XMP ", b"<x:xmpmeta/>"),
             chunk(b"JUNK", b"x"),
@@ -1176,19 +1362,12 @@ mod tests {
         let (out, fields) = run(&[src, b"after".to_vec()].concat()).unwrap();
         assert_eq!(fields, [Camera, Xmp, Other].into());
         let minimal = exif::minimal(Some(3), false).unwrap();
-        assert_eq!(
-            out,
-            webp(&[
-                vp8x(0x08),
-                chunk(b"VP8 ", b"frame"),
-                chunk(b"EXIF", &minimal)
-            ])
-        );
+        assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &minimal)]));
         // Upright: the EXIF flag goes too.
         let t = tiff(b'I', &[&[(0x010F, V::Ascii("Nikon"))]], None);
-        let src = webp(&[vp8x(0x08), chunk(b"VP8 ", b"frame"), chunk(b"EXIF", &t)]);
+        let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &t)]);
         let (out, _) = run(&src).unwrap();
-        assert_eq!(out, webp(&[vp8x(0x00), chunk(b"VP8 ", b"frame")]));
+        assert_eq!(out, webp(&[vp8x(0x00), image()]));
     }
 
     #[test]
@@ -1201,87 +1380,351 @@ mod tests {
         let minimal = exif::minimal(Some(6), false).unwrap();
         let src = webp(&[
             vp8x(0x0C),
-            chunk(b"VP8 ", b"frame"),
+            image(),
             vp8x(0x00),
             chunk(b"EXIF", &six),
             chunk(b"XMP ", b"<x:xmpmeta/>"),
         ]);
         let (out, fields) = run(&src).unwrap();
-        assert_eq!(
-            out,
-            webp(&[
-                vp8x(0x08),
-                chunk(b"VP8 ", b"frame"),
-                chunk(b"EXIF", &minimal)
-            ])
-        );
+        assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &minimal)]));
         assert_eq!(fields, [Xmp].into());
         // Before the image too, and after a simple file's image.
-        let src = webp(&[vp8x(0x0C), vp8x(0x10), chunk(b"VP8 ", b"frame")]);
+        let src = webp(&[vp8x(0x0C), vp8x(0x10), image()]);
         let (out, _) = run(&src).unwrap();
-        assert_eq!(out, webp(&[vp8x(0x00), chunk(b"VP8 ", b"frame")]));
-        let src = webp(&[chunk(b"VP8 ", b"frame"), vp8x(0x10)]);
+        assert_eq!(out, webp(&[vp8x(0x00), image()]));
+        let src = webp(&[image(), vp8x(0x10)]);
         let (out, _) = run(&src).unwrap();
-        assert_eq!(out, webp(&[chunk(b"VP8 ", b"frame")]));
+        assert_eq!(out, webp(&[image()]));
+    }
+
+    /// An animation on [`vp8x`]'s canvas: VP8X flagging `flags` and an
+    /// animation, an ANIM, then `chunks`.
+    fn animation(flags: u8, chunks: &[Vec<u8>]) -> Vec<u8> {
+        webp(&[&[vp8x(0x02 | flags), chunk(b"ANIM", &[0; 6])], chunks].concat())
     }
 
     #[test]
     fn chunks_inside_a_frame_go_too() {
         use MetaField::*;
-        let src = webp(&[
-            vp8x(0x02),
-            chunk(b"ANIM", &[0; 6]),
-            anmf(&[
-                chunk(b"VP8L", b"frame one"),
-                chunk(b"XMP ", b"<x:xmpmeta>Zoe</x:xmpmeta>"),
-                chunk(b"ABCD", b"GPS"),
-            ]),
-            anmf(&[chunk(b"ALPH", b"al"), chunk(b"VP8 ", b"two")]),
-        ]);
+        let src = animation(
+            0,
+            &[
+                frame(
+                    0,
+                    0,
+                    &[
+                        vp8l(2, 2, false),
+                        chunk(b"XMP ", b"<x:xmpmeta>Zoe</x:xmpmeta>"),
+                        chunk(b"ABCD", b"GPS"),
+                    ],
+                ),
+                frame(0, 0, &[chunk(b"ALPH", b"al"), image()]),
+            ],
+        );
         let (out, fields) = run(&src).unwrap();
         assert_eq!(fields, [Xmp, Other].into());
         assert_eq!(
             out,
-            webp(&[
-                vp8x(0x02),
-                chunk(b"ANIM", &[0; 6]),
-                anmf(&[chunk(b"VP8L", b"frame one")]),
-                anmf(&[chunk(b"ALPH", b"al"), chunk(b"VP8 ", b"two")]),
-            ])
+            animation(
+                0,
+                &[
+                    frame(0, 0, &[vp8l(2, 2, false)]),
+                    frame(0, 0, &[chunk(b"ALPH", b"al"), image()]),
+                ]
+            )
         );
-        // A frame too short for its header, or with a chunk past its end.
-        // Its size padded counts, as libwebp's demuxer reads it: a 15-byte
-        // one's pad byte is its header's last, and it's kept as such.
-        let (out, _) = run(&webp(&[vp8x(0x02), chunk(b"ANMF", &[0; 15])])).unwrap();
-        assert_eq!(out, webp(&[vp8x(0x02), chunk(b"ANMF", &[0; 16])]));
+        // A frame too short for its header, or with a chunk past its end,
+        // which the demuxer refuses as conversions do.
         for bad in [
-            webp(&[vp8x(0x02), chunk(b"ANMF", &[0; 14])]),
-            webp(&[
-                vp8x(0x02),
-                chunk(b"ANMF", &[[0; 16].as_slice(), b"VP8 \x09\0\0\0ab"].concat()),
-            ]),
+            animation(0, &[chunk(b"ANMF", &[0; 14]), frame(0, 0, &[image()])]),
+            animation(
+                0,
+                &[chunk(
+                    b"ANMF",
+                    &[[0; 16].as_slice(), b"VP8 \x09\0\0\0ab"].concat(),
+                )],
+            ),
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
     }
 
     #[test]
-    fn a_frame_holding_a_top_level_chunk_is_refused() {
-        // libwebp ends a frame at its image and reads the next frame from
-        // inside it; the `image` crate trusts the size and doesn't. Either
-        // way, dropping it would lose a picture someone sees.
+    fn a_frame_with_no_image_goes_whole() {
+        use MetaField::*;
+        let red = || frame(0, 0, &[image()]);
+        let blue = || frame(0, 0, &[vp8l(2, 2, false)]);
+        let camera = tiff(b'I', &[&[(0x010F, V::Ascii("Nikon"))]], None);
+        // The review's: a last ANMF holding only an unknown chunk, an EXIF,
+        // an empty chunk, or nothing but a header followed by chunks that
+        // go. Kept as it was, empty, it ended the file, which libwebp's
+        // demuxer, Pillow and every conversion refuse; the demuxer passes
+        // over such a frame, so it goes whole, and what it held is said.
+        for (tail, said) in [
+            (
+                vec![chunk(
+                    b"ANMF",
+                    &[[0; 16].as_slice(), b"JUNK\x03\0\0\0abc\0"].concat(),
+                )],
+                vec![Other],
+            ),
+            (vec![chunk(b"ANMF", &[0; 24])], vec![Other]),
+            (vec![chunk(b"ANMF", &[0; 32])], vec![Other]),
+            (
+                vec![chunk(
+                    b"ANMF",
+                    &[[0; 16].as_slice(), &chunk(b"EXIF", &camera)].concat(),
+                )],
+                vec![Camera],
+            ),
+            (
+                vec![chunk(b"ANMF", &[0; 15]), chunk(b"JUNK", b"abc")],
+                vec![Other],
+            ),
+            (
+                vec![chunk(b"ANMF", &[0; 16]), chunk(b"JUNK", b"abc")],
+                vec![Other],
+            ),
+            (
+                vec![chunk(b"ANMF", &[0; 24]), chunk(b"JUNK", b"abc")],
+                vec![Other],
+            ),
+            (
+                vec![chunk(b"ANMF", &[0; 16]), chunk(b"EXIF", &camera)],
+                vec![Camera],
+            ),
+            (
+                vec![chunk(b"ANMF", &[0; 16]), chunk(b"XMP ", b"<x/>")],
+                vec![Xmp],
+            ),
+            // Before a frame too, and an empty one alone, which held nothing.
+            (vec![chunk(b"ANMF", &[0; 40]), blue()], vec![Other]),
+            (vec![chunk(b"ANMF", &[0; 16]), blue()], vec![]),
+        ] {
+            let src = animation(0, &[&[red()], tail.as_slice()].concat());
+            let (out, fields) = run(&src).unwrap_or_else(|e| panic!("{src:?}: {e:?}"));
+            let frames = if tail.len() == 2 && tail[1] == blue() {
+                vec![red(), blue()]
+            } else {
+                vec![red()]
+            };
+            assert_eq!(out, animation(0, &frames), "{src:?}");
+            assert_eq!(fields, said.into_iter().collect(), "{src:?}");
+        }
+        // An empty last frame with nothing after it the demuxer refuses,
+        // and conversions too, so Remove Metadata does.
+        let src = animation(0, &[red(), chunk(b"ANMF", &[0; 16])]);
+        assert!(matches!(run(&src), Err(Error::Broken(_))));
+    }
+
+    #[test]
+    fn an_animations_anim_is_written_as_the_demuxer_reads_it() {
+        let red = || frame(0, 0, &[image()]);
+        let with = |anim: &[u8]| webp(&[vp8x(0x02), anim.to_vec(), red(), chunk(b"ANIM", &[9; 7])]);
+        // The 6 bytes of its size padded the demuxer reads (its pad byte
+        // too), which image-webp reads only at 6: one of 5, 7 or 16 bytes
+        // (Pillow shows them) made every conversion refuse the file. A
+        // second one, which both pass over, goes as it is.
+        for (anim, want) in [
+            (b"ANIM   ".to_vec(), [1, 2, 3, 4, 5, 7]),
+            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6, 7]), [1, 2, 3, 4, 5, 6]),
+            (
+                chunk(b"ANIM", &[[1, 2, 3, 4, 5, 6].as_slice(), &[8; 10]].concat()),
+                [1, 2, 3, 4, 5, 6],
+            ),
+            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6]), [1, 2, 3, 4, 5, 6]),
+        ] {
+            let (out, fields) = run(&with(&anim)).unwrap();
+            assert_eq!(out, with(&chunk(b"ANIM", &want)));
+            assert!(fields.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_frame_is_walked_by_its_size_padded() {
+        use MetaField::*;
+        let red = || frame(0, 0, &[image()]);
+        let blue = || frame(0, 0, &[vp8l(2, 2, false)]);
+        // An odd ANMF whose pad byte completes a chunk header inside it, as
+        // libwebp's demuxer reads it: a 31-byte empty frame, last or before
+        // another, and a frame's image and 7 or 15 bytes after it. They
+        // were refused as "a chunk cut short in an ANMF".
+        let after_image = |n: usize| {
+            let f = frame(0, 0, &[image(), vec![0; n]]);
+            assert_eq!(u32::from_le_bytes(f[4..8].try_into().unwrap()) % 2, 1);
+            f
+        };
+        for (chunks, want) in [
+            (vec![red(), chunk(b"ANMF", &[0; 31])], vec![red()]),
+            (
+                vec![red(), chunk(b"ANMF", &[0; 31]), blue()],
+                vec![red(), blue()],
+            ),
+            (vec![after_image(7)], vec![red()]),
+            (vec![after_image(7), blue()], vec![red(), blue()]),
+            (vec![after_image(15)], vec![red()]),
+        ] {
+            let src = animation(0, &chunks);
+            let (out, fields) = run(&src).unwrap_or_else(|e| panic!("{src:?}: {e:?}"));
+            assert_eq!(out, animation(0, &want), "{src:?}");
+            assert_eq!(fields, [Other].into(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn a_frame_holding_a_frame_or_a_profile_is_refused() {
+        // libwebp ends a frame at its image and reads the rest as top-level
+        // chunks, a frame it shows or a profile it may apply, where the
+        // `image` crate trusts the size and reads neither: readers disagree.
         for inner in [
-            anmf(&[chunk(b"VP8L", b"two")]),
-            vp8x(0x02),
-            chunk(b"ANIM", &[0; 6]),
+            frame(0, 0, &[vp8l(2, 2, false)]),
             chunk(b"ICCP", b"profile"),
         ] {
-            let src = webp(&[
-                vp8x(0x02),
-                chunk(b"ANIM", &[0; 6]),
-                anmf(&[chunk(b"VP8L", b"one"), inner]),
-            ]);
-            assert!(matches!(run(&src), Err(Error::Broken(_))), "{src:?}");
+            let src = animation(0x20, &[frame(0, 0, &[image(), inner])]);
+            let got = run(&src);
+            assert!(
+                matches!(&got, Err(Error::Broken(why)) if why.contains("inside an ANMF")),
+                "{got:?}"
+            );
+        }
+        // A VP8X there the demuxer refuses, as conversions do.
+        let src = animation(0, &[frame(0, 0, &[image(), vp8x(0x02)])]);
+        assert!(matches!(run(&src), Err(Error::Broken(_))));
+        // A second ANIM, which both pass over: it goes, unsaid.
+        let src = animation(0, &[frame(0, 0, &[image(), chunk(b"ANIM", &[0; 6])])]);
+        let (out, fields) = run(&src).unwrap();
+        assert_eq!(out, animation(0, &[frame(0, 0, &[image()])]));
+        assert!(fields.is_empty());
+    }
+
+    #[test]
+    fn a_simple_file_keeps_its_images_frame_and_drops_the_rest() {
+        use MetaField::*;
+        let alph = || chunk(b"ALPH", b"al");
+        let raw = |fourcc: &[u8; 4], size: u32, data: &[u8]| {
+            [fourcc.as_slice(), &size.to_le_bytes(), data].concat()
+        };
+        let camera = tiff(b'I', &[&[(0x010F, V::Ascii("Nikon"))]], None);
+        // libwebp's demuxer reads a simple file's image, and an ALPH after
+        // it, up to the chunk that ends that frame, and nothing after it;
+        // its still decoder and image-webp only the image. The review's:
+        // an ANMF of 8 to 23 bytes after it (an ALPH between), one holding
+        // a frame and 3 stray bytes or an image claiming 100 bytes, and a
+        // chunk past the RIFF's end after a whole one. They were refused.
+        for (tail, kept, said) in [
+            (vec![chunk(b"ANMF", &[0; 8])], vec![], vec![Other]),
+            (
+                vec![alph(), chunk(b"ANMF", &[0; 17])],
+                vec![alph()],
+                vec![Other],
+            ),
+            (vec![chunk(b"ANMF", &[0; 23])], vec![], vec![Other]),
+            (
+                vec![raw(
+                    b"ANMF",
+                    16 + 20 + 3,
+                    &[[0; 16].as_slice(), &image(), &[0; 3]].concat(),
+                )],
+                vec![],
+                vec![Other],
+            ),
+            (
+                vec![raw(
+                    b"ANMF",
+                    26,
+                    &[[0; 16].as_slice(), &raw(b"VP8 ", 100, &[0; 2])].concat(),
+                )],
+                vec![],
+                vec![Other],
+            ),
+            (
+                vec![chunk(b"JUNK", b"junk"), raw(b"JUNK", 1000, &[0; 4])],
+                vec![],
+                vec![Other],
+            ),
+            (
+                vec![chunk(b"EXIF", &camera), raw(b"XMP ", 500, &[0; 4])],
+                vec![],
+                vec![Camera, Other],
+            ),
+            (
+                vec![chunk(b"XMP ", b"<x/>"), vec![0; 3]],
+                vec![],
+                vec![Xmp, Other],
+            ),
+            (vec![alph(), image(), alph()], vec![alph()], vec![Other]),
+            (vec![vp8x(0x10)], vec![], vec![]),
+            (vec![alph()], vec![alph()], vec![]),
+        ] {
+            let src = webp(&[&[image()], tail.as_slice()].concat());
+            let (out, fields) = run(&src).unwrap_or_else(|e| panic!("{src:?}: {e:?}"));
+            assert_eq!(
+                out,
+                webp(&[&[image()], kept.as_slice()].concat()),
+                "{src:?}"
+            );
+            assert_eq!(fields, said.into_iter().collect(), "{src:?}");
+        }
+    }
+
+    #[test]
+    fn what_a_conversion_refuses_is_refused() {
+        // Readers disagree on these, or libwebp's demuxer refuses them:
+        // Remove Metadata refuses them before writing, as conversions do.
+        // It kept their image chunks as they were.
+        for bad in [
+            webp(&[image(), vec![0; 3]]),
+            webp(&[vp8x(0), image(), image()]),
+            webp(&[vp8x(0), alph_before(), image()]),
+            webp(&[vp8x(0), image(), anmf(&[image()])]),
+            webp(&[vp8x(0), chunk(b"ANIM", &[0; 6]), image()]),
+            webp(&[canvas(0, 3, 2), image()]),
+        ] {
+            assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
+        }
+        // A VP8L whose bit says opaque under VP8X's alpha flag: a
+        // conversion decides on it once decoded, and so does `strip::run`.
+        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, false)]))).unwrap();
+        assert!(plan.decides_by_pixels());
+        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, true)]))).unwrap();
+        assert!(!plan.decides_by_pixels());
+    }
+
+    /// An `ALPH` chunk.
+    fn alph_before() -> Vec<u8> {
+        chunk(b"ALPH", b"a")
+    }
+
+    #[test]
+    fn the_file_written_must_be_walked_as_the_source_was() {
+        let check = |src: &[u8], out: &[u8]| {
+            Plan::new(&mut Cursor::new(src))
+                .unwrap()
+                .check(&mut Cursor::new(out))
+        };
+        let red = || frame(0, 0, &[image()]);
+        let two = animation(0, &[red(), red()]);
+        // As the source, its metadata's flags aside.
+        assert!(check(&two, &two).is_ok());
+        let tagged = webp(&[vp8x(0x0C), image()]);
+        assert!(check(&tagged, &webp(&[vp8x(0x08), image()])).is_ok());
+        // Anything a reader would see otherwise is Grape's own failure: a
+        // file the walk refuses, a frame lost, another image, another
+        // canvas, alpha, or a still for an animation.
+        for (src, out) in [
+            (
+                two.clone(),
+                animation(0, &[red(), chunk(b"ANMF", &[0; 16])]),
+            ),
+            (two.clone(), animation(0, &[red()])),
+            (webp(&[image()]), webp(&[vp8(2, 3)])),
+            (webp(&[image()]), webp(&[vp8l(2, 2, false)])),
+            (tagged.clone(), webp(&[canvas(0x08, 3, 2), vp8(3, 2)])),
+            (tagged.clone(), webp(&[vp8x(0x18), alph_before(), image()])),
+            (two.clone(), webp(&[vp8x(0), image()])),
+        ] {
+            let got = check(&src, &out);
+            assert!(matches!(got, Err(Error::Broken(_))), "{out:?}: {got:?}");
         }
     }
 
@@ -1293,38 +1736,28 @@ mod tests {
             &[&[(0x0112, V::Short(3)), (0x927C, V::Bytes(7, &big))]],
             None,
         );
-        let src = webp(&[vp8x(0x08), chunk(b"VP8 ", b"frame"), chunk(b"EXIF", &t)]);
+        let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &t)]);
         let (out, fields) = run(&src).unwrap();
         // The maker note is the camera's; the cut is Other.
         assert_eq!(fields, [MetaField::Camera, MetaField::Other].into());
         let minimal = exif::minimal(Some(3), false).unwrap();
-        assert_eq!(
-            out,
-            webp(&[
-                vp8x(0x08),
-                chunk(b"VP8 ", b"frame"),
-                chunk(b"EXIF", &minimal)
-            ])
-        );
+        assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &minimal)]));
     }
 
     #[test]
     fn data_after_the_riff_is_found_past_the_read_buffer() {
-        let mut input = webp(&[chunk(b"VP8 ", b"frame")]);
+        let mut input = webp(&[image()]);
         input.extend(vec![0; 70_000]);
         input.extend_from_slice(b"more");
-        let mut out = Cursor::new(Vec::new());
-        let found = strip(
-            &mut std::io::BufReader::with_capacity(8, Cursor::new(input)),
-            &mut out,
-        )
-        .unwrap();
+        let mut r = std::io::BufReader::with_capacity(8, Cursor::new(input));
+        let plan = Plan::new(&mut r).unwrap();
+        let found = plan.write(&mut r, &mut Cursor::new(Vec::new())).unwrap();
         assert_eq!(found.fields, [MetaField::Other].into());
     }
 
     #[test]
     fn broken_webps_are_refused() {
-        let good = webp(&[vp8x(0), chunk(b"VP8 ", b"frame!")]);
+        let good = webp(&[vp8x(0), image()]);
         for n in 0..good.len() {
             assert!(run(&good[..n]).is_err(), "cut at {n}");
         }
@@ -1336,26 +1769,25 @@ mod tests {
             short[4..8].copy_from_slice(&riff);
             short
         };
-        let odd = webp(&[chunk(b"VP8 ", b"odd")]);
+        let odd = webp(&[image()]);
         assert_eq!(run(&unpadded(odd.clone())).unwrap().0, odd);
-        let odd = webp(&[vp8x(0x10), chunk(b"ALPH", b"a"), chunk(b"VP8 ", b"odd")]);
+        let odd = webp(&[vp8x(0x10), chunk(b"ALPH", b"a"), image()]);
         assert_eq!(run(&unpadded(odd.clone())).unwrap().0, odd);
-        let frame = |inner: &[u8]| {
-            let mut frame = b"ANMF".to_vec();
-            frame.extend(u32::try_from(16 + inner.len()).unwrap().to_le_bytes());
-            frame.extend([3; 16]);
-            frame.extend(inner);
-            frame
-        };
-        let anim = |frame: Vec<u8>| webp(&[vp8x(0x02), chunk(b"ANIM", &[0; 6]), frame]);
-        // A frame whose image's pad is missing inside it, the frame's own
-        // size even.
-        let inner = b"VP8L\x03\0\0\0abc";
-        let (out, _) = run(&anim(frame(inner))).unwrap();
-        assert_eq!(out, anim(anmf(&[chunk(b"VP8L", b"abc")])));
+        // A last frame whose image lacks its pad, the ANMF's own size odd.
+        let header = &frame(0, 0, &[])[8..24];
+        let lossless = vp8l(2, 2, false);
+        let short = [
+            b"ANMF".as_slice(),
+            &31u32.to_le_bytes(),
+            header,
+            &lossless[..15],
+        ]
+        .concat();
+        let (out, _) = run(&animation(0, &[short])).unwrap();
+        assert_eq!(out, animation(0, &[frame(0, 0, &[lossless])]));
         for bad in [
             webp(&[chunk(b"XMP ", b"no image")]),
-            webp(&[chunk(b"VP8X", &[0; 4]), chunk(b"VP8 ", b"f")]),
+            webp(&[chunk(b"VP8X", &[0; 4]), image()]),
             b"RIFF\x02\0\0\0WEBP".to_vec(),
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
@@ -1372,7 +1804,7 @@ mod tests {
         // A longer VP8X than the format's is copied whole.
         let long = webp(&[
             chunk(b"VP8X", &[0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 7, 7]),
-            chunk(b"VP8 ", b"frame"),
+            image(),
         ]);
         assert_eq!(run(&long).unwrap().0, long);
     }
@@ -1466,7 +1898,7 @@ mod tests {
             ]),
         ] {
             let found = scanned(&good).unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
-            assert!(found.animated);
+            assert!(found.animated && found.frames >= 1);
             assert!(!reading(&mut Cursor::new(&good)).unwrap().opaque);
         }
         // What the demuxer refuses, where image-webp would show the first
@@ -1706,6 +2138,7 @@ mod tests {
                 alpha: true,
                 late_alpha: false,
                 animated: false,
+                frames: 0,
                 carried: Carried {
                     flags: 0x2C,
                     iccp: Some(b"profile".to_vec()),

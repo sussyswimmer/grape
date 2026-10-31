@@ -4092,12 +4092,12 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             assert_eq!(err.user_message, message, "{to:?}");
             fs::remove_file(dir.join(name)).unwrap();
         }
-        // Remove Metadata changes no picture: its image chunks go on as
-        // they are, so each reader shows what it showed.
-        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
-        let out = fs::read(&outcome.outputs[0]).unwrap();
-        assert_eq!(webp_image_chunks(&out), webp_image_chunks(&file), "{name}");
-        fs::remove_file(&outcome.outputs[0]).unwrap();
+        // Remove Metadata refuses them as conversions do, the last once
+        // decoded as they decode it: it kept their image chunks as they
+        // were, so it wrote files Grape refuses and readers disagree on.
+        let err = strip(&dir, name, &file).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+        assert_eq!(err.user_message, message, "{}", err.detail);
         fs::remove_file(dir.join(name)).unwrap();
     }
     // Read as libwebp reads them: an EXIF flag whose chunk is past the
@@ -4283,6 +4283,9 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
         let err = compress(&dir, name, &file, High).unwrap_err();
         assert_eq!(err.user_message, message, "{}", err.detail);
         fs::remove_file(dir.join(name)).unwrap();
+        let err = strip(&dir, name, &file).unwrap_err();
+        assert_eq!(err.user_message, message, "{}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
     }
     // A 5-byte ANIM, and a 15-byte ANMF before the frame: libwebp's
     // demuxer goes by their sizes padded (6, 16) and Pillow shows red;
@@ -4368,6 +4371,29 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
             err.user_message,
             format!("{name} is animated. Compress works on still WebP images for now.")
         );
+        fs::remove_file(dir.join(name)).unwrap();
+        // Remove Metadata writes the ANIM as the 6 bytes the demuxer reads
+        // and drops the frames with no image, which it passes over, so
+        // every conversion reads the file it writes, red.
+        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        assert_eq!(
+            out,
+            riff(&[canvas.clone(), anim.clone(), anmf(0, &[&red_vp8])]),
+            "{name}"
+        );
+        let outcome = run(&dir, name, &out, Operation::convert(Format::Png))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let png = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+        let p = png.to_rgba8().get_pixel(0, 0).0;
+        let off = p[..3]
+            .iter()
+            .zip([200u8, 10, 10])
+            .map(|(&a, b)| a.abs_diff(b));
+        assert!(off.max().unwrap() <= 6 && p[3] == 255, "{name}: {p:?}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
         fs::remove_file(dir.join(name)).unwrap();
     }
     // An animation as libwebp's own encoder lays one out (Pillow's): the
@@ -4529,11 +4555,11 @@ fn a_simple_webp_is_read_past_its_image_as_libwebps_demuxer_reads_it() {
         fs::remove_file(&outcome.outputs[0]).unwrap();
         fs::remove_file(dir.join(name)).unwrap();
     }
-    // Known limit: the demuxer reads nothing after the chunk that ends the
-    // image's frame, so it reads 3 stray bytes after one (as libwebp's
-    // still decoder and Pillow do), and so do conversions and Compress;
-    // Remove Metadata, which walks every chunk to the RIFF's end, refuses
-    // it as cut short.
+    // The demuxer reads nothing after the chunk that ends the image's
+    // frame, so it reads 3 stray bytes after one (as libwebp's still
+    // decoder and Pillow do), and so do conversions, Compress and now
+    // Remove Metadata, which walked every chunk to the RIFF's end and
+    // refused it as cut short: it keeps the image alone.
     let stray = riff(&[red_vp8.clone(), riff_chunk(b"JUNK", b"junk"), vec![0; 3]]);
     let outcome = run(&dir, "stray.webp", &stray, Operation::convert(Format::Png))
         .unwrap_or_else(|e| panic!("{}", e.detail));
@@ -4544,8 +4570,202 @@ fn a_simple_webp_is_read_past_its_image_as_libwebps_demuxer_reads_it() {
         Err(e) => assert_eq!(e.kind, ErrorKind::NoChange, "{}", e.detail),
     }
     fs::remove_file(dir.join("stray.webp")).unwrap();
-    let err = strip(&dir, "stray.webp", &stray).unwrap_err();
-    assert_eq!(err.kind, ErrorKind::DecodeFailed, "{}", err.detail);
+    let outcome = strip(&dir, "stray.webp", &stray).unwrap_or_else(|e| panic!("{}", e.detail));
+    assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), riff(&[red_vp8]));
+    assert_eq!(
+        outcome.notes,
+        vec![Note::MetadataRemoved(vec![MetaField::Other])]
+    );
+}
+
+#[test]
+fn remove_metadata_writes_a_webp_every_reader_reads_as_the_source() {
+    use grape_core::Format;
+    // The review's: files libwebp's demuxer and Pillow read, which Remove
+    // Metadata damaged or refused. An animation whose last ANMF holds no
+    // image: its empty frame was left last, which the demuxer, Pillow and
+    // every conversion refuse. A simple file read past its image's frame:
+    // what follows that frame was walked to the RIFF's end and refused. An
+    // odd ANMF whose pad byte ends a chunk header: walked unpadded, and
+    // refused. Each is written as the demuxer reads it now.
+    let dir = TestDir::new("strip-webp-readers");
+    let red = lossy_webp(&[255, 0, 0].repeat(64 * 40), 64, 40, false, 90.0);
+    let red_vp8 = riff_chunk(b"VP8 ", &webp_chunk(&red, b"VP8 ").unwrap());
+    let blue = lossy_webp(&[0, 0, 255].repeat(64 * 40), 64, 40, false, 90.0);
+    let blue_vp8 = riff_chunk(b"VP8 ", &webp_chunk(&blue, b"VP8 ").unwrap());
+    let alph = riff_chunk(b"ALPH", &[[0u8].as_slice(), &[0x80; 64 * 40]].concat());
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let header = [u24(0), u24(0), u24(63), u24(39), u24(100), vec![0]].concat();
+    let anmf = |inner: &[u8]| riff_chunk(b"ANMF", &[header.as_slice(), inner].concat());
+    let empty = |n: usize| riff_chunk(b"ANMF", &vec![0; n]);
+    let raw = |fourcc: &[u8; 4], size: u32, data: &[u8]| {
+        [fourcc.as_slice(), &size.to_le_bytes(), data].concat()
+    };
+    let junk = riff_chunk(b"JUNK", b"abc");
+    let exif = riff_chunk(b"EXIF", &exif(1)[10..]);
+    let xmp = riff_chunk(b"XMP ", b"<x:xmpmeta>Zoe</x:xmpmeta>");
+    let start = [
+        vp8x_chunk(0x02, 64, 40),
+        riff_chunk(b"ANIM", &[0; 6]),
+        anmf(&red_vp8),
+    ];
+    let animation = |rest: &[Vec<u8>]| riff(&[start.as_slice(), rest].concat());
+    let one = animation(&[]);
+    let two = animation(&[anmf(&blue_vp8)]);
+    let simple = riff(std::slice::from_ref(&red_vp8));
+    use MetaField::*;
+    for (name, file, want, said) in [
+        (
+            "junk-last.webp",
+            animation(&[riff_chunk(b"ANMF", &[[0; 16].as_slice(), &junk].concat())]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "zero8-last.webp",
+            animation(&[empty(24)]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "zero32-last.webp",
+            animation(&[empty(32)]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "exif-last.webp",
+            animation(&[riff_chunk(b"ANMF", &[[0; 16].as_slice(), &exif].concat())]),
+            &one,
+            vec![Location, Camera],
+        ),
+        (
+            "empty15-junk.webp",
+            animation(&[empty(15), junk.clone()]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "empty16-junk.webp",
+            animation(&[empty(16), junk.clone()]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "empty32-junk.webp",
+            animation(&[empty(32), junk.clone()]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "empty16-exif.webp",
+            animation(&[empty(16), exif.clone()]),
+            &one,
+            vec![Location, Camera],
+        ),
+        (
+            "empty16-xmp.webp",
+            animation(&[empty(16), xmp.clone()]),
+            &one,
+            vec![Xmp],
+        ),
+        (
+            "odd31-last.webp",
+            animation(&[empty(31)]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "odd31-middle.webp",
+            animation(&[empty(31), anmf(&blue_vp8)]),
+            &two,
+            vec![Other],
+        ),
+        (
+            "red7.webp",
+            riff(&[
+                start[0].clone(),
+                start[1].clone(),
+                anmf(&[red_vp8.as_slice(), &[0; 7]].concat()),
+            ]),
+            &one,
+            vec![Other],
+        ),
+        (
+            "red7-blue.webp",
+            riff(&[
+                start[0].clone(),
+                start[1].clone(),
+                anmf(&[red_vp8.as_slice(), &[0; 7]].concat()),
+                anmf(&blue_vp8),
+            ]),
+            &two,
+            vec![Other],
+        ),
+        (
+            "simple-anmf8.webp",
+            riff(&[red_vp8.clone(), empty(8)]),
+            &simple,
+            vec![Other],
+        ),
+        (
+            "simple-anmf23.webp",
+            riff(&[red_vp8.clone(), empty(23)]),
+            &simple,
+            vec![Other],
+        ),
+        (
+            "simple-anmf-stray.webp",
+            riff(&[
+                red_vp8.clone(),
+                anmf(&[blue_vp8.as_slice(), &[0; 3]].concat()),
+            ]),
+            &simple,
+            vec![Other],
+        ),
+        (
+            "simple-anmf-vp8-100.webp",
+            riff(&[red_vp8.clone(), anmf(&raw(b"VP8 ", 100, &[0; 10]))]),
+            &simple,
+            vec![Other],
+        ),
+        (
+            "simple-junk-1000.webp",
+            riff(&[red_vp8.clone(), junk.clone(), raw(b"JUNK", 1000, &[0; 4])]),
+            &simple,
+            vec![Other],
+        ),
+        (
+            "simple-xmp-500.webp",
+            riff(&[red_vp8.clone(), xmp.clone(), raw(b"XMP ", 500, &[0; 4])]),
+            &simple,
+            vec![Xmp, Other],
+        ),
+        (
+            "simple-alph-anmf12.webp",
+            riff(&[red_vp8.clone(), alph.clone(), empty(12)]),
+            &riff(&[red_vp8.clone(), alph.clone()]),
+            vec![Other],
+        ),
+    ] {
+        let outcome = strip(&dir, name, &file).unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        assert_eq!(&out, want, "{name}");
+        assert_eq!(outcome.notes, vec![Note::MetadataRemoved(said)], "{name}");
+        // Every conversion reads it: its first frame, red.
+        let outcome = run(&dir, name, &out, Operation::convert(Format::Png))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let png = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+        let p = png.to_rgba8().get_pixel(0, 0).0;
+        assert!(
+            p[0] > 240 && p[1] < 16 && p[2] < 16 && p[3] == 255,
+            "{name}: {p:?}"
+        );
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
 }
 
 #[test]
