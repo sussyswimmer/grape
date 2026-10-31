@@ -835,11 +835,19 @@ mod tests {
             }
             lo
         };
-        // No profile: up to 2³⁰ ÷ 77 = 13,944,699 px (4125 × 3380), where
-        // the largest profile's room stopped it at 13,727,720 (4061 ×
-        // 3380) whatever the picture had; a 3 KB profile, the largest one
-        // and metadata take theirs.
-        for (h, metadata, profile, want) in [
+        // A real file's: Compress carries the ICCP chunk it reads, so its
+        // metadata, held beside the picture and again in the file written,
+        // holds the profile twice, and `crate::image` counts it once more
+        // with the picture. The pixels High admits are (2³⁰ − 3P − 2M) ÷ 77,
+        // P the profile's bytes and M the EXIF's and XMP's: 13,944,699 with
+        // neither (4125 × 3380), 13,944,576 with a 3,144-byte profile and
+        // 13,293,763 with the largest (3933 × 3380; round 7 said 4061).
+        // Rows: height, profile, EXIF and XMP, widest.
+        let px = |profile: u64, other: u64| (WORKING_SET_LIMIT - 3 * profile - 2 * other) / 77;
+        assert_eq!(px(0, 0), 13_944_699);
+        assert_eq!(px(3144, 0), 13_944_576);
+        assert_eq!(px(MAX_ICC as u64, 0), 13_293_763);
+        for (h, profile, other, want) in [
             (3380, 0, 0, Some(4125)),
             (3225, 0, 0, Some(4323)),
             (2775, 0, 0, Some(5025)),
@@ -847,11 +855,13 @@ mod tests {
             (1140, 0, 0, Some(12_232)),
             (836, 0, 0, Some(16_680)),
             (3390, 0, 0, Some(4113)),
-            (1690, 0, 3144, Some(8251)),
-            (3380, 0, MAX_ICC as u64, Some(4061)),
-            (2775, 2 * 65_536, 3144, None),
-            (1140, 2 * 1_000_000, MAX_ICC as u64, None),
+            (1690, 3144, 0, Some(8251)),
+            (3380, 3144, 0, Some(4125)),
+            (3380, MAX_ICC as u64, 0, Some(3933)),
+            (2775, 3144, 65_536, None),
+            (1140, MAX_ICC as u64, 1_000_000, None),
         ] {
+            let metadata = 2 * (profile + other);
             let w = widest(h, metadata, profile);
             if let Some(want) = want {
                 assert_eq!(w, want, "{h} {profile}");
@@ -859,17 +869,111 @@ mod tests {
             assert!(fits_as_it_is(w, h, metadata, profile), "{w}x{h}");
             assert!(!fits_as_it_is(w + 1, h, metadata, profile), "{w}x{h}");
         }
-        // Then the scaled picture's encode beside that file: at Balanced
-        // a hair over its cap (4113 × 3390, 1.004 to 1), with up to about
-        // 9 MB of it.
-        let (w, h) = (4113, 3390);
-        let room = WORKING_SET_LIMIT - peak(w, h, 4, false, Some(4096));
-        assert_eq!(room, 8_978_432);
-        assert!(fits_scaled_beside(w, h, Some(4096), 0, room));
-        assert!(!fits_scaled_beside(w, h, Some(4096), 0, room + 1));
-        assert!(!fits_scaled_beside(w, h, Some(4096), 1, room));
-        // Small's scale of it, far less.
-        assert!(fits_scaled_beside(w, h, Some(2048), 0, 500_000_000));
+        // Then the scaled picture's encode beside that file, when it fits:
+        // at Balanced a hair over its cap, 4097 × 3403 (13,942,091 px,
+        // which High admits), the least room of any size High admits,
+        // 462,848 bytes, where an encode as it is any larger is thrown
+        // away; 8,978,432 at 4113 × 3390, the most High admits at that
+        // height, which round 7 gave as the least.
+        for (w, h, least) in [(4097, 3403, 462_848), (4113, 3390, 8_978_432)] {
+            assert!(fits_as_it_is(w, h, 0, 0), "{w}x{h}");
+            let room = WORKING_SET_LIMIT - peak(w, h, 4, false, Some(4096));
+            assert_eq!(room, least, "{w}x{h}");
+            assert!(fits_scaled_beside(w, h, Some(4096), 0, room));
+            assert!(!fits_scaled_beside(w, h, Some(4096), 0, room + 1));
+            assert!(!fits_scaled_beside(w, h, Some(4096), 1, room));
+        }
+        // Small's scale of a picture High admits leaves far more: at least
+        // 750,780,416 bytes (3714 × 3714).
+        let room = WORKING_SET_LIMIT - peak(3714, 3714, 4, false, Some(2048));
+        assert_eq!(room, 750_780_416);
+        assert!(fits_scaled_beside(4097, 3403, Some(2048), 0, 500_000_000));
+    }
+
+    /// A lossy `w`×`h` WebP of one color with an alpha plane of `alpha`
+    /// (raw, uncompressed) and an ICCP chunk of `profile`, its VP8X flagging
+    /// both: `vp8` is libwebp's key frame of that color, 4128 px wide or
+    /// less, its width set to `w` (258 macroblocks a row from 4113 to 4128).
+    fn flat_with_profile(vp8: &[u8], w: u32, h: u32, alpha: u8, profile: &[u8]) -> Vec<u8> {
+        let chunk = |fourcc: &[u8; 4], data: &[u8]| {
+            let mut out = fourcc.to_vec();
+            out.extend(u32::try_from(data.len()).unwrap().to_le_bytes());
+            out.extend(data);
+            if data.len() % 2 == 1 {
+                out.push(0);
+            }
+            out
+        };
+        let (cw, ch) = ((w - 1).to_le_bytes(), (h - 1).to_le_bytes());
+        let vp8x = [0x30, 0, 0, 0, cw[0], cw[1], cw[2], ch[0], ch[1], ch[2]];
+        let mut frame = vp8.to_vec();
+        frame[6..8].copy_from_slice(&u16::try_from(w).unwrap().to_le_bytes());
+        let mut alph = vec![0];
+        alph.resize(1 + (w * h) as usize, alpha);
+        let body = [
+            chunk(b"VP8X", &vp8x),
+            chunk(b"ICCP", profile),
+            chunk(b"ALPH", &alph),
+            chunk(b"VP8 ", &frame),
+        ]
+        .concat();
+        let mut out = b"RIFF".to_vec();
+        out.extend(u32::try_from(body.len() + 4).unwrap().to_le_bytes());
+        out.extend(b"WEBP");
+        out.extend(body);
+        out
+    }
+
+    #[test]
+    fn decode_counts_a_files_profile_as_high_counts_it() {
+        // A file with an ICCP chunk of 80,000 bytes, at 3380 px high: 4124
+        // px wide leaves 429,584 bytes beside the picture High encodes, so
+        // the profile three times fits, and 4125 leaves 169,324, so it
+        // doesn't, where once or twice it would. Small, which scales both,
+        // encodes the first as it is too.
+        let profile = vec![7; 80_000];
+        let flat = DynamicImage::ImageRgb8(RgbImage::from_pixel(4125, 3380, Rgb([90, 140, 200])));
+        let fast = Options {
+            mode: Mode::Lossy {
+                quality: 10.0,
+                method: 0,
+            },
+            threads: true,
+        };
+        // libwebp's key frame, its width set to each.
+        let vp8 = encoded(&flat, &fast)[20..].to_vec();
+        drop(flat);
+        let dir = std::env::temp_dir();
+        for (w, room, fits) in [(4124, 429_584, true), (4125, 169_324, false)] {
+            assert_eq!(
+                WORKING_SET_LIMIT - peak(w, 3380, 4, false, None),
+                room,
+                "{w}"
+            );
+            let path = dir.join(format!(
+                "grape-webp-profile-{}.webp",
+                crate::output::unique_suffix()
+            ));
+            std::fs::write(&path, flat_with_profile(&vp8, w, 3380, 200, &profile)).unwrap();
+            let carried = webp::scan(&mut Cursor::new(std::fs::read(&path).unwrap()))
+                .unwrap()
+                .carried;
+            assert_eq!(carried.len(), 80_000);
+            let names = Names::new(&path, &path, Format::Webp, Format::Webp);
+            let decoded = decode(
+                &path,
+                Format::Webp,
+                &names,
+                &CancelToken::default(),
+                false,
+                CompressPreset::Small,
+                &carried,
+            );
+            std::fs::remove_file(&path).unwrap();
+            let (img, as_it_is) = decoded.unwrap();
+            assert_eq!(img.dimensions(), (w, 3380));
+            assert_eq!(as_it_is, fits, "{w}");
+        }
     }
 
     #[test]
