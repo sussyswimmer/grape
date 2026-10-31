@@ -1040,10 +1040,12 @@ pub(crate) struct Reading {
     /// differently by each and must be refused once decoded.
     pub(crate) opaque: bool,
     /// A still `VP8L` whose own bit says no alpha with no VP8X alpha flag
-    /// over it (or no VP8X): libwebp's still decoder shows the alpha its
-    /// pixels hold, and its demuxer (Pillow's, Chrome's) and image-webp
-    /// show it opaque, so a picture whose pixels hold some is shown
-    /// differently and must be refused once decoded. The byte to read in
+    /// over it (or no VP8X): libwebp's still decoder and its animation
+    /// decoder (`WebPAnimDecoder`, on the demuxer) give the alpha its
+    /// pixels hold, where the demuxer says there's none (its format flags
+    /// and the frame's `has_alpha`, by the bit), so Pillow, going by that,
+    /// and image-webp show it opaque: a picture whose pixels hold some is
+    /// shown differently and must be refused once decoded. The byte to read in
     /// place of `patch`'s, and where, so that image-webp decodes its alpha
     /// to see: VP8X's flags with alpha on, or the `VP8L`'s own bit set. A
     /// picture with none is then handed on opaque, as image-webp shows it.
@@ -2769,9 +2771,10 @@ mod tests {
             }
         );
         // Its bit off under no flag, or in a simple file: libwebp's still
-        // decoder shows its pixels' alpha, the demuxer and image-webp show
-        // it opaque. Read with alpha on to see, at VP8X's flags (the EXIF
-        // flag off too) or the VP8L's own bit.
+        // and animation decoders show its pixels' alpha, Pillow (by what
+        // the demuxer says) and image-webp show it opaque. Read with alpha
+        // on to see, at VP8X's flags (the EXIF flag off too) or the VP8L's
+        // own bit.
         let unflagged = |file: &[u8]| read(file).unwrap().unflagged;
         let tagged = webp(&[canvas(0x08, 9, 9), vp8l(9, 9, false)]);
         assert_eq!(read(&tagged).unwrap().patch, Some((20, 0)));

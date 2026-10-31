@@ -518,10 +518,11 @@ fn decode_as(
         }
         Ok(Ok(decoded)) => Ok(decoded),
         Ok(Err(DecodeFailure::Unflagged)) => {
-            // libwebp's still decoder shows its pixels' alpha, its
-            // demuxer and image-webp go by the VP8L's bit.
+            // libwebp's still and animation decoders show its pixels'
+            // alpha; its demuxer says it has none, by the VP8L's bit, and
+            // Pillow, going by that, and image-webp show it opaque.
             Err(names.decode_failed(format!(
-                "decode {}: transparent in libwebp's still decoder, opaque in its demuxer",
+                "decode {}: transparent in libwebp's decoders, opaque in Pillow and image-webp",
                 src.display()
             )))
         }

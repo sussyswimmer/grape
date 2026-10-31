@@ -4252,9 +4252,9 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         ),
         // Transparent pixels in a VP8L whose bit says opaque, under
         // VP8X's alpha flag: refused once decoded. And under no flag, or
-        // in a simple file, where libwebp's still decoder shows them and
-        // its demuxer (Pillow) and image-webp show the picture opaque,
-        // which conversions wrote.
+        // in a simple file, where libwebp's still and animation decoders
+        // show them and Pillow (by what the demuxer says) and image-webp
+        // show the picture opaque, which conversions wrote.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
         (
             "vp8l-bit-off-unflagged.webp",
