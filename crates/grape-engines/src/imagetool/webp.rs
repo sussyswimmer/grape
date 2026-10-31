@@ -306,7 +306,8 @@ pub(super) struct Scan {
     /// An `ALPH` chunk after the `VP8 ` one, which libwebp never reads and
     /// image-webp does when none comes before it.
     pub(super) late_alpha: bool,
-    /// VP8X's animation flag: the walk stops there.
+    /// VP8X's animation flag: its chunks are walked as libwebp's demuxer
+    /// walks them ([`animation`]), and nothing is carried.
     pub(super) animated: bool,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
@@ -350,7 +351,8 @@ impl Carried {
 ///   chunks, and its first `ICCP`, `EXIF` and `XMP `, up to
 ///   [`crate::image::MAX_ICC`] bytes for the profile and [`MAX_CARRIED`]
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
-///   metadata). It stops at an animation (VP8X's flag). In a still file,
+///   metadata). An animation (VP8X's flag) is walked by [`animation`],
+///   nothing of it carried. In a still file,
 ///   an `ANMF` chunk is broken (image-webp took the frame's picture or its
 ///   `ALPH` for the still one's, where libwebp's still decoder skips it and
 ///   its demuxer, Chrome's and Pillow's, refuses the file, but for an
@@ -413,6 +415,8 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 found.carried.flags = flags & (ICC_FLAG | EXIF_FLAG | XMP_FLAG);
                 if flags & ANIMATION_FLAG != 0 {
                     found.animated = true;
+                    let canvas = (side(&data[4..7]), side(&data[7..10]));
+                    animation(r, at, at + left, canvas, &mut chunks)?;
                     return Ok(found);
                 }
             }
@@ -503,6 +507,139 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
     Ok(found)
 }
 
+/// The most pixels libwebp's demuxer takes on an animation's canvas or in
+/// a frame (`MAX_IMAGE_AREA`).
+const MAX_AREA: u64 = 1 << 32;
+
+/// Walks an animation's chunks, from `at` to the RIFF's `end`, as libwebp's
+/// demuxer (Chrome's, Pillow's) reads them, and refuses what it refuses
+/// (D16): libwebp's still decoder refuses every animation, and image-webp
+/// would show a first frame of a file no libwebp reader shows. So a second
+/// `VP8X`, an `ALPH`, `VP8 ` or `VP8L` chunk outside a frame, an `ANMF`
+/// before the first `ANIM`, an `ANIM` shorter than its 6 bytes, a frame
+/// that's broken ([`animation_frame`]) and an animation with no frame are
+/// all [`Error::Broken`]; unknown chunks, metadata and a second `ANIM` are
+/// passed over. The canvas, `canvas`, must be under [`MAX_AREA`].
+fn animation(
+    r: &mut dyn In,
+    mut at: u64,
+    end: u64,
+    canvas: (u32, u32),
+    chunks: &mut usize,
+) -> Result<(), Error> {
+    if u64::from(canvas.0) * u64::from(canvas.1) >= MAX_AREA {
+        let (w, h) = canvas;
+        return Err(Error::Broken(format!("a {w}x{h} canvas")));
+    }
+    let mut anim = false;
+    let mut frames = 0u64;
+    while at < end {
+        let mut raw = [0; 8];
+        read_at(r, at, &mut raw)?;
+        let head = next(raw, &mut (end - at), chunks)?;
+        let body = at + 8;
+        at = body + head.body;
+        match &head.fourcc {
+            b"ANIM" if head.size < 6 => {
+                return Err(Error::Broken(format!(
+                    "an ANIM chunk of {} bytes",
+                    head.size
+                )));
+            }
+            b"ANIM" => anim = true,
+            b"ANMF" if !anim => {
+                return Err(Error::Broken("an ANMF chunk before the ANIM chunk".into()));
+            }
+            b"ANMF" => at = animation_frame(r, body, &head, end, canvas, &mut frames)?,
+            b"VP8X" | b"ALPH" | b"VP8 " | b"VP8L" => {
+                return Err(Error::Broken(format!(
+                    "a {} chunk outside the animation's frames",
+                    name(&head.fourcc)
+                )));
+            }
+            _ => {}
+        }
+    }
+    if frames == 0 {
+        return Err(Error::Broken("an animation with no frame".into()));
+    }
+    Ok(())
+}
+
+/// Reads the `ANMF` chunk `head` (its body at `at`) of an animation on a
+/// `canvas`, the RIFF ending at `end`, as libwebp's demuxer does: after
+/// the 16-byte frame header, its frame is an optional `ALPH` and a `VP8 `
+/// or `VP8L`, and the first other chunk ends it. Gives where the demuxer
+/// reads on, as top-level chunks: after the frame's image, inside the
+/// `ANMF` if anything follows it there. With no image chunk it isn't a
+/// frame; with an `ALPH` and no image, an `ALPH` after the image or before
+/// a `VP8L`, an image past the `ANMF`'s end, an image whose bitstream has
+/// no header, or a frame past the canvas, it's [`Error::Broken`]. Counts
+/// the frames in `frames`.
+fn animation_frame(
+    r: &mut dyn In,
+    at: u64,
+    head: &Head,
+    end: u64,
+    canvas: (u32, u32),
+    frames: &mut u64,
+) -> Result<u64, Error> {
+    if head.size < FRAME_HEADER {
+        return Err(Error::Broken("a short ANMF".into()));
+    }
+    let mut header = [0; FRAME_HEADER as usize];
+    read_at(r, at, &mut header)?;
+    let u24 = |b: &[u8]| u64::from(u32::from_le_bytes([b[0], b[1], b[2], 0]));
+    let (x, y) = (2 * u24(&header[0..3]), 2 * u24(&header[3..6]));
+    if (u24(&header[6..9]) + 1) * (u24(&header[9..12]) + 1) >= MAX_AREA {
+        return Err(Error::Broken("a frame too large".into()));
+    }
+    let mut p = at + FRAME_HEADER;
+    let (mut alpha, mut image) = (None, None);
+    while p < end {
+        let mut raw = [0; 8];
+        read_at(r, p, &mut raw)?;
+        let mut left = end - p;
+        let mut counted = 0;
+        let chunk = next(raw, &mut left, &mut counted)?;
+        match &chunk.fourcc {
+            b"ALPH" if alpha.is_none() => alpha = Some(p),
+            b"VP8L" if alpha.is_some() => {
+                return Err(Error::Broken("an ALPH chunk before a frame's VP8L".into()));
+            }
+            b"VP8 " | b"VP8L" if image.is_none() => {
+                let mut bitstream_of = Scan::default();
+                bitstream(r, p + 8, &chunk, &mut bitstream_of)?;
+                image = Some((p, bitstream_of.size));
+            }
+            _ => break,
+        }
+        p += 8 + chunk.body;
+    }
+    if p > at + head.body {
+        return Err(Error::Broken("a frame's image past its ANMF's end".into()));
+    }
+    match (alpha, image) {
+        (None, None) => {}
+        (Some(_), None) => {
+            return Err(Error::Broken("a frame with alpha and no image".into()));
+        }
+        (Some(a), Some((i, _))) if a > i => {
+            return Err(Error::Broken("a frame's ALPH chunk after its image".into()));
+        }
+        (_, Some((_, (w, h)))) => {
+            if x + u64::from(w) > u64::from(canvas.0) || y + u64::from(h) > u64::from(canvas.1) {
+                return Err(Error::Broken(format!(
+                    "a {w}x{h} frame at ({x}, {y}) past a {}x{} canvas",
+                    canvas.0, canvas.1
+                )));
+            }
+            *frames += 1;
+        }
+    }
+    Ok(p)
+}
+
 /// How image-webp, which goes by a file's VP8X flags, must read a still
 /// WebP to show the picture libwebp shows ([`reading`]), for every decode
 /// of one: conversions and Compress alike (D16, D28).
@@ -522,7 +659,8 @@ pub(crate) struct Reading {
 /// a decode must read it ([`Reading`]). What the scan refuses is
 /// [`Error::Broken`], and so is a file whose alpha libwebp and image-webp
 /// read differently ([`alpha_disagrees`]): no decode could show what both
-/// show. An animation's frames aren't walked; a decode takes its first.
+/// show. A decode of an animation takes its first frame, as image-webp
+/// decodes it: its alpha isn't compared.
 pub(crate) fn reading(r: &mut dyn In) -> Result<Reading, Error> {
     let scan = walk(r, false)?;
     if let Some(why) = alpha_disagrees(&scan) {
@@ -1123,6 +1261,155 @@ mod tests {
         scan(&mut Cursor::new(file))
     }
 
+    /// An ANMF frame at (`x`, `y`) of `chunks` (its header's own size 1 × 1:
+    /// libwebp's demuxer goes by the image's).
+    fn frame(x: u32, y: u32, chunks: &[Vec<u8>]) -> Vec<u8> {
+        let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+        let header = [u24(x / 2), u24(y / 2), u24(0), u24(0), u24(100), vec![0]].concat();
+        chunk(b"ANMF", &[header, chunks.concat()].concat())
+    }
+
+    #[test]
+    fn an_animation_is_walked_as_libwebps_demuxer_walks_it() {
+        let anim = || chunk(b"ANIM", &[0; 6]);
+        let alph = || chunk(b"ALPH", b"a");
+        // As libwebp's demuxer reads them (Pillow, Chrome): metadata and
+        // unknown chunks anywhere outside the frames, a second ANIM,
+        // frames with alpha, lossless frames, one at an offset, and a
+        // chunk after a frame's image inside its ANMF, which the demuxer
+        // reads as a top-level chunk.
+        for good in [
+            webp(&[canvas(0x02, 9, 9), anim(), frame(0, 0, &[vp8(9, 9)])]),
+            webp(&[
+                canvas(0x3E, 9, 9),
+                chunk(b"ICCP", b"p"),
+                anim(),
+                chunk(b"JUNK", b"j"),
+                frame(0, 0, &[alph(), vp8(9, 9)]),
+                anim(),
+                frame(2, 4, &[vp8l(7, 5, true), chunk(b"XMP ", b"x")]),
+                chunk(b"EXIF", b"MM"),
+                chunk(b"XMP ", b"<x/>"),
+            ]),
+            // A frame with no image chunk isn't one; the next is the first.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[chunk(b"JUNK", b"j")]),
+                frame(0, 0, &[vp8(9, 9)]),
+            ]),
+        ] {
+            let found = scanned(&good).unwrap_or_else(|e| panic!("{good:?}: {e:?}"));
+            assert!(found.animated);
+            assert!(!reading(&mut Cursor::new(&good)).unwrap().opaque);
+        }
+        // What the demuxer refuses, where image-webp would show the first
+        // frame (or the file's top-level image).
+        for bad in [
+            // An image, or its alpha, outside the frames, before or after.
+            webp(&[
+                canvas(0x02, 9, 9),
+                vp8(9, 9),
+                anim(),
+                frame(0, 0, &[vp8l(9, 9, false)]),
+            ]),
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8l(9, 9, false)]),
+                vp8(9, 9),
+            ]),
+            webp(&[
+                canvas(0x12, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                alph(),
+            ]),
+            // Two images in a frame: the second is read as top-level.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9), vp8l(9, 9, false)]),
+            ]),
+            // A chunk before a frame's image ends it there.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[chunk(b"JUNK", b"j"), vp8(9, 9)]),
+            ]),
+            // ANMF before ANIM, or no ANIM; a short ANIM; no frame.
+            webp(&[canvas(0x02, 9, 9), frame(0, 0, &[vp8(9, 9)]), anim()]),
+            webp(&[canvas(0x02, 9, 9), frame(0, 0, &[vp8(9, 9)])]),
+            webp(&[
+                canvas(0x02, 9, 9),
+                chunk(b"ANIM", &[0; 4]),
+                frame(0, 0, &[vp8(9, 9)]),
+            ]),
+            webp(&[canvas(0x02, 9, 9), anim()]),
+            webp(&[canvas(0x12, 9, 9), chunk(b"EXIF", &[0; 3])]),
+            // A second VP8X.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+                canvas(0x02, 9, 9),
+            ]),
+            // Alpha and no image; alpha after the image; alpha before a
+            // VP8L, whatever comes first.
+            webp(&[
+                canvas(0x12, 9, 9),
+                anim(),
+                frame(0, 0, &[alph()]),
+                frame(0, 0, &[vp8(9, 9)]),
+            ]),
+            webp(&[
+                canvas(0x12, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9), alph()]),
+            ]),
+            webp(&[
+                canvas(0x12, 9, 9),
+                anim(),
+                frame(0, 0, &[alph(), vp8l(9, 9, true)]),
+            ]),
+            webp(&[
+                canvas(0x12, 9, 9),
+                anim(),
+                frame(0, 0, &[vp8(9, 9), alph(), vp8l(9, 9, true)]),
+            ]),
+            // A frame past the canvas, by its image's size or its offset.
+            webp(&[canvas(0x02, 9, 9), anim(), frame(0, 0, &[vp8(10, 9)])]),
+            webp(&[canvas(0x02, 9, 9), anim(), frame(2, 0, &[vp8(8, 9)])]),
+            // A frame's image without a header; a canvas the demuxer
+            // takes as too large.
+            webp(&[
+                canvas(0x02, 9, 9),
+                anim(),
+                frame(0, 0, &[chunk(b"VP8 ", &[0; 10])]),
+            ]),
+            webp(&[
+                canvas(0x02, 1 << 16, 1 << 16),
+                anim(),
+                frame(0, 0, &[vp8(9, 9)]),
+            ]),
+        ] {
+            assert!(matches!(scanned(&bad), Err(Error::Broken(_))), "{bad:?}");
+            assert!(reading(&mut Cursor::new(&bad)).is_err(), "{bad:?}");
+        }
+        // A frame's image past its ANMF's end: the demuxer reads a frame's
+        // chunks on past it, and refuses what it took from there.
+        let empty = frame(0, 0, &[]);
+        let alpha = frame(0, 0, &[alph()]);
+        for frame in [empty, alpha] {
+            let file = webp(&[canvas(0x12, 9, 9), anim(), frame, vp8(9, 9)]);
+            let found = scanned(&file);
+            assert!(
+                matches!(&found, Err(Error::Broken(why)) if why.contains("past its ANMF")),
+                "{found:?}"
+            );
+        }
+    }
+
     #[test]
     fn scan_reads_a_simple_file_to_its_image_only() {
         let found = scanned(&webp(&[vp8(300, 200)])).unwrap();
@@ -1256,14 +1543,17 @@ mod tests {
 
     #[test]
     fn scan_stops_at_an_animation() {
-        for file in [
-            webp(&[canvas(0x02, 9, 9), chunk(b"ANIM", &[0; 6])]),
-            // Its flag set, and nothing after it read: an animation with
-            // no frame is still an animation.
-            webp(&[canvas(0x12, 9, 9), chunk(b"EXIF", &[0; 3])]),
-        ] {
-            assert!(scanned(&file).unwrap().animated, "{file:?}");
-        }
+        // Its flag set: walked as libwebp's demuxer walks it
+        // ([`an_animation_is_walked_as_libwebps_demuxer_walks_it`]), its
+        // metadata not carried (Compress refuses it).
+        let file = webp(&[
+            canvas(0x0A, 9, 9),
+            chunk(b"ANIM", &[0; 6]),
+            frame(0, 0, &[vp8(9, 9)]),
+            chunk(b"EXIF", &[0; 3]),
+        ]);
+        let found = scanned(&file).unwrap();
+        assert!(found.animated && found.carried.exif.is_none(), "{found:?}");
         // Without the flag, an ANMF frame anywhere (image-webp takes its
         // picture or its alpha), an ANIM before the image (libwebp's
         // demuxer refuses the image after it), a short one, and an image
@@ -1376,7 +1666,7 @@ mod tests {
         assert_eq!(alpha_disagrees(&scan(0, true, true, false)), None);
         // Only a late ALPH: image-webp reads it, libwebp doesn't.
         assert!(alpha_disagrees(&scan(0x10, false, false, true)).is_some());
-        // An animation's frames aren't walked.
+        // An animation's alpha isn't compared.
         let animated = Scan {
             animated: true,
             ..scan(0, false, true, false)
@@ -1458,7 +1748,7 @@ mod tests {
         let anim = webp(&[
             canvas(0x12, 9, 9),
             chunk(b"ANIM", &[0; 6]),
-            anmf(&[vp8(9, 9)]),
+            frame(0, 0, &[vp8(9, 9)]),
         ]);
         assert_eq!(read(&anim).unwrap(), Reading::default());
         // Refused: what the scan refuses, and alpha read differently.

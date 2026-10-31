@@ -3913,6 +3913,175 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
 }
 
 #[test]
+fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
+    use grape_core::CompressPreset::High;
+    use grape_core::Format;
+    // libwebp's still decoder refuses every animation, and its demuxer
+    // (Pillow, Chrome) refuses these; image-webp showed a first frame of
+    // each. Conversions wrote it, and Compress said "animated".
+    let dir = TestDir::new("webp-anim-refusals");
+    let (w, h) = (256u32, 160u32);
+    let red = lossy_webp(&[200, 10, 10].repeat((w * h) as usize), w, h, false, 95.0);
+    let red_vp8 = riff_chunk(b"VP8 ", &webp_chunk(&red, b"VP8 ").unwrap());
+    let mut blue = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut blue)
+        .write_image(
+            image::RgbaImage::from_pixel(w, h, image::Rgba([10, 10, 220, 255])).as_raw(),
+            w,
+            h,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let blue_vp8l = riff_chunk(b"VP8L", &webp_chunk(&blue, b"VP8L").unwrap());
+    let u24 = |v: u32| v.to_le_bytes()[..3].to_vec();
+    let anmf = |x: u32, chunks: &[&Vec<u8>]| {
+        let header = [
+            u24(x / 2),
+            u24(0),
+            u24(w - 1),
+            u24(h - 1),
+            u24(100),
+            vec![0],
+        ]
+        .concat();
+        let body: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        riff_chunk(b"ANMF", &[header, body].concat())
+    };
+    let anim = riff_chunk(b"ANIM", &[0; 6]);
+    let canvas = vp8x_chunk(0x02, w, h);
+    for (name, file) in [
+        // The review's: a top-level red VP8 beside an animation of blue,
+        // either order (252 bytes): Convert wrote blue.
+        (
+            "top-first.webp",
+            riff(&[
+                canvas.clone(),
+                red_vp8.clone(),
+                anim.clone(),
+                anmf(0, &[&blue_vp8l]),
+            ]),
+        ),
+        (
+            "top-last.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&blue_vp8l]),
+                red_vp8.clone(),
+            ]),
+        ),
+        // No ANIM before the frame; two images in a frame; a frame past
+        // the canvas; a second VP8X.
+        (
+            "no-anim.webp",
+            riff(&[canvas.clone(), anmf(0, &[&blue_vp8l]), anim.clone()]),
+        ),
+        (
+            "two.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&red_vp8, &blue_vp8l]),
+            ]),
+        ),
+        (
+            "outside.webp",
+            riff(&[canvas.clone(), anim.clone(), anmf(2, &[&red_vp8])]),
+        ),
+        (
+            "vp8x.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                anmf(0, &[&red_vp8]),
+                canvas.clone(),
+            ]),
+        ),
+    ] {
+        let message = format!("{name} isn't a readable WEBP image.");
+        for to in [Format::Png, Format::Jpg] {
+            let err = run(&dir, name, &file, Operation::convert(to)).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+            assert_eq!(err.user_message, message, "{to:?}");
+            fs::remove_file(dir.join(name)).unwrap();
+        }
+        let err = compress(&dir, name, &file, High).unwrap_err();
+        assert_eq!(err.user_message, message, "{}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    // An animation as libwebp's own encoder lays one out (Pillow's): the
+    // first frame whole, the next ones smaller, at an offset, with alpha,
+    // lossless, and metadata after. Converted as its first frame, and
+    // Compress refuses it as animated, as before.
+    let (half_w, half_h) = (w / 2, h / 2);
+    let green = image::RgbaImage::from_pixel(half_w, half_h, image::Rgba([10, 200, 10, 128]));
+    let with_alpha = lossy_webp(green.as_raw(), half_w, half_h, true, 80.0);
+    let small = |chunks: &[Vec<u8>], x: u32, y: u32| {
+        let header = [
+            u24(x / 2),
+            u24(y / 2),
+            u24(half_w - 1),
+            u24(half_h - 1),
+            u24(100),
+            vec![0b10],
+        ]
+        .concat();
+        riff_chunk(b"ANMF", &[header, chunks.concat()].concat())
+    };
+    let mut lossless_green = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut lossless_green)
+        .write_image(
+            green.as_raw(),
+            half_w,
+            half_h,
+            image::ExtendedColorType::Rgba8,
+        )
+        .unwrap();
+    let ordinary = riff(&[
+        vp8x_chunk(0x1A, w, h),
+        anim.clone(),
+        anmf(0, &[&red_vp8]),
+        small(
+            &[
+                riff_chunk(b"ALPH", &webp_chunk(&with_alpha, b"ALPH").unwrap()),
+                riff_chunk(b"VP8 ", &webp_chunk(&with_alpha, b"VP8 ").unwrap()),
+            ],
+            w / 2,
+            h / 2,
+        ),
+        small(
+            &[riff_chunk(
+                b"VP8L",
+                &webp_chunk(&lossless_green, b"VP8L").unwrap(),
+            )],
+            0,
+            0,
+        ),
+        riff_chunk(b"EXIF", b"MM\0*\0\0\0\x08\0\0"),
+    ]);
+    let outcome = run(
+        &dir,
+        "loop.webp",
+        &ordinary,
+        Operation::convert(Format::Png),
+    )
+    .unwrap_or_else(|e| panic!("{}", e.detail));
+    let out = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+    assert_eq!((out.width(), out.height()), (w, h));
+    for p in out.to_rgba8().pixels() {
+        let off = p.0[..3]
+            .iter()
+            .zip([200u8, 10, 10])
+            .map(|(&a, b)| a.abs_diff(b));
+        assert!(off.max().unwrap() <= 6 && p.0[3] == 255, "{p:?}");
+    }
+    fs::remove_file(&outcome.outputs[0]).unwrap();
+    fs::remove_file(dir.join("loop.webp")).unwrap();
+    let err = compress(&dir, "loop.webp", &ordinary, High).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotYetSupported, "{}", err.detail);
+}
+
+#[test]
 fn a_vp8ls_alpha_bit_vp8x_doesnt_flag_is_read_as_libwebp_reads_it() {
     use grape_core::CompressPreset::High;
     use grape_core::Format;

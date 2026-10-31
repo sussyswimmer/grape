@@ -30,7 +30,8 @@
 //!     and PNG decoders keep depends on how the file is laid out, so their
 //!     headers are read first ([`crate::headers`]).
 //! - **First frame only:** an animated WebP or a multi-page TIFF converts
-//!   its first frame or page.
+//!   its first frame or page (an animated WebP's chunks walked first as
+//!   libwebp's demuxer walks them, refused as it refuses them).
 //! - **A WebP as libwebp reads it:** the decoder reads no further than its
 //!   RIFF's end, as libwebp doesn't ([`read_end`]), and its chunks are
 //!   walked first with Compress's scan, which refuses a file readers show
