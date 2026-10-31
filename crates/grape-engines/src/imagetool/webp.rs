@@ -546,7 +546,8 @@ fn decode_flags(scan: &Scan) -> Option<u8> {
 /// ([`reading`]): cut at its RIFF's end, where libwebp stops, its VP8X
 /// flags patched; any other data as it is. For a decoder that reads from
 /// memory, such as resvg's for an SVG's embedded image (lane A's
-/// `svg::resolve`). An error says why it isn't a readable WebP: what a
+/// `svg::resolve`, through `imagetool::webp_readable`, before it admits
+/// the data). An error says why it isn't a readable WebP: what a
 /// conversion refuses before decoding, and a `VP8L` whose own alpha bit
 /// says none under VP8X's alpha flag, whose pixels such a decoder can't be
 /// asked to check.

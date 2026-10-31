@@ -41,6 +41,8 @@ use crate::cancel::Cancellable;
 use crate::publish::Names;
 use crate::{CancelToken, EngineCtx, GrapeError, JobOutcome};
 
+#[allow(unused_imports)] // For lane A's `svg::resolve` (D28).
+pub(crate) use webp::readable as webp_readable;
 pub(crate) use webp::Reading as WebpReading;
 
 /// True when this engine runs `tool` on a file named as `from`. `_heif`
