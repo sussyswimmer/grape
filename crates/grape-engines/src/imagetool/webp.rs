@@ -350,14 +350,19 @@ impl Carried {
 ///   chunks, and its first `ICCP`, `EXIF` and `XMP `, up to
 ///   [`crate::image::MAX_ICC`] bytes for the profile and [`MAX_CARRIED`]
 ///   for each of the others (more is [`Error::TooLarge`]: Compress keeps
-///   metadata). It stops at an animation (VP8X's flag). An `ANIM` or
-///   `ANMF` chunk in a still file is broken, as are two `ALPH` chunks
-///   before a `VP8 ` (libwebp reads the last, image-webp the first), any
-///   before a `VP8L` (libwebp's still decoder then shows alpha, which
-///   image-webp reads by VP8X's flag and the `VP8L`'s own bit, and its
-///   demuxer refuses the file) and a canvas other than the image's size
-///   (libwebp refuses it). Nothing past
-///   the RIFF's end is read, by this walk or by the decoder (which
+///   metadata). It stops at an animation (VP8X's flag). In a still file,
+///   an `ANMF` chunk is broken (image-webp took the frame's picture or its
+///   `ALPH` for the still one's, where libwebp's still decoder skips it and
+///   its demuxer, Chrome's and Pillow's, refuses the file, but for an
+///   `ANMF` after an `ANIM` after the image), as are an `ANIM` before the
+///   image or shorter than its 6 bytes and an `ALPH`, `VP8 ` or `VP8L`
+///   after one, which the demuxer refuses (an `ANIM` after the image both
+///   decoders read past); two `ALPH` chunks before a `VP8 ` (libwebp reads
+///   the last, image-webp the first); any before a `VP8L` (libwebp's still
+///   decoder then shows alpha, which image-webp reads by VP8X's flag and
+///   the `VP8L`'s own bit, and its demuxer refuses the file); and a canvas
+///   other than the image's size (libwebp refuses it). Nothing past the
+///   RIFF's end is read, by this walk or by the decoder (which
 ///   `crate::image` ends there: image-webp's own walk would go on, as far
 ///   again as the RIFF's size less 12 bytes from the end of `VP8X`);
 /// - a simple file only to its first chunk, `VP8 ` or `VP8L`: libwebp and
@@ -377,6 +382,7 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
     let mut found = Scan::default();
     let mut image = None;
     let mut alph = 0;
+    let mut anim = false;
     while left > 0 {
         let mut raw = [0; 8];
         read_at(r, at, &mut raw)?;
@@ -384,6 +390,13 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
         let body = at + 8;
         at = body + head.body;
         let first = chunks == 1;
+        if anim && matches!(&head.fourcc, b"ALPH" | b"VP8 " | b"VP8L") {
+            // libwebp's demuxer refuses any after an ANIM.
+            return Err(Error::Broken(format!(
+                "a {} chunk after an ANIM chunk",
+                name(&head.fourcc)
+            )));
+        }
         match &head.fourcc {
             b"VP8X" if first => {
                 if head.size < 10 {
@@ -443,13 +456,26 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                     found.late_alpha = true;
                 }
             }
-            b"ANIM" | b"ANMF" => {
-                // In a still file: libwebp's still decoder skips it, and
-                // its demuxer (Chrome's) refuses the file.
+            // After the image, in a still file, libwebp's still decoder and
+            // its demuxer both read past it.
+            b"ANIM" if image.is_some() && head.size >= 6 => anim = true,
+            b"ANIM" if image.is_some() => {
                 return Err(Error::Broken(format!(
-                    "an {} chunk in a still image",
-                    name(&head.fourcc)
+                    "an ANIM chunk of {} bytes",
+                    head.size
                 )));
+            }
+            b"ANIM" => {
+                // The still decoder skips it; the demuxer refuses the image
+                // after it.
+                return Err(Error::Broken(
+                    "an ANIM chunk before the image in a still file".into(),
+                ));
+            }
+            b"ANMF" => {
+                // image-webp takes its picture or its alpha for the still
+                // one's, which libwebp's decoders never do.
+                return Err(Error::Broken("an ANMF chunk in a still file".into()));
             }
             b"ICCP" if carry => {
                 take(r, body, &head, MAX_ICC as u64, &mut found.carried.iccp)?;
@@ -1238,15 +1264,41 @@ mod tests {
         ] {
             assert!(scanned(&file).unwrap().animated, "{file:?}");
         }
-        // Without the flag, an animation's chunks are a broken still file:
-        // libwebp's still decoder skips them, its demuxer refuses the file.
+        // Without the flag, an ANMF frame anywhere (image-webp takes its
+        // picture or its alpha), an ANIM before the image (libwebp's
+        // demuxer refuses the image after it), a short one, and an image
+        // chunk after one, which the demuxer refuses too.
+        let anim = chunk(b"ANIM", &[0; 6]);
         for file in [
-            webp(&[canvas(0, 9, 9), chunk(b"ANIM", &[0; 6]), vp8(9, 9)]),
+            webp(&[canvas(0, 9, 9), anim.clone(), vp8(9, 9)]),
             webp(&[canvas(0, 9, 9), anmf(&[vp8(9, 9)])]),
-            webp(&[canvas(0, 9, 9), vp8(9, 9), chunk(b"ANIM", &[0; 6])]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9), anim.clone(), anmf(&[vp8(9, 9)])]),
             webp(&[canvas(0x10, 9, 9), vp8l(9, 9, true), anmf(&[vp8(9, 9)])]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9), chunk(b"ANIM", &[0; 4])]),
+            webp(&[
+                canvas(0x10, 9, 9),
+                chunk(b"ALPH", b"a"),
+                vp8(9, 9),
+                anim.clone(),
+                chunk(b"ALPH", b"b"),
+            ]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9), anim.clone(), vp8(9, 9)]),
         ] {
             assert!(matches!(scanned(&file), Err(Error::Broken(_))), "{file:?}");
+        }
+        // An ANIM after the image: libwebp's still decoder and its demuxer
+        // both show the still picture.
+        for file in [
+            webp(&[canvas(0, 9, 9), vp8(9, 9), anim.clone()]),
+            webp(&[
+                canvas(0x10, 9, 9),
+                vp8l(9, 9, true),
+                anim.clone(),
+                anim.clone(),
+            ]),
+        ] {
+            let found = scanned(&file).unwrap();
+            assert!(!found.animated && found.size == (9, 9), "{file:?}");
         }
     }
 

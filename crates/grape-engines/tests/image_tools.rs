@@ -3784,9 +3784,25 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
                 anmf(&[alph.clone(), vp8.clone()]),
             ]),
         ),
+        // An ANIM before the picture, which libwebp's demuxer (Pillow)
+        // refuses; a short one after it, which it refuses too; and one
+        // after it with a frame of blue, which image-webp took.
         (
             "anim.webp",
             riff(&[canvas(0), riff_chunk(b"ANIM", &[0; 6]), red_vp8.clone()]),
+        ),
+        (
+            "anim-short.webp",
+            riff(&[canvas(0), red_vp8.clone(), riff_chunk(b"ANIM", &[0; 4])]),
+        ),
+        (
+            "anim-frame.webp",
+            riff(&[
+                canvas(0),
+                red_vp8.clone(),
+                riff_chunk(b"ANIM", &[0; 6]),
+                anmf(std::slice::from_ref(&blue_vp8l)),
+            ]),
         ),
         // An ALPH before a VP8L: converted opaque, ImageMagick shows alpha.
         (
@@ -3864,6 +3880,13 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             [200, 10, 10],
         ),
         ("bit-off.webp", riff(&[canvas(0x10), opaque]), [10, 10, 220]),
+        // An ANIM after the picture: libwebp's still decoder and its
+        // demuxer (Pillow) both show it. Refused in round 4.
+        (
+            "anim-after.webp",
+            riff(&[canvas(0), red_vp8.clone(), riff_chunk(b"ANIM", &[0; 6])]),
+            [200, 10, 10],
+        ),
     ] {
         let outcome = run(&dir, name, &file, Operation::convert(Format::Png))
             .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
