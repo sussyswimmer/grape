@@ -13,7 +13,8 @@
 //!   transparency ([`LOSSY_METHOD`]; one its scale left opaque is encoded
 //!   as opaque): libwebp encodes the alpha plane at the picture's method,
 //!   losslessly, and at 6, even a simple one, that took 8 to 80 times as
-//!   long as at 5, with no progress report, for 0.5 to 5 % smaller files.
+//!   long as at 5, with no progress report, for files 1 to 6 % smaller at
+//!   the same quality (more at q70 than at q85 on some pictures).
 //!   Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
 //!   exact, the color under fully transparent pixels free to change; a
 //!   picture with transparency is scaled by area near its transparency,
@@ -92,8 +93,11 @@ use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 /// with alpha; release build, 4 vCPUs), 19 to 25 s with rounded corners,
 /// one pixel at 254 or a hard-edged cutout, 31 s with a sticker's soft edge
 /// and 290 to 700 s with noise, grain or a photo's luminance, against 1 to
-/// 14 s at 5, for files 0.5 to 5.0 % smaller: past every wait D28 names,
-/// so 5 it is.
+/// 14 s at 5, for files 0.5 to 5.0 % smaller there (q85); on three 3000 ×
+/// 1688 photos with one pixel at 254 or rounded corners, 5.6 to 6.4 % at
+/// q70, 1.2 to 5.6 % at q80 and 1.0 to 5.9 % at q85, at the same PSNR to
+/// within 0.04 dB (7 to 8 s against 0.5 s at 5): past every wait D28
+/// names, so 5 it is.
 const LOSSY_METHOD: (u8, u8) = (6, 5);
 
 /// libwebp's lossless preset (cwebp's `-z`): 8 is method 5 at quality 90.
