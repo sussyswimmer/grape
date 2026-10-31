@@ -3805,7 +3805,6 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             "late-alph.webp",
             riff(&[canvas(0x10), vp8.clone(), alph.clone()]),
         ),
-        ("vp8l-unflagged.webp", riff(&[canvas(0), bit(true)])),
         // Transparent pixels in a VP8L whose bit says opaque, under
         // VP8X's alpha flag: refused once decoded.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
@@ -3886,6 +3885,51 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         let out = fs::read(&outcome.outputs[0]).unwrap();
         assert_eq!(webp_image_chunks(&out), webp_image_chunks(&file), "{name}");
         fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+}
+
+#[test]
+fn a_vp8ls_alpha_bit_vp8x_doesnt_flag_is_read_as_libwebp_reads_it() {
+    use grape_core::CompressPreset::High;
+    use grape_core::Format;
+    // A lossless picture whose VP8L header says alpha, in a VP8X whose
+    // flags don't: libwebp's still decoder and its demuxer (Pillow) show
+    // its alpha, so image-webp reads it with the flag on. Conversions and
+    // Compress refused it.
+    let dir = TestDir::new("webp-vp8l-bit");
+    let (w, h) = (256u32, 160u32);
+    let lossless = |px: &image::RgbaImage| {
+        let mut out = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut out)
+            .write_image(px.as_raw(), w, h, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let mut vp8l = webp_chunk(&out, b"VP8L").unwrap();
+        vp8l[4] |= 0x10;
+        riff(&[vp8x_chunk(0, w, h), riff_chunk(b"VP8L", &vp8l)])
+    };
+    // Opaque blue, the bit set by hand; alpha 40 and 255, half and half.
+    let blue = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 10, 220, 255]));
+    let half = image::RgbaImage::from_fn(w, h, |x, _| {
+        image::Rgba([90, 90, 90, if x < w / 2 { 40 } else { 255 }])
+    });
+    for (name, px) in [("blue.webp", &blue), ("half.webp", &half)] {
+        let file = lossless(px);
+        let outcome = run(&dir, name, &file, Operation::convert(Format::Png))
+            .unwrap_or_else(|e| panic!("{name}: {}", e.detail));
+        let out = image::load_from_memory(&fs::read(&outcome.outputs[0]).unwrap()).unwrap();
+        assert_eq!(out.to_rgba8(), *px, "{name}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        match compress(&dir, name, &file, High) {
+            Ok(outcome) => {
+                let out = fs::read(&outcome.outputs[0]).unwrap();
+                let back = image::load_from_memory(&out).unwrap();
+                assert_eq!(back.to_rgba8(), *px, "{name}");
+                fs::remove_file(&outcome.outputs[0]).unwrap();
+            }
+            Err(e) => assert_eq!(e.kind, ErrorKind::NoChange, "{name}: {}", e.detail),
+        }
         fs::remove_file(dir.join(name)).unwrap();
     }
 }

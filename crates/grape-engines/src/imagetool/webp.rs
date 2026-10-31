@@ -511,14 +511,18 @@ pub(crate) fn reading(r: &mut dyn In) -> Result<Reading, Error> {
 
 /// Why `scan`'s alpha reads differently in libwebp (by the chunks) and
 /// image-webp (by VP8X's flag, then the first `ALPH` in the RIFF), if it
-/// does: a decode would show one of them something else.
+/// does: a decode would show one of them something else. A `VP8L`'s alpha
+/// bit under no flag doesn't: libwebp's still decoder and its demuxer both
+/// show its alpha, and image-webp does with the flag on ([`decode_flags`]).
 fn alpha_disagrees(scan: &Scan) -> Option<&'static str> {
     if scan.animated {
         return None;
     }
     let flagged = scan.vp8x?.flags & ALPHA_FLAG != 0;
-    if !flagged && scan.alpha {
-        Some("VP8X says no alpha, and its image has some libwebp reads")
+    if !flagged && scan.alpha && !scan.lossless {
+        // libwebp's still decoder applies it, its demuxer (Pillow's,
+        // Chrome's) drops it.
+        Some("VP8X says no alpha, and its VP8 has an ALPH chunk")
     } else if flagged && !scan.lossless && !scan.alpha && scan.late_alpha {
         Some("its only ALPH chunk comes after its VP8, where libwebp never reads it")
     } else {
@@ -528,16 +532,21 @@ fn alpha_disagrees(scan: &Scan) -> Option<&'static str> {
 
 /// VP8X's flags as image-webp should read `scan`'s file to see what
 /// libwebp does, when they aren't the file's own: the EXIF and XMP flags
-/// off, which change no pixel, and for a still lossy image with no `ALPH`
+/// off, which change no pixel; for a still lossy image with no `ALPH`
 /// chunk before it, alpha off (one only after it, with the flag, is
-/// refused: [`alpha_disagrees`]). image-webp refuses a flag whose chunk is
-/// missing ("An expected chunk was missing"), and libwebp, Pillow and
-/// ImageMagick read the file.
+/// refused: [`alpha_disagrees`]); and for a still `VP8L` whose own alpha
+/// bit is set, alpha on. image-webp refuses a flag whose chunk is missing
+/// ("An expected chunk was missing"), and libwebp, Pillow and ImageMagick
+/// read the file; and it goes by the flag alone for a `VP8L`'s alpha,
+/// which libwebp's still decoder and its demuxer read by the bit.
 fn decode_flags(scan: &Scan) -> Option<u8> {
     let flags = scan.vp8x?.flags;
     let mut view = flags & !(EXIF_FLAG | XMP_FLAG);
     if !scan.animated && !scan.lossless && !scan.alpha {
         view &= !ALPHA_FLAG;
+    }
+    if !scan.animated && scan.lossless && scan.alpha {
+        view |= ALPHA_FLAG;
     }
     (view != flags).then_some(view)
 }
@@ -1307,9 +1316,12 @@ mod tests {
         assert_eq!(alpha_disagrees(&scan(0x10, true, true, false)), None);
         // A late ALPH after one image-webp and libwebp both read.
         assert_eq!(alpha_disagrees(&scan(0x10, false, true, true)), None);
-        // Unflagged alpha libwebp shows and image-webp drops.
+        // An unflagged ALPH chunk, which libwebp's still decoder applies
+        // and its demuxer (Pillow's) drops.
         assert!(alpha_disagrees(&scan(0, false, true, false)).is_some());
-        assert!(alpha_disagrees(&scan(0, true, true, false)).is_some());
+        // An unflagged VP8L alpha bit: libwebp reads its alpha either way,
+        // and image-webp does with the flag turned on ([`decode_flags`]).
+        assert_eq!(alpha_disagrees(&scan(0, true, true, false)), None);
         // Only a late ALPH: image-webp reads it, libwebp doesn't.
         assert!(alpha_disagrees(&scan(0x10, false, false, true)).is_some());
         // An animation's frames aren't walked.
@@ -1354,6 +1366,17 @@ mod tests {
         assert_eq!(decode_flags(&scan(0x30, false, false)), Some(0x20));
         assert_eq!(decode_flags(&scan(0x3C, false, true)), Some(0x30));
         assert_eq!(decode_flags(&scan(0x1C, true, true)), Some(0x10));
+        // A VP8L whose alpha bit VP8X doesn't flag: libwebp shows its
+        // alpha, so image-webp reads the flag on. Not in an animation,
+        // whose frames aren't read here.
+        assert_eq!(decode_flags(&scan(0, true, true)), Some(0x10));
+        assert_eq!(decode_flags(&scan(0x28, true, true)), Some(0x30));
+        assert_eq!(decode_flags(&scan(0, true, false)), None);
+        let animated = Scan {
+            animated: true,
+            ..scan(0, true, true)
+        };
+        assert_eq!(decode_flags(&animated), None);
     }
 
     #[test]
@@ -1393,10 +1416,18 @@ mod tests {
             webp(&[canvas(0, 9, 9), chunk(b"ALPH", b"a"), vp8l(9, 9, false)]),
             webp(&[canvas(0, 9, 9), chunk(b"ALPH", b"a"), vp8(9, 9)]),
             webp(&[canvas(0x10, 9, 9), vp8(9, 9), chunk(b"ALPH", b"a")]),
-            webp(&[canvas(0, 9, 9), vp8l(9, 9, true)]),
         ] {
             assert!(matches!(read(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
+        // A VP8L's alpha bit under no flag: read with the flag on, as
+        // libwebp and Pillow show it.
+        assert_eq!(
+            read(&webp(&[canvas(0, 9, 9), vp8l(9, 9, true)])).unwrap(),
+            Reading {
+                patch: Some((20, 0x10)),
+                opaque: false
+            }
+        );
         // Metadata isn't read, so it's never too large to decode.
         let mut big = webp(&[canvas(0x08, 9, 9), vp8(9, 9)]);
         let size = u32::try_from(MAX_CARRIED + 2).unwrap();

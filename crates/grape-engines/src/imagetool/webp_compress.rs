@@ -38,9 +38,9 @@
 //!   to turn them, as for JPEG.
 //! - **Refused:** an animation; and as for a conversion (`crate::image`
 //!   walks every WebP it decodes with [`webp::reading`]), a file whose
-//!   alpha libwebp and image-webp read differently (VP8X's flag against
-//!   `VP8L`'s alpha bit or the `ALPH` chunks), whose transparency Compress
-//!   can't keep for both, and what [`webp::scan`] finds broken. Nothing
+//!   alpha libwebp and image-webp read differently (VP8X's alpha flag over
+//!   a `VP8L` whose own bit says none, once its pixels prove transparent,
+//!   or the `ALPH` chunks), whose transparency Compress can't keep for both, and what [`webp::scan`] finds broken. Nothing
 //!   past the RIFF's end is read, by the scan or the decoder
 //!   (`crate::image` ends the file there, as libwebp does).
 //! - **Memory:** what the steps hold is checked against D16's limit
