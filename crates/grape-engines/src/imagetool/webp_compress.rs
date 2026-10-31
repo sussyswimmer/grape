@@ -14,8 +14,9 @@
 //!   as opaque): libwebp encodes the alpha plane at the picture's method,
 //!   losslessly, and at 6, even a simple one, that took 8 to 80 times as
 //!   long as at 5, with no progress report, for files that on the
-//!   WebP-decoded pixels Compress encodes came out 4.0 % larger to 22.7 %
-//!   smaller at the same quality.
+//!   WebP-decoded pixels Compress encodes came out 2.7 % larger to 24.9 %
+//!   smaller at the same quality on the pictures measured
+//!   ([`LOSSY_METHOD`]), and can come out smaller still on others.
 //!   Straight to YUV 4:2:0 (a lossy source is 4:2:0 already), alpha
 //!   exact, the color under fully transparent pixels free to change; a
 //!   picture with transparency is scaled by area near its transparency,
@@ -101,14 +102,18 @@ use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 /// and 290 to 700 s with noise, grain or a photo's luminance, against 1 to
 /// 14 s at 5, for files 0.5 to 5.0 % smaller there (q85, round 4): past
 /// every wait D28 names, so 5 it is. What 5 costs in size depends on the
-/// pixels, and Compress always encodes a WebP's decoded ones (round 6,
-/// libwebp 1.6.0 through Pillow 12.3, three 3000 × 1688 photos saved at
-/// q75 to q95 and decoded): encoded as they are, 5's file was −0.3 to
-/// +22.7 % of 6's at q70, −2.5 to +16.1 % at q80 and −4.0 to +1.8 % at
-/// q85, its PSNR 0.58 dB lower to 1.39 dB higher; scaled to 2048 px first,
-/// as Small does, +2.9 to +6.7 %, within 0.15 dB. Through Compress, the
-/// lake photo from Pillow's q90 with one pixel at 254 came out of Balanced
-/// 12.3 % larger than opaque, and of High 1.3 % smaller.
+/// pixels, and Compress always encodes a WebP's decoded ones. On the
+/// pictures measured (round 7: the lake photo at 3000 × 1688, a 1:1 crop
+/// of it and it under Gaussian grain of σ 3, 5 and 8, each with one pixel
+/// at 254 or transparent corners of radius 56, saved by Pillow 12.3 at
+/// q75, q85 and q95 and decoded), 5's file was −1.2 to +33.2 % of 6's at
+/// q70 as they are (+33.2 % under σ 5 grain saved at q85), −2.6 to +2.2 %
+/// at q80 and −0.3 to +2.0 % at q85, its PSNR 0.76 dB lower to 1.51 dB
+/// higher; scaled to 2048 px first with its corners, as Small does, +1.4
+/// to +9.0 %, within 0.2 dB; on other pictures it can be more. Through
+/// Compress, those came out of High 0.2 % smaller to 1.9 % larger than
+/// opaque, and the lake photo from Pillow's q90 with one pixel at 254 of
+/// Balanced 12.3 % larger (round 6).
 const LOSSY_METHOD: (u8, u8) = (6, 5);
 
 /// libwebp's lossless preset (cwebp's `-z`): 8 is method 5 at quality 90.
