@@ -3185,12 +3185,15 @@ fn compress_scales_a_hard_edged_webp_cutout_without_growing_its_alpha() {
         let out = fs::read(&outcome.outputs[0]).unwrap();
         sizes.push(out.len());
         if preset == Small {
-            // Its edges take two steps at 1.27 to 1, half and whole, and no
+            // Its edges take steps of half what a source pixel covers of a
+            // new one at 1.27 to 1 (0.39 and 0.79, then whole), and no
             // edge darkens: each visible pixel of the white disc beside a
             // transparent one is white.
             let back = image::load_from_memory(&out).unwrap().to_rgba8();
             assert_eq!(back.dimensions(), (2048, 1024));
-            assert!(back.pixels().all(|p| [0, 128, 255].contains(&p.0[3])));
+            assert!(back
+                .pixels()
+                .all(|p| alpha_steps(2600.0 / 2048.0).contains(&p.0[3])));
             let mut edges = 0;
             for (x, y, p) in back.enumerate_pixels() {
                 let beside = |dx: i32, dy: i32| {
@@ -3262,7 +3265,8 @@ fn compress_keeps_a_hard_edged_webps_thin_strokes_whole_and_their_color() {
             );
         }
     }
-    // Its alpha in three steps at 2.93 to 1, and the visible pixels as near
+    // Its alpha in steps of half a source pixel's share at 2.93 to 1, and
+    // the visible pixels as near
     // the strokes' blue as the source's own (libwebp's q90 over black left
     // them 16 off on average, 41 at most): with black under the
     // transparency again, they came out 45 off on average, 92 at most.
@@ -3287,7 +3291,22 @@ fn compress_keeps_a_hard_edged_webps_thin_strokes_whole_and_their_color() {
         is.0 <= was.0 + 2.0 && is.1 <= was.1,
         "{is:?} against {was:?}"
     );
-    assert!(back.pixels().all(|p| [0, 85, 170, 255].contains(&p.0[3])));
+    assert!(back
+        .pixels()
+        .all(|p| alpha_steps(f64::from(r)).contains(&p.0[3])));
+}
+
+/// The alpha values a hard edge (0 and 255) takes scaled by `ratio`: steps
+/// of half what a source pixel covers of a new one, 1 ÷ 2r, and 255.
+fn alpha_steps(ratio: f64) -> Vec<u8> {
+    let step = 1.0 / (2.0 * ratio);
+    let mut steps: Vec<u8> = (0..)
+        .map(|k| f64::from(k) * step)
+        .take_while(|&v| v <= 1.0)
+        .map(|v| (v * 255.0).round() as u8)
+        .collect();
+    steps.push(255);
+    steps
 }
 
 #[test]

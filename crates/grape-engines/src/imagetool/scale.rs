@@ -13,18 +13,25 @@
 //! neighbors: Lanczos3 rings, and its alpha would come out with values on
 //! either side of an edge that the source never had, which libwebp stores
 //! losslessly. A new pixel that covers only one alpha value keeps it
-//! exactly; one that covers several (an edge) takes the nearest of n + 1
-//! even steps from the least of them to the most, n the ratio rounded up
-//! ([`Steps`]). So its coverage is kept to within half a step, a region's
-//! (a dither's, a stroke's) on the whole; a 1 px stroke keeps at least a
-//! step wherever it passes, at its own opacity whatever other alpha values
-//! the picture holds; and a hard edge's alpha plane holds n + 1 values
-//! instead of every coverage (by area alone, a signature's alpha plane
-//! took 3.4 times as many bytes at 1.03 to 1 as its source's, and twice
-//! the steps 1.2 to 1.4 times as many). A 1 px dot covers less of a new
-//! pixel than a stroke, so a pattern of them fades (one in nine kept 0.87
-//! of its coverage at 1.03 to 1, 0.79 at 1.5), and past 2 to 1 it's under
-//! half a step, so a dot on its own goes. Its color is the visible pixels' own,
+//! exactly; one that covers several (an edge) takes the nearest step from
+//! the least of them toward the most, each step half of what a source
+//! pixel covers of a new one, 1 ÷ 2r of the way at a ratio r ([`Steps`]).
+//! So a straight line keeps its weight at every phase: a 1 px line covers
+//! two steps of the new pixels it falls across, and their two shares round
+//! to steps that add up to two (with n + 1 even steps, n the ratio rounded
+//! up, a row or column of lines came out at 0.55 to 1.96 of their weight,
+//! line by line, as each keeps one phase along its length); a 2 px line,
+//! which can cover a new pixel whole, to within a step of its 4. A
+//! region's coverage (a dither's, a stroke's) is kept to within half a
+//! step a pixel and about exactly on the whole; a 1 px stroke keeps at
+//! least a step wherever it passes, at its own opacity whatever other
+//! alpha values the picture holds; and a hard edge's alpha plane holds
+//! about 2r + 1 values instead of every coverage (by area alone, a
+//! signature's alpha plane took 3.4 times as many bytes at 1.03 to 1 as
+//! its source's). A 1 px dot covers less of a new pixel than a stroke, so
+//! a pattern of them fades below 2 to 1 (one in nine kept 0.87 of its
+//! coverage at 1.03 to 1, 0.84 at 1.47) and is held at a step past it
+//! (1.55 at 2.93). Its color is the visible pixels' own,
 //! so no edge darkens or lightens, and its fully transparent pixels take
 //! the color of the visible ones nearest them ([`fill_transparent`]):
 //! black there made libwebp's stroke edges steps of color, and its files
@@ -229,22 +236,53 @@ fn transparent(img: &RgbaImage) -> bool {
 
 /// How [`area`]'s new pixels take their alpha ([module docs](self)): one
 /// that covers a single alpha value keeps it, and one that covers several
-/// the nearest of `n` + 1 even steps from the least of them to the most,
-/// `n` the ratio rounded up. A 1 px stroke leaves at least half of what it
-/// covers, 1 ÷ 2n of a new pixel or more, in one of the new pixels it falls
-/// across, so that one keeps a step.
+/// a step from the least of them toward the most, each step half of what
+/// a source pixel covers of a new pixel (1 ÷ 2r of the way, r the ratio),
+/// up to the most. A straight line of source pixels covers a whole number
+/// of steps of the new pixels it falls across, two for a 1 px line, split
+/// between them as its phase has it: the two shares round to steps that
+/// add up to its own, ties to the even step (one of the two is odd, the
+/// other even), so it keeps its weight at every phase.
 struct Steps {
-    n: f32,
+    /// A step, as a share of the way from the least alpha to the most.
+    step: f64,
+    /// How far from half a step, in steps, a share is taken as a tie: the
+    /// ratios across and down differ a little, by the rounding of the new
+    /// size, so a line's shares add up to a little more than its steps.
+    tie: f64,
 }
 
 impl Steps {
     /// For a `from` picture scaled to `to`.
     fn of(from: (u32, u32), to: (u32, u32)) -> Steps {
-        let ratio = |from: u32, to: u32| f64::from(from) / f64::from(to.max(1));
-        let ratio = ratio(from.0, to.0).max(ratio(from.1, to.1));
+        let ratio = |from: u32, to: u32| (f64::from(from) / f64::from(to.max(1))).max(1.0);
+        let (across, down) = (ratio(from.0, to.0), ratio(from.1, to.1));
+        let ratio = across.max(down);
         Steps {
-            n: ratio.ceil().clamp(1.0, 255.0) as f32,
+            step: 1.0 / (2.0 * ratio),
+            // A 2 px line's shares add up to 4 steps, so 4 times the
+            // difference, and a margin for the sums' rounding.
+            tie: 4.0 * (ratio / across.min(down) - 1.0) + 1e-4,
         }
+    }
+
+    /// The step nearest `x` (0 to 1, of the way from the least alpha to
+    /// the most), ties to the even one, or the most when that's nearer
+    /// than the last whole step.
+    fn nearest(&self, x: f64) -> f64 {
+        let steps = x / self.step;
+        let whole = (1.0 / self.step + 1e-9).floor();
+        if steps > whole {
+            let last = whole * self.step;
+            return if x - last < 1.0 - x { last } else { 1.0 };
+        }
+        let below = steps.floor();
+        let k = if (steps - below - 0.5).abs() <= self.tie {
+            below + below.rem_euclid(2.0)
+        } else {
+            steps.round()
+        };
+        (k * self.step).min(1.0)
     }
 
     /// A new pixel from its [`Sums`] and the least and most alpha it
@@ -256,9 +294,9 @@ impl Steps {
         let alpha = if lo == hi {
             lo
         } else {
-            let (lo, hi) = (f32::from(lo), f32::from(hi));
-            let step = (hi - lo) / self.n;
-            byte((lo + ((a - lo) / step).round() * step).clamp(lo, hi))
+            let (lo, hi) = (f64::from(lo), f64::from(hi));
+            let x = ((f64::from(a) - lo) / (hi - lo)).clamp(0.0, 1.0);
+            byte((lo + self.nearest(x) * (hi - lo)) as f32)
         };
         if alpha == 0 || a <= 0.0 {
             [0, 0, 0, alpha]
@@ -596,6 +634,13 @@ mod tests {
         assert!(scale(DynamicImage::ImageRgba8(edge), Some(50), &cancel).is_none());
     }
 
+    /// Whether `alpha` (from 0 to 255) is a whole number of `step`s or 255,
+    /// to within its rounding to a byte.
+    fn on_a_step(alpha: u8, step: f64) -> bool {
+        let steps = f64::from(alpha) / 255.0 / step;
+        alpha == 255 || (steps - steps.round()).abs() <= 0.5 / 255.0 / step + 1e-9
+    }
+
     /// The mean alpha of `img`, 0 to 255.
     fn mean_alpha(img: &RgbaImage) -> f64 {
         let sum: u64 = img.pixels().map(|p| u64::from(p.0[3])).sum();
@@ -605,10 +650,10 @@ mod tests {
     #[test]
     fn transparency_takes_steps_of_what_it_covers_and_never_rings() {
         let cancel = CancelToken::default();
-        // Hard edges (only 0 and 255): a disc's edge takes n + 1 steps (n
-        // the ratio rounded up: 3 at 3 to 1, 2 at 1.2), its color white
-        // wherever it's seen, and under its transparency too, and the
-        // disc's coverage is kept.
+        // Hard edges (only 0 and 255): a disc's edge takes steps of 1 ÷ 2r
+        // (a sixth at 3 to 1; at 1.2, 0.417 and 0.833, and then 1), its
+        // color white wherever it's seen, and under its transparency too,
+        // and the disc's coverage is kept.
         let disc = RgbaImage::from_fn(300, 200, |x, y| {
             let (dx, dy) = (x as f32 - 150.0, y as f32 - 100.0);
             if dx * dx + dy * dy < 80.0 * 80.0 {
@@ -617,13 +662,12 @@ mod tests {
                 image::Rgba([0, 0, 0, 0])
             }
         });
-        for (cap, n) in [(100, 3.0), (250, 2.0)] {
+        for (cap, step) in [(100, 1.0 / 6.0), (250, 1.0 / 2.4)] {
             let out = scale(DynamicImage::ImageRgba8(disc.clone()), Some(cap), &cancel).unwrap();
             let out = out.as_rgba8().unwrap();
             assert!(out.pixels().any(|p| p.0 == [255; 4]), "{cap}");
             for p in out.pixels() {
-                let step = f64::from(p.0[3]) * n / 255.0;
-                assert!((step - step.round()).abs() < 0.01, "{cap}: {p:?}");
+                assert!(on_a_step(p.0[3], step), "{cap}: {p:?}");
                 assert_eq!(p.0[..3], [255; 3], "{cap}: {p:?}");
             }
             let kept = mean_alpha(out) / mean_alpha(&disc);
@@ -641,9 +685,9 @@ mod tests {
         assert!(row[..83].iter().all(|&a| a == 0), "{row:?}");
         assert!(row[84..166].iter().all(|&a| a == 40), "{row:?}");
         assert!(row[167..].iter().all(|&a| a == 255), "{row:?}");
-        // 300 × 10 to 250 × 8: 1.25 to 1, so two steps.
-        assert!([0, 20, 40].contains(&row[83]), "{}", row[83]);
-        assert!([40, 148, 255].contains(&row[166]), "{}", row[166]);
+        // 300 × 10 to 250 × 8: 1.25 to 1, so steps of 0.4 of the way.
+        assert!([0, 16, 32, 40].contains(&row[83]), "{}", row[83]);
+        assert!([40, 126, 212, 255].contains(&row[166]), "{}", row[166]);
         // A soft edge rises steadily, with no value past its neighbours'
         // (Lanczos3 rang 2 to 5 levels either side), and keeps its levels
         // to within half a step of what each pixel covers.
@@ -681,8 +725,11 @@ mod tests {
         // On or off pixel by pixel (a checkerboard, 2 px stripes), at about
         // 1.03, 1.5 and 2.9 to 1: kept to a few percent, where the nearest
         // source level made a checkerboard 93 % opaque at 1.03, the stripes
-        // 63 %. One dot in nine at 1.03 (18 % before): within a sixth; a
-        // dot covers less than a stroke, and past 2 to 1 under half a step.
+        // 63 %. At 1.53, steps of 1 ÷ 2r are 0.33 apart, so a
+        // checkerboard's pixels, each a little either side of half covered,
+        // come out at 0.33 or 0.65: 1.05 of its coverage (1.00 with steps
+        // of 1 ÷ ⌈r⌉, which had a step at half). One dot in nine at 1.03
+        // (18 % before): within a sixth; a dot covers less than a stroke.
         let side = 930;
         for (name, on) in [
             (
@@ -703,7 +750,11 @@ mod tests {
             for &cap in caps {
                 let out = scale(DynamicImage::ImageRgba8(src.clone()), Some(cap), &cancel).unwrap();
                 let kept = mean_alpha(out.as_rgba8().unwrap()) / mean_alpha(&src);
-                let most = if name == "dots" { 0.17 } else { 0.03 };
+                let most = match name {
+                    "dots" => 0.17,
+                    "checker" => 0.06,
+                    _ => 0.03,
+                };
                 assert!((kept - 1.0).abs() < most, "{name} {cap}: {kept}");
             }
         }
@@ -734,8 +785,8 @@ mod tests {
         let src = lines(side);
         // About 1.3, 3.0 and 4.5 source pixels to a new one. (At exactly
         // 1.3, lines every 13 px, 10 new pixels apart, all fall across the
-        // same two new pixels the same way: each comes out half a step
-        // heavier or lighter, 30 % here.)
+        // same two new pixels the same way: with steps of 1 ÷ ⌈r⌉, each
+        // came out half a step heavier or lighter, 30 % here.)
         for cap in [690, 307, 203] {
             let out = scale(DynamicImage::ImageRgba8(src.clone()), Some(cap), &cancel).unwrap();
             let out = out.as_rgba8().unwrap();
@@ -764,19 +815,107 @@ mod tests {
                     );
                 }
             }
-            // The lines' own color, at a step of their 255, and about as
-            // bold as they are: their coverage kept to within a tenth.
-            let n = r.ceil();
+            // The lines' own color, at a step of their 255, and as bold as
+            // they are: their coverage kept but for their ends.
             for p in out.pixels() {
-                let step = f64::from(p.0[3]) * n / 255.0;
-                assert!(
-                    (step - step.round()).abs() < 0.5 * n / 255.0 + 1e-9,
-                    "{cap}: {p:?}"
-                );
+                assert!(on_a_step(p.0[3], 1.0 / (2.0 * r)), "{cap}: {p:?}");
                 assert!(p.0[3] == 0 || p.0[..3] == [20, 20, 160], "{cap}: {p:?}");
             }
             let kept = mean_alpha(out) / mean_alpha(&src);
-            assert!((kept - 1.0).abs() < 0.11, "{cap}: {kept}");
+            assert!((kept - 1.0).abs() < 0.02, "{cap}: {kept}");
+        }
+    }
+
+    /// Each straight line's weight in `out`, scaled from a `w`×`h` grid of
+    /// lines `width` px wide every 17 px from 8, across and down, as a share
+    /// of its true weight (`width` ÷ the ratio): a line down measured over
+    /// the new rows clear of every line across, and the other way round.
+    fn line_weights(out: &RgbaImage, (w, h): (u32, u32), width: u32) -> Vec<f64> {
+        let (rx, ry) = (
+            f64::from(w) / f64::from(out.width()),
+            f64::from(h) / f64::from(out.height()),
+        );
+        let lines = |side: u32| (8..side).step_by(17).collect::<Vec<u32>>();
+        let clear = |n: u32, r: f64, across: &[u32]| -> Vec<u32> {
+            (0..n)
+                .filter(|&i| {
+                    let (from, to) = (f64::from(i) * r, f64::from(i + 1) * r);
+                    across
+                        .iter()
+                        .all(|&l| to <= f64::from(l) - 1.0 || from >= f64::from(l + width) + 1.0)
+                })
+                .collect()
+        };
+        let (rows, cols) = (
+            clear(out.height(), ry, &lines(h)),
+            clear(out.width(), rx, &lines(w)),
+        );
+        let alpha = |x: u32, y: u32| f64::from(out.get_pixel(x, y).0[3]) / 255.0;
+        let band = |at: u32, r: f64, n: u32| {
+            let first = (f64::from(at) / r).floor() as u32;
+            let last = (f64::from(at + width) / r).ceil() as u32;
+            (first.saturating_sub(1)..(last + 1).min(n)).collect::<Vec<u32>>()
+        };
+        let mut weights = Vec::new();
+        for x0 in lines(w).into_iter().filter(|&x| x + width + 17 < w) {
+            let band = band(x0, rx, out.width());
+            let sum: f64 = rows
+                .iter()
+                .map(|&y| band.iter().map(|&x| alpha(x, y)).sum::<f64>())
+                .sum();
+            weights.push(sum / rows.len() as f64 / (f64::from(width) / rx));
+        }
+        for y0 in lines(h).into_iter().filter(|&y| y + width + 17 < h) {
+            let band = band(y0, ry, out.height());
+            let sum: f64 = cols
+                .iter()
+                .map(|&x| band.iter().map(|&y| alpha(x, y)).sum::<f64>())
+                .sum();
+            weights.push(sum / cols.len() as f64 / (f64::from(width) / ry));
+        }
+        weights
+    }
+
+    #[test]
+    fn straight_lines_keep_their_weight_at_every_ratio_and_phase() {
+        let cancel = CancelToken::default();
+        // Grids of hard 1 and 2 px lines (alpha 0 or 255) every 17 px, at
+        // the ratios of 2250, 2600, 3000 and 4000 px to Small's 2048, and
+        // 2.93 to 1. A line keeps one phase against the new pixels along
+        // its length, so steps of 1 ÷ ⌈r⌉ (round 4) left whole lines at
+        // 0.55 to 1.96 of their weight, side by side.
+        for (w, cap) in [
+            (1125, 1024),
+            (1300, 1024),
+            (1500, 1024),
+            (2000, 1024),
+            (1500, 512),
+        ] {
+            for width in [1, 2] {
+                let h = 340;
+                let grid = RgbaImage::from_fn(w, h, |x, y| {
+                    let on = |v: u32| v >= 8 && (v - 8) % 17 < width;
+                    let a = if on(x) || on(y) { 255 } else { 0 };
+                    image::Rgba([90, 90, 90, a])
+                });
+                let out = scale(DynamicImage::ImageRgba8(grid), Some(cap), &cancel).unwrap();
+                let weights = line_weights(out.as_rgba8().unwrap(), (w, h), width);
+                assert!(weights.len() > 20, "{w} {cap}: {weights:?}");
+                // A 1 px line exactly. A 2 px one can cover a new pixel
+                // whole, which keeps its alpha, so only its two partly
+                // covered pixels take steps, apart: within a step of its 4.
+                let (least, most) = if width == 1 {
+                    (0.98, 1.02)
+                } else {
+                    (0.75, 1.25)
+                };
+                for (i, &weight) in weights.iter().enumerate() {
+                    assert!(
+                        (least..=most).contains(&weight),
+                        "{w} {cap} {width} px, line {i}: {weights:?}"
+                    );
+                }
+            }
         }
     }
 
