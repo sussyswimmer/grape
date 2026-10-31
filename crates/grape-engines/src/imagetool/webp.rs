@@ -365,7 +365,7 @@ fn extended(
                 copy_chunk(r, w, at, &head, written)?;
             }
             b"EXIF" => {
-                let walked = read_exif(r, head.size, found)?;
+                let (walked, prefixed) = read_exif(r, head.size, found)?;
                 // Inside a frame, it's dropped alone.
                 if !seen_exif && !in_frame {
                     let needs = exif::minimal(
@@ -373,7 +373,15 @@ fn extended(
                         walked.dcf_adobe_rgb() && flags.flags & ICC_FLAG == 0,
                     );
                     if let Some(tiff) = needs {
-                        write_chunk(w, b"EXIF", &tiff, written)?;
+                        // In the source's form: the `image` crate reads an
+                        // orientation only from a TIFF at the chunk's
+                        // start, Pillow from either.
+                        let exif = if prefixed {
+                            [EXIF_PREFIX.as_slice(), &tiff].concat()
+                        } else {
+                            tiff
+                        };
+                        write_chunk(w, b"EXIF", &exif, written)?;
                         flags.exif = true;
                     }
                     seen_exif = true;
@@ -440,9 +448,18 @@ fn next(head: [u8; 8], left: &mut u64, chunks: &mut usize) -> Result<Head, Error
     Ok(Head { fourcc, size, body })
 }
 
+/// What an EXIF chunk may hold before its TIFF structure: Pillow writes it
+/// in every animation's, and none in a still's.
+const EXIF_PREFIX: &[u8; 6] = b"Exif\0\0";
+
 /// Reads an EXIF chunk's `size` bytes, walking at most [`MAX_EXIF`] of
-/// them (after an optional `Exif\0\0`), and says what it held.
-fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::Exif, Error> {
+/// them (after an optional [`EXIF_PREFIX`]), and says what it held, and
+/// whether the prefix was there.
+fn read_exif(
+    r: &mut dyn BufRead,
+    size: u64,
+    found: &mut Found,
+) -> Result<(exif::Exif, bool), Error> {
     let take = usize_of(size)?.min(MAX_EXIF);
     let mut data = vec![0; take];
     read_exact(r, &mut data)?;
@@ -450,10 +467,10 @@ fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::
     if (take as u64) < size {
         found.fields.insert(MetaField::Other);
     }
-    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(&data);
+    let tiff = data.strip_prefix(EXIF_PREFIX).unwrap_or(&data);
     let walked = exif::walk(tiff);
     found.fields.extend(walked.fields.iter().copied());
-    Ok(walked)
+    Ok((walked, tiff.len() < data.len()))
 }
 
 /// Copies the chunk `head` that starts at `at` in `r` into `w`, padded.
@@ -1403,7 +1420,14 @@ mod tests {
         ]);
         let (out, fields) = run(&[src, b"after".to_vec()].concat()).unwrap();
         assert_eq!(fields, [Camera, Xmp, Other].into());
+        // Behind its `Exif\0\0` as the source's was, which the `image`
+        // crate doesn't read an orientation from, and Pillow does.
         let minimal = exif::minimal(Some(3), false).unwrap();
+        let prefixed = [b"Exif\0\0".as_slice(), &minimal].concat();
+        assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &prefixed)]));
+        // Bare as the source's was.
+        let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &camera)]);
+        let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &minimal)]));
         // Upright: the EXIF flag goes too.
         let t = tiff(b'I', &[&[(0x010F, V::Ascii("Nikon"))]], None);

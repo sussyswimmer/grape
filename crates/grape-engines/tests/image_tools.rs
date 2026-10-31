@@ -301,7 +301,6 @@ fn remove_metadata_strips_a_webp_and_fixes_its_header() {
     );
     let out = fs::read(&outcome.outputs[0]).unwrap();
     assert_eq!(pixels(&out), pixels(&lossless));
-    assert_eq!(orientation(&out), Orientation::Rotate90);
     assert!(!out.windows(6).any(|w| w == b"secret"));
     assert_eq!(
         u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
@@ -309,6 +308,21 @@ fn remove_metadata_strips_a_webp_and_fixes_its_header() {
     );
     // VP8X keeps only its EXIF flag, for the orientation written back.
     assert_eq!(out[20], 0x08);
+    // In the source's form, behind its `Exif\0\0` or bare: the `image`
+    // crate, so every conversion, reads an orientation only from a bare
+    // one, and Pillow from both, so each turns the output as it turned the
+    // source (behind it, the source converted unturned and the output
+    // written bare turned).
+    let exif_at = |out: &[u8]| out.windows(4).rposition(|w| w == b"EXIF").unwrap() + 8;
+    assert_eq!(&out[exif_at(&out)..][..10], b"Exif\0\0MM\0*");
+    assert_eq!(orientation(&src), Orientation::NoTransforms);
+    assert_eq!(orientation(&out), Orientation::NoTransforms);
+    let bare = riff(&[vp8x(0x08), vp8l.clone(), riff_chunk(b"EXIF", &exif[10..])]);
+    let outcome = strip(&dir, "bare.webp", &bare).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(orientation(&bare), Orientation::Rotate90);
+    assert_eq!(orientation(&out), Orientation::Rotate90);
+    assert_eq!(&out[exif_at(&out)..][..4], b"MM\0*");
 }
 
 #[test]
