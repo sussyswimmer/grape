@@ -14,8 +14,9 @@
 //!   `ALPH` and `VP8 ` or `VP8L`; an animation's first `ANIM` as the 6
 //!   bytes the demuxer reads of it, which image-webp reads at that size
 //!   only (what a longer one holds past them goes, as other metadata
-//!   unless it's blank); in a simple file, its image, and the `ALPH` chunk after it if
-//!   there is one, which the demuxer takes for the image's frame.
+//!   unless it's blank); in a simple file, its image, and the `ALPH`
+//!   chunk after it if there is one, which the demuxer takes for the
+//!   image's frame.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
 //!   `XMP `, unknown chunks, an `ANMF` with no image (the demuxer passes
 //!   over it, and refuses a file that ends with an empty one), what the
@@ -23,9 +24,10 @@
 //!   `ANMF` (an `ANMF` is walked by its size padded, as the demuxer walks
 //!   it), an `ICCP` among them as other metadata when the demuxer doesn't
 //!   apply it (VP8X's ICC flag is off, or an `ICCP` comes before it: no
-//!   reader does), everything in a simple file from the chunk that ends its image's
-//!   frame on, which no reader reads (whole chunks said by their kind, the
-//!   rest as other metadata), and anything after the RIFF's end.
+//!   reader does), everything in a simple file from the chunk that ends
+//!   its image's frame on, which no reader reads (whole chunks said by
+//!   their kind, the rest as other metadata), and anything after the
+//!   RIFF's end.
 //! - **Not decoded:** a `VP8L` whose own alpha bit says none under VP8X's
 //!   alpha flag ([`Reading::opaque`]), which conversions decode to refuse
 //!   when its pixels hold transparency, keeps its chunks and VP8X's flag
@@ -116,11 +118,11 @@ impl Plan {
     /// that refuses (readers disagree on it, or libwebp's demuxer refuses
     /// it) is [`Error::Broken`], before anything is written, and so are an
     /// `ANMF` chunk the demuxer reads inside an `ANMF`, or an `ICCP` there
-    /// it applies ([`Scan::inside`]), and a file shorter than its RIFF says, which
-    /// libwebp's still decoder and its demuxer refuse and the walk doesn't
-    /// read to its end. Everything the file makes Remove Metadata refuse
-    /// is refused here: what [`Plan::write`] then finds broken is Grape's
-    /// own failure.
+    /// it applies ([`Scan::inside`]), and a file shorter than its RIFF
+    /// says, which libwebp's still decoder and its demuxer refuse and the
+    /// walk doesn't read to its end. Everything the file makes Remove
+    /// Metadata refuse is refused here: what [`Plan::write`] then finds
+    /// broken is Grape's own failure.
     pub(super) fn new(r: &mut dyn In) -> Result<Plan, Error> {
         let (scan, reading) = walked(r)?;
         if let Some(fourcc) = scan.inside {
