@@ -13,7 +13,8 @@
 //!   and each `ANMF` frame that has an image, with its header and its
 //!   `ALPH` and `VP8 ` or `VP8L`; an animation's first `ANIM` as the 6
 //!   bytes the demuxer reads of it, which image-webp reads at that size
-//!   only; in a simple file, its image, and the `ALPH` chunk after it if
+//!   only (what a longer one holds past them goes, as other metadata
+//!   unless it's blank); in a simple file, its image, and the `ALPH` chunk after it if
 //!   there is one, which the demuxer takes for the image's frame.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
 //!   `XMP `, unknown chunks, an `ANMF` with no image (the demuxer passes
@@ -372,6 +373,11 @@ fn extended(
                 read_at(r, body, &mut data)?;
                 write_chunk(w, b"ANIM", &data, written)?;
                 seen_anim = true;
+                // What a longer one holds past them goes, as other
+                // metadata unless it's blank.
+                if head.size > ANIM_SIZE && !blank(r, body + ANIM_SIZE, head.size - ANIM_SIZE)? {
+                    found.fields.insert(MetaField::Other);
+                }
             }
             b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
                 copy_chunk(r, w, at, &head, written)?;
@@ -410,6 +416,22 @@ fn extended(
     }
     read_at(r, end - 1, &mut [0])?;
     Ok(flags)
+}
+
+/// Whether the `len` bytes of `r` at `at` are all zeros, read a block at a
+/// time.
+fn blank(r: &mut dyn In, at: u64, len: u64) -> Result<bool, Error> {
+    let mut buf = [0; 4096];
+    let mut done = 0;
+    while done < len {
+        let n = usize::try_from(len - done).map_or(buf.len(), |n| n.min(buf.len()));
+        read_at(r, at + done, &mut buf[..n])?;
+        if buf[..n].iter().any(|&b| b != 0) {
+            return Ok(false);
+        }
+        done += n as u64;
+    }
+    Ok(true)
 }
 
 /// What's left of the RIFF after "WEBP", from a file's first 12 bytes.
@@ -1641,20 +1663,43 @@ mod tests {
         let with = |anim: &[u8]| webp(&[vp8x(0x02), anim.to_vec(), red(), chunk(b"ANIM", &[9; 7])]);
         // The 6 bytes of its size padded the demuxer reads (its pad byte
         // too), which image-webp reads only at 6: one of 5, 7 or 16 bytes
-        // (Pillow shows them) made every conversion refuse the file. A
-        // second one, which both pass over, goes as it is.
-        for (anim, want) in [
-            (b"ANIM   ".to_vec(), [1, 2, 3, 4, 5, 7]),
-            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6, 7]), [1, 2, 3, 4, 5, 6]),
+        // (Pillow shows them) made every conversion refuse the file. What
+        // a longer one holds past them goes, said unless it's blank (it
+        // went unsaid). A second one, which both pass over, goes as it is.
+        let other = || [MetaField::Other].into();
+        for (anim, want, said) in [
+            (
+                b"ANIM   ".to_vec(),
+                [1, 2, 3, 4, 5, 7],
+                BTreeSet::new(),
+            ),
+            (
+                chunk(b"ANIM", &[1, 2, 3, 4, 5, 6, 7]),
+                [1, 2, 3, 4, 5, 6],
+                other(),
+            ),
             (
                 chunk(b"ANIM", &[[1, 2, 3, 4, 5, 6].as_slice(), &[8; 10]].concat()),
                 [1, 2, 3, 4, 5, 6],
+                other(),
             ),
-            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6]), [1, 2, 3, 4, 5, 6]),
+            (
+                chunk(
+                    b"ANIM",
+                    &[[1, 2, 3, 4, 5, 6].as_slice(), &[0; 5_000]].concat(),
+                ),
+                [1, 2, 3, 4, 5, 6],
+                BTreeSet::new(),
+            ),
+            (
+                chunk(b"ANIM", &[1, 2, 3, 4, 5, 6]),
+                [1, 2, 3, 4, 5, 6],
+                BTreeSet::new(),
+            ),
         ] {
             let (out, fields) = run(&with(&anim)).unwrap();
             assert_eq!(out, with(&chunk(b"ANIM", &want)));
-            assert!(fields.is_empty());
+            assert_eq!(fields, said);
         }
     }
 
