@@ -256,6 +256,46 @@ fn remove_metadata_strips_a_png_even_one_named_jpg() {
     }
 }
 
+#[test]
+fn remove_metadata_turns_a_png_for_each_reader_as_its_source_was() {
+    // An orientation of 6, as an eXIf bare or behind `Exif\0\0`, or as
+    // ImageMagick's raw profile: the `image` crate, so every conversion,
+    // reads it from a bare eXIf alone, and Pillow from all three. The
+    // minimal EXIF goes back in the same form, so each reader turns the
+    // output as it turned the source (written as a bare eXIf, conversions
+    // turned the two others' output and not their source).
+    let dir = TestDir::new("strip-png-form");
+    let exif = exif(6);
+    let mut raw = format!("\nexif\n{:8}\n", exif.len() - 4).into_bytes();
+    for b in &exif[4..] {
+        raw.extend_from_slice(format!("{b:02x}").as_bytes());
+    }
+    for (name, carried, turned) in [
+        ("bare.png", chunk(b"eXIf", &exif[10..]), true),
+        ("prefixed.png", chunk(b"eXIf", &exif[4..]), false),
+        (
+            "profile.png",
+            chunk(
+                b"tEXt",
+                &[b"Raw profile type exif\0".as_slice(), &raw].concat(),
+            ),
+            false,
+        ),
+    ] {
+        let src = png_with(&plain_png(), &[carried]);
+        let outcome = strip(&dir, name, &src).unwrap();
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        let want = if turned {
+            Orientation::Rotate90
+        } else {
+            Orientation::NoTransforms
+        };
+        assert_eq!(orientation(&src), want, "{name}");
+        assert_eq!(orientation(&out), want, "{name}");
+        assert!(!out.windows(3).any(|w| w == b"Can"), "{name}");
+    }
+}
+
 /// A RIFF chunk, padded to even.
 fn riff_chunk(fourcc: &[u8; 4], data: &[u8]) -> Vec<u8> {
     let mut out = fourcc.to_vec();
@@ -301,7 +341,6 @@ fn remove_metadata_strips_a_webp_and_fixes_its_header() {
     );
     let out = fs::read(&outcome.outputs[0]).unwrap();
     assert_eq!(pixels(&out), pixels(&lossless));
-    assert_eq!(orientation(&out), Orientation::Rotate90);
     assert!(!out.windows(6).any(|w| w == b"secret"));
     assert_eq!(
         u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
@@ -309,6 +348,53 @@ fn remove_metadata_strips_a_webp_and_fixes_its_header() {
     );
     // VP8X keeps only its EXIF flag, for the orientation written back.
     assert_eq!(out[20], 0x08);
+    // In the source's form, behind its `Exif\0\0` or bare: the `image`
+    // crate, so every conversion, reads an orientation only from a bare
+    // one, and Pillow from both, so each turns the output as it turned the
+    // source (behind it, the source converted unturned and the output
+    // written bare turned).
+    let exif_at = |out: &[u8]| out.windows(4).rposition(|w| w == b"EXIF").unwrap() + 8;
+    assert_eq!(&out[exif_at(&out)..][..10], b"Exif\0\0MM\0*");
+    assert_eq!(orientation(&src), Orientation::NoTransforms);
+    assert_eq!(orientation(&out), Orientation::NoTransforms);
+    let bare = riff(&[vp8x(0x08), vp8l.clone(), riff_chunk(b"EXIF", &exif[10..])]);
+    let outcome = strip(&dir, "bare.webp", &bare).unwrap();
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(orientation(&bare), Orientation::Rotate90);
+    assert_eq!(orientation(&out), Orientation::Rotate90);
+    assert_eq!(&out[exif_at(&out)..][..4], b"MM\0*");
+}
+
+#[test]
+fn remove_metadata_keeps_a_webps_alpha_as_it_is_undecoded() {
+    use MetaField::*;
+    // A 12,000 × 12,000 lossless WebP whose VP8X flags alpha over a VP8L
+    // whose own bit says none: readers show it differently once its pixels
+    // hold transparency, which conversions decode it to see (D16). Remove
+    // Metadata keeps its chunks and the flag byte for byte, so its output
+    // shows what the source shows in every reader; it decoded it first,
+    // and refused it as too large to convert. (Its bitstream is a header:
+    // nothing decodes it.)
+    let dir = TestDir::new("strip-webp-undecoded");
+    let side = 12_000u32 - 1;
+    let header = side | side << 14;
+    let vp8l = riff_chunk(
+        b"VP8L",
+        &[&[0x2F][..], &header.to_le_bytes(), &[0; 7]].concat(),
+    );
+    let s = side.to_le_bytes();
+    let vp8x = |flags: u8| {
+        riff_chunk(
+            b"VP8X",
+            &[flags, 0, 0, 0, s[0], s[1], s[2], s[0], s[1], s[2]],
+        )
+    };
+    let xmp = riff_chunk(b"XMP ", b"<x:xmpmeta>secret</x:xmpmeta>");
+    let src = riff(&[vp8x(0x14), vp8l.clone(), xmp]);
+    let outcome = strip(&dir, "big.webp", &src).unwrap();
+    assert_eq!(outcome.notes, [Note::MetadataRemoved(vec![Xmp])]);
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out, riff(&[vp8x(0x10), vp8l]));
 }
 
 #[test]
@@ -462,6 +548,78 @@ fn remove_metadata_strips_every_page_of_a_tiff_and_keeps_its_pixels() {
             );
         }
     }
+}
+
+#[test]
+fn remove_metadata_reads_a_tiff_back_behind_its_first_64_kib_as_it_is() {
+    use tiff::tags::Tag;
+    // A gray 16 × 8 BigTIFF laid out as Pillow and tifffile lay one out,
+    // its IFD and values first (an ICC profile among them), then its second
+    // strip, then bytes no entry points to up to 64 KiB, where its first
+    // strip starts: the end of what the tool's first read of the file
+    // buffered. Its walk reads nothing past there; its copy reads the first
+    // strip from there on, then the second strip and the profile behind
+    // it, which a buffer kept past its end gave 64 bytes early.
+    let entries: [(u16, u16, Vec<u8>); 11] = [
+        (256, 4, le(16, 4)),
+        (257, 4, le(8, 4)),
+        (258, 3, le(8, 2)),
+        (259, 3, le(1, 2)),
+        (262, 3, le(1, 2)),
+        (273, 16, [le(65_536, 8), le(1_000, 8)].concat()),
+        (277, 3, le(1, 2)),
+        (278, 4, le(4, 4)),
+        (279, 16, [le(64, 8), le(64, 8)].concat()),
+        (305, 2, b"secret software\0".to_vec()),
+        (34675, 7, (0..600u32).map(|i| (i % 253) as u8).collect()),
+    ];
+    let mut src = [&b"II+\0\x08\0\0\0"[..], &le(16, 8)].concat();
+    src.extend(le(entries.len() as u64, 8));
+    let mut value_at = 16 + 8 + 20 * entries.len() as u64 + 8;
+    let mut values: Vec<u8> = Vec::new();
+    for (tag, kind, value) in &entries {
+        src.extend(tag.to_le_bytes());
+        src.extend(kind.to_le_bytes());
+        let size = match kind {
+            2 | 7 => 1,
+            3 => 2,
+            4 => 4,
+            _ => 8,
+        };
+        src.extend(le(value.len() as u64 / size, 8));
+        if value.len() <= 8 {
+            let mut field = value.clone();
+            field.resize(8, 0);
+            src.extend(field);
+        } else {
+            src.extend(le(value_at, 8));
+            value_at += value.len() as u64;
+            values.extend(value);
+        }
+    }
+    src.extend(le(0, 8));
+    src.extend(values);
+    let filler = |src: &mut Vec<u8>, to: usize| {
+        let from = src.len();
+        src.extend((from..to).map(|i| (i % 241) as u8 ^ 0x5A));
+    };
+    filler(&mut src, 1_000);
+    src.extend((0..64u8).map(|i| 128 + i));
+    filler(&mut src, 65_536);
+    src.extend((0..64u8).map(|i| i * 2));
+    let dir = TestDir::new("strip-tiff-64k");
+    let outcome = strip(&dir, "pillow.tif", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![MetaField::Software])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(tiff_pages(&out), tiff_pages(&src));
+    let icc = |bytes: &[u8]| {
+        let mut decoder = tiff::decoder::Decoder::new(Cursor::new(bytes)).unwrap();
+        decoder.get_tag_u8_vec(Tag::IccProfile).unwrap()
+    };
+    assert_eq!(icc(&out), icc(&src));
 }
 
 /// A classic gray 64 × 64 TIFF of two uncompressed strips, every byte of
@@ -1979,6 +2137,29 @@ fn remove_metadata_cuts_a_motion_photo_and_says_so() {
     );
     let out = fs::read(&outcome.outputs[0]).unwrap();
     assert_eq!(out.len(), src.len() - after.len());
+    assert_eq!(out[at[0].clone()], src[at[0].clone()]);
+}
+
+#[test]
+fn remove_metadata_reads_a_heic_back_behind_its_first_64_kib_as_it_is() {
+    use MetaField::*;
+    // A motion photo whose mdat ends at 64 KiB, where the tool's first
+    // read of the file buffered up to: the walk reads the video's box
+    // header from there, then meta, behind it, which a buffer kept past
+    // its end gave 16 bytes early, so the file was refused as unreadable.
+    let dir = TestDir::new("strip-heic-64k");
+    let after = bmff(b"mpvd", b"SecretVideo");
+    let primary = |len: usize| (0..len).map(|i| (i % 251) as u8).collect::<Vec<u8>>();
+    let short = heif(b"heic", &IPHONE, &primary(100), b"").0.len();
+    let (src, at) = heif(b"heic", &IPHONE, &primary(100 + 65_536 - short), &after);
+    assert_eq!(src.len() - after.len(), 65_536);
+    let outcome = strip(&dir, "motion.heic", &src).unwrap();
+    assert_eq!(
+        outcome.notes,
+        [Note::MetadataRemoved(vec![Location, Camera, Xmp, Embedded])]
+    );
+    let out = fs::read(&outcome.outputs[0]).unwrap();
+    assert_eq!(out.len(), 65_536);
     assert_eq!(out[at[0].clone()], src[at[0].clone()]);
 }
 
@@ -4070,8 +4251,16 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             riff(&[red_vp8.clone(), alph.clone(), blue_vp8l.clone()]),
         ),
         // Transparent pixels in a VP8L whose bit says opaque, under
-        // VP8X's alpha flag: refused once decoded.
+        // VP8X's alpha flag: refused once decoded. And under no flag, or
+        // in a simple file, where libwebp's still and animation decoders
+        // show them and Pillow (by what the demuxer says) and image-webp
+        // show the picture opaque, which conversions wrote.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
+        (
+            "vp8l-bit-off-unflagged.webp",
+            riff(&[canvas(0), bit(false)]),
+        ),
+        ("vp8l-bit-off-simple.webp", riff(&[bit(false)])),
         (
             "canvas.webp",
             riff(&[vp8x_chunk(0, w + 1, h), red_vp8.clone()]),
@@ -4092,12 +4281,20 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             assert_eq!(err.user_message, message, "{to:?}");
             fs::remove_file(dir.join(name)).unwrap();
         }
-        // Remove Metadata refuses them as conversions do, the last once
-        // decoded as they decode it: it kept their image chunks as they
-        // were, so it wrote files Grape refuses and readers disagree on.
-        let err = strip(&dir, name, &file).unwrap_err();
-        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
-        assert_eq!(err.user_message, message, "{}", err.detail);
+        // Remove Metadata refuses them as conversions do: it kept their
+        // image chunks as they were, so it wrote files Grape refuses and
+        // readers disagree on. But for the one readers show differently
+        // only by its pixels, which it doesn't decode: kept as it is, its
+        // output shows what it shows in every reader.
+        if name.starts_with("vp8l-bit-off") {
+            let outcome = strip(&dir, name, &file).unwrap();
+            assert_eq!(fs::read(&outcome.outputs[0]).unwrap(), file);
+            fs::remove_file(&outcome.outputs[0]).unwrap();
+        } else {
+            let err = strip(&dir, name, &file).unwrap_err();
+            assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+            assert_eq!(err.user_message, message, "{}", err.detail);
+        }
         fs::remove_file(dir.join(name)).unwrap();
     }
     // Read as libwebp reads them: an EXIF flag whose chunk is past the
@@ -4112,6 +4309,9 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             image::Rgba([10, 10, 220, 255]),
         )),
     );
+    // The encoder sets its alpha bit: off, it says none.
+    let mut opaque_off = opaque.clone();
+    opaque_off[12] &= !0x10;
     for (name, file, want) in [
         (
             "exif-after.webp",
@@ -4128,6 +4328,14 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             [200, 10, 10],
         ),
         ("bit-off.webp", riff(&[canvas(0x10), opaque]), [10, 10, 220]),
+        // Its bit off under no flag, or in a simple file: decoded with its
+        // alpha to see, and handed on opaque, as before.
+        (
+            "bit-off-unflagged.webp",
+            riff(&[canvas(0), opaque_off.clone()]),
+            [10, 10, 220],
+        ),
+        ("bit-off-simple.webp", riff(&[opaque_off]), [10, 10, 220]),
         // An ANIM after the picture: libwebp's still decoder and its
         // demuxer (Pillow) both show it. Refused in round 4, and one of 5
         // bytes (6 padded, as the demuxer reads it) in round 5.
@@ -4149,6 +4357,9 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         for p in out.to_rgba8().pixels() {
             let off = p.0[..3].iter().zip(want).map(|(&a, b)| a.abs_diff(b));
             assert!(off.max().unwrap() <= 6 && p.0[3] == 255, "{name}: {p:?}");
+        }
+        if name.starts_with("bit-off-") {
+            assert_eq!(out.color(), image::ColorType::Rgb8, "{name}");
         }
         fs::remove_file(&outcome.outputs[0]).unwrap();
         fs::remove_file(dir.join(name)).unwrap();

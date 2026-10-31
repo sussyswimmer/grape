@@ -8,8 +8,10 @@
 //!   `eXIf` ([`exif::walk`]), tIME, other ancillary chunks, and anything
 //!   after IEND. Apple's `iDOT` goes unreported: it's a decoding hint
 //!   whose offsets the strip makes wrong.
-//! - **Written back:** the minimal EXIF as `eXIf` where the first EXIF
-//!   was, when that was before the image data and the picture needs it.
+//! - **Written back:** the minimal EXIF where the first EXIF was, when
+//!   that was before the image data and the picture needs it, in its form
+//!   ([`Form`]): an `eXIf`, bare or behind `Exif\0\0` as it was, or
+//!   ImageMagick's raw profile in a `tEXt`.
 
 use std::io::{BufRead, Read, Write};
 
@@ -67,6 +69,31 @@ enum Part {
     ExifSlot,
 }
 
+/// How the first EXIF before the image data was held, which the minimal
+/// one takes, so that each reader turns the output as it turned the
+/// source: the `image` crate (so Grape's conversions) reads an orientation
+/// only from a bare `eXIf`, Pillow from all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Form {
+    /// An `eXIf`, behind `Exif\0\0` or not.
+    Exif { prefixed: bool },
+    /// ImageMagick's raw profile of this name (`exif` or `APP1`), behind
+    /// `Exif\0\0` or not.
+    Profile { name: &'static str, prefixed: bool },
+}
+
+/// What a PNG's text chunk of `data` (its keyword first) names as a raw
+/// EXIF profile, if it is one.
+fn profile_name(data: &[u8]) -> Option<&'static str> {
+    if data.starts_with(b"Raw profile type exif\0") {
+        Some("exif")
+    } else if data.starts_with(b"Raw profile type APP1\0") {
+        Some("APP1")
+    } else {
+        None
+    }
+}
+
 /// Strips the PNG `r` into `w` ([module docs](self)).
 pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Error> {
     let mut found = Found::default();
@@ -78,7 +105,7 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
     write(w, SIGNATURE)?;
     let mut held: Option<Vec<Part>> = Some(Vec::new());
     let mut held_bytes = 0;
-    let mut first_exif: Option<exif::Exif> = None;
+    let mut first_exif: Option<(exif::Exif, Form)> = None;
     let mut budget = INFLATE_BUDGET;
     let mut exif_budget = MAX_READ as u64;
     let mut color_chunk = false;
@@ -117,15 +144,16 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
                 if &kind == b"IEND" {
                     return Err(Error::Broken("no image data".into()));
                 }
-                let needs = first_exif
-                    .as_ref()
-                    .and_then(|e| exif::minimal(e.orientation, e.dcf_adobe_rgb() && !color_chunk));
+                let needs = first_exif.as_ref().and_then(|(e, form)| {
+                    exif::minimal(e.orientation, e.dcf_adobe_rgb() && !color_chunk)
+                        .map(|tiff| (tiff, *form))
+                });
                 for part in parts {
                     match part {
                         Part::Bytes(bytes) => write(w, &bytes)?,
                         Part::ExifSlot => {
-                            if let Some(tiff) = &needs {
-                                write_chunk(w, b"eXIf", tiff)?;
+                            if let Some((tiff, form)) = &needs {
+                                write_minimal(w, tiff, *form)?;
                             }
                         }
                     }
@@ -148,15 +176,17 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
             b"tEXt" | b"zTXt" | b"iTXt" => {
                 let (field, exif_blob) = text(&kind, &data, whole, &mut budget, &mut exif_budget);
                 found.fields.extend(field);
-                if let Some(blob) = exif_blob {
-                    note_exif(&mut found, &mut first_exif, held.as_mut(), &blob);
+                if let (Some(blob), Some(name)) = (exif_blob, profile_name(&data)) {
+                    let form = |prefixed| Form::Profile { name, prefixed };
+                    note_exif(&mut found, &mut first_exif, held.as_mut(), &blob, form);
                 }
             }
             b"eXIf" => {
                 if !whole {
                     found.fields.insert(MetaField::Other);
                 }
-                note_exif(&mut found, &mut first_exif, held.as_mut(), &data);
+                let form = |prefixed| Form::Exif { prefixed };
+                note_exif(&mut found, &mut first_exif, held.as_mut(), &data, form);
             }
             b"tIME" => {
                 found.fields.insert(MetaField::ModDate);
@@ -175,12 +205,15 @@ pub(super) fn strip(r: &mut dyn BufRead, w: &mut dyn Write) -> Result<Found, Err
 }
 
 /// Walks an EXIF blob (a TIFF, or one behind `Exif\0\0`), reports its
-/// fields and, for the first one before the image data, marks its place.
+/// fields and, for the first one before the image data, marks its place
+/// and keeps it with its form (`form` of whether it was behind the
+/// prefix).
 fn note_exif(
     found: &mut Found,
-    first: &mut Option<exif::Exif>,
+    first: &mut Option<(exif::Exif, Form)>,
     held: Option<&mut Vec<Part>>,
     blob: &[u8],
+    form: impl Fn(bool) -> Form,
 ) {
     let tiff = blob.strip_prefix(b"Exif\0\0").unwrap_or(blob);
     let walked = exif::walk(tiff);
@@ -188,7 +221,37 @@ fn note_exif(
     if first.is_none() {
         if let Some(parts) = held {
             parts.push(Part::ExifSlot);
-            *first = Some(walked);
+            *first = Some((walked, form(tiff.len() < blob.len())));
+        }
+    }
+}
+
+/// Hex digits, as ImageMagick writes a raw profile's.
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Writes the minimal EXIF `tiff` in `form`. A raw profile is written as
+/// ImageMagick writes one, uncompressed: a newline, its name, its length
+/// in 8 columns, then its bytes in hex, 36 to a line.
+fn write_minimal(w: &mut dyn Write, tiff: &[u8], form: Form) -> Result<(), Error> {
+    let (Form::Exif { prefixed } | Form::Profile { prefixed, .. }) = form;
+    let blob = if prefixed {
+        [b"Exif\0\0".as_slice(), tiff].concat()
+    } else {
+        tiff.to_vec()
+    };
+    match form {
+        Form::Exif { .. } => write_chunk(w, b"eXIf", &blob),
+        Form::Profile { name, .. } => {
+            let mut text = format!("Raw profile type {name}\0\n{name}\n{:8}", blob.len());
+            for line in blob.chunks(36) {
+                text.push('\n');
+                for b in line {
+                    text.push(char::from(HEX[usize::from(b >> 4)]));
+                    text.push(char::from(HEX[usize::from(b & 15)]));
+                }
+            }
+            text.push('\n');
+            write_chunk(w, b"tEXt", text.as_bytes())
         }
     }
 }
@@ -545,6 +608,74 @@ mod tests {
         let src = png(&[ihdr(), idat(), chunk(b"eXIf", &t), chunk(b"IEND", &[])]);
         let (out, _) = run(&src).unwrap();
         assert_eq!(out, png(&[ihdr(), idat(), chunk(b"IEND", &[])]));
+    }
+
+    #[test]
+    fn the_orientation_comes_back_in_the_form_its_exif_had() {
+        let t = tiff(
+            b'I',
+            &[&[(0x0112, V::Short(6)), (0x010F, V::Ascii("Sony"))]],
+            None,
+        );
+        let minimal = exif::minimal(Some(6), false).unwrap();
+        let behind = |tiff: &[u8]| [b"Exif\0\0".as_slice(), tiff].concat();
+        let around = |exif: Vec<u8>| png(&[ihdr(), exif, idat(), chunk(b"IEND", &[])]);
+        // An eXIf behind `Exif\0\0`, which the `image` crate reads no
+        // orientation from and Pillow does: so is the minimal one.
+        let (out, _) = run(&around(chunk(b"eXIf", &behind(&t)))).unwrap();
+        assert_eq!(out, around(chunk(b"eXIf", &behind(&minimal))));
+        // ImageMagick's raw profile, compressed, which only Pillow reads:
+        // back as one, uncompressed, which reads back as the minimal EXIF.
+        for (keyword, name) in [("exif", "exif"), ("APP1", "APP1")] {
+            for blob in [behind(&t), t.clone()] {
+                let mut raw = format!("\n{name}\n{:8}\n", blob.len()).into_bytes();
+                for b in &blob {
+                    raw.extend_from_slice(format!("{b:02x}").as_bytes());
+                }
+                let key = format!("Raw profile type {keyword}\0");
+                let ztxt = [key.as_bytes(), b"\0", &zlib(&raw)].concat();
+                let (out, _) = run(&around(chunk(b"zTXt", &ztxt))).unwrap();
+                let prefixed = blob.len() > t.len();
+                let back = if prefixed {
+                    behind(&minimal)
+                } else {
+                    minimal.clone()
+                };
+                let mut text = format!("{key}\n{name}\n{:8}\n", back.len()).into_bytes();
+                let hex: String = back.iter().map(|b| format!("{b:02x}")).collect();
+                text.extend_from_slice(hex.as_bytes());
+                text.push(b'\n');
+                assert!(back.len() <= 36);
+                assert_eq!(out, around(chunk(b"tEXt", &text)));
+                let (field, read) = text_of(b"tEXt", &text, true);
+                assert_eq!((field, read), (None, Some(back)));
+            }
+        }
+    }
+
+    #[test]
+    fn a_long_raw_profile_is_written_36_bytes_to_a_line() {
+        let mut out = Vec::new();
+        let tiff: Vec<u8> = (0..80).collect();
+        write_minimal(
+            &mut out,
+            &tiff,
+            Form::Profile {
+                name: "exif",
+                prefixed: true,
+            },
+        )
+        .unwrap();
+        let text = &out[8..out.len() - 4];
+        let lines: Vec<&[u8]> = text.split(|&b| b == b'\n').collect();
+        assert_eq!(lines[0], b"Raw profile type exif\0");
+        assert_eq!(lines[1], b"exif");
+        assert_eq!(lines[2], b"      86");
+        assert_eq!(lines[3].len(), 72);
+        assert_eq!(lines[4].len(), 72);
+        assert_eq!(lines[5].len(), 28);
+        assert_eq!(lines[6], b"");
+        assert_eq!(&lines[3][..12], b"457869660000");
     }
 
     #[test]

@@ -208,15 +208,6 @@ pub(crate) fn run(
                 .map_err(|e| failed(e, &names, src, dir, &ctx.cancel))?,
         ),
     };
-    if let Stripper::Webp(plan) = &stripper {
-        if plan.decides_by_pixels() {
-            // A conversion decides on this one only once it's decoded it,
-            // so it's decoded as a conversion decodes it: one whose pixels
-            // readers show differently is refused as conversions refuse it.
-            crate::image::decode_stored(src, from, Format::Webp, &names, &ctx.cancel, &|_, _, _| 0)
-                .map_err(|e| publish::or_cancelled(&ctx.cancel, src, e))?;
-        }
-    }
     publish::ensure_dir(job, ctx, dir, &names)?;
     let (temp, out) = TempFile::create(dir, from.output_ext())
         .map_err(|e| names.write_failed(format!("create temp in {}: {e}", dir.display())))?;
@@ -230,7 +221,8 @@ pub(crate) fn run(
         Stripper::Heic(plan) => plan.write(&mut reader, &mut writer),
     }
     .and_then(|found| writer.flush().map(|()| found).map_err(Error::Write));
-    let found = found.map_err(|e| failed(e, &names, src, temp.path(), &ctx.cancel))?;
+    let found =
+        found.map_err(|e| write_failed(e, &stripper, &names, src, temp.path(), &ctx.cancel))?;
     close(writer, None, temp.path(), &names, src, &ctx.cancel)?;
     drop(reader);
     check(&stripper, temp.path(), &names, src, &ctx.cancel)?;
@@ -282,6 +274,28 @@ fn failed(e: Error, names: &Names, src: &Path, temp: &Path, cancel: &CancelToken
         Error::Write(e) => names.write_failed(format!("write {}: {e}", temp.display())),
     };
     publish::or_cancelled(cancel, src, e)
+}
+
+/// The error for the user when `stripper` stopped writing (`src` is the
+/// source, `temp` the file it wrote into): as [`failed`] says, but for a
+/// WebP, whose plan refused all the file makes Remove Metadata refuse
+/// ([`webp::Plan::new`]), a step that finds it broken is Grape's own
+/// failure, not the file's (D28).
+fn write_failed(
+    e: Error,
+    stripper: &Stripper,
+    names: &Names,
+    src: &Path,
+    temp: &Path,
+    cancel: &CancelToken,
+) -> GrapeError {
+    match (stripper, e) {
+        (Stripper::Webp(_), Error::Broken(why)) => {
+            let e = names.encode_failed(format!("write {}: {why}", temp.display()));
+            publish::or_cancelled(cancel, src, e)
+        }
+        (_, e) => failed(e, names, src, temp, cancel),
+    }
 }
 
 /// Reads the TIFF, HEIF file or WebP Grape wrote at `path` again, against
@@ -412,6 +426,39 @@ mod tests {
         let result = close(writer, Some(5), &path, &names, src, &cancel);
         std::fs::remove_file(&path).unwrap();
         assert_eq!(result.unwrap_err().kind, ErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn a_webp_found_broken_past_its_plan_is_grapes_own_failure() {
+        // A 2 × 2 VP8L, and a file whose only chunk claims more than it has.
+        let webp = |chunk: &[u8]| {
+            let mut file = b"RIFF".to_vec();
+            file.extend(u32::try_from(chunk.len() + 4).unwrap().to_le_bytes());
+            file.extend_from_slice(b"WEBP");
+            file.extend_from_slice(chunk);
+            file
+        };
+        let good = webp(b"VP8L\x05\0\0\0\x2f\x01\x40\0\0\0");
+        let bad = webp(b"VP8L\x09\0\0\0\x2f\x01\x40\0\0\0");
+        let plan = webp::Plan::new(&mut Cursor::new(&good)).unwrap();
+        assert!(webp::Plan::new(&mut Cursor::new(&bad)).is_err());
+        // The write reads a file other than the one planned, as one that
+        // changed under it would be.
+        let e = plan
+            .write(&mut Cursor::new(&bad), &mut Cursor::new(Vec::new()))
+            .unwrap_err();
+        assert!(matches!(e, Error::Broken(_)), "{e:?}");
+        let src = Path::new("pic.webp");
+        let names = Names::new(src, Path::new("out.webp"), Format::Webp, Format::Webp);
+        let cancel = CancelToken::new();
+        let temp = Path::new(".grape-tmp.webp");
+        let own = write_failed(e, &Stripper::Webp(plan), &names, src, temp, &cancel);
+        assert_eq!(own.kind, ErrorKind::EncodeFailed);
+        assert_eq!(own.user_message, "Grape couldn't write a WEBP file.");
+        // The other streamed containers' is the file's.
+        let broken = Error::Broken("the file ends early".into());
+        let theirs = write_failed(broken, &Stripper::Png, &names, src, temp, &cancel);
+        assert_eq!(theirs.kind, ErrorKind::DecodeFailed);
     }
 
     #[test]

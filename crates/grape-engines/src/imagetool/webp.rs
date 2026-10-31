@@ -13,26 +13,40 @@
 //!   and each `ANMF` frame that has an image, with its header and its
 //!   `ALPH` and `VP8 ` or `VP8L`; an animation's first `ANIM` as the 6
 //!   bytes the demuxer reads of it, which image-webp reads at that size
-//!   only; in a simple file, its image, and the `ALPH` chunk after it if
-//!   there is one, which the demuxer takes for the image's frame.
+//!   only (what a longer one holds past them goes, as other metadata
+//!   unless it's blank); in a simple file, its image, and the `ALPH`
+//!   chunk after it if there is one, which the demuxer takes for the
+//!   image's frame.
 //! - **Dropped:** `EXIF` ([`exif::walk`], after an optional `Exif\0\0`),
 //!   `XMP `, unknown chunks, an `ANMF` with no image (the demuxer passes
 //!   over it, and refuses a file that ends with an empty one), what the
 //!   demuxer reads as top-level chunks after a frame's image inside its
 //!   `ANMF` (an `ANMF` is walked by its size padded, as the demuxer walks
-//!   it), everything in a simple file from the chunk that ends its image's
-//!   frame on, which no reader reads (whole chunks said by their kind, the
-//!   rest as other metadata), and anything after the RIFF's end.
+//!   it), an `ICCP` among them as other metadata when the demuxer doesn't
+//!   apply it (VP8X's ICC flag is off, or an `ICCP` comes before it: no
+//!   reader does), everything in a simple file from the chunk that ends
+//!   its image's frame on, which no reader reads (whole chunks said by
+//!   their kind, the rest as other metadata), and anything after the
+//!   RIFF's end.
+//! - **Not decoded:** a `VP8L` whose own alpha bit says none under VP8X's
+//!   alpha flag ([`Reading::opaque`]), which conversions decode to refuse
+//!   when its pixels hold transparency, keeps its chunks and VP8X's flag
+//!   byte for byte, so its output shows what the source shows in every
+//!   reader, whether they agree on it or not.
 //! - **Refused:** what a conversion refuses before decoding ([`reading`]),
-//!   and an `ANMF` or `ICCP` chunk the demuxer reads at the top level
-//!   inside an `ANMF`, after its frame: the `image` crate trusts the
-//!   `ANMF`'s size and reads neither, where the demuxer shows the one as a
-//!   frame and may apply the other, so readers disagree on the file. (An
+//!   and an `ANMF` chunk the demuxer reads at the top level inside an
+//!   `ANMF`, after its frame, or an `ICCP` there it applies as the file's
+//!   profile ([`Scan::inside`]): the `image` crate trusts the `ANMF`'s
+//!   size and reads neither, where the demuxer shows the one as a frame
+//!   and the other as the profile, so readers disagree on the file. (An
 //!   `ANIM` there, a second one, both pass over: it goes.)
 //! - **Patched afterwards:** the RIFF size, each frame's size, and VP8X's
-//!   flags: XMP off, and EXIF on only when the minimal EXIF
-//!   ([`exif::minimal`]) went back where the old one was. Without a VP8X
-//!   (a simple WebP) there's no flag to set, so none goes back.
+//!   flags: XMP off, and EXIF off unless the minimal EXIF
+//!   ([`exif::minimal`]) went back where the old one was, and then as the
+//!   source had it: libwebp's demuxer (Pillow's) keeps an EXIF only under
+//!   the flag, and image-webp reads one whatever it says, so each reads
+//!   the output's as it read the source's. Without a VP8X (a simple WebP)
+//!   no reader reads an EXIF, so none goes back.
 //! - **Checked:** the file written must be walked as the source was, with
 //!   the same frames, image and canvas, or nothing is published: Grape
 //!   never writes a WebP it would refuse itself.
@@ -73,6 +87,14 @@ const ICC_FLAG: u8 = 0x20;
 /// Where an extended file's VP8X flags are: [`scan`] wants `VP8X` first.
 const VP8X_FLAGS_AT: u64 = 20;
 
+/// Where a simple file's `VP8L` alpha bit is ([`VP8L_ALPHA_BIT`]): its
+/// image is its first chunk, whose header (after the 0x2F signature) is
+/// 14 bits each of width and height less one, the alpha bit, a version.
+const SIMPLE_ALPHA_AT: u64 = 24;
+
+/// The `VP8L` alpha bit in its byte at [`SIMPLE_ALPHA_AT`].
+const VP8L_ALPHA_BIT: u8 = 0x10;
+
 /// The largest `EXIF` or `XMP ` chunk Compress carries (D28). Compress
 /// keeps metadata, so a file with a larger one is refused rather than
 /// written without it.
@@ -94,29 +116,35 @@ pub(super) struct Plan {
 impl Plan {
     /// Walks the WebP `r` as a conversion does before decoding it: what
     /// that refuses (readers disagree on it, or libwebp's demuxer refuses
-    /// it) is [`Error::Broken`], before anything is written.
+    /// it) is [`Error::Broken`], before anything is written, and so are an
+    /// `ANMF` chunk the demuxer reads inside an `ANMF`, or an `ICCP` there
+    /// it applies ([`Scan::inside`]), and a file shorter than its RIFF
+    /// says, which libwebp's still decoder and its demuxer refuse and the
+    /// walk doesn't read to its end. Everything the file makes Remove
+    /// Metadata refuse is refused here: what [`Plan::write`] then finds
+    /// broken is Grape's own failure.
     pub(super) fn new(r: &mut dyn In) -> Result<Plan, Error> {
         let (scan, reading) = walked(r)?;
+        if let Some(fourcc) = scan.inside {
+            return Err(Error::Broken(format!(
+                "{} chunk inside an ANMF",
+                a(&fourcc)
+            )));
+        }
+        let mut header = [0; 12];
+        read_at(r, 0, &mut header)?;
+        read_at(r, 12 + riff(&header)? - 1, &mut [0])?;
         Ok(Plan { scan, reading })
     }
 
-    /// Whether a conversion decides on the source only once it's decoded:
-    /// a `VP8L` whose own alpha bit says none under VP8X's alpha flag,
-    /// refused when its pixels hold transparency ([`Reading::opaque`]).
-    pub(super) fn decides_by_pixels(&self) -> bool {
-        self.reading.opaque
-    }
-
-    /// Strips the WebP `r` into `w` ([module docs](self)).
+    /// Strips the WebP `r` into `w` ([module docs](self)), the file
+    /// [`Plan::new`] walked: an [`Error::Broken`] here, on a file the plan
+    /// took, is Grape's own failure, not the file's.
     pub(super) fn write(&self, r: &mut dyn In, w: &mut dyn Out) -> Result<Found, Error> {
         let mut found = Found::default();
         let mut header = [0; 12];
         read_at(r, 0, &mut header)?;
         let end = 12 + riff(&header)?;
-        // The RIFF must be whole: libwebp's still decoder and its demuxer
-        // refuse a file shorter than it says, which the walk doesn't read
-        // to its end.
-        read_at(r, end - 1, &mut [0])?;
         let mut written = 0u64;
         write(w, &header, &mut written)?;
         let flags = match self.scan.vp8x {
@@ -134,9 +162,12 @@ impl Plan {
         let size = u32::try_from(written - 8).map_err(|_| Error::Broken("too big".into()))?;
         seek_write(w, 4, &size.to_le_bytes())?;
         if let Some(Flags { at, flags, exif }) = flags {
-            let mut new = flags & !XMP_FLAG & !EXIF_FLAG;
-            if exif {
-                new |= EXIF_FLAG;
+            // EXIF's as the source had it when the minimal EXIF went back:
+            // on where it was off, the demuxer (Pillow) read an orientation
+            // from the output it never read from the source.
+            let mut new = flags & !XMP_FLAG;
+            if !exif {
+                new &= !EXIF_FLAG;
             }
             seek_write(w, at, &[new])?;
         }
@@ -307,13 +338,17 @@ fn extended(
             // `image` crate never reads.
             b"VP8X" => {}
             b"ANIM" if in_frame => {}
-            // A frame the demuxer shows and the `image` crate doesn't, or
-            // a profile it may apply: readers disagree on the file.
-            b"ANMF" | b"ICCP" if in_frame => {
-                return Err(Error::Broken(format!(
-                    "a {} chunk inside an ANMF",
-                    name(&head.fourcc)
-                )));
+            // A frame the demuxer shows and the `image` crate doesn't:
+            // readers disagree on the file, which [`Plan::new`] refused.
+            b"ANMF" if in_frame => {
+                return Err(Error::Broken(
+                    "an ANMF chunk inside an ANMF, past the plan".into(),
+                ));
+            }
+            // A profile no reader applies ([`Plan::new`] refused one the
+            // demuxer applies): VP8X's ICC flag is off, or one came first.
+            b"ICCP" if in_frame => {
+                found.fields.insert(MetaField::Other);
             }
             b"ANMF" => {
                 let frame = animation_frame(r, body, &head, end, canvas, &mut frames)?;
@@ -346,12 +381,17 @@ fn extended(
                 read_at(r, body, &mut data)?;
                 write_chunk(w, b"ANIM", &data, written)?;
                 seen_anim = true;
+                // What a longer one holds past them goes, as other
+                // metadata unless it's blank.
+                if head.size > ANIM_SIZE && !blank(r, body + ANIM_SIZE, head.size - ANIM_SIZE)? {
+                    found.fields.insert(MetaField::Other);
+                }
             }
             b"VP8 " | b"VP8L" | b"ALPH" | b"ANIM" | b"ICCP" => {
                 copy_chunk(r, w, at, &head, written)?;
             }
             b"EXIF" => {
-                let walked = read_exif(r, head.size, found)?;
+                let (walked, prefixed) = read_exif(r, head.size, found)?;
                 // Inside a frame, it's dropped alone.
                 if !seen_exif && !in_frame {
                     let needs = exif::minimal(
@@ -359,7 +399,15 @@ fn extended(
                         walked.dcf_adobe_rgb() && flags.flags & ICC_FLAG == 0,
                     );
                     if let Some(tiff) = needs {
-                        write_chunk(w, b"EXIF", &tiff, written)?;
+                        // In the source's form: the `image` crate reads an
+                        // orientation only from a TIFF at the chunk's
+                        // start, Pillow from either.
+                        let exif = if prefixed {
+                            [EXIF_PREFIX.as_slice(), &tiff].concat()
+                        } else {
+                            tiff
+                        };
+                        write_chunk(w, b"EXIF", &exif, written)?;
                         flags.exif = true;
                     }
                     seen_exif = true;
@@ -376,6 +424,22 @@ fn extended(
     }
     read_at(r, end - 1, &mut [0])?;
     Ok(flags)
+}
+
+/// Whether the `len` bytes of `r` at `at` are all zeros, read a block at a
+/// time.
+fn blank(r: &mut dyn In, at: u64, len: u64) -> Result<bool, Error> {
+    let mut buf = [0; 4096];
+    let mut done = 0;
+    while done < len {
+        let n = usize::try_from(len - done).map_or(buf.len(), |n| n.min(buf.len()));
+        read_at(r, at + done, &mut buf[..n])?;
+        if buf[..n].iter().any(|&b| b != 0) {
+            return Ok(false);
+        }
+        done += n as u64;
+    }
+    Ok(true)
 }
 
 /// What's left of the RIFF after "WEBP", from a file's first 12 bytes.
@@ -426,9 +490,18 @@ fn next(head: [u8; 8], left: &mut u64, chunks: &mut usize) -> Result<Head, Error
     Ok(Head { fourcc, size, body })
 }
 
+/// What an EXIF chunk may hold before its TIFF structure: Pillow writes it
+/// in every animation's, and none in a still's.
+const EXIF_PREFIX: &[u8; 6] = b"Exif\0\0";
+
 /// Reads an EXIF chunk's `size` bytes, walking at most [`MAX_EXIF`] of
-/// them (after an optional `Exif\0\0`), and says what it held.
-fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::Exif, Error> {
+/// them (after an optional [`EXIF_PREFIX`]), and says what it held, and
+/// whether the prefix was there.
+fn read_exif(
+    r: &mut dyn BufRead,
+    size: u64,
+    found: &mut Found,
+) -> Result<(exif::Exif, bool), Error> {
     let take = usize_of(size)?.min(MAX_EXIF);
     let mut data = vec![0; take];
     read_exact(r, &mut data)?;
@@ -436,10 +509,10 @@ fn read_exif(r: &mut dyn BufRead, size: u64, found: &mut Found) -> Result<exif::
     if (take as u64) < size {
         found.fields.insert(MetaField::Other);
     }
-    let tiff = data.strip_prefix(b"Exif\0\0").unwrap_or(&data);
+    let tiff = data.strip_prefix(EXIF_PREFIX).unwrap_or(&data);
     let walked = exif::walk(tiff);
     found.fields.extend(walked.fields.iter().copied());
-    Ok(walked)
+    Ok((walked, tiff.len() < data.len()))
 }
 
 /// Copies the chunk `head` that starts at `at` in `r` into `w`, padded.
@@ -477,6 +550,15 @@ pub(super) struct Scan {
     pub(super) animated: bool,
     /// An animation's frames, as the demuxer counts them; 0 for a still.
     pub(super) frames: u64,
+    /// The first `ANMF` chunk the demuxer reads at the top level inside an
+    /// animation's `ANMF`, after its frame's image, or `ICCP` there that it
+    /// applies as the file's profile (VP8X flags one, and it's the first
+    /// `ICCP` the demuxer reads: its `WebPDemuxGetChunk` gives the first),
+    /// where the `image` crate, trusting the `ANMF`'s size, reads neither.
+    /// Conversions take the first frame, which both show; Remove Metadata
+    /// refuses the file ([`Plan::new`]). An `ICCP` the demuxer doesn't
+    /// apply, no reader does: it goes.
+    pub(super) inside: Option<[u8; 4]>,
     /// What Compress carries into its own file.
     pub(super) carried: Carried,
 }
@@ -585,7 +667,13 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 if flags & ANIMATION_FLAG != 0 {
                     found.animated = true;
                     let canvas = (side(&data[4..7]), side(&data[7..10]));
-                    found.frames = animation(r, at, at + left, canvas, &mut chunks)?;
+                    let icc = flags & ICC_FLAG != 0;
+                    found.frames = animation(r, at, at + left, canvas, icc, &mut chunks).map(
+                        |(frames, inside)| {
+                            found.inside = inside;
+                            frames
+                        },
+                    )?;
                     return Ok(found);
                 }
             }
@@ -604,10 +692,7 @@ fn walk(r: &mut dyn In, carry: bool) -> Result<Scan, Error> {
                 }
             }
             _ if first => {
-                return Err(Error::Broken(format!(
-                    "a {} chunk first",
-                    name(&head.fourcc)
-                )));
+                return Err(Error::Broken(format!("{} chunk first", a(&head.fourcc))));
             }
             // The image's own: one before it, or one after it ([`Own`]).
             b"ALPH" => match image {
@@ -740,8 +825,8 @@ impl Own {
             } if is_image => Own::In { alpha, image: true },
             _ if is_alph || is_image => {
                 return Err(Error::Broken(format!(
-                    "a {} chunk past the image's own",
-                    name(fourcc)
+                    "{} chunk past the image's own",
+                    a(fourcc)
                 )));
             }
             Own::In { .. } => Own::Past,
@@ -773,26 +858,45 @@ const MAX_AREA: u64 = 1 << 32;
 /// padded, a frame that's broken ([`animation_frame`]) and an animation
 /// with no frame are all [`Error::Broken`]; unknown chunks, metadata and a
 /// second `ANIM` are passed over. The canvas, `canvas`, must be under
-/// [`MAX_AREA`]. Gives the frames it read.
+/// [`MAX_AREA`]. `icc` is VP8X's ICC flag. Gives the frames it read, and
+/// the first `ANMF` the demuxer reads inside an `ANMF`, or `ICCP` there it
+/// applies ([`Scan::inside`]).
 fn animation(
     r: &mut dyn In,
     mut at: u64,
     end: u64,
     canvas: (u32, u32),
+    icc: bool,
     chunks: &mut usize,
-) -> Result<u64, Error> {
+) -> Result<(u64, Option<[u8; 4]>), Error> {
     if u64::from(canvas.0) * u64::from(canvas.1) >= MAX_AREA {
         let (w, h) = canvas;
         return Err(Error::Broken(format!("a {w}x{h} canvas")));
     }
     let mut anim = false;
     let mut frames = 0u64;
+    // The end of the last `ANMF` read at the top level: a chunk that starts
+    // before it is inside it.
+    let mut frame_end = 0;
+    let mut inside = None;
+    // Whether an `ICCP` was read, inside a frame or not: the demuxer
+    // applies the first, when VP8X flags one.
+    let mut profile = false;
     while at < end {
         let mut raw = [0; 8];
         read_at(r, at, &mut raw)?;
         let head = next(raw, &mut (end - at), chunks)?;
+        let in_frame = at < frame_end;
         let body = at + 8;
         at = body + head.body;
+        let applied = &head.fourcc == b"ICCP" && icc && !profile;
+        profile |= &head.fourcc == b"ICCP";
+        if in_frame && (&head.fourcc == b"ANMF" || applied) && inside.is_none() {
+            inside = Some(head.fourcc);
+        }
+        if !in_frame && &head.fourcc == b"ANMF" {
+            frame_end = at;
+        }
         match &head.fourcc {
             // Its size padded, as the demuxer reads it ([`ANIM_SIZE`]).
             b"ANIM" if head.body < ANIM_SIZE => {
@@ -808,8 +912,8 @@ fn animation(
             b"ANMF" => at = animation_frame(r, body, &head, end, canvas, &mut frames)?.resume,
             b"VP8X" | b"ALPH" | b"VP8 " | b"VP8L" => {
                 return Err(Error::Broken(format!(
-                    "a {} chunk outside the animation's frames",
-                    name(&head.fourcc)
+                    "{} chunk outside the animation's frames",
+                    a(&head.fourcc)
                 )));
             }
             _ => {}
@@ -818,7 +922,7 @@ fn animation(
     if frames == 0 {
         return Err(Error::Broken("an animation with no frame".into()));
     }
-    Ok(frames)
+    Ok((frames, inside))
 }
 
 /// An `ANMF` chunk as libwebp's demuxer reads it ([`animation_frame`]).
@@ -937,6 +1041,17 @@ pub(crate) struct Reading {
     /// alpha its pixels hold, so a picture whose pixels hold some is shown
     /// differently by each and must be refused once decoded.
     pub(crate) opaque: bool,
+    /// A still `VP8L` whose own bit says no alpha with no VP8X alpha flag
+    /// over it (or no VP8X): libwebp's still decoder and its animation
+    /// decoder (`WebPAnimDecoder`, on the demuxer) give the alpha its
+    /// pixels hold, where the demuxer says there's none (its format flags
+    /// and the frame's `has_alpha`, by the bit), so Pillow, going by that,
+    /// and image-webp show it opaque: a picture whose pixels hold some is
+    /// shown differently and must be refused once decoded. The byte to read in
+    /// place of `patch`'s, and where, so that image-webp decodes its alpha
+    /// to see: VP8X's flags with alpha on, or the `VP8L`'s own bit set. A
+    /// picture with none is then handed on opaque, as image-webp shows it.
+    pub(crate) unflagged: Option<(u64, u8)>,
 }
 
 /// Walks the WebP `r` as [`scan`] does, its metadata unread, and says how
@@ -956,9 +1071,26 @@ fn walked(r: &mut dyn In) -> Result<(Scan, Reading), Error> {
         return Err(Error::Broken(why.into()));
     }
     let flagged = scan.vp8x.is_some_and(|vp8x| vp8x.flags & ALPHA_FLAG != 0);
+    let patch = decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags));
+    let unflagged = if !scan.animated && scan.lossless && !scan.alpha && !flagged {
+        Some(match scan.vp8x {
+            Some(vp8x) => {
+                let flags = patch.map_or(vp8x.flags, |(_, flags)| flags);
+                (VP8X_FLAGS_AT, flags | ALPHA_FLAG)
+            }
+            None => {
+                let mut byte = [0];
+                read_at(r, SIMPLE_ALPHA_AT, &mut byte)?;
+                (SIMPLE_ALPHA_AT, byte[0] | VP8L_ALPHA_BIT)
+            }
+        })
+    } else {
+        None
+    };
     let reading = Reading {
-        patch: decode_flags(&scan).map(|flags| (VP8X_FLAGS_AT, flags)),
+        patch,
         opaque: !scan.animated && scan.lossless && flagged && !scan.alpha,
+        unflagged,
     };
     Ok((scan, reading))
 }
@@ -1088,8 +1220,8 @@ fn take(
     }
     if head.size > max {
         return Err(Error::TooLarge(format!(
-            "a {} chunk of {} bytes, over the {max} Compress carries",
-            name(&head.fourcc),
+            "{} chunk of {} bytes, over the {max} Compress carries",
+            a(&head.fourcc),
             head.size
         )));
     }
@@ -1147,8 +1279,8 @@ pub(super) fn assemble(
             b"VP8 " | b"VP8L" if image.is_none() => image = Some((head.fourcc, body)),
             other => {
                 return Err(Error::Broken(format!(
-                    "libwebp wrote a {} chunk Grape didn't expect",
-                    name(other)
+                    "libwebp wrote {} chunk Grape didn't expect",
+                    a(other)
                 )));
             }
         }
@@ -1203,6 +1335,17 @@ pub(super) fn assemble(
 /// A fourcc for a message, its trailing space trimmed.
 fn name(fourcc: &[u8; 4]) -> String {
     String::from_utf8_lossy(fourcc).trim_end().to_owned()
+}
+
+/// A fourcc for a message after "a" or "an", as it's read: "an ANMF", "an
+/// XMP", "a VP8L".
+fn a(fourcc: &[u8; 4]) -> String {
+    let name = name(fourcc);
+    let an = matches!(
+        name.as_bytes().first(),
+        Some(b'A' | b'E' | b'I' | b'O' | b'U' | b'X')
+    );
+    format!("{} {name}", if an { "an" } else { "a" })
 }
 
 fn usize_of(n: u64) -> Result<usize, Error> {
@@ -1361,13 +1504,70 @@ mod tests {
         ]);
         let (out, fields) = run(&[src, b"after".to_vec()].concat()).unwrap();
         assert_eq!(fields, [Camera, Xmp, Other].into());
+        // Behind its `Exif\0\0` as the source's was, which the `image`
+        // crate doesn't read an orientation from, and Pillow does.
         let minimal = exif::minimal(Some(3), false).unwrap();
+        let prefixed = [b"Exif\0\0".as_slice(), &minimal].concat();
+        assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &prefixed)]));
+        // Bare as the source's was.
+        let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &camera)]);
+        let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x08), image(), chunk(b"EXIF", &minimal)]));
         // Upright: the EXIF flag goes too.
         let t = tiff(b'I', &[&[(0x010F, V::Ascii("Nikon"))]], None);
         let src = webp(&[vp8x(0x08), image(), chunk(b"EXIF", &t)]);
         let (out, _) = run(&src).unwrap();
         assert_eq!(out, webp(&[vp8x(0x00), image()]));
+    }
+
+    #[test]
+    fn the_exif_flag_stays_as_the_source_had_it() {
+        // An EXIF under no flag: libwebp's demuxer (Pillow) keeps none,
+        // image-webp reads it. Its minimal EXIF goes back, which image-webp
+        // reads as it read the source's, and the flag stays off: it was
+        // turned on, and Pillow read an orientation from the output it
+        // never read from the source.
+        let six = tiff(
+            b'M',
+            &[&[(0x010F, V::Ascii("Nikon")), (0x0112, V::Short(6))]],
+            None,
+        );
+        let minimal = exif::minimal(Some(6), false).unwrap();
+        let prefixed = |t: &[u8]| [b"Exif\0\0".as_slice(), t].concat();
+        let red = || frame(0, 0, &[image()]);
+        for (src, want) in [
+            (
+                webp(&[
+                    vp8x(0x10),
+                    chunk(b"EXIF", &six),
+                    chunk(b"ALPH", b"al"),
+                    image(),
+                ]),
+                webp(&[
+                    vp8x(0x10),
+                    chunk(b"EXIF", &minimal),
+                    chunk(b"ALPH", b"al"),
+                    image(),
+                ]),
+            ),
+            (
+                webp(&[vp8x(0x00), image(), chunk(b"EXIF", &prefixed(&six))]),
+                webp(&[vp8x(0x00), image(), chunk(b"EXIF", &prefixed(&minimal))]),
+            ),
+            (
+                animation(0, &[chunk(b"EXIF", &prefixed(&six)), red(), red()]),
+                animation(0, &[chunk(b"EXIF", &prefixed(&minimal)), red(), red()]),
+            ),
+            // Flagged, it stays on.
+            (
+                animation(0x08, &[red(), chunk(b"EXIF", &six)]),
+                animation(0x08, &[red(), chunk(b"EXIF", &minimal)]),
+            ),
+        ] {
+            let (out, fields) = run(&src).unwrap();
+            assert_eq!(out, want, "{src:?}");
+            assert_eq!(fields, [MetaField::Camera].into(), "{src:?}");
+        }
     }
 
     #[test]
@@ -1523,20 +1723,43 @@ mod tests {
         let with = |anim: &[u8]| webp(&[vp8x(0x02), anim.to_vec(), red(), chunk(b"ANIM", &[9; 7])]);
         // The 6 bytes of its size padded the demuxer reads (its pad byte
         // too), which image-webp reads only at 6: one of 5, 7 or 16 bytes
-        // (Pillow shows them) made every conversion refuse the file. A
-        // second one, which both pass over, goes as it is.
-        for (anim, want) in [
-            (b"ANIM   ".to_vec(), [1, 2, 3, 4, 5, 7]),
-            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6, 7]), [1, 2, 3, 4, 5, 6]),
+        // (Pillow shows them) made every conversion refuse the file. What
+        // a longer one holds past them goes, said unless it's blank (it
+        // went unsaid). A second one, which both pass over, goes as it is.
+        let other = || [MetaField::Other].into();
+        for (anim, want, said) in [
+            (
+                b"ANIM   ".to_vec(),
+                [1, 2, 3, 4, 5, 7],
+                BTreeSet::new(),
+            ),
+            (
+                chunk(b"ANIM", &[1, 2, 3, 4, 5, 6, 7]),
+                [1, 2, 3, 4, 5, 6],
+                other(),
+            ),
             (
                 chunk(b"ANIM", &[[1, 2, 3, 4, 5, 6].as_slice(), &[8; 10]].concat()),
                 [1, 2, 3, 4, 5, 6],
+                other(),
             ),
-            (chunk(b"ANIM", &[1, 2, 3, 4, 5, 6]), [1, 2, 3, 4, 5, 6]),
+            (
+                chunk(
+                    b"ANIM",
+                    &[[1, 2, 3, 4, 5, 6].as_slice(), &[0; 5_000]].concat(),
+                ),
+                [1, 2, 3, 4, 5, 6],
+                BTreeSet::new(),
+            ),
+            (
+                chunk(b"ANIM", &[1, 2, 3, 4, 5, 6]),
+                [1, 2, 3, 4, 5, 6],
+                BTreeSet::new(),
+            ),
         ] {
             let (out, fields) = run(&with(&anim)).unwrap();
             assert_eq!(out, with(&chunk(b"ANIM", &want)));
-            assert!(fields.is_empty());
+            assert_eq!(fields, said);
         }
     }
 
@@ -1572,20 +1795,82 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_holding_a_frame_or_a_profile_is_refused() {
+    fn a_frame_holding_a_frame_or_a_profile_the_demuxer_applies_is_refused() {
         // libwebp ends a frame at its image and reads the rest as top-level
-        // chunks, a frame it shows or a profile it may apply, where the
-        // `image` crate trusts the size and reads neither: readers disagree.
-        for inner in [
-            frame(0, 0, &[vp8l(2, 2, false)]),
-            chunk(b"ICCP", b"profile"),
+        // chunks, a frame it shows or a profile it applies as the file's
+        // (VP8X flags one, and no ICCP came first), where the `image` crate
+        // trusts the size and reads neither: readers disagree. The plan
+        // refuses them, before anything is written.
+        let profile = || chunk(b"ICCP", b"profile");
+        let first = || chunk(b"ICCP", b"the file's");
+        let anim = || chunk(b"ANIM", &[0; 6]);
+        let red = || frame(0, 0, &[image()]);
+        for (src, why) in [
+            (
+                animation(0, &[frame(0, 0, &[image(), red()])]),
+                "an ANMF chunk inside an ANMF",
+            ),
+            (
+                animation(0x20, &[frame(0, 0, &[image(), profile()])]),
+                "an ICCP chunk inside an ANMF",
+            ),
+            // The demuxer reads its profile at the top level, in a frame
+            // or not, and applies the first.
+            (
+                webp(&[
+                    vp8x(0x22),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                    first(),
+                ]),
+                "an ICCP chunk inside an ANMF",
+            ),
+            // In an ANMF with no image, the demuxer passes over the frame
+            // and reads on at its header's end.
+            (
+                webp(&[vp8x(0x22), anim(), red(), frame(0, 0, &[profile()]), red()]),
+                "an ICCP chunk inside an ANMF",
+            ),
         ] {
-            let src = animation(0x20, &[frame(0, 0, &[image(), inner])]);
-            let got = run(&src);
+            let got = Plan::new(&mut Cursor::new(&src));
             assert!(
-                matches!(&got, Err(Error::Broken(why)) if why.contains("inside an ANMF")),
+                matches!(&got, Err(Error::Broken(said)) if said == why),
                 "{got:?}"
             );
+        }
+        // One it doesn't apply, no reader does: VP8X's ICC flag off, or an
+        // ICCP before it. It goes, as other metadata (it was refused).
+        for (src, want) in [
+            (
+                animation(0, &[frame(0, 0, &[image(), profile()])]),
+                animation(0, &[red()]),
+            ),
+            (
+                webp(&[vp8x(0x02), anim(), red(), frame(0, 0, &[profile()]), red()]),
+                webp(&[vp8x(0x02), anim(), red(), red()]),
+            ),
+            (
+                webp(&[
+                    vp8x(0x22),
+                    first(),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                ]),
+                webp(&[vp8x(0x22), first(), anim(), red()]),
+            ),
+            (
+                webp(&[
+                    vp8x(0x02),
+                    anim(),
+                    frame(0, 0, &[image(), profile()]),
+                    first(),
+                ]),
+                webp(&[vp8x(0x02), anim(), red(), first()]),
+            ),
+        ] {
+            let (out, fields) = run(&src).unwrap();
+            assert_eq!(out, want);
+            assert_eq!(fields, [MetaField::Other].into());
         }
         // A VP8X there the demuxer refuses, as conversions do.
         let src = animation(0, &[frame(0, 0, &[image(), vp8x(0x02)])]);
@@ -1682,12 +1967,14 @@ mod tests {
         ] {
             assert!(matches!(run(&bad), Err(Error::Broken(_))), "{bad:?}");
         }
-        // A VP8L whose bit says opaque under VP8X's alpha flag: a
-        // conversion decides on it once decoded, and so does `strip::run`.
-        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, false)]))).unwrap();
-        assert!(plan.decides_by_pixels());
-        let plan = Plan::new(&mut Cursor::new(webp(&[vp8x(0x10), vp8l(2, 2, true)]))).unwrap();
-        assert!(!plan.decides_by_pixels());
+        // A VP8L whose bit says opaque under VP8X's alpha flag, which a
+        // conversion decides on once decoded: kept as it is, undecoded,
+        // its flag byte for byte, so it shows what the source shows.
+        for flags in [0x10, 0x14] {
+            let src = webp(&[vp8x(flags), vp8l(2, 2, false)]);
+            let (out, _) = run(&src).unwrap();
+            assert_eq!(out, webp(&[vp8x(0x10), vp8l(2, 2, false)]));
+        }
     }
 
     /// An `ALPH` chunk.
@@ -1757,9 +2044,12 @@ mod tests {
 
     #[test]
     fn broken_webps_are_refused() {
+        // By the plan, before anything is written: cut inside its image's
+        // bitstream, past what the walk reads, too.
         let good = webp(&[vp8x(0), image()]);
         for n in 0..good.len() {
-            assert!(run(&good[..n]).is_err(), "cut at {n}");
+            let planned = Plan::new(&mut Cursor::new(&good[..n]));
+            assert!(matches!(planned, Err(Error::Broken(_))), "cut at {n}");
         }
         // The last pad byte missing is fine, and it's written: libwebp
         // refuses a chunk without its pad. In a frame too.
@@ -2139,6 +2429,7 @@ mod tests {
                 late_alpha: false,
                 animated: false,
                 frames: 0,
+                inside: None,
                 carried: Carried {
                     flags: 0x2C,
                     iccp: Some(b"profile".to_vec()),
@@ -2441,7 +2732,8 @@ mod tests {
             read(&tagged).unwrap(),
             Reading {
                 patch: Some((20, 0)),
-                opaque: false
+                opaque: false,
+                unflagged: None,
             }
         );
         assert_eq!(tagged[20], 0x18);
@@ -2476,9 +2768,31 @@ mod tests {
             read(&webp(&[canvas(0, 9, 9), vp8l(9, 9, true)])).unwrap(),
             Reading {
                 patch: Some((20, 0x10)),
-                opaque: false
+                opaque: false,
+                unflagged: None,
             }
         );
+        // Its bit off under no flag, or in a simple file: libwebp's still
+        // and animation decoders show its pixels' alpha, Pillow (by what
+        // the demuxer says) and image-webp show it opaque. Read with alpha
+        // on to see, at VP8X's flags (the EXIF flag off too) or the VP8L's
+        // own bit.
+        let unflagged = |file: &[u8]| read(file).unwrap().unflagged;
+        let tagged = webp(&[canvas(0x08, 9, 9), vp8l(9, 9, false)]);
+        assert_eq!(read(&tagged).unwrap().patch, Some((20, 0)));
+        assert_eq!(unflagged(&tagged), Some((20, 0x10)));
+        let simple = webp(&[vp8l(9, 9, false)]);
+        assert_eq!(simple[24] & 0x10, 0);
+        assert_eq!(unflagged(&simple), Some((24, simple[24] | 0x10)));
+        for read_as_it_is in [
+            webp(&[vp8l(9, 9, true)]),
+            webp(&[canvas(0x10, 9, 9), vp8l(9, 9, false)]),
+            webp(&[canvas(0, 9, 9), vp8l(9, 9, true)]),
+            webp(&[canvas(0, 9, 9), vp8(9, 9)]),
+            anim.clone(),
+        ] {
+            assert_eq!(unflagged(&read_as_it_is), None);
+        }
         // Metadata isn't read, so it's never too large to decode.
         let mut big = webp(&[canvas(0x08, 9, 9), vp8(9, 9)]);
         let size = u32::try_from(MAX_CARRIED + 2).unwrap();

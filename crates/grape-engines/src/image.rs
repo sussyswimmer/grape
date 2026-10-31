@@ -224,6 +224,9 @@ enum DecodeFailure {
     /// The header asks for more memory than Grape allows; the detail says
     /// how much.
     TooLarge(String),
+    /// A still `VP8L` decoded with its alpha to see (`Reading::unflagged`)
+    /// holds transparency, which readers show differently.
+    Unflagged,
 }
 
 impl From<ImageError> for DecodeFailure {
@@ -379,10 +382,13 @@ fn decode_as(
     } else {
         None
     };
+    // A VP8L whose alpha libwebp's readers show differently is decoded
+    // with its alpha, to see.
+    let unflagged = webp.is_some_and(|reading| reading.unflagged.is_some());
     let inner = Patched {
         inner: Cancellable::new(file, cancel),
         pos: 0,
-        patch: webp.and_then(|reading| reading.patch),
+        patch: webp.and_then(|reading| reading.unflagged.or(reading.patch)),
     };
     let mut reader = ImageReader::new(BufReader::new(Bounded { inner, pos: 0, end }));
     if let Some(hint) = image_format(from) {
@@ -454,7 +460,14 @@ fn decode_as(
                 Orientation::NoTransforms
             };
             let (width, height) = decoder.dimensions();
-            let color = decoder.color_type();
+            // Decoded with its alpha to see, it's counted as it was decoded
+            // before, RGB: image-webp held the same RGBA buffer then, and
+            // copied its color out of it, as it's copied out below before
+            // it's turned.
+            let color = match decoder.color_type() {
+                ColorType::Rgba8 if unflagged => ColorType::Rgb8,
+                color => color,
+            };
             let icc = decoder
                 .icc_profile()
                 .ok()
@@ -475,9 +488,22 @@ fn decode_as(
             // hold the decoded buffer to the default limit, and give the
             // decoder only what is left for its own buffers.
             let mut limits = Limits::default();
-            limits.reserve(decoder.total_bytes())?;
+            limits.reserve(if unflagged {
+                u64::from(width) * u64::from(height) * 3
+            } else {
+                decoder.total_bytes()
+            })?;
             decoder.set_limits(limits)?;
             let mut img = DynamicImage::from_decoder(decoder)?;
+            if unflagged {
+                if transparent(&img) {
+                    return Err(DecodeFailure::Unflagged);
+                }
+                // Opaque, it's handed on as RGB, dropped to it before it's
+                // turned: a quarter turn of the RGBA held two RGBA copies,
+                // 8 bytes a pixel, where the RGB's peak is the 7 counted.
+                img = DynamicImage::ImageRgb8(img.into_rgb8());
+            }
             img.apply_orientation(orientation);
             Ok((img, icc))
         },
@@ -491,6 +517,15 @@ fn decode_as(
             )))
         }
         Ok(Ok(decoded)) => Ok(decoded),
+        Ok(Err(DecodeFailure::Unflagged)) => {
+            // libwebp's still and animation decoders show its pixels'
+            // alpha; its demuxer says it has none, by the VP8L's bit, and
+            // Pillow, going by that, and image-webp show it opaque.
+            Err(names.decode_failed(format!(
+                "decode {}: transparent in libwebp's decoders, opaque in Pillow and image-webp",
+                src.display()
+            )))
+        }
         Ok(Err(DecodeFailure::TooLarge(detail))) => {
             Err(names.too_large(format!("decode {}: {detail}", src.display())))
         }
