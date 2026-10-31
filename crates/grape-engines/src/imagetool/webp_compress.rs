@@ -21,7 +21,9 @@
 //!   source pixel covers of a new one (so a straight line keeps its
 //!   weight), its fully transparent pixels colored as the visible ones
 //!   nearest them, and by Lanczos3 elsewhere ([`scale`]). The qualities
-//!   are JPEG's, so a preset means the same across formats.
+//!   are JPEG's, so a preset means the same across formats. A picture
+//!   with transparency its cap would scale by less than 2 to 1 is also
+//!   encoded as it is, and the smaller file kept ([`UNSCALED_UNDER`]).
 //!   Kept when it's at most 90 % of the source's size. "Try Small" only
 //!   when Small's own file is: when Balanced or High ends `NoChange`, Small
 //!   is run as a trial, its file measured and never written
@@ -64,6 +66,7 @@
 //!   started, with no report: a 9850² grained source took 6.3 s at Small,
 //!   and a cancel 1 s in returned after 5.3 s.
 
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Write};
 use std::path::Path;
@@ -77,6 +80,7 @@ use super::scale;
 use super::strip::{self, Error};
 use super::webp::{self, Carried, ALPHA_FLAG};
 use crate::cancel::Cancellable;
+use crate::image::{MAX_ICC, WORKING_SET_LIMIT};
 use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
@@ -119,6 +123,26 @@ const LOSSY_ALPHA_BYTES: u64 = 73;
 /// output (at most about 4 bytes a pixel) and the RGBA it decodes to for
 /// the check (4) come once libwebp's buffers are freed.
 const LOSSLESS_BYTES: u64 = 58;
+
+/// Under this many times its preset's long side, a lossy picture with
+/// transparency is also encoded as it is, at the preset's quality, and
+/// the smaller file kept ([`lossy_file`]): the cap is there to make the
+/// file smaller, and scaled, a hard-edged alpha plane's glyphs, which
+/// repeat exactly as they are, each land at a phase of their own, and its
+/// edges take steps, so it can come out larger than unscaled. Measured
+/// through Compress on 12 kinds of picture at 1.03 to 2.73 times Small's
+/// cap and 8 at 1.03 to 2 times Balanced's, the scaled file was the
+/// smaller of the two on every one from 1.86 to 1 up (1.80 at Balanced),
+/// and antialiased text's was the larger up to 1.85 to 1 (1.02 times);
+/// twice the cap is also where scaling first averages by a whole factor.
+const UNSCALED_UNDER: u64 = 2;
+
+/// Whether Compress at a long side of `cap` also encodes a `width`×`height`
+/// picture as it is ([`UNSCALED_UNDER`]), if it has `alpha`.
+fn tries_unscaled(width: u32, height: u32, alpha: bool, cap: Option<u32>) -> bool {
+    let long = u64::from(width.max(height));
+    alpha && cap.is_some_and(|cap| long > u64::from(cap) && long < UNSCALED_UNDER * u64::from(cap))
+}
 
 /// A lossy preset's quality and the long side it scales down to.
 fn plan(preset: CompressPreset) -> (f32, Option<u32>) {
@@ -165,7 +189,7 @@ fn small_would_do(
         return Ok(false);
     }
     progress(0.9);
-    let img = match decode(
+    let decoded = decode(
         src,
         from,
         names,
@@ -173,14 +197,15 @@ fn small_would_do(
         false,
         CompressPreset::Small,
         carried,
-    ) {
-        Ok(img) => img,
+    );
+    let (img, unscaled) = match decoded {
+        Ok(decoded) => decoded,
         Err(_) if cancel.is_cancelled() => return Err(crate::cancelled(src)),
         Err(_) => return Ok(false),
     };
     progress(0.92);
     match lossy_file(
-        img,
+        (img, unscaled),
         CompressPreset::Small,
         carried,
         (src, names, cancel),
@@ -266,7 +291,7 @@ pub(crate) fn run(
 
     let lossless = scan.lossless;
     let mut carried = scan.carried;
-    let img = decode(src, from, &names, cancel, lossless, preset, &carried)?;
+    let (img, unscaled) = decode(src, from, &names, cancel, lossless, preset, &carried)?;
     progress(0.4);
     let (out, img, width, height) = if lossless {
         progress(0.5);
@@ -286,8 +311,14 @@ pub(crate) fn run(
         (out, Some(img), width, height)
     } else {
         let ctx = (src, &names, cancel);
-        let (out, width, height) =
-            lossy_file(img, preset, &mut carried, ctx, progress, (0.5, 0.9))?;
+        let (out, width, height) = lossy_file(
+            (img, unscaled),
+            preset,
+            &mut carried,
+            ctx,
+            progress,
+            (0.5, 0.9),
+        )?;
         (out, None, width, height)
     };
     // A cancel during the last report is a cancel, not a verdict on size.
@@ -342,7 +373,11 @@ pub(crate) fn run(
 /// The picture `src` holds, decoded as stored (8-bit RGB or RGBA) once
 /// what Compress at `preset` holds for it, its metadata `carried` among
 /// it, is checked against D16's limit ([`peak`]). Read as libwebp reads
-/// it, or refused as conversions refuse it (`webp::reading`).
+/// it, or refused as conversions refuse it (`webp::reading`). With it,
+/// whether a lossy one's encode as it is ([`UNSCALED_UNDER`]) fits the
+/// limit too, counted with the rest (and the largest profile), which
+/// [`lossy_file`] then holds to: one that doesn't is only scaled, as
+/// before, and never refused for it.
 fn decode(
     src: &Path,
     from: Format,
@@ -351,13 +386,23 @@ fn decode(
     lossless: bool,
     preset: CompressPreset,
     carried: &Carried,
-) -> Result<DynamicImage, GrapeError> {
+) -> Result<(DynamicImage, bool), GrapeError> {
     let (_, cap) = plan(preset);
     // The metadata is held throughout, and again in the file written.
     let metadata = carried.len().saturating_mul(2);
+    let unscaled = Cell::new(false);
     let tool_peak = |width: u32, height: u32, color: ColorType| {
         let bpp = u64::from(color.bytes_per_pixel());
-        peak(width, height, bpp, lossless, cap).saturating_add(metadata)
+        let scaled = peak(width, height, bpp, lossless, cap).saturating_add(metadata);
+        if !lossless && tries_unscaled(width, height, color.has_alpha(), cap) {
+            // As it is first, the decoded picture held; scaled after.
+            let both = peak(width, height, bpp, false, None)
+                .saturating_add(metadata)
+                .max(scaled)
+                .saturating_add(MAX_ICC as u64);
+            unscaled.set(both <= WORKING_SET_LIMIT);
+        }
+        scaled
     };
     let (img, _icc) =
         crate::image::decode_stored(src, from, Format::Webp, names, cancel, &tool_peak)
@@ -365,16 +410,21 @@ fn decode(
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
-    Ok(rgb_or_rgba(img))
+    Ok((rgb_or_rgba(img), unscaled.get()))
 }
 
 /// What the lossy `preset` writes of the decoded picture `img`: scaled to
 /// its cap ([`scale`]), encoded at its quality by the method the scaled
 /// picture calls for ([`LOSSY_METHOD`]), libwebp's progress going to
 /// `span` of `progress`, and put in a file with `carried` ([`assembled`]).
-/// Gives the file and the picture's size.
+/// A picture with transparency the cap scales by less than
+/// [`UNSCALED_UNDER`] to 1 is first encoded as it is too, when `unscaled`
+/// says that fits D16's limit ([`decode`]), its file held through the
+/// scale (counted then, and dropped if it doesn't fit) and the smaller of
+/// the two kept; the two encodes share `span`, the first half each. Gives
+/// the file and the picture's size.
 fn lossy_file(
-    img: DynamicImage,
+    (img, unscaled): (DynamicImage, bool),
     preset: CompressPreset,
     carried: &mut Carried,
     (src, names, cancel): (&Path, &Names, &CancelToken),
@@ -382,6 +432,31 @@ fn lossy_file(
     span: (f32, f32),
 ) -> Result<(Vec<u8>, u32, u32), GrapeError> {
     let (quality, cap) = plan(preset);
+    let (from_w, from_h) = img.dimensions();
+    let transparent = matches!(&img, DynamicImage::ImageRgba8(rgba) if scale::transparent(rgba));
+    let mut span = span;
+    let mut as_it_is = None;
+    if unscaled && tries_unscaled(from_w, from_h, transparent, cap) {
+        let half = (span.0 + span.1) / 2.0;
+        progress(span.0);
+        let file = encode_lossy(
+            &img,
+            quality,
+            (src, names, cancel),
+            progress,
+            (span.0, half),
+        )?;
+        span.0 = half;
+        // Held through the scale and its encode.
+        let metadata = carried.len().saturating_mul(2);
+        let held = peak(from_w, from_h, 4, false, cap)
+            .saturating_add(metadata)
+            .saturating_add(file.len() as u64)
+            .saturating_add(MAX_ICC as u64);
+        if held <= WORKING_SET_LIMIT {
+            as_it_is = Some(file);
+        }
+    }
     let img = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
     let img = opaque_as_rgb(img);
     if cancel.is_cancelled() {
@@ -389,8 +464,28 @@ fn lossy_file(
     }
     progress(span.0);
     let (width, height) = img.dimensions();
-    // By the picture encoded: one whose scale left it opaque has no alpha
-    // plane to encode.
+    let encoded = encode_lossy(&img, quality, (src, names, cancel), progress, span)?;
+    drop(img);
+    progress(span.1);
+    let (encoded, width, height) = match as_it_is {
+        Some(file) if file.len() < encoded.len() => (file, from_w, from_h),
+        _ => (encoded, width, height),
+    };
+    let out = assembled(encoded, width, height, carried, src, names)?;
+    Ok((out, width, height))
+}
+
+/// `img` (8-bit RGB or RGBA) encoded lossily at `quality`, by the method
+/// the picture calls for ([`LOSSY_METHOD`]: one with no alpha plane to
+/// encode, an opaque one, at 6), libwebp's progress going to `span` of
+/// `progress`.
+fn encode_lossy(
+    img: &DynamicImage,
+    quality: f32,
+    (src, names, cancel): (&Path, &Names, &CancelToken),
+    progress: &mut dyn FnMut(f32),
+    span: (f32, f32),
+) -> Result<Vec<u8>, GrapeError> {
     let method = if img.color().has_alpha() {
         LOSSY_METHOD.1
     } else {
@@ -401,12 +496,7 @@ fn lossy_file(
         // A thread more for the alpha plane.
         threads: true,
     };
-    let encoded = encode(&img, &opts, cancel, progress, span)
-        .map_err(|e| encode_error(e, src, names, cancel))?;
-    drop(img);
-    progress(span.1);
-    let out = assembled(encoded, width, height, carried, src, names)?;
-    Ok((out, width, height))
+    encode(img, &opts, cancel, progress, span).map_err(|e| encode_error(e, src, names, cancel))
 }
 
 /// libwebp's `encoded` file of a `width`×`height` picture with `carried`
@@ -658,6 +748,24 @@ mod tests {
         assert!(fits(4000, 3000, 4, false, None));
         assert!(!fits(4096, 4096, 4, false, Some(4096)));
         assert!(fits(8192, 8192, 4, false, Some(2048)));
+    }
+
+    #[test]
+    fn a_picture_with_alpha_under_twice_the_cap_is_also_tried_as_it_is() {
+        // Over the cap, under twice it, with alpha: tried as it is too.
+        assert!(tries_unscaled(2049, 10, true, Some(2048)));
+        assert!(tries_unscaled(10, 4095, true, Some(2048)));
+        assert!(tries_unscaled(8191, 1675, true, Some(4096)));
+        // Not over the cap, at twice it or past, no cap, or opaque.
+        for (w, h, alpha, cap) in [
+            (2048, 2048, true, Some(2048)),
+            (4096, 10, true, Some(2048)),
+            (9000, 10, true, Some(4096)),
+            (3000, 10, true, None),
+            (3000, 10, false, Some(2048)),
+        ] {
+            assert!(!tries_unscaled(w, h, alpha, cap), "{w}x{h} {alpha} {cap:?}");
+        }
     }
 
     #[test]

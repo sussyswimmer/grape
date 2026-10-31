@@ -3576,6 +3576,126 @@ fn compress_says_try_small_only_when_small_would_do_more() {
     assert!(!try_small_is_exact(&dir, "tagged.webp", &tagged));
 }
 
+/// Hard-edged text on transparency, `w`×`h` at `quality`, in the photo's
+/// colors or a smooth blend of colors: lines of 26 made-up glyphs, 10 × 16
+/// px of 1 and 2 px strokes each, which repeat exactly, as a font's do.
+fn hard_text(w: u32, h: u32, quality: f32, in_photo: bool) -> Vec<u8> {
+    let colors = if in_photo {
+        photo(w, h)
+    } else {
+        RgbImage::from_fn(w, h, |x, y| {
+            let (x, y) = (x as f32 / w as f32, y as f32 / h as f32);
+            Rgb([
+                (40.0 + 180.0 * x) as u8,
+                (200.0 - 150.0 * y) as u8,
+                (90.0 + 120.0 * x * y) as u8,
+            ])
+        })
+    };
+    let mut seed = 9u32;
+    let mut next = move || {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        seed >> 8
+    };
+    let glyphs: Vec<Vec<bool>> = (0..26)
+        .map(|_| {
+            let mut ink = vec![false; 10 * 16];
+            for _ in 0..3 {
+                let (across, at, wide) = (next() % 2 == 0, next() % 8, 1 + next() % 2);
+                for t in 0..16 {
+                    for k in 0..wide {
+                        let (x, y) = if across {
+                            (t % 10, at + k)
+                        } else {
+                            (at + k, t)
+                        };
+                        ink[(y.min(15) * 10 + x.min(9)) as usize] = true;
+                    }
+                }
+            }
+            ink
+        })
+        .collect();
+    let mut on = vec![false; (w * h) as usize];
+    for row in (4..h.saturating_sub(20)).step_by(22) {
+        for col in (4..w.saturating_sub(12)).step_by(12) {
+            let glyph = &glyphs[(next() % 26) as usize];
+            for (i, &ink) in glyph.iter().enumerate() {
+                let (x, y) = (col + i as u32 % 10, row + i as u32 / 10);
+                on[(y * w + x) as usize] |= ink;
+            }
+        }
+    }
+    let rgba = image::RgbaImage::from_fn(w, h, |x, y| {
+        let [r, g, b] = colors.get_pixel(x, y).0;
+        image::Rgba([r, g, b, if on[(y * w + x) as usize] { 255 } else { 0 }])
+    });
+    lossy_webp(rgba.as_raw(), w, h, true, quality)
+}
+
+#[test]
+fn compress_keeps_a_webp_with_transparency_unscaled_when_that_is_smaller() {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let dir = TestDir::new("compress-webp-unscaled");
+    let run = |name: &str, src: &[u8], preset| {
+        let outcome = compress(&dir, name, src, preset)
+            .unwrap_or_else(|e| panic!("{name} {preset:?}: {}", e.detail));
+        let out = fs::read(&outcome.outputs[0]).unwrap();
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+        fs::remove_file(dir.join(name)).unwrap();
+        let back = image::load_from_memory(&out).unwrap();
+        (out.len(), (back.width(), back.height()))
+    };
+    // Hard text a little over Small's 2048 px, whose alpha plane is most of
+    // the file: scaled by 1.03, each glyph, which repeated exactly, lands
+    // at its own phase and its edges take steps, so Small's file came out
+    // larger than Balanced's, which isn't scaled. Small keeps it as it is
+    // now, at its own quality, its file the smaller.
+    let text = hard_text(2100, 300, 92.0, false);
+    let (small, small_size) = run("text.webp", &text, Small);
+    let (balanced, balanced_size) = run("text.webp", &text, Balanced);
+    let (high, _) = run("text.webp", &text, High);
+    assert_eq!(small_size, (2100, 300));
+    assert_eq!(balanced_size, (2100, 300));
+    assert!(
+        small <= balanced && balanced <= high,
+        "{small} {balanced} {high}"
+    );
+    // A photo with transparent corners, at the same size: scaling makes
+    // it smaller, so its scaled file is kept.
+    let colors = photo(2100, 300);
+    let corners = image::RgbaImage::from_fn(2100, 300, |x, y| {
+        let [r, g, b] = colors.get_pixel(x, y).0;
+        let (dx, dy) = (x.min(2099 - x), y.min(299 - y));
+        image::Rgba([r, g, b, if dx + dy < 20 { 0 } else { 255 }])
+    });
+    let corners = lossy_webp(corners.as_raw(), 2100, 300, true, 90.0);
+    let (_, size) = run("corners.webp", &corners, Small);
+    assert_eq!(size, (2048, 293));
+}
+
+#[test]
+fn compress_reports_both_encodes_of_a_webp_in_order_and_stops_at_a_cancel() {
+    use grape_core::CompressPreset::Small;
+    // Encoded as it is (0.5 to 0.7), then scaled (0.7 to 0.9): the
+    // progress never goes back, and a cancel during the first encode ends
+    // the job, with nothing written.
+    let src = hard_text(2100, 300, 92.0, false);
+    let dir = TestDir::new("compress-webp-both");
+    let (_, job) = plan_one(&dir, "text.webp", &src, compress_op(Small));
+    let mut seen = Vec::new();
+    run_job(&job, &EngineCtx::default(), &mut |p| seen.push(p)).unwrap();
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    for (from, to) in [(0.5, 0.7), (0.7, 0.9)] {
+        assert!(
+            seen.iter().any(|&p| p > from && p < to),
+            "{from}-{to}: {seen:?}"
+        );
+    }
+    let first = seen.iter().position(|&p| p > 0.5 && p < 0.7).unwrap();
+    cancelled_at("text.webp", &src, compress_op(Small), first + 1);
+}
+
 #[test]
 fn a_cancel_during_the_try_small_trial_is_a_cancel() {
     use grape_core::CompressPreset::Balanced;

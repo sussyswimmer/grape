@@ -226,7 +226,7 @@ fn scaled_size(width: u32, height: u32, cap: u32) -> (u32, u32) {
 }
 
 /// Whether any pixel of `img` isn't opaque.
-fn transparent(img: &RgbaImage) -> bool {
+pub(super) fn transparent(img: &RgbaImage) -> bool {
     img.as_raw()
         .as_chunks::<4>()
         .0
