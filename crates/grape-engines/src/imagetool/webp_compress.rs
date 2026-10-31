@@ -22,8 +22,10 @@
 //!   colored as the visible ones nearest them, and by Lanczos3 elsewhere
 //!   ([`scale`]). The qualities are JPEG's, so a preset
 //!   means the same across formats.
-//!   Kept when it's at most 90 % of the source's size; "Try Small" only
-//!   when Small's file is likely to be ([`small_does_more`]).
+//!   Kept when it's at most 90 % of the source's size. "Try Small" only
+//!   when Small's own file is: when Balanced or High ends `NoChange`, Small
+//!   is run as a trial, its file measured and never written
+//!   ([`small_would_do`]).
 //! - **Lossless:** at every preset, never scaled, libwebp's lossless
 //!   preset [`LOSSLESS_LEVEL`] with every pixel's color kept (`exact`),
 //!   even under full transparency. The output is decoded again and must
@@ -73,7 +75,7 @@ use image::{ColorType, DynamicImage, GenericImageView};
 use super::exif;
 use super::scale;
 use super::strip::{self, Error};
-use super::webp::{self, Scan, ALPHA_FLAG};
+use super::webp::{self, Carried, ALPHA_FLAG};
 use crate::cancel::Cancellable;
 use crate::output::TempFile;
 use crate::publish::{self, Names};
@@ -127,50 +129,68 @@ fn plan(preset: CompressPreset) -> (f32, Option<u32>) {
     }
 }
 
-/// The bytes of the smallest `VP8 ` frame libwebp writes, a 1 × 1
-/// picture's at any quality: its headers, which no preset shrinks.
-const VP8_FRAME: f64 = 26.0;
+/// The fewest bytes a lossy file Compress writes with `carried` in it can
+/// take: `RIFF` and `WEBP`, a `VP8X` when anything is carried, each chunk
+/// carried, and a `VP8 ` chunk of at least a key frame's 10 bytes.
+fn least_lossy_file(carried: &Carried) -> u64 {
+    let chunk = |len: u64| 8 + len + (len & 1);
+    let parts: u64 = [&carried.iccp, &carried.exif, &carried.xmp]
+        .into_iter()
+        .flatten()
+        .map(|c| chunk(c.len() as u64))
+        .sum();
+    let vp8x = if parts > 0 { chunk(10) } else { 0 };
+    12 + vp8x + parts + chunk(10)
+}
 
-/// Whether Small would do more than another preset to the lossy WebP
-/// `scan` found, a file of `before` bytes (D26): whether the file Small
-/// would write is likely at most 90 % of it. Its `VP8 ` data past
-/// [`VP8_FRAME`] is predicted to take c(q) × s of what it takes now, where
-/// s is Small's scale (its long side over 2048, or 1) and c(q) = 1.3 −
-/// 0.0085 (q − 30) for the quality q the frame header reads as
-/// ([`webp::quality`]; 0 if unread): the most Small took of two photos,
-/// one smooth, at 30 to 90 and 2049 to 4096 px, and of crops down to 1 px.
-/// Data that holds less than 2 bytes a macroblock (a flat or fully
-/// transparent picture: about half a byte, whatever its quality) takes at
-/// least s² (a macroblock's worth each), and isn't sent to Small unless it
-/// scales. Its `ALPH` chunk, stored losslessly at every preset, stays as it
-/// is, or once scaled half again as large unless its alpha is only 0 and
-/// 255 (`hard_alpha`; Small keeps such edges hard): an antialiased alpha
-/// plane came out up to 1.5 times as large at 1.3 to 1, and a hard one at
-/// most as large but for one with almost nothing in it. The rest of the
-/// file (its container, metadata) stays.
-fn small_does_more(scan: &Scan, before: u64, hard_alpha: bool) -> bool {
-    let (_, cap) = plan(CompressPreset::Small);
-    let (w, h) = scan.size;
-    let long = f64::from(w.max(h).max(1));
-    let scale = cap.map_or(1.0, |cap| (f64::from(cap) / long).min(1.0));
-    let scales = scale < 1.0;
-    let macroblocks = u64::from(w.div_ceil(16)) * u64::from(h.div_ceil(16));
-    let detail = scan.image_bytes >= macroblocks.saturating_mul(2);
-    if !scales && !detail {
-        return false;
+/// Whether Small would write at most `most` bytes of the lossy WebP `src`
+/// (D26's "Try Small"): Small's own decode, scale, encode and file, with
+/// the metadata it keeps, `carried`, run as a trial whose file is only
+/// measured, never written. Skipped when no file can be that small
+/// ([`least_lossy_file`]). It holds what Small would, under the same peak
+/// check; a file Small couldn't write (too large, a failed encode) is no
+/// reason to try it. Its progress goes to 0.9–0.98, and a cancel stops it
+/// as it stops Small.
+#[allow(clippy::too_many_arguments)] // `run`'s, plus the trial's own.
+fn small_would_do(
+    src: &Path,
+    from: Format,
+    names: &Names,
+    carried: &mut Carried,
+    most: u64,
+    cancel: &CancelToken,
+    progress: &mut dyn FnMut(f32),
+) -> Result<bool, GrapeError> {
+    if least_lossy_file(carried) > most {
+        return Ok(false);
     }
-    let q = f64::from(scan.quality.unwrap_or(0));
-    let kept = (1.3 - 0.0085 * (q - 30.0)) * scale;
-    let kept = if detail {
-        kept
-    } else {
-        kept.max(scale * scale)
+    progress(0.9);
+    let img = match decode(
+        src,
+        from,
+        names,
+        cancel,
+        false,
+        CompressPreset::Small,
+        carried,
+    ) {
+        Ok(img) => img,
+        Err(_) if cancel.is_cancelled() => return Err(crate::cancelled(src)),
+        Err(_) => return Ok(false),
     };
-    let vp8 = scan.image_bytes as f64;
-    let vp8 = VP8_FRAME.min(vp8) + (vp8 - VP8_FRAME).max(0.0) * kept;
-    let alpha = scan.alpha_bytes as f64 * if scales && !hard_alpha { 1.5 } else { 1.0 };
-    let rest = before.saturating_sub(scan.image_bytes.saturating_add(scan.alpha_bytes));
-    rest as f64 + vp8 + alpha <= 0.9 * before as f64
+    progress(0.92);
+    match lossy_file(
+        img,
+        CompressPreset::Small,
+        carried,
+        (src, names, cancel),
+        progress,
+        (0.93, 0.98),
+    ) {
+        Ok((file, _, _)) => Ok(file.len() as u64 <= most),
+        Err(_) if cancel.is_cancelled() => Err(crate::cancelled(src)),
+        Err(_) => Ok(false),
+    }
 }
 
 /// What Compress holds at its peak for a `width`×`height` decoded picture
@@ -243,85 +263,32 @@ pub(crate) fn run(
     }
     progress(0.1);
 
-    let (quality, cap) = plan(preset);
     let lossless = scan.lossless;
-    // The metadata is held throughout, and again in the file written.
-    let metadata = scan.carried.len().saturating_mul(2);
-    let tool_peak = |width: u32, height: u32, color: ColorType| {
-        let bpp = u64::from(color.bytes_per_pixel());
-        peak(width, height, bpp, lossless, cap).saturating_add(metadata)
-    };
-    // Read as libwebp reads it, or refused as conversions refuse it
-    // (`webp::reading`).
-    let (img, _icc) =
-        crate::image::decode_stored(src, from, Format::Webp, &names, cancel, &tool_peak)
-            .map_err(|e| publish::or_cancelled(cancel, src, e))?;
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-    let img = rgb_or_rgba(img);
-    let hard_alpha = alpha_kind(&img).1;
-    let try_small =
-        !lossless && preset != CompressPreset::Small && small_does_more(&scan, before, hard_alpha);
-    progress(0.4);
-    let img = if lossless {
-        img
-    } else {
-        let scaled = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
-        opaque_as_rgb(scaled)
-    };
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-    progress(0.5);
-
-    let (width, height) = img.dimensions();
-    let opts = Options {
-        mode: if lossless {
-            Mode::Lossless {
-                level: LOSSLESS_LEVEL,
-            }
-        } else {
-            // By the picture encoded: one whose scale left it opaque has
-            // no alpha plane to encode.
-            let method = if img.color().has_alpha() {
-                LOSSY_METHOD.1
-            } else {
-                LOSSY_METHOD.0
-            };
-            Mode::Lossy { quality, method }
-        },
-        // A thread more for a lossy picture's alpha plane. A lossless one
-        // gains nothing at its level but a second encoder's buffers.
-        threads: !lossless,
-    };
-    let encoded = encode(&img, &opts, cancel, progress).map_err(|e| {
-        let detail = format!("encode {}: {e}", src.display());
-        let e = match e {
-            grape_webp::Error::Cancelled => crate::cancelled(src),
-            grape_webp::Error::OutOfMemory | grape_webp::Error::TooLarge => names.too_large(detail),
-            _ => names.encode_failed(detail),
-        };
-        publish::or_cancelled(cancel, src, e)
-    })?;
-    if cancel.is_cancelled() {
-        return Err(crate::cancelled(src));
-    }
-    progress(0.9);
-
     let mut carried = scan.carried;
-    if let Some(exif) = carried.exif.as_mut() {
-        let at = if exif.starts_with(b"Exif\0\0") { 6 } else { 0 };
-        exif::patch_dimensions(&mut exif[at..], width, height);
-    }
-    let out = webp::assemble(encoded, width, height, &carried).map_err(|e| {
-        let why = match e {
-            Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => why,
-            Error::Read(e) | Error::Write(e) => e.to_string(),
+    let img = decode(src, from, &names, cancel, lossless, preset, &carried)?;
+    progress(0.4);
+    let (out, img, width, height) = if lossless {
+        progress(0.5);
+        let (width, height) = img.dimensions();
+        let opts = Options {
+            mode: Mode::Lossless {
+                level: LOSSLESS_LEVEL,
+            },
+            // A second thread gains nothing at this level but a second
+            // encoder's buffers.
+            threads: false,
         };
-        names.encode_failed(format!("assemble {}: {why}", src.display()))
-    })?;
-    drop(carried);
+        let encoded = encode(&img, &opts, cancel, progress, (0.5, 0.9))
+            .map_err(|e| encode_error(e, src, &names, cancel))?;
+        progress(0.9);
+        let out = assembled(encoded, width, height, &mut carried, src, &names)?;
+        (out, Some(img), width, height)
+    } else {
+        let ctx = (src, &names, cancel);
+        let (out, width, height) =
+            lossy_file(img, preset, &mut carried, ctx, progress, (0.5, 0.9))?;
+        (out, None, width, height)
+    };
     // A cancel during the last report is a cancel, not a verdict on size.
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
@@ -334,13 +301,19 @@ pub(crate) fn run(
         before.saturating_mul(9) / 10
     };
     if after > most {
+        // Only its size counts: what Small would write is measured with
+        // nothing else held.
+        drop((out, img));
+        let try_small = !lossless
+            && preset != CompressPreset::Small
+            && small_would_do(src, from, &names, &mut carried, most, cancel, progress)?;
         let detail = format!("{after} bytes from {before} in {}", src.display());
         return Err(names.not_smaller(try_small, detail));
     }
-    if lossless {
-        check_lossless(&out, &img)
-    } else {
-        check_lossy(&out, width, height)
+    drop(carried);
+    match &img {
+        Some(img) => check_lossless(&out, img),
+        None => check_lossy(&out, width, height),
     }
     .map_err(|why| names.encode_failed(format!("check {}: {why}", src.display())))?;
     drop(img);
@@ -365,6 +338,116 @@ pub(crate) fn run(
     Ok(outcome)
 }
 
+/// The picture `src` holds, decoded as stored (8-bit RGB or RGBA) once
+/// what Compress at `preset` holds for it, its metadata `carried` among
+/// it, is checked against D16's limit ([`peak`]). Read as libwebp reads
+/// it, or refused as conversions refuse it (`webp::reading`).
+fn decode(
+    src: &Path,
+    from: Format,
+    names: &Names,
+    cancel: &CancelToken,
+    lossless: bool,
+    preset: CompressPreset,
+    carried: &Carried,
+) -> Result<DynamicImage, GrapeError> {
+    let (_, cap) = plan(preset);
+    // The metadata is held throughout, and again in the file written.
+    let metadata = carried.len().saturating_mul(2);
+    let tool_peak = |width: u32, height: u32, color: ColorType| {
+        let bpp = u64::from(color.bytes_per_pixel());
+        peak(width, height, bpp, lossless, cap).saturating_add(metadata)
+    };
+    let (img, _icc) =
+        crate::image::decode_stored(src, from, Format::Webp, names, cancel, &tool_peak)
+            .map_err(|e| publish::or_cancelled(cancel, src, e))?;
+    if cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    Ok(rgb_or_rgba(img))
+}
+
+/// What the lossy `preset` writes of the decoded picture `img`: scaled to
+/// its cap ([`scale`]), encoded at its quality by the method the scaled
+/// picture calls for ([`LOSSY_METHOD`]), libwebp's progress going to
+/// `span` of `progress`, and put in a file with `carried` ([`assembled`]).
+/// Gives the file and the picture's size.
+fn lossy_file(
+    img: DynamicImage,
+    preset: CompressPreset,
+    carried: &mut Carried,
+    (src, names, cancel): (&Path, &Names, &CancelToken),
+    progress: &mut dyn FnMut(f32),
+    span: (f32, f32),
+) -> Result<(Vec<u8>, u32, u32), GrapeError> {
+    let (quality, cap) = plan(preset);
+    let img = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
+    let img = opaque_as_rgb(img);
+    if cancel.is_cancelled() {
+        return Err(crate::cancelled(src));
+    }
+    progress(span.0);
+    let (width, height) = img.dimensions();
+    // By the picture encoded: one whose scale left it opaque has no alpha
+    // plane to encode.
+    let method = if img.color().has_alpha() {
+        LOSSY_METHOD.1
+    } else {
+        LOSSY_METHOD.0
+    };
+    let opts = Options {
+        mode: Mode::Lossy { quality, method },
+        // A thread more for the alpha plane.
+        threads: true,
+    };
+    let encoded = encode(&img, &opts, cancel, progress, span)
+        .map_err(|e| encode_error(e, src, names, cancel))?;
+    drop(img);
+    progress(span.1);
+    let out = assembled(encoded, width, height, carried, src, names)?;
+    Ok((out, width, height))
+}
+
+/// libwebp's `encoded` file of a `width`×`height` picture with `carried`
+/// put in it ([`webp::assemble`]), the EXIF's PixelXDimension and
+/// PixelYDimension set to that size first.
+fn assembled(
+    encoded: Vec<u8>,
+    width: u32,
+    height: u32,
+    carried: &mut Carried,
+    src: &Path,
+    names: &Names,
+) -> Result<Vec<u8>, GrapeError> {
+    if let Some(exif) = carried.exif.as_mut() {
+        let at = if exif.starts_with(b"Exif\0\0") { 6 } else { 0 };
+        exif::patch_dimensions(&mut exif[at..], width, height);
+    }
+    webp::assemble(encoded, width, height, carried).map_err(|e| {
+        let why = match e {
+            Error::Broken(why) | Error::TooLarge(why) | Error::Refused(why) => why,
+            Error::Read(e) | Error::Write(e) => e.to_string(),
+        };
+        names.encode_failed(format!("assemble {}: {why}", src.display()))
+    })
+}
+
+/// What a failed encode of `src` tells the user.
+fn encode_error(
+    e: grape_webp::Error,
+    src: &Path,
+    names: &Names,
+    cancel: &CancelToken,
+) -> GrapeError {
+    let detail = format!("encode {}: {e}", src.display());
+    let e = match e {
+        grape_webp::Error::Cancelled => crate::cancelled(src),
+        grape_webp::Error::OutOfMemory | grape_webp::Error::TooLarge => names.too_large(detail),
+        _ => names.encode_failed(detail),
+    };
+    publish::or_cancelled(cancel, src, e)
+}
+
 /// `img` as 8-bit RGB or RGBA, what image-webp decodes to.
 fn rgb_or_rgba(img: DynamicImage) -> DynamicImage {
     match img {
@@ -386,28 +469,15 @@ fn opaque_as_rgb(img: DynamicImage) -> DynamicImage {
     }
 }
 
-/// Whether any pixel of `img` isn't opaque, and whether every pixel's
-/// alpha is 0 or 255.
-fn alpha_kind(img: &DynamicImage) -> (bool, bool) {
-    let Some(rgba) = img.as_rgba8() else {
-        return (false, true);
-    };
-    let (mut transparent, mut hard) = (false, true);
-    for p in rgba.as_raw().as_chunks::<4>().0 {
-        transparent |= p[3] != u8::MAX;
-        hard &= p[3] == 0 || p[3] == u8::MAX;
-    }
-    (transparent, hard)
-}
-
 /// `img` (8-bit RGB or RGBA) encoded with `opts`; libwebp's progress goes
-/// to 0.5–0.9 of `progress`, never back (a lossless encode's percent can
-/// go down), and a cancel ends the encode at its next report.
+/// to `span` of `progress`, never back (a lossless encode's percent can go
+/// down), and a cancel ends the encode at its next report.
 fn encode(
     img: &DynamicImage,
     opts: &Options,
     cancel: &CancelToken,
     progress: &mut dyn FnMut(f32),
+    (from, to): (f32, f32),
 ) -> Result<Vec<u8>, grape_webp::Error> {
     let (width, height) = img.dimensions();
     let px = match img {
@@ -426,7 +496,7 @@ fn encode(
     let mut most = 0;
     grape_webp::encode(px, opts, &mut |percent| {
         most = most.max(percent);
-        progress(0.5 + 0.4 * f32::from(most) / 100.0);
+        progress(from + (to - from) * f32::from(most) / 100.0);
         !cancel.is_cancelled()
     })
 }
@@ -548,7 +618,7 @@ mod tests {
     };
 
     fn encoded(img: &DynamicImage, opts: &Options) -> Vec<u8> {
-        encode(img, opts, &CancelToken::default(), &mut |_| {}).unwrap()
+        encode(img, opts, &CancelToken::default(), &mut |_| {}, (0.5, 0.9)).unwrap()
     }
 
     #[test]
@@ -590,94 +660,17 @@ mod tests {
     }
 
     #[test]
-    fn the_quality_is_read_back_from_libwebps_files() {
-        // A photo-like picture and flat colors, at methods 4 (Pillow's and
-        // cwebp's) and 6: within 2 points of the quality libwebp was given.
-        let flat = RgbImage::from_fn(320, 240, |x, y| {
-            if (x / 40 + y / 40) % 2 == 0 {
-                Rgb([200, 40, 40])
-            } else {
-                Rgb([30, 30, 160])
-            }
-        });
-        for src in [photo(320, 240), flat] {
-            for quality in [30.0, 50.0, 70.0, 75.0, 80.0, 90.0] {
-                for method in [4, 6] {
-                    let opts = Options {
-                        mode: Mode::Lossy { quality, method },
-                        threads: false,
-                    };
-                    let file = encoded(&DynamicImage::ImageRgb8(src.clone()), &opts);
-                    let scan = webp::scan(&mut Cursor::new(&file)).unwrap();
-                    let estimate = f32::from(scan.quality.unwrap());
-                    assert!((estimate - quality).abs() <= 2.0, "{quality}: {estimate}");
-                    assert_eq!(scan.image_bytes as usize, file.len() - 20);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn try_small_only_when_small_does_more() {
-        // The scan of a Pillow file: VP8 data, ALPH data and the rest.
-        let file = |w: u32, h: u32, q: u8, vp8: u64, alph: u64| {
-            let scan = Scan {
-                size: (w, h),
-                quality: Some(q),
-                image_bytes: vp8,
-                alpha_bytes: alph,
-                ..Scan::default()
-            };
-            let before = vp8 + alph + if alph > 0 { 48 } else { 20 };
-            (scan, before)
+    fn small_is_tried_unless_no_file_could_be_small_enough() {
+        // RIFF, WEBP and a 10-byte VP8 frame: 30 bytes.
+        assert_eq!(least_lossy_file(&Carried::default()), 30);
+        // With metadata, a VP8X, each chunk padded.
+        let carried = Carried {
+            flags: 0x0C,
+            iccp: None,
+            exif: Some(vec![0; 101]),
+            xmp: Some(vec![0; 4]),
         };
-        let does = |(scan, before): (Scan, u64), hard: bool| small_does_more(&scan, before, hard);
-        // Measured (lake.jpg, Pillow 12.3): a little over 2048 px at q30
-        // (Small 116.6 %), q40 (102.3 %) and q50 (91.8 %), and 2200 px at
-        // q30 (110.6 %): no. 4096 px at q30 (43.6 %) and 2049 at q90
-        // (23.8 %): yes.
-        for (w, q, vp8) in [
-            (2049, 31, 35_084),
-            (2049, 41, 43_355),
-            (2049, 51, 51_620),
-            (2200, 31, 41_581),
-        ] {
-            assert!(!does(file(w, w * 9 / 16, q, vp8, 0), true), "{w} q{q}");
-        }
-        assert!(does(file(4096, 2304, 31, 123_727, 0), true));
-        assert!(does(file(2049, 1153, 91, 256_386, 0), true));
-        // Not scaled: only the VP8 data shrinks, so the ALPH data counts
-        // as it is (a 1000 × 256 logo at q72, 6,824 bytes of it, Small
-        // 102 %), and a finer quality than Small's, but not much finer,
-        // isn't enough (a 64 × 64 crop at q75: 92.2 %).
-        assert!(!does(file(1000, 256, 72, 3_976, 6_824), false));
-        assert!(!does(file(64, 64, 75, 414, 0), true));
-        assert!(does(file(64, 64, 90, 810, 0), true));
-        // One pixel: VP8's frame header is all its data (Small 100 %).
-        assert!(!does(file(1, 1, 90, 26, 0), true));
-        assert!(!does(file(1, 1, 100, 30, 2), true));
-        // Scaled, an alpha that isn't only 0 and 255 counts half again (two
-        // antialiased discs, 2600 px, q95: Small 100.4 %), a hard one as it
-        // is (a signature, 3000 px, q90: 62.0 %).
-        assert!(!does(file(2600, 1300, 95, 8_098, 13_326), false));
-        assert!(does(file(2600, 1300, 95, 8_098, 13_326), true));
-        assert!(does(file(3000, 2000, 91, 10_760, 16_401), true));
-        // Flat (a fully transparent picture's VP8 takes about half a byte
-        // a macroblock): not unless it scales, then by its macroblocks.
-        let flat = file(1600, 900, 90, 2_812, 0);
-        assert!(!does(flat, true));
-        assert!(does(file(4000, 2000, 90, 15_625, 0), true));
-        assert!(!does(file(2100, 1000, 90, 4_102, 0), true));
-        // Unread, its quality counts as 0; metadata four times the image
-        // outweighs what it saves.
-        let (fine, before) = file(2600, 1463, 91, 100_000, 0);
-        assert!(small_does_more(&fine, before, true));
-        let unread = Scan {
-            quality: None,
-            ..fine.clone()
-        };
-        assert!(!small_does_more(&unread, before, true));
-        assert!(!small_does_more(&fine, before * 5, true));
+        assert_eq!(least_lossy_file(&carried), 12 + 18 + 110 + 12 + 18);
     }
 
     #[test]
@@ -733,12 +726,17 @@ mod tests {
     fn encode_reports_progress_and_stops_at_a_cancel() {
         let img = DynamicImage::ImageRgb8(photo(256, 256));
         let mut seen = Vec::new();
-        encode(&img, &lossy(80.0), &CancelToken::default(), &mut |p| {
-            seen.push(p)
-        })
+        let span = (0.93, 0.98);
+        encode(
+            &img,
+            &lossy(80.0),
+            &CancelToken::default(),
+            &mut |p| seen.push(p),
+            span,
+        )
         .unwrap();
         assert!(seen.len() > 3, "{seen:?}");
-        assert!(seen.iter().all(|p| (0.5..=0.9).contains(p)), "{seen:?}");
+        assert!(seen.iter().all(|p| (0.93..=0.98).contains(p)), "{seen:?}");
         assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
         // libwebp's lossless percent goes down now and then (1, 2, 34, 18,
         // 22, … for a 16,383 × 1 gradient with noise); what `progress`
@@ -770,6 +768,7 @@ mod tests {
             &LOSSLESS,
             &CancelToken::default(),
             &mut |p| seen.push(p),
+            (0.5, 0.9),
         )
         .unwrap();
         assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
@@ -777,13 +776,19 @@ mod tests {
         cancel.cancel();
         for opts in [lossy(80.0), LOSSLESS] {
             assert_eq!(
-                encode(&img, &opts, &cancel, &mut |_| {}),
+                encode(&img, &opts, &cancel, &mut |_| {}, (0.5, 0.9)),
                 Err(grape_webp::Error::Cancelled)
             );
         }
         let gray = DynamicImage::ImageLuma8(image::GrayImage::new(4, 4));
         assert_eq!(
-            encode(&gray, &LOSSLESS, &CancelToken::default(), &mut |_| {}),
+            encode(
+                &gray,
+                &LOSSLESS,
+                &CancelToken::default(),
+                &mut |_| {},
+                (0.5, 0.9)
+            ),
             Err(grape_webp::Error::BadInput)
         );
         assert!(matches!(rgb_or_rgba(gray), DynamicImage::ImageRgb8(_)));
@@ -811,14 +816,12 @@ mod tests {
             .pixels()
             .zip(rgba.pixels())
             .all(|(a, b)| a.0[3] == b.0[3]));
-        assert_eq!(
-            alpha_kind(&DynamicImage::ImageRgba8(rgba.clone())),
-            (true, false)
-        );
-        assert_eq!(alpha_kind(&DynamicImage::ImageRgb8(src)), (false, true));
-        let hard = RgbaImage::from_fn(4, 1, |x, _| Rgba([9, 9, 9, [0, 255][x as usize % 2]]));
-        assert_eq!(alpha_kind(&DynamicImage::ImageRgba8(hard)), (true, true));
+        // Opaque RGBA goes as RGB; anything see-through stays RGBA.
         let opaque = RgbaImage::from_pixel(2, 2, Rgba([9, 9, 9, 255]));
-        assert_eq!(alpha_kind(&DynamicImage::ImageRgba8(opaque)), (false, true));
+        let rgb = opaque_as_rgb(DynamicImage::ImageRgba8(opaque));
+        assert_eq!(rgb.as_rgb8().unwrap().as_raw(), &[9; 12]);
+        assert!(opaque_as_rgb(DynamicImage::ImageRgba8(rgba))
+            .as_rgba8()
+            .is_some());
     }
 }

@@ -3413,52 +3413,175 @@ fn compress_leaves_a_compact_webp_alone_and_refuses_an_animated_one() {
     assert_eq!(err.user_message, "before.webp isn't a readable WEBP image.");
 }
 
+/// Compress at Balanced and High on `src` named `name`: each that ends
+/// `NoChange` says "Try Small" exactly when Small, run then, writes at most
+/// 90 % of it (D26). Gives whether Balanced was told to try Small.
+fn try_small_is_exact(dir: &TestDir, name: &str, src: &[u8]) -> bool {
+    use grape_core::CompressPreset::{Balanced, High, Small};
+    let small = compress(dir, name, src, Small);
+    if let Ok(outcome) = &small {
+        let out = fs::metadata(&outcome.outputs[0]).unwrap().len();
+        assert!(out * 10 <= src.len() as u64 * 9, "{name}");
+        fs::remove_file(&outcome.outputs[0]).unwrap();
+    } else if let Err(e) = &small {
+        assert_eq!(e.kind, ErrorKind::NoChange, "{name} Small: {}", e.detail);
+    }
+    fs::remove_file(dir.join(name)).unwrap();
+    let mut told = Vec::new();
+    for preset in [Balanced, High] {
+        match compress(dir, name, src, preset) {
+            Ok(outcome) => {
+                fs::remove_file(&outcome.outputs[0]).unwrap();
+                told.push(false);
+            }
+            Err(e) => {
+                assert_eq!(
+                    e.kind,
+                    ErrorKind::NoChange,
+                    "{name} {preset:?}: {}",
+                    e.detail
+                );
+                let try_small = small.is_ok();
+                let message = if try_small {
+                    format!("{name} is already compact. Try Small.")
+                } else {
+                    format!("{name} is already as small as Grape makes it.")
+                };
+                assert_eq!(e.user_message, message, "{name} {preset:?}: {}", e.detail);
+                told.push(try_small);
+            }
+        }
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    told[0]
+}
+
+/// A smooth photo-like picture with a fine, faint texture, lossy at
+/// `quality`: at q75, Balanced's q80 makes it larger and Small's q70 about
+/// 83 %, as with a real photo.
+fn smooth_photo(w: u32, h: u32, quality: f32) -> Vec<u8> {
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        let (x, y) = (x as f32, y as f32);
+        let grain = 4.0 * (x / 2.3).sin() * (y / 3.1).cos();
+        let v = |base: f32| (base + grain).clamp(0.0, 255.0) as u8;
+        Rgb([
+            v(128.0 + 80.0 * (x / 41.0).sin() * (y / 53.0).cos()),
+            v(128.0 + 70.0 * ((x + y) / 67.0).sin()),
+            v(100.0 + 50.0 * (x / 29.0 - y / 31.0).cos()),
+        ])
+    });
+    lossy_webp(img.as_raw(), w, h, false, quality)
+}
+
 #[test]
 fn compress_says_try_small_only_when_small_would_do_more() {
-    use grape_core::CompressPreset::{Balanced, High, Small};
-    // Each of these was told "Try Small" at Balanced or High, and Small
-    // then left it alone too.
+    // "Try Small" is said when Small's own file, made as a trial, is at
+    // most 90 % of the source, and only then. Each of these was told
+    // otherwise by a prediction.
     let dir = TestDir::new("compress-webp-try-small");
-    // A little over 2048 px at a coarse quality: Small scales it hardly
-    // at all, and its q70 spends more on what's left.
-    let coarse = lossy_webp(photo(2049, 1152).as_raw(), 2049, 1152, false, 30.0);
-    // Not scaled, at a finer quality than Small's, its alpha (stored
-    // losslessly at every preset) most of the file.
+    // A q75 photo Small doesn't scale (cwebp's default quality): told
+    // it was as small as Grape makes it, though Small made it 58 to 85 %.
+    assert!(try_small_is_exact(
+        &dir,
+        "q75.webp",
+        &smooth_photo(800, 450, 75.0)
+    ));
+    // Under a grained alpha veil, a little over 2048 px: Small scales the
+    // veil by area and makes it about half.
     let mut n = 1u32;
-    let colors = photo(512, 512);
-    let veil = image::RgbaImage::from_fn(512, 512, |x, y| {
+    let colors = photo(2400, 240);
+    let veil = image::RgbaImage::from_fn(2400, 240, |x, y| {
         n = n.wrapping_mul(1_103_515_245).wrapping_add(12_345);
         let [r, g, b] = colors.get_pixel(x, y).0;
-        image::Rgba([r, g, b, 96 + (n >> 16) as u8 % 128])
+        image::Rgba([r, g, b, 168 + (n >> 16) as u8 % 64])
     });
-    let veiled = lossy_webp(veil.as_raw(), 512, 512, true, 80.0);
-    assert!(webp_chunk(&veiled, b"ALPH").unwrap().len() * 2 > veiled.len());
-    // One pixel: the container and VP8's frame header are all there is.
+    let veiled = lossy_webp(veil.as_raw(), 2400, 240, true, 80.0);
+    assert!(try_small_is_exact(&dir, "veil.webp", &veiled));
+    // A 1 × 500 strip, whose frame headers are much of it (told to try
+    // Small, which made a Pillow one 94 %), and one pixel, whose frame
+    // headers are all of it: whatever Small makes of them.
+    let strip = lossy_webp(photo(1, 500).as_raw(), 1, 500, false, 80.0);
+    try_small_is_exact(&dir, "strip.webp", &strip);
     let dot = lossy_webp(&[200, 30, 30], 1, 1, false, 90.0);
-    let dot_alpha = lossy_webp(&[200, 30, 30, 128], 1, 1, true, 90.0);
-    for (name, src, presets) in [
-        ("coarse.webp", &coarse, &[Balanced][..]),
-        ("veil.webp", &veiled, &[Balanced, High]),
-        ("dot.webp", &dot, &[Balanced, High]),
-        ("dot-alpha.webp", &dot_alpha, &[Balanced, High]),
-    ] {
-        for &preset in presets.iter().chain([&Small]) {
-            let err = compress(&dir, name, src, preset).unwrap_err();
-            assert_eq!(
-                err.kind,
-                ErrorKind::NoChange,
-                "{name} {preset:?}: {}",
-                err.detail
-            );
-            assert_eq!(
-                err.user_message,
-                format!("{name} is already as small as Grape makes it."),
-                "{preset:?}: {}",
-                err.detail
-            );
-            fs::remove_file(dir.join(name)).unwrap();
+    assert!(!try_small_is_exact(&dir, "dot.webp", &dot));
+    // Hard-edged strokes over a photo a little over 2048 px at q80, told to
+    // try Small, which then grew them: its alpha plane is most of the file.
+    let photo_colors = photo(2250, 300);
+    let mut seed = 9u32;
+    let mut strokes = vec![false; 2250 * 300];
+    for _ in 0..1500 {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let (x0, y0) = ((seed >> 8) as usize % 2240, (seed >> 20) as usize % 290);
+        let (across, len, wide) = (
+            seed & 1 == 0,
+            4 + (seed >> 4) as usize % 20,
+            1 + (seed >> 2) as usize % 3,
+        );
+        for t in 0..len {
+            for k in 0..wide {
+                let (x, y) = if across {
+                    (x0 + t, y0 + k)
+                } else {
+                    (x0 + k, y0 + t)
+                };
+                if x < 2250 && y < 300 {
+                    strokes[y * 2250 + x] = true;
+                }
+            }
         }
     }
+    let text = image::RgbaImage::from_fn(2250, 300, |x, y| {
+        let [r, g, b] = photo_colors.get_pixel(x, y).0;
+        image::Rgba([
+            r,
+            g,
+            b,
+            if strokes[(y * 2250 + x) as usize] {
+                255
+            } else {
+                0
+            },
+        ])
+    });
+    let hard = lossy_webp(text.as_raw(), 2250, 300, true, 80.0);
+    try_small_is_exact(&dir, "text.webp", &hard);
+    // Metadata the size of the file: no file Small writes could be 90 %,
+    // so the trial isn't run.
+    let fine = smooth_photo(400, 300, 95.0);
+    let tagged = riff(&[
+        vp8x_chunk(0x04, 400, 300),
+        fine[12..].to_vec(),
+        riff_chunk(b"XMP ", &vec![b'x'; fine.len() * 10]),
+    ]);
+    assert!(!try_small_is_exact(&dir, "tagged.webp", &tagged));
+}
+
+#[test]
+fn a_cancel_during_the_try_small_trial_is_a_cancel() {
+    use grape_core::CompressPreset::Balanced;
+    // Balanced can't make this q75 photo smaller, so Small is tried, after
+    // the main encode (0.9): a cancel there ends the job as cancelled,
+    // with nothing written, and the progress never goes back.
+    let dir = TestDir::new("compress-webp-trial-cancel");
+    let src = smooth_photo(800, 450, 75.0);
+    let (path, job) = plan_one(&dir, "q75.webp", &src, compress_op(Balanced));
+    let before = SourceState::of(&path);
+    let ctx = EngineCtx::default();
+    let cancel = ctx.cancel.clone();
+    let mut seen = Vec::new();
+    let err = run_job(&job, &ctx, &mut |p| {
+        if p > 0.9 {
+            cancel.cancel();
+        }
+        seen.push(p);
+    })
+    .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Cancelled, "{}", err.detail);
+    assert!(seen.iter().any(|&p| p > 0.9), "{seen:?}");
+    assert!(seen.windows(2).all(|w| w[0] <= w[1]), "{seen:?}");
+    before.assert_unchanged();
+    assert_no_leftovers(&dir.path);
+    assert!(!planned_file(&job).exists());
 }
 
 #[test]
