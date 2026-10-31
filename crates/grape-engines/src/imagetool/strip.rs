@@ -77,10 +77,10 @@ impl<R: Read + Seek> In for BufReader<R> {
         if self.buffer().len() >= buf.len() {
             return self.read_exact(buf);
         }
-        if !self.buffer().is_empty() {
-            // Dropped, so that the file is at `at`.
-            self.seek(SeekFrom::Start(at))?;
-        }
+        // Dropped, so that the file is at `at`, and dropped even when it's
+        // used up: kept, a later seek back into it would take its bytes as
+        // the ones before where the file is now, `buf.len()` too early.
+        self.seek(SeekFrom::Start(at))?;
         self.get_mut().read_exact(buf)
     }
 }
@@ -450,5 +450,26 @@ mod tests {
             read_at(&mut r, 995, &mut [0; 10]),
             Err(Error::Broken(_))
         ));
+    }
+
+    #[test]
+    fn a_read_back_after_one_past_a_used_up_buffer_reads_the_files_bytes() {
+        let bytes: Vec<u8> = (0..200).map(|i| i as u8).collect();
+        let mut r = BufReader::with_capacity(64, Cursor::new(bytes.clone()));
+        let mut buf = [0; 8];
+        // 0 to 64 buffered, then used up to its end.
+        assert_eq!(r.fill_buf().unwrap().len(), 64);
+        read_at(&mut r, 60, &mut buf[..4]).unwrap();
+        assert!(r.buffer().is_empty());
+        assert_eq!(buf[..4], bytes[60..64]);
+        // Straight from the file, the buffer used up.
+        read_at(&mut r, 64, &mut buf).unwrap();
+        assert_eq!(buf, bytes[64..72]);
+        // Back into where the buffer was: the file's bytes, not 8 early.
+        read_at(&mut r, 50, &mut buf).unwrap();
+        assert_eq!(buf, bytes[50..58]);
+        let mut next = [0; 4];
+        r.read_exact(&mut next).unwrap();
+        assert_eq!(next, bytes[58..62]);
     }
 }
