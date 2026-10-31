@@ -3960,6 +3960,38 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
             "late-alph.webp",
             riff(&[canvas(0x10), vp8.clone(), alph.clone()]),
         ),
+        // Image chunks past the image's own, which libwebp's demuxer
+        // (Pillow) refuses and its still decoder reads past: the review's
+        // six, which were converted, compressed and stripped.
+        (
+            "two-vp8.webp",
+            riff(&[canvas(0), red_vp8.clone(), vp8.clone()]),
+        ),
+        (
+            "vp8-xmp-vp8.webp",
+            riff(&[
+                canvas(0x04),
+                red_vp8.clone(),
+                riff_chunk(b"XMP ", b"<x/>"),
+                vp8.clone(),
+            ]),
+        ),
+        (
+            "two-late-alph.webp",
+            riff(&[canvas(0), vp8.clone(), alph.clone(), alph.clone()]),
+        ),
+        (
+            "vp8l-alph.webp",
+            riff(&[canvas(0x10), bit(true), alph.clone()]),
+        ),
+        (
+            "two-vp8l.webp",
+            riff(&[canvas(0), blue_vp8l.clone(), bit(true)]),
+        ),
+        (
+            "alph-vp8-alph.webp",
+            riff(&[canvas(0x10), alph.clone(), vp8.clone(), alph.clone()]),
+        ),
         // Transparent pixels in a VP8L whose bit says opaque, under
         // VP8X's alpha flag: refused once decoded.
         ("vp8l-bit-off.webp", riff(&[canvas(0x10), bit(false)])),
@@ -4020,10 +4052,16 @@ fn a_webp_compress_refuses_is_refused_by_every_conversion_too() {
         ),
         ("bit-off.webp", riff(&[canvas(0x10), opaque]), [10, 10, 220]),
         // An ANIM after the picture: libwebp's still decoder and its
-        // demuxer (Pillow) both show it. Refused in round 4.
+        // demuxer (Pillow) both show it. Refused in round 4, and one of 5
+        // bytes (6 padded, as the demuxer reads it) in round 5.
         (
             "anim-after.webp",
             riff(&[canvas(0), red_vp8.clone(), riff_chunk(b"ANIM", &[0; 6])]),
+            [200, 10, 10],
+        ),
+        (
+            "anim5-after.webp",
+            riff(&[canvas(0), red_vp8.clone(), riff_chunk(b"ANIM", &[0; 5])]),
             [200, 10, 10],
         ),
     ] {
@@ -4146,6 +4184,45 @@ fn an_animated_webp_libwebp_refuses_is_refused_by_every_conversion_too() {
         }
         let err = compress(&dir, name, &file, High).unwrap_err();
         assert_eq!(err.user_message, message, "{}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+    // A 5-byte ANIM, and a 15-byte ANMF before the frame: libwebp's
+    // demuxer goes by their sizes padded (6, 16) and Pillow shows red;
+    // image-webp refuses both, so conversions do, and Compress says what
+    // it said of an animation (it said "isn't a readable WEBP image").
+    for (name, file) in [
+        (
+            "anim5.webp",
+            riff(&[
+                canvas.clone(),
+                riff_chunk(b"ANIM", &[0; 5]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+        (
+            "anmf15.webp",
+            riff(&[
+                canvas.clone(),
+                anim.clone(),
+                riff_chunk(b"ANMF", &[0; 15]),
+                anmf(0, &[&red_vp8]),
+            ]),
+        ),
+    ] {
+        let err = run(&dir, name, &file, Operation::convert(Format::Png)).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::DecodeFailed, "{name}: {}", err.detail);
+        fs::remove_file(dir.join(name)).unwrap();
+        let err = compress(&dir, name, &file, High).unwrap_err();
+        assert_eq!(
+            err.kind,
+            ErrorKind::NotYetSupported,
+            "{name}: {}",
+            err.detail
+        );
+        assert_eq!(
+            err.user_message,
+            format!("{name} is animated. Compress works on still WebP images for now.")
+        );
         fs::remove_file(dir.join(name)).unwrap();
     }
     // An animation as libwebp's own encoder lays one out (Pillow's): the
