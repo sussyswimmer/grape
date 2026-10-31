@@ -884,9 +884,15 @@ mod tests {
             assert!(!fits_scaled_beside(w, h, Some(4096), 1, room));
         }
         // Small's scale of a picture High admits leaves far more: at least
-        // 750,780,416 bytes (3714 × 3714).
-        let room = WORKING_SET_LIMIT - peak(3714, 3714, 4, false, Some(2048));
-        assert_eq!(room, 750_780_416);
+        // 750,780,416 bytes, wherever its result is 2048 × 2048, from
+        // 2049 × 2048 to 3734 × 3734, the largest square High admits
+        // (3714 × 3714 among them).
+        for (w, h) in [(2049, 2048), (3714, 3714), (3734, 3734)] {
+            let room = WORKING_SET_LIMIT - peak(w, h, 4, false, Some(2048));
+            assert_eq!(room, 750_780_416, "{w}x{h}");
+        }
+        assert!(fits_as_it_is(3734, 3734, 0, 0));
+        assert!(!fits_as_it_is(3735, 3735, 0, 0));
         assert!(fits_scaled_beside(4097, 3403, Some(2048), 0, 500_000_000));
     }
 
