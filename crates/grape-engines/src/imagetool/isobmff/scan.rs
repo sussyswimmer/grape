@@ -45,10 +45,13 @@
 //!    with no codec brand, which sniff as HEIC) or in another codec than
 //!    HEVC ([`CODEC`]: AVC, JPEG, JPEG 2000, VVC, uncompressed, which a
 //!    conversion may read); more than 8 bits ([`DEEP`]); another picture
-//!    ([`PICTURES`]); non-square pixels ([`PIXELS`]); and, at High, an
-//!    upright `ispe` over one HEVC picture ([`HIGH`], with
-//!    [`Encoder::max_picture`]'s bounds; `clap` only crops, so this is
-//!    conservative).
+//!    ([`PICTURES`]); non-square pixels ([`PIXELS`]); a `colr` `nclx` that
+//!    isn't sRGB-like ([`Nclx::srgb_like`]) with no ICC profile, where the
+//!    helper hands back no profile for one ([`WIDE`]; [`Bounds`]: libheif
+//!    on the PC; ImageIO hands back its color space's, so on a Mac the
+//!    pipeline decides after the decode); and, at High, an upright `ispe`
+//!    over one HEVC picture ([`HIGH`], with [`Encoder::max_picture`]'s
+//!    bounds; `clap` only crops, so this is conservative).
 //! 5. **The metadata items' data** ([`Scan::load`]), read whole from the
 //!    file or `idat` (data that names another data reference is this
 //!    file's, as libheif reads it), [`MAX_CARRIED`] at most in all (over
@@ -113,6 +116,10 @@ pub(crate) const PIXELS: &str = "has non-square pixels, which Compress can't kee
 /// Why a picture over one HEVC picture is refused at High.
 pub(crate) const HIGH: &str = "is too large to compress at High yet. Try Balanced.";
 
+/// Why a wide color space with no ICC profile is refused: encoded without
+/// one, its colors would shift.
+pub(crate) const WIDE: &str = "uses a wide color space that Compress can't keep yet.";
+
 /// Why a picture coded in another codec than HEVC or AV1 is refused: HEIF
 /// whose `ftyp` names no codec (rule 5 of D41's sniff) but whose picture
 /// is AVC, JPEG, JPEG 2000, VVC, uncompressed (`unci`), …, which a
@@ -150,11 +157,35 @@ pub(crate) struct Nclx {
 }
 
 impl Nclx {
-    /// Whether it's sRGB as far as Compress is concerned: primaries BT.709
-    /// (1) or unspecified (2), and transfer BT.709 (1), unspecified (2),
-    /// BT.601 (6) or sRGB (13).
+    /// Whether it's sRGB as far as Compress is concerned: SDR primaries
+    /// close to sRGB's, BT.709 (1), unspecified (2) or BT.601's (5, 625
+    /// lines; 6, 525 lines), and an SDR transfer, BT.709 (1), unspecified
+    /// (2), BT.601 (6) or sRGB (13). Wide primaries (P3's 12, BT.2020's 9,
+    /// …) and HDR transfers (PQ's 16, HLG's 18) aren't.
     pub(crate) fn srgb_like(&self) -> bool {
-        matches!(self.primaries, 1 | 2) && matches!(self.transfer, 1 | 2 | 6 | 13)
+        matches!(self.primaries, 1 | 2 | 5 | 6) && matches!(self.transfer, 1 | 2 | 6 | 13)
+    }
+}
+
+/// What the helper takes, which [`Scan::refusal`] holds a file to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Bounds {
+    /// The largest picture it encodes, in pixels and on a side
+    /// ([`Encoder::max_picture`]).
+    pub(crate) picture: (u64, u32),
+    /// Whether it hands back an ICC profile for a picture whose color is an
+    /// `nclx` alone: ImageIO hands back its color space's (macOS), libheif
+    /// none (the PC, D33).
+    pub(crate) nclx_profile: bool,
+}
+
+impl Bounds {
+    /// `encoder`'s, on this OS.
+    pub(crate) fn of(encoder: &Encoder) -> Bounds {
+        Bounds {
+            picture: encoder.max_picture(),
+            nclx_profile: cfg!(target_os = "macos"),
+        }
     }
 }
 
@@ -171,6 +202,8 @@ pub(crate) enum Refusal {
     Pictures,
     /// [`PIXELS`].
     Pixels,
+    /// [`WIDE`].
+    Wide,
     /// [`HIGH`].
     High,
 }
@@ -185,6 +218,7 @@ impl Refusal {
             Refusal::Deep => DEEP,
             Refusal::Pictures => PICTURES,
             Refusal::Pixels => PIXELS,
+            Refusal::Wide => WIDE,
             Refusal::High => HIGH,
         }
     }
@@ -475,14 +509,9 @@ impl Scan {
     }
 
     /// The first reason, in [module docs](self)' order, why Compress at
-    /// `preset` refuses the file, with the largest picture the helper
-    /// encodes, `max_picture` (pixels, side: [`Encoder::max_picture`]).
-    pub(crate) fn refusal(
-        &self,
-        preset: CompressPreset,
-        max_picture: (u64, u32),
-    ) -> Option<Refusal> {
-        let (max_pixels, max_side) = max_picture;
+    /// `preset` refuses the file, with a helper that takes `bounds`.
+    pub(crate) fn refusal(&self, preset: CompressPreset, bounds: Bounds) -> Option<Refusal> {
+        let (max_pixels, max_side) = bounds.picture;
         let over = |(w, h): (u32, u32)| {
             u64::from(w) * u64::from(h) > max_pixels || w > max_side || h > max_side
         };
@@ -497,6 +526,8 @@ impl Scan {
             Some(Refusal::Pictures)
         } else if self.pasp.is_some_and(|(h, v)| h != v) {
             Some(Refusal::Pixels)
+        } else if !bounds.nclx_profile && !self.icc && self.nclx.is_some_and(|n| !n.srgb_like()) {
+            Some(Refusal::Wide)
         } else if preset == CompressPreset::High && self.upright().is_some_and(over) {
             Some(Refusal::High)
         } else {
@@ -792,7 +823,7 @@ pub(crate) fn check(
     }
     let failed = |e: Error| fail(scan_error(e, names, src));
     let mut scan = Scan::read(&mut r, len).map_err(failed)?;
-    if let Some(refusal) = scan.refusal(preset, encoder.max_picture()) {
+    if let Some(refusal) = scan.refusal(preset, Bounds::of(encoder)) {
         return Err(strip::refused(names, src, refusal.why()));
     }
     scan.load(&mut r).map_err(failed)?;
@@ -834,8 +865,20 @@ mod tests {
     use crate::ErrorKind;
     use CompressPreset::{Balanced, High, Small};
 
-    /// One HEVC picture: [`Encoder::max_picture`] for HEIC.
-    const HEVC: (u64, u32) = (35_651_584, 16_888);
+    /// One HEVC picture ([`Encoder::max_picture`] for HEIC), and no profile
+    /// back for an `nclx` (libheif's).
+    const HEVC: Bounds = Bounds {
+        picture: (35_651_584, 16_888),
+        nclx_profile: false,
+    };
+
+    /// [`HEVC`] with the largest picture `pixels` and `side`.
+    fn picture(pixels: u64, side: u32) -> Bounds {
+        Bounds {
+            picture: (pixels, side),
+            ..HEVC
+        }
+    }
 
     fn read(file: &[u8]) -> Result<Scan, Error> {
         Scan::read(&mut Cursor::new(file), file.len() as u64)
@@ -1221,17 +1264,25 @@ mod tests {
         }
         // By the bounds given.
         let s = read(&primary_with(vec![hvcc(8, 8), ispe(64, 48)]).build().0).unwrap();
-        assert_eq!(s.refusal(High, (64 * 48, 64)), None);
-        assert_eq!(s.refusal(High, (64 * 48 - 1, 64)), Some(Refusal::High));
-        assert_eq!(s.refusal(High, (64 * 48, 63)), Some(Refusal::High));
+        assert_eq!(s.refusal(High, picture(64 * 48, 64)), None);
+        assert_eq!(
+            s.refusal(High, picture(64 * 48 - 1, 64)),
+            Some(Refusal::High)
+        );
+        assert_eq!(s.refusal(High, picture(64 * 48, 63)), Some(Refusal::High));
         // With no ispe, the helper's own cap is what holds.
         let s = read(&primary_with(vec![hvcc(8, 8)]).build().0).unwrap();
-        assert_eq!((s.ispe, s.refusal(High, (1, 1))), (None, None));
+        assert_eq!((s.ispe, s.refusal(High, picture(1, 1))), (None, None));
     }
 
     #[test]
     fn the_refusals_come_in_their_order() {
-        let mut b = primary_with(vec![hvcc(10, 10), ispe(8000, 6000), pasp(4, 3)]);
+        let mut b = primary_with(vec![
+            hvcc(10, 10),
+            ispe(8000, 6000),
+            pasp(4, 3),
+            nclx(12, 13, 6, true),
+        ]);
         b.items.push(Item::picture(5, 0xA5, 10));
         assert_eq!(refusal(&b), Some(Refusal::Deep));
         b.properties[0] = hvcc(8, 8);
@@ -1239,6 +1290,8 @@ mod tests {
         b.items[3].hidden = true;
         assert_eq!(refusal(&b), Some(Refusal::Pixels));
         b.properties[2] = pasp(1, 1);
+        assert_eq!(refusal(&b), Some(Refusal::Wide));
+        b.properties[3] = nclx(1, 13, 6, true);
         assert_eq!(refusal(&b), Some(Refusal::High));
         let s = read(&b.build().0).unwrap();
         assert_eq!(s.refusal(Balanced, HEVC), None);
@@ -1249,6 +1302,7 @@ mod tests {
             (Refusal::Deep, DEEP),
             (Refusal::Pictures, PICTURES),
             (Refusal::Pixels, PIXELS),
+            (Refusal::Wide, WIDE),
             (Refusal::High, HIGH),
         ];
         for (refusal, why) in words {
@@ -1305,10 +1359,16 @@ mod tests {
             ((2, 2), true),
             ((1, 6), true),
             ((1, 1), true),
+            // BT.601's primaries, 625 and 525 lines: SDR, close to sRGB.
+            ((5, 1), true),
+            ((6, 6), true),
+            ((5, 13), true),
             ((12, 13), false),
             ((9, 16), false),
             ((9, 18), false),
             ((1, 16), false),
+            ((5, 16), false),
+            ((6, 18), false),
         ] {
             let s = read(
                 &primary_with(vec![hvcc(8, 8), nclx(p, t, 6, true)])
@@ -1323,6 +1383,37 @@ mod tests {
             );
             assert_eq!(n.srgb_like(), srgb, "{p} {t}");
             assert!(!s.icc);
+            // With no profile, and a helper that hands back none for an
+            // nclx, it's refused before the decode; one that hands back its
+            // color space's (ImageIO) decides after it.
+            let wide = (!srgb).then_some(Refusal::Wide);
+            assert_eq!(s.refusal(Balanced, HEVC), wide, "{p} {t}");
+            let mac = Bounds {
+                nclx_profile: true,
+                ..HEVC
+            };
+            assert_eq!(s.refusal(Balanced, mac), None, "{p} {t}");
+        }
+        // The item 6 samples: BT.601's 5/1/5 and 6/6/6 kept, P3's 12/13/6
+        // and BT.2020 PQ's 9/16/9 refused.
+        for ((p, t, m), refused) in [
+            ((5, 1, 5), false),
+            ((6, 6, 6), false),
+            ((12, 13, 6), true),
+            ((9, 16, 9), true),
+        ] {
+            let s = read(
+                &primary_with(vec![hvcc(8, 8), nclx(p, t, m, false)])
+                    .build()
+                    .0,
+            )
+            .unwrap();
+            let wide = refused.then_some(Refusal::Wide);
+            assert_eq!(s.refusal(Small, HEVC), wide, "{p}/{t}/{m}");
+            // An ICC profile beside it decides the color: kept.
+            let props = vec![hvcc(8, 8), icc(b"prof", b"p"), nclx(p, t, m, false)];
+            let s = read(&primary_with(props).build().0).unwrap();
+            assert_eq!(s.refusal(Small, HEVC), None, "{p}/{t}/{m}");
         }
         for kind in [b"prof", b"rICC"] {
             let s = read(
@@ -1664,6 +1755,18 @@ mod tests {
             Balanced,
             PIXELS,
         );
+        // P3 by its nclx alone: libheif hands back no profile, so the PC
+        // refuses it before the helper starts; a Mac's ImageIO hands back
+        // its color space's, so the helper is asked.
+        let p3 = primary_with(vec![hvcc(8, 8), nclx(12, 13, 6, true)])
+            .build()
+            .0;
+        if cfg!(target_os = "macos") {
+            let e = check_err(&p3, Balanced, nowhere());
+            assert_eq!(e.user_message, "Grape's image helper couldn't start.");
+        } else {
+            refused(&p3, Balanced, WIDE);
+        }
         let big = primary_with(vec![hvcc(8, 8), ispe(8000, 6000)]).build().0;
         refused(&big, High, HIGH);
         let e = check_err(&big, Balanced, nowhere());

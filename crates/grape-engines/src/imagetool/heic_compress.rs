@@ -25,9 +25,11 @@
 //!    holds at its peak ([`peak`]) with the carried metadata and the
 //!    profile, within D16's 1 GiB. 0.05–0.40.
 //! 3. **Color:** with no profile back, a `colr` `nclx` that isn't sRGB-like
-//!    (primaries 1 or 2, transfer 1, 2, 6 or 13) is refused ([`WIDE`]):
+//!    (primaries 1, 2, 5 or 6, transfer 1, 2, 6 or 13:
+//!    [`Nclx::srgb_like`](scan::Nclx::srgb_like)) is refused ([`WIDE`]):
 //!    encoded without it, its colors would shift. libheif hands back no
-//!    profile for one (Windows: a P3 `nclx` is refused); ImageIO hands back
+//!    profile for one (Windows: a P3 `nclx` with no ICC profile is refused,
+//!    by the scan already, before the helper starts); ImageIO hands back
 //!    its color space's (macOS: kept). One rule on both.
 //! 4. **Scale** ([`scale::scale`]) to the preset's long side, as JPEG's
 //!    Compress does. 0.40–0.50 (Lanczos3 itself can't be stopped).
@@ -92,7 +94,7 @@ use image::{ColorType, GenericImageView};
 use super::exif::{self, MAX_EXIF};
 use super::isobmff::graft::{Added, Graft};
 use super::isobmff::items::Role;
-use super::isobmff::scan::{self, Scan};
+use super::isobmff::scan::{self, Scan, WIDE};
 use super::scale;
 use super::strip::{self, Error};
 use crate::cancel::Cancellable;
@@ -100,10 +102,6 @@ use crate::heif::{Decoded, Decoder, Encoder};
 use crate::output::TempFile;
 use crate::publish::{self, Names};
 use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
-
-/// Why a wide color space the helper hands back with no profile is
-/// refused.
-pub(crate) const WIDE: &str = "uses a wide color space that Compress can't keep yet.";
 
 /// A preset's quality for the helper of this OS (`mac`: ImageIO's, q / 100;
 /// otherwise libheif's) and the long side it scales down to.
@@ -893,22 +891,34 @@ mod tests {
 
     #[test]
     fn a_wide_color_space_with_no_profile_back_is_refused() {
-        for (primaries, transfer, profile, refused) in [
-            (12, 13, false, true),
-            (9, 16, false, true),
-            (12, 13, true, false),
-            (1, 13, false, false),
-            (2, 2, false, false),
+        for ((primaries, transfer, matrix), profile, refused) in [
+            ((12, 13, 6), false, true),
+            ((9, 16, 9), false, true),
+            ((12, 13, 6), true, false),
+            ((1, 13, 6), false, false),
+            ((2, 2, 2), false, false),
+            // BT.601's primaries are SDR, close to sRGB's.
+            ((5, 1, 5), false, false),
+            ((6, 6, 6), false, false),
         ] {
             let mut source = Source::new((64, 48));
-            source.props = vec![nclx(primaries, transfer, 6, true)];
-            source.icc = profile.then(rgb_profile);
+            source.props = vec![nclx(primaries, transfer, matrix, true)];
+            // A profile in the source, which the helper hands back.
+            if profile {
+                source.icc = Some(rgb_profile());
+                source.props.push(colr_icc(b"prof", &rgb_profile()));
+            }
             let c = case("photo.heic", &source.build(), Balanced);
             let ran = c.run("ok");
             if refused {
                 let e = c.refused(&ran);
                 assert_eq!(e.kind, ErrorKind::NotYetSupported);
                 assert_eq!(e.user_message, format!("photo.heic {WIDE}"));
+                // libheif hands back no profile for an nclx: the PC refuses
+                // it before the helper decodes anything.
+                if !cfg!(target_os = "macos") {
+                    assert!(ran.progress.is_empty(), "{:?}", ran.progress);
+                }
             } else {
                 let (out, _) = c.output(&ran);
                 assert_eq!(parse_fake(&out).unwrap().icc, source.icc, "{primaries}");
