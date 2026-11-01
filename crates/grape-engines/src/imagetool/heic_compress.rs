@@ -87,8 +87,10 @@
 //!   the decoded pixels 0.3 s, and the graft, write and check of a 36 MiB
 //!   `out.heic` 0.06 s.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::ops::Range;
 use std::path::Path;
 
 use grape_core::{CompressPreset, Format, Job};
@@ -403,27 +405,162 @@ fn upright_exif(tiff: &mut [u8], width: u32, height: u32, upright: bool) {
     }
 }
 
-/// An XMP packet's `tiff:Orientation` set to 1 in place, in both forms a
-/// packet writes it: an attribute (`tiff:Orientation="6"`, or in single
-/// quotes) and an element (`<tiff:Orientation>6</tiff:Orientation>`). A
-/// value of more than one digit is left as it is.
+/// The tiff namespace (`tiff:Orientation`'s).
+const TIFF_NS: &[u8] = b"http://ns.adobe.com/tiff/1.0/";
+
+/// The most bytes [`upright_xmp`] looks at around one name: a prefix, an
+/// element's attributes, a value. Past it, the name is left as it is, so a
+/// packet of any size is read in one pass.
+const NEAR: usize = 256;
+
+/// An XMP packet's Orientation in the tiff namespace set to 1 in place,
+/// the value's length kept, in both forms a packet writes it: an attribute
+/// (`tiff:Orientation="6"`, either quote, spaces around `=` and inside the
+/// quotes) and an element (`<tiff:Orientation>6</tiff:Orientation>`, its
+/// own attributes and spaces or line breaks around the value). The prefix
+/// is any the packet binds to the tiff namespace (`xmlns:t="…tiff/1.0/"`),
+/// and `tiff` when the packet binds `tiff` to nothing; a property of
+/// another namespace (`phototiff:Orientation`) is never touched. A value
+/// that's one digit after any zeros (`6`, `06`) becomes 1 (`1`, `01`);
+/// anything else is left as it is. What isn't handled is left as it is: a
+/// UTF-16 or UTF-32 packet, a prefix bound again inside the packet, the
+/// tiff namespace as the default one, `rdf:value` forms, and a name, its
+/// attributes or its value longer than [`NEAR`].
 fn upright_xmp(xmp: &mut [u8]) {
-    const NAME: &[u8] = b"tiff:Orientation";
+    const NAME: &[u8] = b":Orientation";
+    let prefixes = tiff_prefixes(xmp);
     let mut at = 0;
-    while let Some(found) = xmp[at..].windows(NAME.len()).position(|w| w == NAME) {
-        let i = at + found + NAME.len();
-        let digit = match xmp.get(i..i + 4) {
-            Some(&[b'=', q, d, end]) if (q == b'"' || q == b'\'') && end == q => {
-                d.is_ascii_digit().then_some(i + 2)
-            }
-            Some(&[b'>', d, b'<', b'/']) => d.is_ascii_digit().then_some(i + 1),
+    while let Some(found) = find(&xmp[at..], NAME) {
+        let colon = at + found;
+        let end = colon + NAME.len();
+        at = end;
+        // The prefix, back to the character before it.
+        let len = xmp[colon.saturating_sub(NEAR)..colon]
+            .iter()
+            .rev()
+            .take_while(|&&b| is_name_byte(b))
+            .count();
+        let start = colon - len;
+        if !prefixes.contains(&xmp[start..colon]) {
+            continue;
+        }
+        // Opening an element or naming an attribute: not a closing tag.
+        let value = match start.checked_sub(1).map(|i| xmp[i]) {
+            Some(b'<') => element_value(xmp, start, end),
+            Some(b) if b.is_ascii_whitespace() => quoted(xmp, end),
             _ => None,
         };
-        if let Some(d) = digit {
-            xmp[d] = b'1';
+        if let Some(value) = value {
+            set_to_1(&mut xmp[value]);
         }
-        at = i;
     }
+}
+
+/// Whether `b` may be in a prefix: what XML allows in a name but `:`
+/// (bytes of a non-ASCII character among it).
+fn is_name_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.') || b >= 0x80
+}
+
+/// The prefixes `xmp` binds to [`TIFF_NS`], and `tiff` when it binds
+/// `tiff` to nothing.
+fn tiff_prefixes(xmp: &[u8]) -> HashSet<Vec<u8>> {
+    const XMLNS: &[u8] = b"xmlns:";
+    let mut prefixes = HashSet::new();
+    let mut tiff_bound = false;
+    let mut at = 0;
+    while let Some(found) = find(&xmp[at..], XMLNS) {
+        let start = at + found + XMLNS.len();
+        at = start;
+        let len = xmp[start..]
+            .iter()
+            .take(NEAR)
+            .take_while(|&&b| is_name_byte(b))
+            .count();
+        let prefix = &xmp[start..start + len];
+        let Some(uri) = quoted(xmp, start + len) else {
+            continue;
+        };
+        if prefix == b"tiff" {
+            tiff_bound = true;
+        }
+        if &xmp[uri] == TIFF_NS && !prefix.is_empty() {
+            prefixes.insert(prefix.to_vec());
+        }
+    }
+    if !tiff_bound {
+        prefixes.insert(b"tiff".to_vec());
+    }
+    prefixes
+}
+
+/// From `at`: spaces, `=`, spaces, then a value in `"` or `'` of at most
+/// [`NEAR`] bytes; the value.
+fn quoted(xmp: &[u8], at: usize) -> Option<Range<usize>> {
+    let at = skip_spaces(xmp, at);
+    (xmp.get(at) == Some(&b'=')).then_some(())?;
+    let at = skip_spaces(xmp, at + 1);
+    let quote = *xmp.get(at).filter(|q| matches!(q, b'"' | b'\''))?;
+    let rest = xmp.get(at + 1..)?;
+    let len = rest.iter().take(NEAR).position(|&b| b == quote)?;
+    Some(at + 1..at + 1 + len)
+}
+
+/// After an element's name (`<` at `start - 1`, the name to `end`): its
+/// attributes up to `>`, then its text up to the same name's closing tag;
+/// the text, or `None` (an empty element, one holding more than text, or
+/// one longer than [`NEAR`] to there).
+fn element_value(xmp: &[u8], start: usize, end: usize) -> Option<Range<usize>> {
+    let next = *xmp.get(end)?;
+    if next != b'>' && !next.is_ascii_whitespace() {
+        // A longer name (`Orientation2`).
+        return None;
+    }
+    let close = end + xmp[end..].iter().take(NEAR).position(|&b| b == b'>')?;
+    if xmp[close - 1] == b'/' {
+        return None;
+    }
+    let text = close + 1;
+    let len = xmp
+        .get(text..)?
+        .iter()
+        .take(NEAR)
+        .position(|&b| b == b'<')?;
+    let after = &xmp[text + len..];
+    let name = &xmp[start..end];
+    let closed = after.get(..2) == Some(b"</") && after[2..].starts_with(name);
+    closed.then_some(text..text + len)
+}
+
+/// A value of one digit after any zeros, spaces around it, set to 1 in
+/// place; anything else is left as it is.
+fn set_to_1(value: &mut [u8]) {
+    let len = value.trim_ascii().len();
+    let Some(first) = value.iter().position(|b| !b.is_ascii_whitespace()) else {
+        return;
+    };
+    let digits = &mut value[first..first + len];
+    let Some((one, zeros)) = digits.split_last_mut() else {
+        return;
+    };
+    if one.is_ascii_digit() && zeros.iter().all(|&b| b == b'0') {
+        *one = b'1';
+    }
+}
+
+/// Where `needle` first is in `hay`.
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// `at` past any ASCII spaces, tabs and line breaks, at most [`NEAR`].
+fn skip_spaces(xmp: &[u8], at: usize) -> usize {
+    at + xmp.get(at..).map_or(0, |rest| {
+        rest.iter()
+            .take(NEAR)
+            .take_while(|b| b.is_ascii_whitespace())
+            .count()
+    })
 }
 
 #[cfg(test)]
@@ -507,7 +644,8 @@ mod tests {
     /// An XMP packet with both forms of `tiff:Orientation` at `o`.
     fn xmp(o: u16) -> String {
         format!(
-            "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description tiff:Orientation=\"{o}\" \
+            "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:Description \
+             xmlns:tiff='http://ns.adobe.com/tiff/1.0/' tiff:Orientation=\"{o}\" \
              exif:GPSLatitude='48,1N'><tiff:Orientation>{o}</tiff:Orientation>\
              </rdf:Description></x:xmpmeta>"
         )
@@ -1131,30 +1269,116 @@ mod tests {
 
     #[test]
     fn xmp_orientation_is_set_in_both_forms_and_nothing_else() {
+        // In an rdf:Description, the tiff namespace bound as packets bind
+        // it; `{}` is where each case goes.
+        const TIFF: &str = "xmlns:tiff=\"http://ns.adobe.com/tiff/1.0/\"";
+        let packet = |inner: &str| {
+            format!(
+                "<x:xmpmeta xmlns:x='adobe:ns:meta/'><rdf:RDF><rdf:Description {TIFF} \
+                 xmlns:t='http://ns.adobe.com/tiff/1.0/' \
+                 xmlns:phototiff='http://example.com/photo/tiff/' \
+                 xmlns:other='http://example.com/other/' {inner}</rdf:Description>\
+                 </rdf:RDF></x:xmpmeta>"
+            )
+        };
         for (before, after) in [
-            ("tiff:Orientation=\"6\"", "tiff:Orientation=\"1\""),
-            ("tiff:Orientation='8'", "tiff:Orientation='1'"),
+            // Attributes, either quote, spaces around `=` and in the value.
+            ("tiff:Orientation=\"6\">", "tiff:Orientation=\"1\">"),
+            ("tiff:Orientation='8'>", "tiff:Orientation='1'>"),
+            ("tiff:Orientation = \"6\">", "tiff:Orientation = \"1\">"),
+            ("tiff:Orientation=\n  ' 3 '>", "tiff:Orientation=\n  ' 1 '>"),
+            // Elements, the value with spaces and line breaks around it.
             (
-                "<tiff:Orientation>3</tiff:Orientation>",
-                "<tiff:Orientation>1</tiff:Orientation>",
+                "><tiff:Orientation>3</tiff:Orientation>",
+                "><tiff:Orientation>1</tiff:Orientation>",
             ),
-            ("tiff:Orientation=\"16\"", "tiff:Orientation=\"16\""),
-            ("tiff:Orientation=\"6'", "tiff:Orientation=\"6'"),
-            ("tiff:Orientation = \"6\"", "tiff:Orientation = \"6\""),
             (
-                "<tiff:Orientation>x</tiff:Orientation>",
-                "<tiff:Orientation>x</tiff:Orientation>",
+                "><tiff:Orientation>\n 6\n</tiff:Orientation>",
+                "><tiff:Orientation>\n 1\n</tiff:Orientation>",
             ),
-            ("tiff:Orientation", "tiff:Orientation"),
-            ("tiff:Orientation=\"", "tiff:Orientation=\""),
+            (
+                "><tiff:Orientation rdf:datatype='int'>5</tiff:Orientation>",
+                "><tiff:Orientation rdf:datatype='int'>1</tiff:Orientation>",
+            ),
+            // Leading zeros keep the value's length.
+            ("tiff:Orientation=\"06\">", "tiff:Orientation=\"01\">"),
+            (
+                "><tiff:Orientation>008</tiff:Orientation>",
+                "><tiff:Orientation>001</tiff:Orientation>",
+            ),
+            // Another prefix bound to the tiff namespace.
+            ("t:Orientation=\"6\">", "t:Orientation=\"1\">"),
+            (
+                "><t:Orientation>7</t:Orientation>",
+                "><t:Orientation>1</t:Orientation>",
+            ),
+            // Not an orientation, or not the tiff namespace's: as it was.
+            ("tiff:Orientation=\"16\">", "tiff:Orientation=\"16\">"),
+            ("tiff:Orientation=\"6'>", "tiff:Orientation=\"6'>"),
+            ("tiff:Orientation=\"\">", "tiff:Orientation=\"\">"),
+            ("tiff:Orientation=\"6x\">", "tiff:Orientation=\"6x\">"),
+            (
+                "><tiff:Orientation>x</tiff:Orientation>",
+                "><tiff:Orientation>x</tiff:Orientation>",
+            ),
+            (
+                "><tiff:Orientation/><tiff:Orientation>",
+                "><tiff:Orientation/><tiff:Orientation>",
+            ),
+            (
+                "phototiff:Orientation=\"6\">",
+                "phototiff:Orientation=\"6\">",
+            ),
+            (
+                "><phototiff:Orientation>6</phototiff:Orientation>",
+                "><phototiff:Orientation>6</phototiff:Orientation>",
+            ),
+            ("other:Orientation=\"6\">", "other:Orientation=\"6\">"),
+            ("tiff:OrientationX=\"6\">", "tiff:OrientationX=\"6\">"),
+            ("tiff:Orientation>", "tiff:Orientation>"),
         ] {
-            let mut x = before.as_bytes().to_vec();
+            let mut x = packet(before).into_bytes();
             upright_xmp(&mut x);
-            assert_eq!(x, after.as_bytes(), "{before}");
+            assert_eq!(String::from_utf8(x).unwrap(), packet(after), "{before}");
+        }
+        // tiff bound to another namespace isn't the tiff namespace; a
+        // packet that binds it nowhere is taken as binding it the usual way.
+        for (packet, after) in [
+            (
+                "<r xmlns:tiff='http://example.com/'><d tiff:Orientation='6'/></r>",
+                "<r xmlns:tiff='http://example.com/'><d tiff:Orientation='6'/></r>",
+            ),
+            (
+                "<r><d tiff:Orientation='6'/></r>",
+                "<r><d tiff:Orientation='1'/></r>",
+            ),
+        ] {
+            let mut x = packet.as_bytes().to_vec();
+            upright_xmp(&mut x);
+            assert_eq!(x, after.as_bytes(), "{packet}");
         }
         let mut both = xmp(6).into_bytes();
         upright_xmp(&mut both);
         assert_eq!(both, xmp(1).as_bytes());
+        // 50,000 prefixes, each bound and used, then a megabyte of a name:
+        // one pass, each patched.
+        let mut big = Vec::new();
+        for i in 0..50_000 {
+            let decl = format!(" xmlns:p{i}='{}'", "http://ns.adobe.com/tiff/1.0/");
+            big.extend_from_slice(decl.as_bytes());
+            big.extend_from_slice(format!("<p{i}:Orientation> 6 </p{i}:Orientation>").as_bytes());
+        }
+        big.extend(std::iter::repeat_n(b'a', 1 << 20));
+        big.extend_from_slice(b":Orientation='6'");
+        upright_xmp(&mut big);
+        let patched = big.windows(3).filter(|w| w == b" 1 ").count();
+        assert_eq!(patched, 50_000);
+        assert!(big.ends_with(b":Orientation='6'"));
+        // Cut anywhere, it never panics.
+        let whole = packet("tiff:Orientation = '6'><tiff:Orientation> 6 </tiff:Orientation>");
+        for n in 0..whole.len() {
+            upright_xmp(&mut whole.as_bytes()[..n].to_vec());
+        }
     }
 
     #[test]
