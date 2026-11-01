@@ -38,8 +38,11 @@
 //! - **Checked** ([`Graft::check`]): the file is read again from disk, and
 //!   must be the size planned, with the same primary, exactly the kept and
 //!   added items, each kept item's data the same bytes as in `out.heic`, and
-//!   each added one in its one extent, of its type, described as the
-//!   primary.
+//!   each added one of its type, described as the primary, in the one
+//!   extent the plan gave it; the new `mdat`'s data is then read once, in
+//!   order, against the added items' (each item found by its id in a map:
+//!   no step is a search of them all, so 60,000 items take as long as
+//!   their bytes).
 //! - **Memory:** `out.heic` (its size), its `meta` and model, and the new
 //!   `meta`, written twice (the first time for its size); then, for the
 //!   check, the written file's `meta` and model and two 64 KiB buffers.
@@ -776,11 +779,11 @@ impl Graft {
                 .collect()
         };
         let total = |pieces: &[Range<u64>]| pieces.iter().map(|p| p.end - p.start).sum::<u64>();
-        let mut a = vec![0; STEP];
+        let mut bufs = (vec![0; STEP], vec![0; STEP]);
         for kept in &self.kept {
             let found = pieces(kept.id)?;
             if total(&found) != total(&kept.pieces)
-                || !same(r, &found, &mut a, |at, b: &mut [u8]| {
+                || !same(r, &found, &mut bufs, |at, b: &mut [u8]| {
                     fill(&self.file, &kept.pieces, at, b)
                 })?
             {
@@ -793,24 +796,47 @@ impl Graft {
             .filter(|r| &r.kind == b"cdsc" && m.to(r) == [m.primary])
             .map(|r| r.from)
             .collect();
+        let kinds: HashMap<u32, [u8; 4]> = m.items.iter().map(|i| (i.id, i.kind)).collect();
+        // The added items' data is the new mdat's, one after another, to
+        // the end of the file: each must be where the plan put it, and the
+        // whole read once, in order.
+        let data: u64 = self.added.iter().map(|a| a.data.len() as u64).sum();
+        let mut at = len.saturating_sub(data);
         for (&id, added) in self.ids.iter().zip(&self.added) {
             let found = pieces(id)?;
-            let one = locations.get(&id).is_some_and(|l| l.method == 0) && found.len() == 1;
-            if !one || m.item(id).map(|i| i.kind) != Some(added.kind) {
+            let end = at + added.data.len() as u64;
+            let one = locations.get(&id).is_some_and(|l| l.method == 0)
+                && found.len() == 1
+                && found[0] == (at..end);
+            if !one || kinds.get(&id) != Some(&added.kind) {
                 return wrong(format!("doesn't hold item {id} as planned"));
             }
             if !described.contains(&id) {
                 return wrong(format!("doesn't say item {id} describes the primary"));
             }
-            let whole = 0..added.data.len() as u64;
-            let data = std::slice::from_ref(&whole);
-            if total(&found) != total(data)
-                || !same(r, &found, &mut a, |at, b: &mut [u8]| {
-                    fill(&added.data, data, at, b)
-                })?
-            {
-                return wrong(format!("changed item {id}'s data"));
+            at = end;
+        }
+        let whole = len.saturating_sub(data)..len;
+        let mut items = self.added.iter().map(|a| &a.data[..]);
+        let mut item: &[u8] = &[];
+        let same_data = same(r, std::slice::from_ref(&whole), &mut bufs, |_, b| {
+            // In order: each call fills on from where the last stopped.
+            let mut n = 0;
+            while n < b.len() {
+                if item.is_empty() {
+                    match items.next() {
+                        Some(next) => item = next,
+                        None => return,
+                    }
+                }
+                let k = item.len().min(b.len() - n);
+                b[n..n + k].copy_from_slice(&item[..k]);
+                item = &item[k..];
+                n += k;
             }
+        })?;
+        if !same_data {
+            return wrong("changed an added item's data".into());
         }
         Ok(())
     }
@@ -855,15 +881,16 @@ fn fill(space: &[u8], pieces: &[Range<u64>], at: u64, buf: &mut [u8]) {
 }
 
 /// Whether the bytes of `r` in `found` (end to end) are those `expected`
-/// fills in, [`STEP`] at a time: `expected(at, buf)` fills `buf` with what
-/// should be from `at` on (the caller checked that it's as long in all).
+/// fills in, a buffer of `bufs` at a time (two of the same length, read
+/// and expected): `expected(at, buf)` fills `buf` with what should be from
+/// `at` on, called in order (the caller checked that it's as long in all).
 fn same(
     r: &mut dyn In,
     found: &[Range<u64>],
-    a: &mut [u8],
+    bufs: &mut (Vec<u8>, Vec<u8>),
     mut expected: impl FnMut(u64, &mut [u8]),
 ) -> Result<bool, Error> {
-    let mut b = vec![0; a.len()];
+    let (a, b) = (&mut bufs.0, &mut bufs.1);
     let mut at = 0u64;
     for range in found {
         let mut from = range.start;
@@ -1388,6 +1415,70 @@ mod tests {
         assert_eq!(m.iref.map(|(_, v)| v), Some(0));
         let cdsc: Vec<_> = m.refs.iter().filter(|r| &r.kind == b"cdsc").collect();
         assert_eq!(cdsc.len(), carried().len());
+    }
+
+    /// A file in memory that counts its seeks: the check's reads, each
+    /// out of the file's order.
+    struct Counting<'a> {
+        inner: Cursor<&'a [u8]>,
+        seeks: usize,
+    }
+
+    impl io::Read for Counting<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+
+    impl io::BufRead for Counting<'_> {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.inner.fill_buf()
+        }
+
+        fn consume(&mut self, n: usize) {
+            self.inner.consume(n);
+        }
+    }
+
+    impl io::Seek for Counting<'_> {
+        fn seek(&mut self, to: io::SeekFrom) -> io::Result<u64> {
+            self.seeks += 1;
+            self.inner.seek(to)
+        }
+    }
+
+    impl In for Counting<'_> {}
+
+    #[test]
+    fn the_check_reads_the_added_items_in_one_pass() {
+        // 20,000 items of 4 bytes: the check reads them where they are, one
+        // after another, not each with a seek of its own (and finds each
+        // item once, not by a search of them all).
+        let added: Vec<Added> = (0..20_000u32)
+            .map(|i| Added {
+                kind: *b"Exif",
+                hidden: true,
+                name: Vec::new(),
+                content_type: Vec::new(),
+                encoding: Vec::new(),
+                data: i.to_be_bytes().to_vec(),
+            })
+            .collect();
+        let (file, _) = libheif().build();
+        let g = Graft::new(file, added).unwrap();
+        let mut out = Vec::new();
+        g.write(&mut out).unwrap();
+        let mut r = Counting {
+            inner: Cursor::new(&out),
+            seeks: 0,
+        };
+        g.check(&mut r, out.len() as u64).unwrap();
+        assert!(r.seeks < 100, "{} seeks", r.seeks);
+        // A changed byte among them is still caught.
+        let mut bad = out.clone();
+        let at = bad.len() - 4 * 10_000 + 1;
+        bad[at] ^= 1;
+        assert!(g.check(&mut Cursor::new(&bad), bad.len() as u64).is_err());
     }
 
     #[test]
