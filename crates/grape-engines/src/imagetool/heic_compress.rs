@@ -63,8 +63,10 @@
 //!    then 1.0.
 //!
 //! - **Dropped,** as D26's JPEG Compress drops them: gain maps, `tmap`,
-//!   depth and Portrait mattes, thumbnails, motion-photo video and C2PA;
-//!   `udes`, `crtt` and `mdft` aren't carried (the date is in the Exif).
+//!   depth and Portrait mattes, thumbnails, motion-photo video and C2PA,
+//!   and with a gain map, a `tmap` or a motion photo's video the XMP that
+//!   may describe them ([`Scan::extras`]); `udes`, `crtt` and `mdft` aren't
+//!   carried (the date is in the Exif).
 //! - **Memory:** at the helper's `image` line, [`peak`]'s figure for the
 //!   picture (decoded; averaged and Lanczos3's steps; the scaled picture and
 //!   `out.heic`, counted at 2 bytes a pixel, 3 with alpha), the carried
@@ -816,6 +818,27 @@ mod tests {
         assert_eq!(plan(Small, true), (60, Some(2048)));
         assert_eq!(plan(Balanced, true), (70, Some(4096)));
         assert_eq!(plan(High, true), (80, None));
+    }
+
+    #[test]
+    fn xmp_goes_when_what_it_may_describe_is_dropped() {
+        // A motion photo: its video in an mpvd box after it all. The XMP
+        // (Google's MotionPhoto and Container:Directory) goes with the
+        // video, as JPEG Compress drops it; the Exif stays.
+        let source = Source::new((64, 48));
+        let mut b = source.builder();
+        b.after.push(bx(b"mpvd", &[9; 1000]));
+        let c = case("motion.heic", &b.build().0, Balanced);
+        let (out, s) = c.output(&c.run("ok"));
+        assert_eq!(s.carried.len(), 1);
+        assert_eq!(s.carried[0].role, Role::Exif);
+        assert!(!s.extras);
+        assert!(!out.windows(4).any(|w| w == b"mpvd"));
+        // Without it, both go across.
+        let c = case("still.heic", &source.build(), Balanced);
+        let (_, s) = c.output(&c.run("ok"));
+        assert_eq!(s.carried.len(), 2);
+        assert_eq!(s.carried[1].role, Role::Xmp);
     }
 
     #[test]

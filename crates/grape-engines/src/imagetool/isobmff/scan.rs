@@ -43,7 +43,15 @@
 //!      Metadata drops them: Exif, XMP and other `mime` items, `uri `
 //!      items, IPTC, and any other type), their `infe` fields and where
 //!      their data is. Those that describe another picture (a gain map's
-//!      or a depth map's XMP) go with it.
+//!      or a depth map's XMP) go with it. So do the XMP items when the file
+//!      holds content Compress drops that the primary's XMP can describe
+//!      ([`Scan::extras`]: a motion photo's video, in an `mpvd` box or as
+//!      bytes after the last box that aren't zeros; a gain map, an
+//!      auxiliary image Apple's, Samsung's or ISO 21496-1's `auxC` names
+//!      so; a `tmap`), as D26's JPEG Compress drops a JPEG's XMP with its
+//!      MPF images and what follows its EOI: such XMP (Google's
+//!      `GCamera:MotionPhoto` and `Container:Directory`, `hdrgm:`) would
+//!      tell a reader of what's gone.
 //! 4. **Refusals** ([`Scan::refusal`]), each `NotYetSupported`, in this
 //!    order: a picture coded in AV1 ([`AVIF`]: libheif writes AV1 grids
 //!    with no codec brand, which sniff as HEIC) or in another codec than
@@ -98,7 +106,7 @@ use grape_heif_proto::{self as proto, Sniff};
 use super::super::exif::{self, MAX_EXIF};
 use super::super::strip::{self, read_at, Error, In};
 use super::boxes::{children, load, Child, Fields, Top};
-use super::items::{file_meta, is_sequence, name, Item, Location, Meta, Ref, Role};
+use super::items::{file_meta, is_sequence, name, Aux, Item, Location, Meta, Ref, Role};
 use crate::cancel::Cancellable;
 use crate::heif::{self, Encoder};
 use crate::publish::{self, Names};
@@ -314,6 +322,9 @@ pub(crate) struct Scan {
     /// The first carried Exif's IFD0 Orientation, 1 to 8, once
     /// [`Scan::load`] has read it.
     pub(crate) orientation: Option<u16>,
+    /// Whether the file holds content Compress drops that the primary's
+    /// XMP can describe ([module docs](self)); then no XMP is carried.
+    pub(crate) extras: bool,
     /// `idat`'s content, for data there.
     idat: Vec<u8>,
 }
@@ -479,7 +490,11 @@ impl Scan {
             .iter()
             .any(|&id| ix.all(id, b"irot").any(turns) || ix.prop(id, b"imir").is_some());
         let others = others(&m, &ix);
-        let carried = carried(&m, len)?;
+        let extras = extras(r, &top, &m, &ix)?;
+        let mut carried = carried(&m, len)?;
+        if extras {
+            carried.retain(|c| c.role != Role::Xmp);
+        }
         let idat = m.idat().map(|r| m.bytes[r].to_vec()).unwrap_or_default();
         Ok(Scan {
             primary,
@@ -499,6 +514,7 @@ impl Scan {
             others,
             carried,
             orientation: None,
+            extras,
             idat,
         })
     }
@@ -712,6 +728,37 @@ fn others(m: &Meta, ix: &Index<'_>) -> Vec<u32> {
         .collect()
 }
 
+/// Whether the file holds content Compress drops that the primary's XMP
+/// can describe ([module docs](self)): an `mpvd` box, bytes after the last
+/// box that aren't zeros (read up to the first that isn't), a gain map or
+/// a `tmap`.
+fn extras(r: &mut dyn In, top: &Top, m: &Meta, ix: &Index<'_>) -> Result<bool, Error> {
+    let gain_map = |id: u32| {
+        ix.prop(id, b"auxC")
+            .and_then(|auxc| m.aux_of(auxc))
+            .is_some_and(|aux| aux == Aux::GainMap)
+    };
+    if top.boxes.iter().any(|b| &b.kind == b"mpvd")
+        || m.items
+            .iter()
+            .any(|item| &item.kind == b"tmap" || gain_map(item.id))
+    {
+        return Ok(true);
+    }
+    let mut buf = [0; 4096];
+    let mut at = top.tail;
+    while at < top.len {
+        // At most 4096.
+        let n = (top.len - at).min(buf.len() as u64) as usize;
+        read_at(r, at, &mut buf[..n])?;
+        if buf[..n].iter().any(|&b| b != 0) {
+            return Ok(true);
+        }
+        at += n as u64;
+    }
+    Ok(false)
+}
+
 /// The metadata items that describe the primary ([module docs](self)), in
 /// `iinf`'s order, with where their data is, checked to lie within the
 /// file (`len` bytes) or `idat`; their data isn't read yet.
@@ -901,7 +948,7 @@ mod tests {
 
     use super::super::tests::{
         auxc, bx, camera, hvcc, icc, imir, iphone, irot, ispe, layouts, meta_at, nclx, pasp, pixi,
-        portrait, prop, simple, Builder, Item, Place, EXIF, GAIN, SECRET_XMP, THUMB, XMP,
+        portrait, prop, simple, Builder, Item, Place, EXIF, GAIN, SECRET_XMP, THUMB, TMAP, XMP,
     };
     use super::*;
     use crate::heif::tests::{fake, fake_image, nowhere};
@@ -1055,10 +1102,16 @@ mod tests {
                 .filter(|(kind, _, to)| kind == b"cdsc" && to.contains(&b.primary))
                 .map(|(_, from, _)| *from)
                 .collect();
+            // A motion photo's video or junk after the last box (or a gain
+            // map, a tone map: `iphone`'s XMP describes its gain map
+            // anyway) takes the XMP with it.
+            let extras = matches!(name, "iphone" | "trailing mpvd" | "trailing junk");
+            assert_eq!(s.extras, extras, "{name}");
             let expected: Vec<u32> = b
                 .items
                 .iter()
                 .filter(|i| describe.contains(&i.id) && i.place != Place::Nowhere)
+                .filter(|i| !(extras && i.text == Some("application/rdf+xml")))
                 .map(|i| i.id)
                 .collect();
             assert_eq!(ids(&s), expected, "{name}");
@@ -1643,6 +1696,90 @@ mod tests {
         );
         // The carried Exif is the first: Orientation 1, not the loose one's 6.
         assert_eq!(s.orientation, Some(1));
+    }
+
+    #[test]
+    fn xmp_isnt_carried_when_content_it_may_describe_is_dropped() {
+        // `simple`, its Exif and XMP describing the primary, with `change`.
+        let carried = |change: &dyn Fn(&mut Builder)| {
+            let mut b = simple();
+            change(&mut b);
+            let s = scan(&b.build().0);
+            (s.extras, ids(&s))
+        };
+        // A plain photo: both carried; zeros after its last box are
+        // padding.
+        assert_eq!(carried(&|_| {}), (false, vec![EXIF, XMP]));
+        assert_eq!(
+            carried(&|b| b.tail = vec![0; 300]),
+            (false, vec![EXIF, XMP])
+        );
+        // What Compress drops and XMP describes (a motion photo's video, a
+        // gain map, a tone map): the XMP goes with it, as D26's JPEG drops
+        // a JPEG's XMP with its MPF images or the data after its EOI. The
+        // Exif and anything else stays.
+        let gain_map = |urn: &'static str| {
+            move |b: &mut Builder| {
+                b.properties.push(auxc(urn));
+                let n = b.properties.len() as u16;
+                let mut gain = Item::picture(GAIN, 0xD0, 20);
+                gain.hidden = true;
+                gain.props = vec![(1, true), (n, true)];
+                b.items.push(gain);
+                b.refs.push((*b"auxl", GAIN, vec![1]));
+            }
+        };
+        let apple = gain_map("urn:com:apple:photo:2020:aux:hdrgainmap");
+        let samsung = gain_map("urn:com:samsung:photo:2024:aux:hdrgainmap");
+        let iso = gain_map("urn:iso:std:iso:ts:21496:-1");
+        let depth = gain_map("urn:mpeg:hevc:2015:auxid:2");
+        for (why, change, dropped) in [
+            (
+                "a motion photo's video",
+                &(|b: &mut Builder| b.after = vec![bx(b"mpvd", &[7; 100])])
+                    as &dyn Fn(&mut Builder),
+                true,
+            ),
+            (
+                "a video after the last box",
+                &|b| b.tail = vec![0, 0, 1, 2],
+                true,
+            ),
+            ("Apple's gain map", &apple, true),
+            ("Samsung's gain map", &samsung, true),
+            ("an ISO 21496 gain map", &iso, true),
+            (
+                "a tone map",
+                &|b| {
+                    let mut tmap = Item::new(TMAP, *b"tmap", Place::Idat, vec![0; 6]);
+                    tmap.hidden = true;
+                    b.items.push(tmap);
+                    b.refs.push((*b"dimg", TMAP, vec![1]));
+                },
+                true,
+            ),
+            // Not what XMP describes of the primary: kept.
+            ("a depth map", &depth, false),
+            (
+                "a free box",
+                &|b| b.after = vec![bx(b"free", &[7; 100])],
+                false,
+            ),
+        ] {
+            let expected = if dropped {
+                (true, vec![EXIF])
+            } else {
+                (false, vec![EXIF, XMP])
+            };
+            assert_eq!(carried(change), expected, "{why}");
+        }
+        // Other items describing the primary stay.
+        let (extras, kept) = carried(&|b| {
+            b.after = vec![bx(b"mpvd", &[7; 100])];
+            b.items.push(Item::mime(12, "text/plain", b"a note"));
+            b.refs.push((*b"cdsc", 12, vec![1]));
+        });
+        assert_eq!((extras, kept), (true, vec![EXIF, 12]));
     }
 
     #[test]
