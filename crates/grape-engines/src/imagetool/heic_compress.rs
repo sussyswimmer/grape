@@ -58,7 +58,8 @@
 //!    Orientation, as JPEG Compress keeps a JPEG's. A helper that turned
 //!    one by its Exif (ImageIO may) is told by the sides it hands back:
 //!    `ispe`'s, swapped, for an Orientation of 5 to 8 ([`turned_by_exif`]);
-//!    of 2 to 4 it can't be told (a known limit, QA's).
+//!    of 2 to 4, or of 5 to 8 on a square picture or one a `clap` crops, it
+//!    can't be told (a known limit, QA's).
 //! 8. **Graft** into `out.heic` ([`Graft`]), then the final rule: over 90 %
 //!    of the source is `NoChange` as above (Small's trial too), before a
 //!    temp file is made. 0.90–0.92.
