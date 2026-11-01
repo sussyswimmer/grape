@@ -5,11 +5,15 @@
 //! again.
 //!
 //! - **What `out.heic` must be** (D33's invariants, checked on every one):
-//!   `ftyp` first, then one `meta`, `mdat`s and `free` or `skip` boxes in
-//!   any order, and nothing after its last box; `meta` read by the
-//!   [model](super::items); a primary item that's a picture; every `iloc`
-//!   entry an item's, stored in the file (construction method 0, each
-//!   extent with a length, outside `meta`) or in `idat` (1), in this file.
+//!   `ftyp` first, naming a still HEIC (`heic`, `heix` or `mif1` among its
+//!   brands: a sequence's `msf1` and `hevc` sniff as HEIC too), then one
+//!   `meta`, `mdat`s and `free` or `skip` boxes in any order, and nothing
+//!   after its last box; `meta` read by the [model](super::items); a
+//!   primary item that's HEVC (`hvc1`, or a `grid` of `hvc1` tiles); every
+//!   `iloc` entry an item's, stored in the file (construction method 0,
+//!   each extent with a length, outside `meta`) or in `idat` (1), in this
+//!   file; and no metadata item of its own in a reference but a `cdsc` (the
+//!   rewrite would leave a grid a tile short, or a thumbnail of nothing).
 //!   Anything else is broken ([`Error::Broken`]), which Compress reports as
 //!   an encode failure: nothing is published.
 //! - **The helper's own metadata goes:** every item that's metadata by its
@@ -517,6 +521,9 @@ impl Graft {
         {
             return Err(Error::Broken(format!("a {} box", name(&b.kind))));
         }
+        if !still_heic(&file, &top.boxes[0]) {
+            return Err(Error::Broken("an ftyp that names no still HEIC".into()));
+        }
         let meta_box = file_meta(&top)?;
         let m = Meta::parse(load(&mut Cursor::new(&file[..]), &meta_box)?)?;
         if m.item(m.primary).map(|i| i.role()) != Some(Role::Image) {
@@ -537,6 +544,39 @@ impl Graft {
             })
             .map(|i| i.id)
             .collect();
+        if let Some((r, id)) = m.refs.iter().filter(|r| &r.kind != b"cdsc").find_map(|r| {
+            let named = std::iter::once(&r.from).chain(m.to(r));
+            named
+                .copied()
+                .find(|id| dropped.contains(id))
+                .map(|id| (r, id))
+        }) {
+            return Err(Error::Broken(format!(
+                "its metadata item {id} in a {} reference",
+                name(&r.kind)
+            )));
+        }
+        let kind = |id: u32| m.item(id).map(|i| i.kind);
+        let hevc = match kind(m.primary) {
+            Some(k) if &k == b"hvc1" => true,
+            Some(k) if &k == b"grid" => {
+                let tiles: Vec<u32> = m
+                    .refs
+                    .iter()
+                    .filter(|r| &r.kind == b"dimg" && r.from == m.primary)
+                    .flat_map(|r| m.to(r).iter().copied())
+                    .collect();
+                // Each looked up once: a grid has as many tiles as items.
+                let kinds: HashMap<u32, [u8; 4]> = m.items.iter().map(|i| (i.id, i.kind)).collect();
+                !tiles.is_empty() && tiles.iter().all(|t| kinds.get(t) == Some(b"hvc1"))
+            }
+            _ => false,
+        };
+        if !hevc {
+            return Err(Error::Broken(
+                "a primary item that isn't HEVC or a grid of it".into(),
+            ));
+        }
         let ids: HashSet<u32> = m.items.iter().map(|i| i.id).collect();
         if let Some(loc) = m.locations.iter().find(|l| !ids.contains(&l.id)) {
             return Err(Error::Broken(format!(
@@ -840,6 +880,23 @@ impl Graft {
         }
         Ok(())
     }
+}
+
+/// Whether the `ftyp` box `ftyp` of `file` names a still HEIC: `heic`,
+/// `heix` or `mif1` as its major or a compatible brand.
+fn still_heic(file: &[u8], ftyp: &Header) -> bool {
+    let content = ftyp.content();
+    let brands = usize::try_from(content.start)
+        .ok()
+        .zip(usize::try_from(content.end).ok())
+        .and_then(|(start, end)| file.get(start..end))
+        .unwrap_or_default();
+    // The major brand, the minor version (skipped), the compatible ones.
+    let major = brands.first_chunk::<4>().into_iter();
+    let compatible = brands.get(8..).unwrap_or_default().as_chunks::<4>().0;
+    major
+        .chain(compatible)
+        .any(|b| b == b"heic" || b == b"heix" || b == b"mif1")
 }
 
 /// Copies the box `bytes` to `out`, giving one that ran to the end of its
@@ -1349,6 +1406,52 @@ mod tests {
         ] {
             let why_not = broken(&bad, Vec::new());
             assert!(why_not.contains(says), "{why}: {why_not}");
+        }
+        // Brands that don't name a still HEIC (a sequence's, msf1 with
+        // hevc, sniffs as HEIC); a primary that isn't HEVC, or a grid of
+        // what isn't.
+        for (why, brands, ok) in [
+            ("a sequence's brands", &b"msf1\0\0\0\0msf1hevc"[..], false),
+            ("AVIF's", b"avif\0\0\0\0avifmiaf", false),
+            ("mif1 alone", b"mif1\0\0\0\0mif1", true),
+            ("heix", b"heix\0\0\0\0mif1heix", true),
+            ("heic compatible only", b"miaf\0\0\0\0miafheic", true),
+        ] {
+            let mut b = libheif();
+            b.brands = brands.to_vec();
+            let file = b.build().0;
+            match ok {
+                true => drop(grafted(&file, carried())),
+                false => assert!(broken(&file, carried()).contains("still HEIC"), "{why}"),
+            }
+        }
+        for kind in [*b"av01", *b"iden", *b"jpeg"] {
+            let mut b = libheif();
+            b.items[0].kind = kind;
+            assert!(broken(&b.build().0, carried()).contains("HEVC"), "{kind:?}");
+            let mut b = imageio();
+            b.items[2].kind = kind;
+            assert!(
+                broken(&b.build().0, carried()).contains("HEVC"),
+                "grid of {kind:?}"
+            );
+        }
+        let mut b = imageio();
+        b.refs.retain(|r| &r.0 != b"dimg");
+        assert!(broken(&b.build().0, carried()).contains("HEVC"));
+        // The helper's own metadata in a reference that isn't a cdsc: the
+        // rewrite would leave a grid a tile short, or a thumbnail of
+        // nothing.
+        for (kind, from, to) in [
+            (*b"dimg", 1, vec![2, 3, 4, 5, 6]),
+            (*b"thmb", 6, vec![1]),
+            (*b"auxl", 6, vec![1]),
+        ] {
+            let mut b = imageio();
+            b.refs.retain(|r| r.0 != kind || r.1 != from);
+            b.refs.push((kind, from, to));
+            let why = broken(&b.build().0, carried());
+            assert!(why.contains("item 6"), "{kind:?}: {why}");
         }
         // The helper's own Exif may be anywhere: it goes.
         let mut b = libheif_with_metadata();
