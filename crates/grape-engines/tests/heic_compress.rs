@@ -7,10 +7,12 @@
 //! - On Windows, `grape-heif.exe` decodes and encodes (libheif, x265):
 //!   each fixture is compressed, its output read again by the helper, and
 //!   the metadata Grape grafted into it read from its bytes.
-//! - On macOS, a Mac that can't write HEIC (GitHub's VMs) says "This Mac
-//!   can't write HEIC files." before anything is decoded, with nothing
-//!   written; the cases accept that, say so on stderr and stop there. One
-//!   that can runs them whole.
+//! - On macOS, ImageIO decodes and encodes. GitHub's macOS VMs write HEIC
+//!   (2026-11-01), so CI runs every case through it; a Mac that can't
+//!   says "This Mac can't write HEIC files." before anything is decoded,
+//!   with nothing written, and the cases accept that, say so on stderr and
+//!   stop there. ImageIO writes its own `irot` (of 0) and its own color
+//!   box, which the cases print.
 //! - The fixtures are small, so a `free` box of 256 KiB is put after each
 //!   to give Compress something to gain on: what's past the last box a
 //!   reader needs is never carried.
@@ -267,7 +269,18 @@ fn a_turned_photos_metadata_comes_back_upright() {
     // Turned by its irot: the helper hands it back 64 × 96, and that's
     // what the output holds, with no irot.
     assert_eq!(decoded(&out).to_rgb8().dimensions(), (64, 96));
-    assert_eq!(found(&out, b"irot"), 0);
+    // Nothing turns it again: libheif writes no `irot`, ImageIO one of 0.
+    let props = properties(&out);
+    if cfg!(target_os = "macos") {
+        eprintln!("ImageIO's properties: {}", described(&out, &props));
+    }
+    for (kind, range) in &props {
+        assert!(
+            kind != b"imir" && (kind != b"irot" || out[range.start + 8] & 3 == 0),
+            "{}",
+            described(&out, &props)
+        );
+    }
     // The source's Exif, once, saying so; its GPS kept.
     assert_eq!(exif_tiffs(&out).len(), 1);
     assert_eq!(exif_of(&out), (1, (64, 96), true, 0));
@@ -302,7 +315,11 @@ fn each_preset_shrinks_a_detailed_photo_that_reads_back_close() {
         // Under every cap: never scaled.
         assert_eq!(back.dimensions(), (1600, 1200), "{preset:?}");
         let db = psnr(back.as_raw(), original.as_raw());
-        eprintln!("q95.heic at {preset:?}: {} bytes, {db:.1} dB", out.len());
+        eprintln!(
+            "q95.heic at {preset:?}: {} bytes, {db:.1} dB, mean change {:?}",
+            out.len(),
+            mean_change(back.as_raw(), original.as_raw())
+        );
         assert!(db > 25.0, "{preset:?}: {db:.1} dB");
         sizes.push(out.len());
     }
@@ -403,6 +420,50 @@ fn shown(img: image::RgbImage, o: u16) -> image::RgbImage {
         8 => image::imageops::rotate270(&img),
         _ => img,
     }
+}
+
+/// The mean change of each channel from `b` to `a` (RGB samples).
+fn mean_change(a: &[u8], b: &[u8]) -> [f64; 3] {
+    let mut sum = [0f64; 3];
+    for (n, (&x, &y)) in a.iter().zip(b).enumerate() {
+        sum[n % 3] += f64::from(x) - f64::from(y);
+    }
+    let pixels = (a.len() / 3) as f64;
+    sum.map(|s| (s / pixels * 10.0).round() / 10.0)
+}
+
+/// The properties in `heic`'s `ipco`: type and range.
+fn properties(heic: &[u8]) -> Vec<([u8; 4], std::ops::Range<usize>)> {
+    let top = boxes(heic, 0, heic.len());
+    let (_, meta) = top.iter().find(|(k, _)| k == b"meta").unwrap();
+    let (_, iprp) = boxes(heic, meta.start + 12, meta.end)
+        .into_iter()
+        .find(|(k, _)| k == b"iprp")
+        .unwrap();
+    let (_, ipco) = boxes(heic, iprp.start + 8, iprp.end)
+        .into_iter()
+        .find(|(k, _)| k == b"ipco")
+        .unwrap();
+    boxes(heic, ipco.start + 8, ipco.end)
+}
+
+/// `props` as `type(size)`, with an `irot`'s angle code and a `colr`'s kind.
+fn described(heic: &[u8], props: &[([u8; 4], std::ops::Range<usize>)]) -> String {
+    let words: Vec<String> = props
+        .iter()
+        .map(|(kind, r)| {
+            let name = String::from_utf8_lossy(kind);
+            match kind {
+                b"irot" => format!("irot({})", heic[r.start + 8] & 3),
+                b"colr" => format!(
+                    "colr {}",
+                    String::from_utf8_lossy(&heic[r.start + 8..r.start + 12])
+                ),
+                _ => format!("{name}({})", r.len()),
+            }
+        })
+        .collect();
+    words.join(", ")
 }
 
 /// The top-level boxes of `data` from `at` to `end`: type and range.
@@ -527,22 +588,27 @@ fn an_icc_profile_is_kept() {
     let Some(out) = compress(&dir, "icc.heic", CompressPreset::Balanced) else {
         return;
     };
-    let kept = profile(&out).expect("no profile in the output");
-    // libheif writes the profile it's given; ImageIO writes its color
-    // space's, which may be laid out its own way.
+    // libheif writes the profile it's given; ImageIO describes its color
+    // space its own way (a profile, or for sRGB maybe an `nclx`), so on a
+    // Mac it's printed and the pixels below decide.
+    let kept = profile(&out);
     if cfg!(target_os = "macos") {
+        let colrs: Vec<_> = properties(&out)
+            .into_iter()
+            .filter(|(kind, _)| kind == b"colr")
+            .map(|(_, r)| String::from_utf8_lossy(&out[r.start + 8..r.start + 12]).into_owned())
+            .collect();
         eprintln!(
-            "icc.heic: ImageIO wrote a {}-byte profile for a {}-byte one, {}",
-            kept.len(),
-            source.len(),
-            if kept == source {
-                "the same bytes"
-            } else {
-                "other bytes"
-            }
+            "icc.heic: ImageIO wrote colr {colrs:?}, {} for the source's {} bytes",
+            match &kept {
+                Some(k) if *k == source => "the same profile".to_string(),
+                Some(k) => format!("a {}-byte profile", k.len()),
+                None => "no profile".to_string(),
+            },
+            source.len()
         );
     } else {
-        assert_eq!(kept, source);
+        assert_eq!(kept.as_deref(), Some(&source[..]));
     }
     let back = decoded(&out).to_rgb8();
     let p = back.get_pixel(32, 32);
