@@ -794,7 +794,9 @@ mod tests {
             let c = case("photo.heic", &source.build(), preset);
             let ran = c.run("ok");
             let (out, s) = c.output(&ran);
-            let (quality, _) = plan(preset, false);
+            // This OS's table, as the pipeline sends it (the fake runs on
+            // every OS).
+            let (quality, _) = plan(preset, cfg!(target_os = "macos"));
             assert_eq!(fake_quality(&out), Some(quality), "{preset:?}");
             let picture = parse_fake(&out).unwrap();
             assert_eq!((picture.width, picture.height), size, "{preset:?}");
@@ -807,7 +809,10 @@ mod tests {
             assert_eq!(s.carried[1].content_type, b"application/rdf+xml");
             assert!(ran.progress.contains(&0.05) && ran.progress.contains(&0.98));
         }
-        // The Mac's numbers.
+        // Both tables.
+        assert_eq!(plan(Small, false), (40, Some(2048)));
+        assert_eq!(plan(Balanced, false), (50, Some(4096)));
+        assert_eq!(plan(High, false), (60, None));
         assert_eq!(plan(Small, true), (60, Some(2048)));
         assert_eq!(plan(Balanced, true), (70, Some(4096)));
         assert_eq!(plan(High, true), (80, None));
