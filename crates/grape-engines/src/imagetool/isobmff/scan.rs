@@ -28,12 +28,16 @@
 //!      `colr` (`nclx`, and whether there's an ICC profile), `pasp` and
 //!      `clap`, or its first coded item's when it has none;
 //!    - the other pictures ([`Scan::others`]): each picture that isn't
-//!      hidden, isn't the primary, isn't a thumbnail (a `thmb` from it),
-//!      an auxiliary image (an `auxl` from it: alpha, depth, a gain map, a
-//!      matte), a `tmap`, a picture another is made of (a `dimg` to it:
-//!      a grid's tiles, which MIAF hides and some writers don't), or in an
-//!      `altr` group with the primary. A stereo pair (`ster`), Apple's
-//!      spatial photos, a burst or a collection stored as items have one;
+//!      hidden and isn't the primary's own. Its own are the primary, the
+//!      pictures in an `altr` group with it, and what's tied to one of its
+//!      own: a picture it's made of (a `dimg` from it: a grid's tiles,
+//!      which MIAF hides and some writers don't), a thumbnail of it (a
+//!      `thmb` to it), an auxiliary image of it (an `auxl` to it: alpha,
+//!      depth, a gain map, a matte) and a `tmap` made from it. A stereo pair
+//!      (`ster`), Apple's spatial photos, a burst or a collection stored as
+//!      items have one, and so does a picture whose references tie it to
+//!      nothing of the primary's (a thumbnail of another picture, an
+//!      auxiliary image of itself, a tile of a hidden `iden`);
 //!    - the metadata items that describe the primary ([`Carried`]: each
 //!      item that isn't a picture with a `cdsc` to the primary, as Remove
 //!      Metadata drops them: Exif, XMP and other `mime` items, `uri `
@@ -373,11 +377,6 @@ impl<'a> Index<'a> {
             .filter(move |r| &r.kind == kind)
             .flat_map(|r| self.meta.to(r).iter().copied())
     }
-
-    /// Whether `id` refers to anything by `kind`.
-    fn refers(&self, id: u32, kind: &[u8; 4]) -> bool {
-        self.to(id, kind).next().is_some()
-    }
 }
 
 impl Scan {
@@ -670,32 +669,45 @@ fn pixi_bits(m: &Meta, p: Option<&Child>) -> Option<u8> {
 }
 
 /// The pictures other than the primary that a reader shows on their own
-/// ([module docs](self)), in `iinf`'s order.
+/// ([module docs](self)), in `iinf`'s order: those that aren't hidden and
+/// aren't the primary's own, found by following the references from the
+/// primary and its `altr` alternatives, each item once.
 fn others(m: &Meta, ix: &Index<'_>) -> Vec<u32> {
-    let made_of: HashSet<u32> = m
-        .refs
-        .iter()
-        .filter(|r| &r.kind == b"dimg")
-        .flat_map(|r| m.to(r).iter().copied())
-        .collect();
-    let alternatives: HashSet<u32> = m
-        .groups
-        .iter()
-        .filter(|g| &g.child.kind == b"altr" && m.members(g).contains(&m.primary))
-        .flat_map(|g| m.members(g).iter().copied())
-        .collect();
+    // Who's tied to an item by a reference to it: its thumbnails, its
+    // auxiliary images, and the tone maps made from it.
+    let mut tied: HashMap<u32, Vec<u32>> = HashMap::new();
+    for r in &m.refs {
+        let tone_map = &r.kind == b"dimg"
+            && ix
+                .items
+                .get(&r.from)
+                .is_some_and(|item| &item.kind == b"tmap");
+        if matches!(&r.kind, b"thmb" | b"auxl") || tone_map {
+            for &to in m.to(r) {
+                tied.entry(to).or_default().push(r.from);
+            }
+        }
+    }
+    let mut own = HashSet::from([m.primary]);
+    own.extend(
+        m.groups
+            .iter()
+            .filter(|g| &g.child.kind == b"altr" && m.members(g).contains(&m.primary))
+            .flat_map(|g| m.members(g).iter().copied()),
+    );
+    let mut queue: VecDeque<u32> = own.iter().copied().collect();
+    while let Some(id) = queue.pop_front() {
+        let made_of = ix.to(id, b"dimg");
+        let ties = tied.get(&id).into_iter().flatten().copied();
+        for next in made_of.chain(ties) {
+            if own.insert(next) {
+                queue.push_back(next);
+            }
+        }
+    }
     m.items
         .iter()
-        .filter(|item| {
-            item.role() == Role::Image
-                && !item.hidden
-                && item.id != m.primary
-                && &item.kind != b"tmap"
-                && !ix.refers(item.id, b"thmb")
-                && !ix.refers(item.id, b"auxl")
-                && !made_of.contains(&item.id)
-                && !alternatives.contains(&item.id)
-        })
+        .filter(|item| item.role() == Role::Image && !item.hidden && !own.contains(&item.id))
         .map(|item| item.id)
         .collect()
 }
@@ -1210,7 +1222,10 @@ mod tests {
             ),
             ("thumbnail", &|b| b.refs.push((*b"thmb", 5, vec![1]))),
             ("auxiliary", &|b| b.refs.push((*b"auxl", 5, vec![1]))),
-            ("tone map", &|b| b.items[3].kind = *b"tmap"),
+            ("tone map", &|b| {
+                b.items[3].kind = *b"tmap";
+                b.refs.push((*b"dimg", 5, vec![1]));
+            }),
             ("alternative", &|b| {
                 b.groups.push((*b"altr", 50, vec![5, 1]))
             }),
@@ -1232,9 +1247,52 @@ mod tests {
             ("a thumbnail's picture", &|b| {
                 b.refs.push((*b"thmb", 1, vec![5]))
             }),
+            // References that tie it to nothing of the primary's: a
+            // thumbnail of another, hidden picture; an auxiliary image of
+            // itself; a picture a hidden iden is made of.
+            ("a thumbnail of another picture", &|b| {
+                let mut hidden = Item::picture(6, 0xA6, 10);
+                hidden.hidden = true;
+                b.items.push(hidden);
+                b.refs.push((*b"thmb", 5, vec![6]));
+            }),
+            ("an auxiliary image of itself", &|b| {
+                b.refs.push((*b"auxl", 5, vec![5]))
+            }),
+            ("made into a hidden iden", &|b| {
+                let mut iden = Item::new(7, *b"iden", Place::Nowhere, Vec::new());
+                iden.hidden = true;
+                b.items.push(iden);
+                b.refs.push((*b"dimg", 7, vec![5]));
+            }),
+            ("a tone map of another picture", &|b| {
+                let mut tmap = Item::new(8, *b"tmap", Place::Idat, vec![0; 6]);
+                tmap.hidden = true;
+                b.items.push(tmap);
+                b.refs.push((*b"dimg", 8, vec![6]));
+                let mut base = Item::picture(6, 0xA6, 10);
+                base.hidden = true;
+                b.items.push(base);
+                b.refs.push((*b"thmb", 5, vec![8]));
+            }),
         ] {
             assert_eq!(with(change).others, [5], "{why}");
         }
+        // What belongs to the primary by a chain stays its own: a
+        // thumbnail of one of its tiles, an auxiliary image of a tone map
+        // made from it, a tone map's unhidden gain map.
+        let mut b = grid(vec![hvcc(8, 8)], vec![], [vec![1], vec![1]]);
+        b.items.push(Item::picture(5, 0xA5, 10));
+        b.refs.push((*b"thmb", 5, vec![2]));
+        assert_eq!(read(&b.build().0).unwrap().others, Vec::<u32>::new());
+        let mut b = simple();
+        let mut tmap = Item::new(8, *b"tmap", Place::Idat, vec![0; 6]);
+        tmap.hidden = true;
+        b.items
+            .extend([tmap, Item::picture(5, 0xA5, 10), Item::picture(6, 0xA6, 10)]);
+        b.refs.push((*b"dimg", 8, vec![1, 5]));
+        b.refs.push((*b"auxl", 6, vec![8]));
+        assert_eq!(read(&b.build().0).unwrap().others, Vec::<u32>::new());
         // Tiles that aren't hidden are the grid's picture.
         let mut b = grid(vec![hvcc(8, 8)], vec![], [vec![1], vec![1]]);
         b.items[1].hidden = false;
