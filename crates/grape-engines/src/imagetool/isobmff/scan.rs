@@ -49,9 +49,12 @@
 //!    isn't sRGB-like ([`Nclx::srgb_like`]) with no ICC profile, where the
 //!    helper hands back no profile for one ([`WIDE`]; [`Bounds`]: libheif
 //!    on the PC; ImageIO hands back its color space's, so on a Mac the
-//!    pipeline decides after the decode); and, at High, an upright `ispe`
-//!    over one HEVC picture ([`HIGH`], with [`Encoder::max_picture`]'s
-//!    bounds; `clap` only crops, so this is conservative).
+//!    pipeline decides after the decode); an `ispe` over the most pixels
+//!    the helper decodes, at every preset ([`Refusal::TooLarge`]: "… is
+//!    too large to convert.", the words its `image` line would end the
+//!    decode with, `DecodeFailed`); and, at High, an upright `ispe` over one
+//!    HEVC picture ([`HIGH`], with [`Encoder::max_picture`]'s bounds). `clap`
+//!    only crops, so the last two are conservative.
 //! 5. **The metadata items' data** ([`Scan::load`]), read whole from the
 //!    file or `idat` (data that names another data reference is this
 //!    file's, as libheif reads it), [`MAX_CARRIED`] at most in all (over
@@ -116,6 +119,11 @@ pub(crate) const PIXELS: &str = "has non-square pixels, which Compress can't kee
 /// Why a picture over one HEVC picture is refused at High.
 pub(crate) const HIGH: &str = "is too large to compress at High yet. Try Balanced.";
 
+/// Why a picture over the most pixels the helper decodes is refused, at
+/// every preset: the words of `Names::too_large`, which a decode the
+/// helper's `image` line ends says too.
+pub(crate) const TOO_LARGE: &str = "is too large to convert.";
+
 /// Why a wide color space with no ICC profile is refused: encoded without
 /// one, its colors would shift.
 pub(crate) const WIDE: &str = "uses a wide color space that Compress can't keep yet.";
@@ -173,6 +181,9 @@ pub(crate) struct Bounds {
     /// The largest picture it encodes, in pixels and on a side
     /// ([`Encoder::max_picture`]).
     pub(crate) picture: (u64, u32),
+    /// The most pixels it decodes (its `max_pixels`: the `image` line
+    /// ends a larger decode, whatever the preset).
+    pub(crate) decode: u64,
     /// Whether it hands back an ICC profile for a picture whose color is an
     /// `nclx` alone: ImageIO hands back its color space's (macOS), libheif
     /// none (the PC, D33).
@@ -180,10 +191,13 @@ pub(crate) struct Bounds {
 }
 
 impl Bounds {
-    /// `encoder`'s, on this OS.
+    /// `encoder`'s, on this OS, with the decoder's pixel cap: Grape's
+    /// limits ([`proto::Limits::DEFAULT`], which every helper the app
+    /// starts is held to).
     pub(crate) fn of(encoder: &Encoder) -> Bounds {
         Bounds {
             picture: encoder.max_picture(),
+            decode: proto::Limits::DEFAULT.max_pixels,
             nclx_profile: cfg!(target_os = "macos"),
         }
     }
@@ -204,6 +218,9 @@ pub(crate) enum Refusal {
     Pixels,
     /// [`WIDE`].
     Wide,
+    /// Over the most pixels the helper decodes ([`TOO_LARGE`],
+    /// `DecodeFailed`).
+    TooLarge,
     /// [`HIGH`].
     High,
 }
@@ -219,6 +236,7 @@ impl Refusal {
             Refusal::Pictures => PICTURES,
             Refusal::Pixels => PIXELS,
             Refusal::Wide => WIDE,
+            Refusal::TooLarge => TOO_LARGE,
             Refusal::High => HIGH,
         }
     }
@@ -528,6 +546,11 @@ impl Scan {
             Some(Refusal::Pixels)
         } else if !bounds.nclx_profile && !self.icc && self.nclx.is_some_and(|n| !n.srgb_like()) {
             Some(Refusal::Wide)
+        } else if self
+            .ispe
+            .is_some_and(|(w, h)| u64::from(w) * u64::from(h) > bounds.decode)
+        {
+            Some(Refusal::TooLarge)
         } else if preset == CompressPreset::High && self.upright().is_some_and(over) {
             Some(Refusal::High)
         } else {
@@ -823,8 +846,18 @@ pub(crate) fn check(
     }
     let failed = |e: Error| fail(scan_error(e, names, src));
     let mut scan = Scan::read(&mut r, len).map_err(failed)?;
-    if let Some(refusal) = scan.refusal(preset, Bounds::of(encoder)) {
-        return Err(strip::refused(names, src, refusal.why()));
+    let bounds = Bounds::of(encoder);
+    match scan.refusal(preset, bounds) {
+        None => {}
+        Some(Refusal::TooLarge) => {
+            let (w, h) = scan.ispe.unwrap_or_default();
+            return Err(names.too_large(format!(
+                "{}: {w}x{h} is over the {} pixels the helper decodes",
+                src.display(),
+                bounds.decode
+            )));
+        }
+        Some(refusal) => return Err(strip::refused(names, src, refusal.why())),
     }
     scan.load(&mut r).map_err(failed)?;
     encoder.check_encode(names, cancel)?;
@@ -869,6 +902,7 @@ mod tests {
     /// back for an `nclx` (libheif's).
     const HEVC: Bounds = Bounds {
         picture: (35_651_584, 16_888),
+        decode: 134_217_728,
         nclx_profile: false,
     };
 
@@ -1241,6 +1275,39 @@ mod tests {
     }
 
     #[test]
+    fn over_the_pixels_the_helper_decodes_is_refused_at_every_preset() {
+        // 200 MP (Samsung's 12,240 × 16,320), one pixel over the 134,217,728
+        // the helper decodes, and that many; with an irot too.
+        for ((w, h), over) in [
+            ((12_240, 16_320), true),
+            ((16_385, 8192), true),
+            ((16_384, 8192), false),
+            ((11_585, 11_585), false),
+        ] {
+            for angle in [0, 1] {
+                let b = primary_with(vec![hvcc(8, 8), ispe(w, h), irot(angle)]);
+                let s = read(&b.build().0).unwrap();
+                for preset in [Small, Balanced, High] {
+                    let expected = match (over, preset) {
+                        (true, _) => Some(Refusal::TooLarge),
+                        // Over one HEVC picture, at High only.
+                        (false, High) => Some(Refusal::High),
+                        (false, _) => None,
+                    };
+                    assert_eq!(s.refusal(preset, HEVC), expected, "{w}x{h} {preset:?}");
+                }
+            }
+        }
+        // By the bound given; with no ispe, the helper's own cap holds.
+        let s = read(&primary_with(vec![hvcc(8, 8), ispe(64, 48)]).build().0).unwrap();
+        let cap = |decode| Bounds { decode, ..HEVC };
+        assert_eq!(s.refusal(Small, cap(64 * 48)), None);
+        assert_eq!(s.refusal(Small, cap(64 * 48 - 1)), Some(Refusal::TooLarge));
+        let s = read(&primary_with(vec![hvcc(8, 8)]).build().0).unwrap();
+        assert_eq!(s.refusal(Small, cap(1)), None);
+    }
+
+    #[test]
     fn over_one_hevc_picture_is_refused_at_high_only() {
         for ((w, h), over) in [
             ((8000, 6000), true),
@@ -1303,6 +1370,7 @@ mod tests {
             (Refusal::Pictures, PICTURES),
             (Refusal::Pixels, PIXELS),
             (Refusal::Wide, WIDE),
+            (Refusal::TooLarge, TOO_LARGE),
             (Refusal::High, HIGH),
         ];
         for (refusal, why) in words {
@@ -1766,6 +1834,16 @@ mod tests {
             assert_eq!(e.user_message, "Grape's image helper couldn't start.");
         } else {
             refused(&p3, Balanced, WIDE);
+        }
+        // Over what the helper decodes: the words its image line would end
+        // the decode with, at every preset, before it starts.
+        let huge = primary_with(vec![hvcc(8, 8), ispe(12_240, 16_320)])
+            .build()
+            .0;
+        for preset in [Small, Balanced, High] {
+            let e = check_err(&huge, preset, nowhere());
+            assert_eq!(e.kind, ErrorKind::DecodeFailed, "{e:?}");
+            assert_eq!(e.user_message, "photo.heic is too large to convert.");
         }
         let big = primary_with(vec![hvcc(8, 8), ispe(8000, 6000)]).build().0;
         refused(&big, High, HIGH);

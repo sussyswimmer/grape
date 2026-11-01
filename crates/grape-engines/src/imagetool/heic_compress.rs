@@ -16,8 +16,10 @@
 //!
 //! 1. **Before anything starts** ([`scan::check`]): the file's content,
 //!    boxes and `meta`, the refusals (AVIF, another codec, sequences, more
-//!    than 8 bits, another picture, non-square pixels, High over one HEVC
-//!    picture), the metadata items to carry (16 MiB at most), and last
+//!    than 8 bits, another picture, non-square pixels, a wide `nclx` with no
+//!    profile where the helper hands back none, more pixels than the helper
+//!    decodes at any preset, High over one HEVC picture), the metadata
+//!    items to carry (16 MiB at most), and last
 //!    whether the helper can write HEIC at all (probed once a process).
 //!    Progress 0–0.05.
 //! 2. **Decode** ([`Decoder::decode_within`]): upright 8-bit RGB or RGBA
