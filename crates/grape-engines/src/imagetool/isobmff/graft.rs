@@ -747,6 +747,12 @@ impl Graft {
         (self.file.len() - self.old_meta.len() + self.meta.len() + self.mdat.len()) as u64 + data
     }
 
+    /// The added items back, for another graft of the same items (HEIC
+    /// Compress's "Try Small" trial).
+    pub(crate) fn into_added(self) -> Vec<Added> {
+        self.added
+    }
+
     /// The ids the added items have, in order.
     #[cfg(test)]
     pub(crate) fn ids(&self) -> &[u32] {

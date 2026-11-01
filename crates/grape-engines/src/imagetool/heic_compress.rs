@@ -39,10 +39,14 @@
 //!    streamed into the helper's `input.rgba` (0.50–0.55), its `out.heic`
 //!    read back (0.55–0.90). The pixels go once it's back.
 //! 6. **Early size check:** `out.heic`, the carried data and 256 bytes over
-//!    90 % of the source end it `NoChange` ("… is already compact. Try
-//!    Small." but at Small, "… is already as small as Grape makes it."):
-//!    HEVC has no quality to read from a source the way a JPEG's tables
-//!    give one, so this comes only after the decode and encode.
+//!    90 % of the source end it `NoChange`: HEVC has no quality to read
+//!    from a source the way a JPEG's tables give one, so this comes only
+//!    after the decode and encode. "… is already compact. Try Small." only
+//!    when Small would write a file ([`Small::would_do`]): when it would
+//!    scale the picture, or else when its encode of the same pixels, run as
+//!    a trial at its quality and measured as Small measures its own, would
+//!    pass (0.90–0.98); otherwise "… is already as small as Grape makes
+//!    it.".
 //! 7. **The metadata** ([`carried`]): each Exif item's dimensions become the
 //!    new picture's (the Exif IFD's, and IFD0's when it has them). The
 //!    helper turns the picture by its `irot` and `imir` ([`Scan::turns`]);
@@ -56,8 +60,8 @@
 //!    `ispe`'s, swapped, for an Orientation of 5 to 8 ([`turned_by_exif`]);
 //!    of 2 to 4 it can't be told (a known limit, QA's).
 //! 8. **Graft** into `out.heic` ([`Graft`]), then the final rule: over 90 %
-//!    of the source is `NoChange` as above, before a temp file is made.
-//!    0.90–0.92.
+//!    of the source is `NoChange` as above (Small's trial too), before a
+//!    temp file is made. 0.90–0.92.
 //! 9. **Write** the temp file in the destination folder through
 //!    [`Cancellable`], read it again ([`Graft::check`]), then publish it
 //!    without replacing anything, with [`Note::Compressed`]. 0.92–0.98,
@@ -96,7 +100,7 @@ use std::path::Path;
 
 use grape_core::{CompressPreset, Format, Job};
 use grape_heif_proto::HeifFormat;
-use image::{ColorType, GenericImageView};
+use image::{ColorType, DynamicImage, GenericImageView};
 
 use super::exif;
 use super::isobmff::graft::{Added, Graft};
@@ -108,7 +112,7 @@ use crate::cancel::Cancellable;
 use crate::heif::{Decoded, Decoder, Encoder};
 use crate::output::TempFile;
 use crate::publish::{self, Names};
-use crate::{EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
+use crate::{CancelToken, EngineCtx, ErrorKind, GrapeError, JobOutcome, Note};
 
 /// A preset's quality for the helper of this OS (`mac`: ImageIO's, q / 100;
 /// otherwise libheif's) and the long side it scales down to.
@@ -219,7 +223,8 @@ pub(crate) fn run_with(
     let scan = scan::check(src, &names, preset, encoder, cancel)?;
     forward.to(0.05);
 
-    let (quality, cap) = plan(preset, cfg!(target_os = "macos"));
+    let mac = cfg!(target_os = "macos");
+    let (quality, cap) = plan(preset, mac);
     let held: u64 = scan.carried.iter().map(|c| c.data.len() as u64).sum();
     let tool_peak = |width: u32, height: u32, color: ColorType| {
         peak(width, height, u64::from(color.bytes_per_pixel()), cap).saturating_add(held)
@@ -244,6 +249,9 @@ pub(crate) fn run_with(
         return Err(strip::refused(&names, src, WIDE));
     }
     let upright = scan.turns() || turned_by_exif(&scan, img.dimensions());
+    // Whether Small, where "Try Small" points, would scale the picture.
+    let small_cap = plan(CompressPreset::Small, mac).1;
+    let small_scales = small_cap.is_some_and(|c| img.width().max(img.height()) > c);
     let img = scale::scale(img, cap, cancel).ok_or_else(|| crate::cancelled(src))?;
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
@@ -261,31 +269,50 @@ pub(crate) fn run_with(
             &mut |f| forward.to(f),
         )
         .map_err(|e| publish::or_cancelled(cancel, src, e))?;
-    drop((img, icc));
+    // Small's trial encodes these same pixels (Small scales nothing that
+    // this preset didn't): kept only when a "Try Small" could need it.
+    let trial = if preset != CompressPreset::Small && !small_scales {
+        Some((img, icc))
+    } else {
+        drop((img, icc));
+        None
+    };
     if cancel.is_cancelled() {
         return Err(crate::cancelled(src));
     }
     forward.to(0.90);
-    let try_small = preset != CompressPreset::Small;
-    let early = (encoded.len() as u64)
-        .saturating_add(held)
-        .saturating_add(256);
-    if early.saturating_mul(10) > before.saturating_mul(9) {
+    let added = carried(scan, (width, height), upright);
+    let mut small = Small {
+        preset,
+        scales: small_scales,
+        quality: plan(CompressPreset::Small, mac).0,
+        trial,
+        held,
+        before,
+        encoder,
+        names: &names,
+        src,
+        cancel,
+    };
+    if !fits(early_size(encoded.len() as u64, held), before) {
         let detail = format!(
             "{} bytes and {held} of metadata from {before} in {}",
             encoded.len(),
             src.display()
         );
+        drop(encoded);
+        let try_small = small.would_do(added, &mut forward)?;
         return Err(names.not_smaller(try_small, detail));
     }
 
-    let graft = Graft::new(encoded, carried(scan, (width, height), upright))
-        .map_err(|e| graft_failed(e, &names, src))?;
+    let graft = Graft::new(encoded, added).map_err(|e| graft_failed(e, &names, src))?;
     let after = graft.len();
-    if after.saturating_mul(10) > before.saturating_mul(9) {
+    if !fits(after, before) {
         let detail = format!("{after} bytes from {before} in {}", src.display());
+        let try_small = small.would_do(graft.into_added(), &mut forward)?;
         return Err(names.not_smaller(try_small, detail));
     }
+    drop(small);
     forward.to(0.92);
 
     publish::ensure_dir(job, ctx, dir, &names)?;
@@ -319,6 +346,95 @@ pub(crate) fn run_with(
     forward.to(1.0);
     outcome.notes.push(Note::Compressed { before, after });
     Ok(outcome)
+}
+
+/// What the early size check counts for an `out.heic` of `encoded` bytes and
+/// `held` bytes of carried metadata: both, and 256 bytes for what the graft
+/// adds to `meta`.
+fn early_size(encoded: u64, held: u64) -> u64 {
+    encoded.saturating_add(held).saturating_add(256)
+}
+
+/// Whether a file of `size` bytes is at most 90 % of a source of `before`
+/// (D26's rule for lossy formats).
+fn fits(size: u64, before: u64) -> bool {
+    size.saturating_mul(10) <= before.saturating_mul(9)
+}
+
+/// What "Try Small" is decided by at a `NoChange` from Balanced or High
+/// ([module docs](self), step 8).
+struct Small<'a> {
+    preset: CompressPreset,
+    /// Small would scale the picture: it does more, always.
+    scales: bool,
+    /// Small's quality for this OS's helper.
+    quality: u8,
+    /// The pixels this preset encoded, and their profile, which Small
+    /// would encode too: `None` at Small, and when Small scales.
+    trial: Option<(DynamicImage, Option<Vec<u8>>)>,
+    /// The carried metadata's bytes.
+    held: u64,
+    /// The source's size.
+    before: u64,
+    encoder: &'a Encoder,
+    names: &'a Names,
+    src: &'a Path,
+    cancel: &'a CancelToken,
+}
+
+impl Small<'_> {
+    /// Whether Small would write a file where this preset ended `NoChange`
+    /// (D26's "Try Small", as WebP's): yes when it would scale the
+    /// picture; otherwise Small's encode runs as a trial on the same pixels
+    /// at Small's quality, its file measured with `added` grafted in by
+    /// both of Small's own checks, exactly, and never written. Skipped when
+    /// no file could pass (the metadata and the graft's 256 bytes are over
+    /// 90 % of the source already). A trial Small couldn't finish (a failed
+    /// encode or graft) is no reason to try it. Its progress goes to
+    /// 0.90–0.98, only forwards; a cancel during it, its last report
+    /// included, is a cancel.
+    fn would_do(
+        &mut self,
+        added: Vec<Added>,
+        forward: &mut Forward<'_>,
+    ) -> Result<bool, GrapeError> {
+        if self.preset == CompressPreset::Small {
+            return Ok(false);
+        }
+        if self.scales {
+            return Ok(true);
+        }
+        let Some((img, icc)) = self.trial.take() else {
+            return Ok(false);
+        };
+        if !fits(early_size(0, self.held), self.before) {
+            return Ok(false);
+        }
+        let cancel = self.cancel;
+        if cancel.is_cancelled() {
+            return Err(crate::cancelled(self.src));
+        }
+        let encoded = self.encoder.encode(
+            &img,
+            icc.as_deref(),
+            Some(self.quality),
+            self.names,
+            cancel,
+            (0.90, 0.98),
+            &mut |f| forward.to(f),
+        );
+        drop((img, icc));
+        if cancel.is_cancelled() {
+            return Err(crate::cancelled(self.src));
+        }
+        let Ok(encoded) = encoded else {
+            return Ok(false);
+        };
+        if !fits(early_size(encoded.len() as u64, self.held), self.before) {
+            return Ok(false);
+        }
+        Ok(Graft::new(encoded, added).is_ok_and(|g| fits(g.len(), self.before)))
+    }
 }
 
 /// What the graft says went wrong, in Grape's words: what the helper wrote
@@ -1191,20 +1307,199 @@ mod tests {
 
     #[test]
     fn what_isnt_smaller_enough_is_not_written() {
-        // No padding: the fake writes the pixels as they are, so the file
-        // can't shrink by a tenth. Small says so; the others say Try Small.
-        for (preset, words) in [
-            (Small, "is already as small as Grape makes it."),
-            (Balanced, "is already compact. Try Small."),
-            (High, "is already compact. Try Small."),
-        ] {
+        // No padding: the fake writes the pixels as they are at every
+        // quality, so no file is a tenth smaller, and Small's trial says so
+        // too: each preset says as much.
+        for preset in [Small, Balanced, High] {
             let mut source = Source::new((64, 48));
             source.pad = 0;
             let c = case("photo.heic", &source.build(), preset);
             let ran = c.run("ok");
             let e = c.refused(&ran);
             assert_eq!(e.kind, ErrorKind::NoChange);
-            assert_eq!(e.user_message, format!("photo.heic {words}"));
+            assert_eq!(
+                e.user_message,
+                "photo.heic is already as small as Grape makes it."
+            );
+            assert!(
+                ran.progress.windows(2).all(|w| w[0] < w[1]),
+                "{:?}",
+                ran.progress
+            );
+        }
+    }
+
+    /// The variable that makes [`sized_helper`] a helper, and names its
+    /// mode.
+    const SIZED: &str = "GRAPE_HEIC_SIZED";
+
+    /// A helper as the fake is ([`fake`]), but whose file at Small's
+    /// quality is `mode`'s: `shrinks` writes a 1×1 picture, `grows` the
+    /// picture twice over; any other quality, the picture as it is.
+    struct SizedCodec {
+        mode: String,
+    }
+
+    impl grape_heif_proto::Codec for SizedCodec {
+        fn caps(&self) -> grape_heif_proto::Caps {
+            let both = grape_heif_proto::FormatCaps {
+                decode: true,
+                encode: true,
+            };
+            grape_heif_proto::Caps {
+                heic: both,
+                avif: both,
+                codec: "sized".to_string(),
+            }
+        }
+
+        fn decode(
+            &self,
+            source: &Path,
+            _format: HeifFormat,
+            _limits: &grape_heif_proto::Limits,
+            out: &mut dyn grape_heif_proto::PixelSink,
+        ) -> Result<(), grape_heif_proto::Failure> {
+            let damaged =
+                || grape_heif_proto::Failure::new(grape_heif_proto::FailKind::Damaged, "sized");
+            let image =
+                parse_fake(&fs::read(source).map_err(|_| damaged())?).ok_or_else(damaged)?;
+            let info = grape_heif_proto::ImageInfo {
+                width: image.width,
+                height: image.height,
+                channels: image.channels,
+                icc_bytes: image.icc.as_ref().map_or(0, |p| p.len() as u32),
+            };
+            out.begin(&info, image.icc.as_deref())?;
+            let row = image.width as usize * usize::from(image.channels);
+            for r in image.rows.chunks_exact(row) {
+                out.row(r)?;
+            }
+            Ok(())
+        }
+
+        fn encode(
+            &self,
+            px: &grape_heif_proto::Pixels,
+            _format: HeifFormat,
+            quality: Option<u8>,
+            _limits: &grape_heif_proto::Limits,
+        ) -> Result<Vec<u8>, grape_heif_proto::Failure> {
+            let small = quality == Some(plan(Small, cfg!(target_os = "macos")).0);
+            let n = usize::from(px.channels);
+            Ok(match (small, self.mode.as_str()) {
+                (true, "shrinks") => fake_heic(1, 1, px.channels, &px.data[..n], None),
+                (true, "grows") => {
+                    let twice = [&px.data[..], &px.data[..]].concat();
+                    fake_heic(px.width, px.height * 2, px.channels, &twice, None)
+                }
+                _ => fake_heic(
+                    px.width,
+                    px.height,
+                    px.channels,
+                    &px.data,
+                    px.icc.as_deref(),
+                ),
+            })
+        }
+    }
+
+    /// Not a test: [`SizedCodec`]'s helper, which the tests start as the
+    /// fake's ([`sized`]).
+    #[test]
+    #[ignore = "a fake image helper, run by the tests below"]
+    fn sized_helper() {
+        let Ok(mode) = std::env::var(SIZED) else {
+            return;
+        };
+        let codec = SizedCodec { mode };
+        let done = grape_heif_proto::serve(&codec, std::io::stdin().lock(), std::io::stdout());
+        std::process::exit(if done { 0 } else { 1 });
+    }
+
+    /// The test binary as [`sized_helper`] in `mode`.
+    fn sized(mode: &str) -> Launch {
+        Launch {
+            program: std::env::current_exe().unwrap(),
+            args: [
+                "--exact",
+                "imagetool::heic_compress::tests::sized_helper",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+                "-q",
+            ]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect(),
+            envs: vec![(SIZED.into(), mode.into())],
+            contain: None,
+        }
+    }
+
+    #[test]
+    fn try_small_is_said_only_when_small_would_write_a_file() {
+        let run = |size: (u32, u32), pad: usize, preset, helper: &str| {
+            let mut source = Source::new(size);
+            source.pad = pad;
+            let c = case("photo.heic", &source.build(), preset);
+            let ran = c.run_with(sized(helper), c.limits(), None);
+            assert!(
+                ran.progress.windows(2).all(|w| w[0] < w[1]),
+                "{:?}",
+                ran.progress
+            );
+            let said = match &ran.result {
+                Ok(_) => "written".to_string(),
+                Err(e) => e.user_message.clone(),
+            };
+            if ran.result.is_ok() {
+                fs::remove_file(c.dest()).unwrap();
+            }
+            said
+        };
+        const TRY: &str = "photo.heic is already compact. Try Small.";
+        const AS_SMALL: &str = "photo.heic is already as small as Grape makes it.";
+        // Small scales nothing (64 × 48): its trial decides. A Small that
+        // writes a file says Try Small, and Small then writes it; one that
+        // doesn't, says as much.
+        for preset in [Balanced, High] {
+            assert_eq!(run((64, 48), 0, preset, "shrinks"), TRY, "{preset:?}");
+            assert_eq!(run((64, 48), 0, preset, "ok"), AS_SMALL, "{preset:?}");
+            assert_eq!(run((64, 48), 0, preset, "grows"), AS_SMALL, "{preset:?}");
+        }
+        assert_eq!(run((64, 48), 0, Small, "shrinks"), "written");
+        assert_eq!(run((64, 48), 0, Small, "ok"), AS_SMALL);
+        // Small scales it (2100 wide): Try Small, with no trial (one would
+        // say no here).
+        for preset in [Balanced, High] {
+            assert_eq!(run((2100, 10), 0, preset, "grows"), TRY, "{preset:?}");
+        }
+        // The metadata alone is over 90 %: no trial (one would say yes).
+        let mut source = Source::new((64, 48));
+        source.pad = 0;
+        let mut b = source.builder();
+        b.items
+            .push(Item::mime(12, "text/plain", &vec![7; 200_000]));
+        b.refs.push((*b"cdsc", 12, vec![1]));
+        let c = case("photo.heic", &b.build().0, Balanced);
+        let ran = c.run_with(sized("shrinks"), c.limits(), None);
+        assert_eq!(c.refused(&ran).user_message, AS_SMALL);
+    }
+
+    #[test]
+    fn a_cancel_during_small_s_trial_saves_nothing() {
+        let mut source = Source::new((64, 48));
+        source.pad = 0;
+        let c = case("photo.heic", &source.build(), Balanced);
+        let reports = c.run_with(sized("shrinks"), c.limits(), None).progress;
+        // The trial's own reports, from 0.90 on.
+        assert!(reports.iter().any(|&f| f > 0.9), "{reports:?}");
+        for &at in &reports {
+            let ran = c.run_with(sized("shrinks"), c.limits(), Some(at));
+            let e = ran.result.unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Cancelled, "at {at}: {e:?}");
+            assert_eq!(ran.progress.last(), Some(&at));
         }
     }
 
