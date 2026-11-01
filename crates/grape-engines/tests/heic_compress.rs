@@ -14,6 +14,14 @@
 //! - The fixtures are small, so a `free` box of 256 KiB is put after each
 //!   to give Compress something to gain on: what's past the last box a
 //!   reader needs is never carried.
+//! - CI writes the fixtures once, on Windows (`grape-heif-fixtures` with
+//!   `--icc`), and both OSes' jobs read the same folder: `exif-xmp.heic`,
+//!   `q95.heic`, `thumb.heic`, `nclx-p3.heic`, `alpha.heic`, `icc.heic`
+//!   and `grid.heic` are there on each. Two cases change a copy of
+//!   `exif-xmp.heic` in memory: its Exif swapped for one with an IFD1
+//!   thumbnail, and its `irot` blanked (as Samsung's) to see whether the
+//!   helper's decode turns a picture by its Exif (it says on stderr;
+//!   libheif must not).
 //!
 //! Every test checks that its source is unchanged, that nothing but the
 //! output is left beside it, and that no `grape-heif-…` work folder is left
@@ -55,12 +63,21 @@ fn sidecars() -> SidecarPaths {
     }
 }
 
-/// Fixture `name`, with a `free` box of 256 KiB after it.
-fn padded(name: &str) -> Vec<u8> {
+/// Fixture `name` as it is.
+fn fixture(name: &str) -> Vec<u8> {
     let dir = std::env::var_os("GRAPE_TEST_HEIF_FIXTURES")
         .map(PathBuf::from)
         .expect("set GRAPE_TEST_HEIF_FIXTURES to grape-heif-fixtures' folder");
-    let mut file = fs::read(dir.join(name)).unwrap_or_else(|e| panic!("fixture {name}: {e}"));
+    fs::read(dir.join(name)).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
+}
+
+/// Fixture `name`, with a `free` box of 256 KiB after it.
+fn padded(name: &str) -> Vec<u8> {
+    pad(fixture(name))
+}
+
+/// `file` with a `free` box of 256 KiB after it.
+fn pad(mut file: Vec<u8>) -> Vec<u8> {
     let pad = 256 * 1024u32;
     file.extend_from_slice(&(pad + 8).to_be_bytes());
     file.extend_from_slice(b"free");
@@ -124,8 +141,17 @@ fn compress_op(preset: CompressPreset) -> Operation {
 /// Compress at `preset` on fixture `name` (padded): the output's bytes, or
 /// `None` on a Mac that can't write HEIC (said on stderr).
 fn compress(dir: &TestDir, name: &str, preset: CompressPreset) -> Option<Vec<u8>> {
-    let source = padded(name);
-    let (dest, result, progress) = run(dir, name, &source, compress_op(preset));
+    compress_bytes(dir, name, &padded(name), preset)
+}
+
+/// [`compress`] on `source`, named `name`.
+fn compress_bytes(
+    dir: &TestDir,
+    name: &str,
+    source: &[u8],
+    preset: CompressPreset,
+) -> Option<Vec<u8>> {
+    let (dest, result, progress) = run(dir, name, source, compress_op(preset));
     match result {
         Ok(outcome) => {
             assert_eq!(outcome.outputs, std::slice::from_ref(&dest));
@@ -345,4 +371,313 @@ fn a_10_bit_photo_is_refused_before_the_helper_starts() {
         "deep.heic is a 10-bit (HDR) photo, which Compress can't keep yet."
     );
     assert!(progress.is_empty());
+}
+
+/// The content of `heic`'s first `colr` box of type `prof`: its ICC
+/// profile.
+fn profile(heic: &[u8]) -> Option<Vec<u8>> {
+    let at = heic.windows(8).position(|w| w == b"colrprof")?;
+    let size = u32::from_be_bytes(heic[at - 4..at].try_into().unwrap()) as usize;
+    Some(heic[at + 8..at - 4 + size].to_vec())
+}
+
+/// Where the red in `img` is: the corner its red pixels' centre is
+/// nearest, as (right, bottom).
+fn red_corner(img: &image::RgbImage) -> (bool, bool) {
+    let (w, h) = img.dimensions();
+    let (mut sx, mut sy, mut n) = (0u64, 0u64, 0u64);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p[0] > 200 && p[1] < 80 && p[2] < 80 {
+            (sx, sy, n) = (sx + u64::from(x), sy + u64::from(y), n + 1);
+        }
+    }
+    assert!(n > 0, "no red");
+    (sx / n > u64::from(w) / 2, sy / n > u64::from(h) / 2)
+}
+
+/// `img` turned as a viewer turns it by Exif Orientation `o` (1, 3, 6, 8).
+fn shown(img: image::RgbImage, o: u16) -> image::RgbImage {
+    match o {
+        3 => image::imageops::rotate180(&img),
+        6 => image::imageops::rotate90(&img),
+        8 => image::imageops::rotate270(&img),
+        _ => img,
+    }
+}
+
+/// The top-level boxes of `data` from `at` to `end`: type and range.
+fn boxes(data: &[u8], mut at: usize, end: usize) -> Vec<([u8; 4], std::ops::Range<usize>)> {
+    let mut out = Vec::new();
+    while at + 8 <= end {
+        let size = u32::from_be_bytes(data[at..at + 4].try_into().unwrap()) as usize;
+        assert!(size >= 8 && at + size <= end, "a box this test can't read");
+        out.push((data[at + 4..at + 8].try_into().unwrap(), at..at + size));
+        at += size;
+    }
+    out
+}
+
+/// `heic` with its primary's `irot` blanked into a `free` box, as Samsung
+/// writes a portrait, and that property's association made not essential:
+/// nothing in the file turns the picture any more.
+fn without_irot(heic: &[u8]) -> Vec<u8> {
+    let mut out = heic.to_vec();
+    let top = boxes(heic, 0, heic.len());
+    let (_, meta) = top.iter().find(|(k, _)| k == b"meta").unwrap();
+    let (_, iprp) = boxes(heic, meta.start + 12, meta.end)
+        .into_iter()
+        .find(|(k, _)| k == b"iprp")
+        .unwrap();
+    let kids = boxes(heic, iprp.start + 8, iprp.end);
+    let (_, ipco) = kids.iter().find(|(k, _)| k == b"ipco").unwrap();
+    let props = boxes(heic, ipco.start + 8, ipco.end);
+    let index = props.iter().position(|(k, _)| k == b"irot").unwrap() + 1;
+    let irot = &props[index - 1].1;
+    out[irot.start + 4..irot.start + 8].copy_from_slice(b"free");
+    let (_, ipma) = kids.iter().find(|(k, _)| k == b"ipma").unwrap();
+    let (version, wide) = (heic[ipma.start + 8], heic[ipma.start + 11] & 1 == 1);
+    let mut at = ipma.start + 12;
+    let count = u32::from_be_bytes(heic[at..at + 4].try_into().unwrap());
+    at += 4;
+    for _ in 0..count {
+        at += if version < 1 { 2 } else { 4 };
+        let n = heic[at];
+        at += 1;
+        for _ in 0..n {
+            let (value, len) = if wide {
+                (
+                    usize::from(u16::from_be_bytes([heic[at], heic[at + 1]]) & 0x7FFF),
+                    2,
+                )
+            } else {
+                (usize::from(heic[at] & 0x7F), 1)
+            };
+            if value == index {
+                out[at] &= 0x7F;
+            }
+            at += len;
+        }
+    }
+    out
+}
+
+/// `heic`'s one Exif's IFD0 Orientation set to `o` (a SHORT), in place.
+fn with_orientation(heic: &[u8], o: u16) -> Vec<u8> {
+    let mut out = heic.to_vec();
+    let [at] = exif_tiffs(heic)[..] else {
+        panic!("not one Exif");
+    };
+    assert_eq!(&heic[at..at + 2], b"MM");
+    let ifd0 = at + u32::from_be_bytes(heic[at + 4..at + 8].try_into().unwrap()) as usize;
+    let n = usize::from(u16::from_be_bytes([heic[ifd0], heic[ifd0 + 1]]));
+    let e = (0..n)
+        .map(|k| ifd0 + 2 + 12 * k)
+        .find(|&e| heic[e..e + 2] == [0x01, 0x12])
+        .unwrap();
+    assert_eq!(&heic[e + 2..e + 8], &[0, 3, 0, 0, 0, 1]);
+    out[e + 8..e + 10].copy_from_slice(&o.to_be_bytes());
+    out
+}
+
+/// How far the big-endian TIFF at `at` in `heic` reaches: past IFD0, the
+/// IFDs it points to, and every value stored outside its entry.
+fn tiff_extent(heic: &[u8], at: usize) -> usize {
+    let t = &heic[at..];
+    let u16_at = |i: usize| usize::from(u16::from_be_bytes([t[i], t[i + 1]]));
+    let u32_at = |i: usize| u32::from_be_bytes(t[i..i + 4].try_into().unwrap()) as usize;
+    let mut end = 8;
+    let mut ifds = vec![u32_at(4)];
+    while let Some(ifd) = ifds.pop() {
+        let n = u16_at(ifd);
+        end = end.max(ifd + 2 + 12 * n + 4);
+        for e in (0..n).map(|k| ifd + 2 + 12 * k) {
+            let size = [0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8][u16_at(e + 2).min(10)] * u32_at(e + 4);
+            if matches!(u16_at(e), 0x8769 | 0x8825) {
+                ifds.push(u32_at(e + 8));
+            } else if size > 4 {
+                end = end.max(u32_at(e + 8) + size);
+            }
+        }
+    }
+    end
+}
+
+#[test]
+fn alpha_is_kept() {
+    let _turn = serial();
+    let dir = TestDir::new("heic-compress-it");
+    let Some(out) = compress(&dir, "alpha.heic", CompressPreset::Balanced) else {
+        return;
+    };
+    let back = decoded(&out).to_rgba8();
+    assert_eq!(back.dimensions(), (64, 64));
+    // Left half opaque, right half 128, red under both.
+    for (x, alpha) in [(8, 255), (56, 128)] {
+        let p = back.get_pixel(x, 32);
+        assert!(p[0] > 230 && p[1] < 30 && p[2] < 30, "{x}: {p:?}");
+        assert!(p[3].abs_diff(alpha) <= 8, "{x}: {p:?}");
+    }
+}
+
+#[test]
+fn an_icc_profile_is_kept() {
+    let _turn = serial();
+    let dir = TestDir::new("heic-compress-it");
+    let source = profile(&fixture("icc.heic")).expect("icc.heic has no prof");
+    let Some(out) = compress(&dir, "icc.heic", CompressPreset::Balanced) else {
+        return;
+    };
+    let kept = profile(&out).expect("no profile in the output");
+    // libheif writes the profile it's given; ImageIO writes its color
+    // space's, which may be laid out its own way.
+    if cfg!(target_os = "macos") {
+        eprintln!(
+            "icc.heic: ImageIO wrote a {}-byte profile for a {}-byte one, {}",
+            kept.len(),
+            source.len(),
+            if kept == source {
+                "the same bytes"
+            } else {
+                "other bytes"
+            }
+        );
+    } else {
+        assert_eq!(kept, source);
+    }
+    let back = decoded(&out).to_rgb8();
+    let p = back.get_pixel(32, 32);
+    assert!(p.0.iter().all(|&c| c.abs_diff(128) <= 6), "{p:?}");
+}
+
+#[test]
+fn a_grid_is_written_as_one_picture() {
+    let _turn = serial();
+    let dir = TestDir::new("heic-compress-it");
+    let source = fixture("grid.heic");
+    assert_eq!(found(&source, b"grid"), 1);
+    let Some(out) = compress(&dir, "grid.heic", CompressPreset::Balanced) else {
+        return;
+    };
+    // libheif writes one picture of 128 × 128: no grid, no tiles.
+    if !cfg!(target_os = "macos") {
+        assert_eq!(found(&out, b"grid"), 0);
+        assert_eq!(found(&out, b"dimg"), 0);
+    }
+    let back = decoded(&out).to_rgb8();
+    assert_eq!(back.dimensions(), (128, 128));
+    for ((x, y), color) in [
+        ((32, 32), [255, 0, 0]),
+        ((96, 32), [0, 255, 0]),
+        ((32, 96), [0, 0, 255]),
+        ((96, 96), [255, 255, 255]),
+    ] {
+        let p = back.get_pixel(x, y);
+        let near = p.0.iter().zip(color).all(|(&a, b)| a.abs_diff(b) <= 24);
+        assert!(near, "({x}, {y}): {p:?}, not {color:?}");
+    }
+}
+
+#[test]
+fn a_turned_photos_thumbnail_goes() {
+    let _turn = serial();
+    let dir = TestDir::new("heic-compress-it");
+    // exif-xmp.heic's Exif (turned by its irot), its TIFF replaced in place
+    // by one with Orientation 6, an Exif IFD with the stored size, and an
+    // IFD1 thumbnail; the rest of the old TIFF zeroed.
+    let mut source = fixture("exif-xmp.heic");
+    let [at] = exif_tiffs(&source)[..] else {
+        panic!("not one Exif");
+    };
+    let room = tiff_extent(&source, at);
+    let mut tiff = b"MM\0*\0\0\0\x08".to_vec();
+    let entry = |t: &mut Vec<u8>, tag: u16, kind: u16, value: [u8; 4]| {
+        t.extend_from_slice(&tag.to_be_bytes());
+        t.extend_from_slice(&kind.to_be_bytes());
+        t.extend_from_slice(&1u32.to_be_bytes());
+        t.extend_from_slice(&value);
+    };
+    // IFD0 at 8 (2 entries), the Exif IFD at 38 (2), IFD1 at 68 (3), the
+    // thumbnail at 110 (16 bytes).
+    tiff.extend_from_slice(&2u16.to_be_bytes());
+    entry(&mut tiff, 0x0112, 3, [0, 6, 0, 0]);
+    entry(&mut tiff, 0x8769, 4, 38u32.to_be_bytes());
+    tiff.extend_from_slice(&68u32.to_be_bytes());
+    tiff.extend_from_slice(&2u16.to_be_bytes());
+    entry(&mut tiff, 0xA002, 4, 96u32.to_be_bytes());
+    entry(&mut tiff, 0xA003, 4, 64u32.to_be_bytes());
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+    tiff.extend_from_slice(&3u16.to_be_bytes());
+    entry(&mut tiff, 0x0103, 3, [0, 6, 0, 0]);
+    entry(&mut tiff, 0x0201, 4, 110u32.to_be_bytes());
+    entry(&mut tiff, 0x0202, 4, 16u32.to_be_bytes());
+    tiff.extend_from_slice(&0u32.to_be_bytes());
+    tiff.extend_from_slice(b"\xFF\xD8thumbnail...\xFF\xD9");
+    assert_eq!(tiff.len(), 126);
+    assert!(tiff.len() <= room, "{room}");
+    source[at..at + room].fill(0);
+    source[at..at + tiff.len()].copy_from_slice(&tiff);
+    let source = pad(source);
+    assert_eq!(exif_of(&source), (6, (96, 64), false, 68));
+    let Some(out) = compress_bytes(&dir, "thumb-exif.heic", &source, CompressPreset::Balanced)
+    else {
+        return;
+    };
+    // Upright now: Orientation 1, the new size, and no IFD1.
+    assert_eq!(exif_of(&out), (1, (64, 96), false, 0));
+}
+
+#[test]
+fn whether_the_decoder_turns_a_picture_by_its_exif() {
+    let _turn = serial();
+    let dir = TestDir::new("heic-compress-it");
+    // exif-xmp.heic stored 96 × 64, its red block top left, with nothing
+    // that turns it but its Exif (its irot blanked, as Samsung's).
+    let stored = without_irot(&fixture("exif-xmp.heic"));
+    for o in [6, 3] {
+        let heic = with_orientation(&stored, o);
+        let back = decoded(&heic).to_rgb8();
+        let turned = (back.dimensions(), red_corner(&back)) != ((96, 64), (false, false));
+        eprintln!(
+            "Orientation {o}: the helper decoded {:?}, red at {:?}: {} turns by Exif: {}",
+            back.dimensions(),
+            red_corner(&back),
+            if cfg!(target_os = "macos") {
+                "ImageIO"
+            } else {
+                "libheif"
+            },
+            if turned { "yes" } else { "no" }
+        );
+        // libheif never does.
+        if !cfg!(target_os = "macos") {
+            assert!(!turned, "{o}");
+        }
+        // Compress on it: upright as a viewer shows it, for 6 whichever
+        // way the helper decoded it (D28's swapped-sides rule); for 3 a
+        // helper that turns by Exif can't be told (D28's limit), and
+        // libheif doesn't.
+        let source = pad(heic);
+        let name = format!("exif-{o}.heic");
+        let Some(out) = compress_bytes(&dir, &name, &source, CompressPreset::Balanced) else {
+            continue;
+        };
+        // As a viewer shows it: one on this decoder turns by the Exif if
+        // the decoder did (Preview on ImageIO), else as the Exif says.
+        let (kept, ..) = exif_of(&out);
+        let back = decoded(&out).to_rgb8();
+        let display = if turned { back } else { shown(back, kept) };
+        let upright = match o {
+            6 => ((64, 96), (true, false)),
+            _ => ((96, 64), (true, true)),
+        };
+        let ok = (display.dimensions(), red_corner(&display)) == upright;
+        eprintln!("Orientation {o}: Compress kept {kept}; shown upright: {ok}");
+        if o == 6 || !cfg!(target_os = "macos") {
+            assert!(
+                ok,
+                "{o}: {:?}",
+                (display.dimensions(), red_corner(&display))
+            );
+        }
+    }
 }
