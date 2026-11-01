@@ -203,13 +203,13 @@ pub(crate) struct Bounds {
 }
 
 impl Bounds {
-    /// `encoder`'s, on this OS, with the decoder's pixel cap: Grape's
-    /// limits ([`proto::Limits::DEFAULT`], which every helper the app
-    /// starts is held to).
+    /// `encoder`'s, on this OS, with the pixel cap its runs send
+    /// ([`Encoder::max_decode_pixels`]; the job's decoder is given the same
+    /// limits).
     pub(crate) fn of(encoder: &Encoder) -> Bounds {
         Bounds {
             picture: encoder.max_picture(),
-            decode: proto::Limits::DEFAULT.max_pixels,
+            decode: encoder.max_decode_pixels(),
             nclx_profile: cfg!(target_os = "macos"),
         }
     }
