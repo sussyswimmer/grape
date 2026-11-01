@@ -860,15 +860,37 @@ impl Infe {
     }
 }
 
-/// IFD0's Orientation (1 to 8) of the Exif item `data`: its 4-byte header
-/// offset, then a TIFF structure (after `Exif\0\0` when there is one), its
-/// first [`MAX_EXIF`] walked, as Remove Metadata reads it.
-fn orientation(data: &[u8]) -> Option<u16> {
+/// Where an Exif item's TIFF structure starts in its `data`: after its
+/// 4-byte header offset, and after `Exif\0\0` when that's there, as HEIF
+/// writes it; or, for an item written with no header, at 0 (`MM\0*` or
+/// `II*\0` first) or after `Exif\0\0` there. An offset that would start
+/// with those bytes is past any item Compress carries.
+pub(crate) fn exif_tiff_at(data: &[u8]) -> Option<usize> {
+    let tiff = |at: usize| {
+        data.get(at..at + 4)
+            .is_some_and(|b| b == b"MM\0*" || b == b"II*\0")
+    };
+    if tiff(0) {
+        return Some(0);
+    }
+    if data.starts_with(b"Exif\0\0") && tiff(6) {
+        return Some(6);
+    }
     let offset = u32::from_be_bytes(*data.first_chunk::<4>()?);
     let skip = usize::try_from(offset).ok()?.checked_add(4)?;
-    let tiff = data.get(skip..)?;
-    let tiff = tiff.strip_prefix(b"Exif\0\0").unwrap_or(tiff);
-    exif::walk(&tiff[..tiff.len().min(MAX_EXIF)]).orientation
+    let rest = data.get(skip..)?;
+    Some(if rest.starts_with(b"Exif\0\0") {
+        skip + 6
+    } else {
+        skip
+    })
+}
+
+/// IFD0's Orientation (1 to 8, a SHORT or a LONG) of the Exif item `data`
+/// ([`exif_tiff_at`]), its first [`MAX_EXIF`] read ([`exif::orientation`]).
+fn orientation(data: &[u8]) -> Option<u16> {
+    let tiff = data.get(exif_tiff_at(data)?..)?;
+    exif::orientation(&tiff[..tiff.len().min(MAX_EXIF)])
 }
 
 /// What Compress on HEIC knows of `src` (named in `names`) at `preset`
@@ -1886,6 +1908,22 @@ mod tests {
         let mut bare = Item::exif(EXIF, &[]);
         bare.data = [&0u32.to_be_bytes()[..], &portrait()].concat();
         assert_eq!(orientation(vec![bare], vec![EXIF]), Some(6));
+        // With no header at all, or Exif\0\0 first; stored as a LONG.
+        let mut headerless = Item::exif(EXIF, &[]);
+        headerless.data = portrait();
+        assert_eq!(orientation(vec![headerless], vec![EXIF]), Some(6));
+        let mut prefixed = Item::exif(EXIF, &[]);
+        prefixed.data = [&b"Exif\0\0"[..], &portrait()].concat();
+        assert_eq!(orientation(vec![prefixed], vec![EXIF]), Some(6));
+        let long = super::super::super::exif::tests::tiff(
+            b'I',
+            &[&[(0x0112, super::super::super::exif::tests::V::Long(8))]],
+            None,
+        );
+        assert_eq!(
+            orientation(vec![Item::exif(EXIF, &long)], vec![EXIF]),
+            Some(8)
+        );
         // An offset past its end; none.
         let mut past = Item::exif(EXIF, &portrait());
         past.data[..4].copy_from_slice(&1000u32.to_be_bytes());

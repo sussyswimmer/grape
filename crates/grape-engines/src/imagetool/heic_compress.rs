@@ -44,10 +44,11 @@
 //!    HEVC has no quality to read from a source the way a JPEG's tables
 //!    give one, so this comes only after the decode and encode.
 //! 7. **The metadata** ([`carried`]): each Exif item's dimensions become the
-//!    new picture's. The helper turns the picture by its `irot` and `imir`
-//!    ([`Scan::turns`]); then every Exif item's Orientation becomes 1 (its
-//!    IFD1, stored as the picture was, unlinked when it said 2 to 8) and so
-//!    does every XMP item's `tiff:Orientation`. A photo that turns only by
+//!    new picture's (the Exif IFD's, and IFD0's when it has them). The
+//!    helper turns the picture by its `irot` and `imir` ([`Scan::turns`]);
+//!    then every Exif item's Orientation becomes 1 (a SHORT or a LONG; its
+//!    IFD1, stored as the picture was, unlinked) and so does every XMP
+//!    item's Orientation in the tiff namespace ([`upright_xmp`]). A photo that turns only by
 //!    its Exif (a Samsung portrait, its `irot` blanked; an iOS 11 photo)
 //!    comes back as stored, as libheif decodes it, and keeps its
 //!    Orientation, as JPEG Compress keeps a JPEG's. A helper that turned
@@ -97,7 +98,7 @@ use grape_core::{CompressPreset, Format, Job};
 use grape_heif_proto::HeifFormat;
 use image::{ColorType, GenericImageView};
 
-use super::exif::{self, MAX_EXIF};
+use super::exif;
 use super::isobmff::graft::{Added, Graft};
 use super::isobmff::items::Role;
 use super::isobmff::scan::{self, Scan, WIDE};
@@ -376,32 +377,23 @@ fn carried(scan: Scan, (width, height): (u32, u32), upright: bool) -> Vec<Added>
         .collect()
 }
 
-/// The TIFF structure of an Exif item's `data`: after its 4-byte header
-/// offset, and after `Exif\0\0` when it's there, as the scan reads it.
+/// The TIFF structure of an Exif item's `data`, where the scan finds it
+/// ([`scan::exif_tiff_at`]).
 fn exif_tiff(data: &mut [u8]) -> Option<&mut [u8]> {
-    let offset = u32::from_be_bytes(*data.first_chunk::<4>()?);
-    let skip = usize::try_from(offset).ok()?.checked_add(4)?;
-    let tiff = data.get_mut(skip..)?;
-    if tiff.starts_with(b"Exif\0\0") {
-        tiff.get_mut(6..)
-    } else {
-        Some(tiff)
-    }
+    let at = scan::exif_tiff_at(data)?;
+    data.get_mut(at..)
 }
 
 /// An Exif `tiff` for pixels now `width`×`height`, in place: its
-/// dimensions, and when they're `upright`, an Orientation of 1 and no IFD1
-/// if it said 2 to 8.
+/// dimensions, the Exif IFD's and IFD0's; and when they're `upright`, an
+/// Orientation of 1 (a SHORT or a LONG) and no IFD1, whose thumbnail is
+/// stored as the picture was.
 fn upright_exif(tiff: &mut [u8], width: u32, height: u32, upright: bool) {
     exif::patch_dimensions(tiff, width, height);
+    exif::patch_ifd0_dimensions(tiff, width, height);
     if upright {
-        let turned = exif::walk(&tiff[..tiff.len().min(MAX_EXIF)])
-            .orientation
-            .is_some_and(|o| o != 1);
         exif::patch_orientation(tiff, 1);
-        if turned {
-            exif::unlink_ifd1(tiff);
-        }
+        exif::unlink_ifd1(tiff);
     }
 }
 
@@ -916,9 +908,55 @@ mod tests {
             };
             (get(0xA002), get(0xA003))
         });
-        let walked = exif::walk(tiff);
-        let ifd1 = walked.fields.contains(&MetaField::Thumbnail);
-        (walked.orientation, dims, ifd1)
+        let ifd1 = exif::walk(tiff).fields.contains(&MetaField::Thumbnail);
+        (exif::orientation(tiff), dims, ifd1)
+    }
+
+    /// IFD0's ImageWidth and ImageLength (SHORT or LONG) of a carried Exif
+    /// item, when it has them.
+    fn ifd0_size(data: &[u8]) -> Option<(u32, u32)> {
+        let tiff = &data[10..];
+        let u16_at = |at: usize| u16::from_be_bytes([tiff[at], tiff[at + 1]]);
+        let u32_at = |at: usize| u32::from_be_bytes(tiff[at..at + 4].try_into().unwrap());
+        let ifd0 = u32_at(4) as usize;
+        let get = |tag| {
+            (0..usize::from(u16_at(ifd0)))
+                .map(|n| ifd0 + 2 + n * 12)
+                .find(|&e| u16_at(e) == tag)
+                .map(|e| match u16_at(e + 2) {
+                    3 => u32::from(u16_at(e + 8)),
+                    _ => u32_at(e + 8),
+                })
+        };
+        Some((get(0x0100)?, get(0x0101)?))
+    }
+
+    /// [`camera`]'s Exif with its Orientation as `orientation`, and IFD0's
+    /// ImageWidth (a LONG) and ImageLength (a SHORT) as `size`.
+    fn camera_as(orientation: V<'_>, (w, h): (u32, u32)) -> Vec<u8> {
+        tiff(
+            b'M',
+            &[
+                &[
+                    (0x0100, V::Long(w)),
+                    (0x0101, V::Short(u16::try_from(h).unwrap())),
+                    (0x010F, V::Ascii("SecretMake")),
+                    (0x0112, orientation),
+                    (0x8769, V::Ifd(1)),
+                ],
+                &[
+                    (0x9003, V::Ascii("2024:05:01 10:20:30")),
+                    (0xA002, V::Long(w)),
+                    (0xA003, V::Long(h)),
+                ],
+                &[
+                    (0x0103, V::Short(6)),
+                    (0x0201, V::Long(4000)),
+                    (0x0202, V::Long(10)),
+                ],
+            ],
+            Some(2),
+        )
     }
 
     #[test]
@@ -1010,12 +1048,33 @@ mod tests {
             assert_eq!((o, dims, ifd1), (Some(1), Some((64, 48)), false), "{angle}");
             assert_eq!(s.carried[1].data, xmp(1).as_bytes());
         }
-        // Orientation 1 already, with an irot: no IFD1 goes.
-        let mut source = Source::new((64, 48));
-        source.props = vec![irot(1)];
-        let c = case("photo.heic", &source.build(), Balanced);
+        // Turned, its IFD1 goes whatever the Orientation said: 1 already,
+        // 9 (not one), or none; and one stored as a LONG becomes 1 too.
+        for (orientation, read) in [
+            (V::Short(1), Some(1)),
+            (V::Short(9), Some(1)),
+            (V::Long(6), Some(1)),
+            (V::Ascii("6"), None),
+        ] {
+            let mut source = Source::new((64, 48));
+            source.props = vec![irot(1)];
+            source.exif = Some(camera_as(orientation, (48, 64)));
+            let c = case("photo.heic", &source.build(), Balanced);
+            let (_, s) = c.output(&c.run("ok"));
+            let data = &s.carried[0].data;
+            assert_eq!(exif_of(data), (read, Some((64, 48)), false), "{read:?}");
+            // IFD0's size, the stored one, is the new picture's too.
+            assert_eq!(ifd0_size(data), Some((64, 48)));
+        }
+        // Scaled and not turned: IFD0's size follows, its IFD1 stays.
+        let mut source = Source::new((4200, 30));
+        source.pad = 500_000;
+        source.exif = Some(camera_as(V::Short(1), (4200, 30)));
+        let c = case("photo.heic", &source.build(), Small);
         let (_, s) = c.output(&c.run("ok"));
-        assert_eq!(exif_of(&s.carried[0].data), (Some(1), Some((64, 48)), true));
+        let data = &s.carried[0].data;
+        assert_eq!(exif_of(data), (Some(1), Some((2048, 15)), true));
+        assert_eq!(ifd0_size(data), Some((2048, 15)));
     }
 
     #[test]
@@ -1383,10 +1442,19 @@ mod tests {
 
     #[test]
     fn exif_items_of_any_form_are_patched_where_they_can_be() {
-        // Its TIFF right after its offset; behind Exif\0\0; an offset past
-        // its end; too short for one.
+        // Its TIFF right after its offset; behind Exif\0\0; with no
+        // offset at all (big- or little-endian, or Exif\0\0 first); an
+        // offset past its end; too short for one.
         let tiff = camera(6, (64, 48));
+        let little = super::super::exif::tests::tiff(
+            b'I',
+            &[&[(0x0112, V::Short(6))], &[(0x0103, V::Short(6))]],
+            Some(1),
+        );
         for (data, at) in [
+            (tiff.clone(), Some(0)),
+            (little.clone(), Some(0)),
+            ([&b"Exif\0\0"[..], &tiff].concat(), Some(6)),
             ([&0u32.to_be_bytes()[..], &tiff].concat(), Some(4)),
             (
                 [&6u32.to_be_bytes()[..], b"Exif\0\0", &tiff].concat(),

@@ -318,10 +318,33 @@ pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
     }) else {
         return;
     };
-    let Ok(start) = usize::try_from(exif_ifd) else {
+    set_numbers(tiff, order, exif_ifd, &[(0xA002, width), (0xA003, height)]);
+}
+
+/// Sets IFD0's ImageWidth and ImageLength (0x0100, 0x0101) of `tiff` to
+/// `width` and `height`, in place, as [`patch_dimensions`] sets the Exif
+/// IFD's, for pixels Compress turned or scaled (D28's HEIC): a phone's Exif
+/// may say its stored size there too. A tag that isn't there, or a SHORT
+/// that can't hold the value, is left as it is.
+pub(crate) fn patch_ifd0_dimensions(tiff: &mut [u8], width: u32, height: u32) {
+    let Some((order, first)) = header(tiff) else {
         return;
     };
-    let Some(count) = tiff.get(start..start + 2).map(|b| order.u16(b)) else {
+    set_numbers(tiff, order, first, &[(0x0100, width), (0x0101, height)]);
+}
+
+/// Sets each entry of the IFD at `ifd` in `tiff` whose tag is one of
+/// `values`' to its value, in place: one SHORT that can hold it, or one
+/// LONG. Anything else, or an IFD cut short, is left as it is.
+fn set_numbers(tiff: &mut [u8], order: Order, ifd: u32, values: &[(u16, u32)]) {
+    let Ok(start) = usize::try_from(ifd) else {
+        return;
+    };
+    let Some(count) = tiff
+        .get(start..start.saturating_add(2))
+        .filter(|b| b.len() == 2)
+        .map(|b| order.u16(b))
+    else {
         return;
     };
     for n in 0..usize::from(count.min(MAX_ENTRIES)) {
@@ -334,14 +357,12 @@ pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
             order.u16(&entry[2..4]),
             order.u32(&entry[4..8]),
         );
-        let value = match tag {
-            0xA002 => width,
-            0xA003 => height,
-            _ => continue,
+        let Some(&(_, value)) = values.iter().find(|(t, _)| *t == tag) else {
+            continue;
         };
         let field = &mut tiff[at + 8..at + 12];
-        match (kind, count, order) {
-            (3, 1, _) => {
+        match (kind, count) {
+            (3, 1) => {
                 let Ok(v) = u16::try_from(value) else {
                     continue;
                 };
@@ -351,43 +372,46 @@ pub(crate) fn patch_dimensions(tiff: &mut [u8], width: u32, height: u32) {
                 };
                 field[..2].copy_from_slice(&b);
             }
-            (4, 1, Order::Little) => field.copy_from_slice(&value.to_le_bytes()),
-            (4, 1, Order::Big) => field.copy_from_slice(&value.to_be_bytes()),
+            (4, 1) => field.copy_from_slice(&match order {
+                Order::Little => value.to_le_bytes(),
+                Order::Big => value.to_be_bytes(),
+            }),
             _ => {}
         }
     }
 }
 
-/// Sets IFD0's Orientation (0x0112, one SHORT) of `tiff` to `orientation`,
-/// in place, once Compress has turned the pixels upright (D28's HEIC). An
-/// Orientation that isn't there, or isn't one SHORT, is left as it is: a
-/// reader that finds none takes the picture as it's stored.
+/// IFD0's Orientation (0x0112) of `tiff` as one SHORT or one LONG, as
+/// exiftool reads it, when it's 1 to 8; of two entries the last, as
+/// [`walk`] reads it. (`walk`, for Remove Metadata's report and its
+/// minimal Exif, takes a SHORT only.)
+pub(crate) fn orientation(tiff: &[u8]) -> Option<u16> {
+    let (order, first) = header(tiff)?;
+    let reader = Reader { tiff, order };
+    let ifd = reader.ifd(first)?;
+    let mut found = None;
+    for entry in ifd.entries.iter().filter(|e| e.tag == 0x0112) {
+        found = match (entry.kind, entry.count) {
+            (3, 1) => Some(u32::from(order.u16(&entry.field))),
+            (4, 1) => Some(order.u32(&entry.field)),
+            _ => None,
+        }
+        .and_then(|o| u16::try_from(o).ok())
+        .filter(|o| (1..=8).contains(o));
+    }
+    found
+}
+
+/// Sets IFD0's Orientation (0x0112, one SHORT or one LONG) of `tiff` to
+/// `orientation`, in place, once Compress has turned the pixels upright
+/// (D28's HEIC). An Orientation that isn't there, or isn't one SHORT or
+/// LONG, is left as it is: a reader that finds none takes the picture as
+/// it's stored.
 pub(crate) fn patch_orientation(tiff: &mut [u8], orientation: u16) {
     let Some((order, first)) = header(tiff) else {
         return;
     };
-    let Some((start, count)) = ifd0(tiff, order, first) else {
-        return;
-    };
-    for n in 0..usize::from(count) {
-        let at = start + 2 + n * 12;
-        let Some(entry) = tiff.get(at..at + 12) else {
-            return;
-        };
-        if (
-            order.u16(&entry[0..2]),
-            order.u16(&entry[2..4]),
-            order.u32(&entry[4..8]),
-        ) != (0x0112, 3, 1)
-        {
-            continue;
-        }
-        let b = match order {
-            Order::Little => orientation.to_le_bytes(),
-            Order::Big => orientation.to_be_bytes(),
-        };
-        tiff[at + 8..at + 10].copy_from_slice(&b);
-    }
+    set_numbers(tiff, order, first, &[(0x0112, u32::from(orientation))]);
 }
 
 /// Unlinks IFD1, the thumbnail's IFD, from `tiff` in place: IFD0's next
@@ -810,10 +834,25 @@ pub(crate) mod tests {
             assert!(exif.fields.contains(&Location) && exif.fields.contains(&Camera));
             assert_eq!(exif.orientation, Some(1));
         }
-        // An Orientation that isn't one SHORT, none at all, and garbage:
-        // nothing happens.
+        // One stored as a LONG, as exiftool reads it, in either order.
+        for order in *b"IM" {
+            let mut t = tiff(order, &[&[(0x0112, V::Long(6))]], None);
+            assert_eq!(orientation(&t), Some(6));
+            let len = t.len();
+            patch_orientation(&mut t, 1);
+            assert_eq!((t.len(), orientation(&t)), (len, Some(1)));
+            let r = Reader {
+                tiff: &t,
+                order: header(&t).unwrap().0,
+            };
+            let entry = &r.ifd(8).unwrap().entries[0];
+            assert_eq!((entry.kind, r.order.u32(&entry.field)), (4, 1));
+        }
+        // An Orientation that isn't one SHORT or LONG, none at all, and
+        // garbage: nothing happens.
         for mut t in [
-            tiff(b'I', &[&[(0x0112, V::Long(6))]], None),
+            tiff(b'I', &[&[(0x0112, V::Bytes(3, &[0, 6, 0, 6]))]], None),
+            tiff(b'I', &[&[(0x0112, V::Bytes(1, &[6]))]], None),
             tiff(b'M', &[&[(0x010F, V::Ascii("x"))]], None),
             b"II*\0\xff\xff\xff\xff".to_vec(),
             b"MM\0*\0\0\0\x08\x7f\xff".to_vec(),
@@ -839,6 +878,81 @@ pub(crate) mod tests {
             let mut t = real[..n].to_vec();
             patch_orientation(&mut t, 1);
             unlink_ifd1(&mut t);
+        }
+    }
+
+    #[test]
+    fn the_orientation_is_read_as_a_short_or_a_long() {
+        for order in *b"IM" {
+            for (value, read) in [
+                (V::Short(6), Some(6)),
+                (V::Long(8), Some(8)),
+                (V::Short(1), Some(1)),
+                (V::Short(9), None),
+                (V::Long(0), None),
+                (V::Long(0x0006_0000), None),
+                (V::Bytes(3, &[0, 6, 0, 6]), None),
+                (V::Ascii("6"), None),
+            ] {
+                let t = tiff(order, &[&[(0x0112, value)]], None);
+                assert_eq!(orientation(&t), read, "{}", order as char);
+            }
+            // Of two, the last, as `walk` reads it; in IFD1 only, none.
+            let two = tiff(
+                order,
+                &[&[(0x0112, V::Short(6)), (0x0112, V::Long(3))]],
+                None,
+            );
+            assert_eq!(orientation(&two), Some(3));
+            let ifd1 = tiff(
+                order,
+                &[&[(0x010F, V::Ascii("x"))], &[(0x0112, V::Short(6))]],
+                Some(1),
+            );
+            assert_eq!(orientation(&ifd1), None);
+        }
+        assert_eq!(orientation(b"II*\0\xff\xff\xff\xff"), None);
+        assert_eq!(orientation(b""), None);
+    }
+
+    #[test]
+    fn compress_patches_ifd0s_image_size_in_place() {
+        for order in *b"IM" {
+            let mut t = tiff(
+                order,
+                &[
+                    &[
+                        (0x0100, V::Long(4032)),
+                        (0x0101, V::Short(3024)),
+                        (0x8769, V::Ifd(1)),
+                    ],
+                    &[(0xA002, V::Long(4032))],
+                ],
+                None,
+            );
+            let len = t.len();
+            patch_ifd0_dimensions(&mut t, 1536, 2048);
+            assert_eq!(t.len(), len);
+            let r = Reader {
+                tiff: &t,
+                order: header(&t).unwrap().0,
+            };
+            let ifd0 = r.ifd(8).unwrap();
+            assert_eq!(r.order.u32(&ifd0.entries[0].field), 1536);
+            assert_eq!(r.short(&ifd0.entries[1]), Some(2048));
+            // The Exif IFD's is patch_dimensions'.
+            let exif = r.ifd(r.pointer(&ifd0.entries[2])).unwrap();
+            assert_eq!(r.order.u32(&exif.entries[0].field), 4032);
+        }
+        // A SHORT that can't hold it, none at all, garbage: as it was.
+        for mut t in [
+            tiff(b'I', &[&[(0x0100, V::Short(64))]], None),
+            tiff(b'M', &[&[(0x010F, V::Ascii("x"))]], None),
+            b"II*\0\xff\xff\xff\xff".to_vec(),
+        ] {
+            let before = t.clone();
+            patch_ifd0_dimensions(&mut t, 70_000, 1);
+            assert_eq!(t, before);
         }
     }
 
