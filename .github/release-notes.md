@@ -52,6 +52,11 @@ Everything runs on your computer. No account, no telemetry, and the conversion p
 
 Windows 11 and up-to-date Windows 10 already have Microsoft's WebView2 runtime, which Grape's windows use. On a PC without it, the installer fetches it from Microsoft first — that is the only network call in the whole install.
 
+<!-- Windows-only release, while the Mac checklist in TESTING.md ("Release, M9") is
+     still open: delete this macOS section, the DMG row in "Files in this release", the
+     macOS badge and the macOS column of the keys table. SHA256SUMS.txt keeps the DMG's
+     line (PLATFORM_WINDOWS.md, "Releasing", step 7). -->
+
 ## Install on macOS
 
 1. Download **`Grape-macOS-universal.dmg`** from the files above.
