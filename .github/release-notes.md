@@ -30,7 +30,7 @@ Everything runs on your computer. No account, no telemetry, and the conversion p
 - **Archives** — ZIP, TAR and GZIP between each other, and RAR in, through Grape's own bsdtar.
 - **PDF** — to JPG, PNG, TXT and MD.
 - **9 of the 26 tools** — Compress, Remove Metadata, Remove Audio, Normalize Volume, Audio Channels, Extract Archive, Split PDF, Merge PDFs and Create PDF. The others say "Not in this build yet".
-- **All six file actions** — Copy, Copy Path, Terminal, Move, Share and Float, plus Settings: remappable keys, output folder, sounds, haptics, launch at login.
+- **All six file actions** — Copy, Copy Path, Terminal, Move, Share and Float, plus Settings: remappable keys, output folder, sounds, haptics on a Mac, and launch at login.
 
 ## Files in this release
 
