@@ -878,7 +878,7 @@ fn dropped_box(r: &mut dyn In, b: &Header) -> Result<Option<MetaField>, Error> {
 }
 
 /// `ranges` sorted and merged where they touch or overlap, in place.
-fn merged(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
+pub(super) fn merged(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
     ranges.sort_unstable_by_key(|r| (r.start, r.end));
     ranges.dedup_by(|next, last| {
         let touches = next.start <= last.end;
@@ -891,7 +891,7 @@ fn merged(mut ranges: Vec<Range<u64>>) -> Vec<Range<u64>> {
 }
 
 /// Whether `range` overlaps any of `merged` (sorted, apart).
-fn overlaps(merged: &[Range<u64>], range: &Range<u64>) -> bool {
+pub(super) fn overlaps(merged: &[Range<u64>], range: &Range<u64>) -> bool {
     let i = merged.partition_point(|m| m.end <= range.start);
     merged.get(i).is_some_and(|m| m.start < range.end)
 }
@@ -917,7 +917,11 @@ fn gaps(covered: &[Range<u64>], within: Range<u64>) -> impl Iterator<Item = Rang
 
 /// Where `take` bytes of an item's data from `skip` on lie in its `pieces`
 /// (end to end, each in order): fewer when it ends first.
-fn within(pieces: &[Range<u64>], skip: u64, take: u64) -> impl Iterator<Item = Range<u64>> + '_ {
+pub(super) fn within(
+    pieces: &[Range<u64>],
+    skip: u64,
+    take: u64,
+) -> impl Iterator<Item = Range<u64>> + '_ {
     let end = skip.saturating_add(take);
     // Where each piece starts in the item's data.
     let mut at = 0u64;
@@ -947,7 +951,7 @@ fn zeros(r: &mut dyn In, range: Range<u64>, buf: &mut [u8]) -> Result<bool, Erro
 /// Starts a box of `kind` in `form` (an explicit size for one that ran to
 /// the end) at the end of `out`, for [`end_box`] to give its size; gives
 /// where it starts.
-fn start_box(out: &mut Vec<u8>, kind: &[u8; 4], form: Form) -> usize {
+pub(super) fn start_box(out: &mut Vec<u8>, kind: &[u8; 4], form: Form) -> usize {
     let at = out.len();
     out.extend_from_slice(&Header::write(kind, form, form.head()));
     at
@@ -955,8 +959,9 @@ fn start_box(out: &mut Vec<u8>, kind: &[u8; 4], form: Form) -> usize {
 
 /// Sets the size of the box [`start_box`] started at `at` in `form`: the
 /// rest of `out`. A rebuilt box is never bigger than the source's, so a
-/// 32-bit size still fits.
-fn end_box(out: &mut [u8], at: usize, form: Form) {
+/// 32-bit size still fits; Compress's graft checks the `meta` it builds
+/// before it ends it ([`isobmff::graft`](super::isobmff::graft)).
+pub(super) fn end_box(out: &mut [u8], at: usize, form: Form) {
     let len = out.len() - at;
     match form {
         Form::Large => out[at + 8..at + 16].copy_from_slice(&(len as u64).to_be_bytes()),
@@ -969,7 +974,7 @@ fn end_box(out: &mut [u8], at: usize, form: Form) {
 
 /// Writes an item id: 32 bits when `wide`, 16 otherwise (an id the source
 /// wrote in 16 bits).
-fn put_id(out: &mut Vec<u8>, id: u32, wide: bool) {
+pub(super) fn put_id(out: &mut Vec<u8>, id: u32, wide: bool) {
     if wide {
         out.extend_from_slice(&id.to_be_bytes());
     } else {

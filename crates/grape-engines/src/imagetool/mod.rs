@@ -1,11 +1,14 @@
 //! Grape's own image tools (D26, D28), in Rust with no sidecar: Remove
 //! Metadata on JPEG, PNG, WebP, GIF, TIFF and HEIC by stripping the
 //! container, which keeps the image data byte for byte, and Compress on
-//! JPEG, PNG, TIFF and WebP.
+//! JPEG, PNG, TIFF and WebP; and Compress on HEIC with Grape's image
+//! helper (D33).
 //!
 //! - [`compress`] and [`png_compress`]: Compress on JPEG and PNG; on TIFF,
 //!   [`tiff`]'s, which deflates its strips and tiles again; on WebP,
-//!   [`webp_compress`], which encodes it again with libwebp.
+//!   [`webp_compress`], which encodes it again with libwebp; on HEIC,
+//!   [`heic_compress`], which the helper decodes and encodes and Grape
+//!   grafts the metadata back into.
 //! - [`scale`]: scaling a picture down for Compress, and what that holds.
 //! - [`strip`]: Remove Metadata's runner, and each container's stripper
 //!   ([`jpeg`], [`png`], [`webp`], [`gif`], [`tiff`]'s rewrite, and
@@ -20,6 +23,7 @@ mod compress;
 pub(crate) mod exif;
 mod gif;
 mod heic;
+mod heic_compress;
 mod isobmff;
 mod jpeg;
 mod png;
@@ -45,18 +49,19 @@ use crate::{CancelToken, EngineCtx, GrapeError, JobOutcome};
 pub(crate) use webp::readable as webp_readable;
 pub(crate) use webp::Reading as WebpReading;
 
-/// True when this engine runs `tool` on a file named as `from`. `_heif`
+/// True when this engine runs `tool` on a file named as `from`. `heif`
 /// says whether this install has the HEIC helper (D33), as
-/// `archive::extracts` is told about bsdtar: no tool here needs it yet;
-/// Compress on HEIC will (D28).
-pub(crate) fn runs_tool(tool: ToolKey, from: Format, _heif: bool) -> bool {
+/// `archive::extracts` is told about bsdtar: Compress on HEIC needs it
+/// (D28), Remove Metadata on HEIC doesn't.
+pub(crate) fn runs_tool(tool: ToolKey, from: Format, heif: bool) -> bool {
     match tool {
         ToolKey::RemoveMetadata => strip::strips(from),
         // By name; the content decides which compressor runs ([`run`]).
-        ToolKey::Compress => matches!(
-            from,
-            Format::Jpg | Format::Png | Format::Tiff | Format::Webp
-        ),
+        ToolKey::Compress => match from {
+            Format::Jpg | Format::Png | Format::Tiff | Format::Webp => true,
+            Format::Heic => heif,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -80,6 +85,10 @@ pub(crate) fn run(
             Some(Kind::Tiff) => tiff::compress::run(job, src, dest, from, ctx, progress),
             Some(Kind::Webp) => {
                 webp_compress::run(job, src, dest, from, params.compress, ctx, progress)
+            }
+            // HEIC, and AVIF or HEIF of another codec, which it refuses.
+            Some(Kind::Heif(_)) => {
+                heic_compress::run(job, src, dest, from, params.compress, ctx, progress)
             }
             // JPEG, or "isn't a readable …".
             _ => compress::run(job, src, dest, from, params.compress, ctx, progress),

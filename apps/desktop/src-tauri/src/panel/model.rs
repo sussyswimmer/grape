@@ -898,6 +898,25 @@ mod tests {
                 }
             );
         }
+        // Compress on HEIC runs with the image helper (D28, lane B's B12):
+        // with `grape-heif.exe` (Windows; on macOS Grape itself) the panel
+        // opens, and without it the drop goes to the helper's info toast.
+        let heic = files(&["/a/IMG_0001.heic"]);
+        let with_helper = |op: &Operation, items: &[SelectionItem]| {
+            let sidecars = SidecarPaths {
+                heif: Some(PathBuf::from("grape-heif.exe")),
+                ..installed()
+            };
+            jobs::check_runnable(op, items, &sidecars)
+        };
+        assert_eq!(
+            route(WheelEntry::Tool(ToolKey::Compress), &heic, V1, with_helper),
+            Route::Panel(ToolKey::Compress)
+        );
+        assert_eq!(
+            route(WheelEntry::Tool(ToolKey::Compress), &heic, V1, real),
+            Route::Direct
+        );
     }
 
     #[test]

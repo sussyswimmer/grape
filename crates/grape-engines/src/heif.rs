@@ -419,7 +419,6 @@ impl Decoder {
     /// it, the helper is killed before any pixel is written ("… is too large
     /// to convert."). Everything else, the errors included, is
     /// [`Decoder::decode`]'s.
-    #[cfg_attr(not(test), allow(dead_code))] // Lane B's HEIC Compress (D28) calls it.
     pub(crate) fn decode_within(
         &self,
         src: &Path,
@@ -476,14 +475,12 @@ impl Fit<'_> {
 /// an AVIF's) bytes back rather than a published file (HEIC Compress,
 /// D28). It runs the conversions' encode ([`encode_pixels`]): the same
 /// checks, `input.rgba`, request, deadline and output checks.
-#[cfg_attr(not(test), allow(dead_code))] // Lane B's HEIC Compress (D28) builds it.
 pub(crate) struct Encoder {
     launch: Launch,
     limits: Limits,
     format: HeifFormat,
 }
 
-#[cfg_attr(not(test), allow(dead_code))] // Lane B's HEIC Compress (D28) calls these.
 impl Encoder {
     /// The helper in the app's sidecars, if it found one, writing `format`
     /// with Grape's limits.
@@ -515,6 +512,14 @@ impl Encoder {
     pub(crate) fn max_picture(&self) -> (u64, u32) {
         let limits = self.limits.encode_limits(self.format);
         (limits.max_encode_pixels, limits.max_encode_side)
+    }
+
+    /// The most pixels this helper decodes under the same limits: the
+    /// `max_pixels` a run sends, which a decode's `image` line is held to.
+    /// Compress on HEIC (D28) bounds its scan with it, so the two can't
+    /// drift.
+    pub(crate) fn max_decode_pixels(&self) -> u64 {
+        self.limits.helper.max_pixels
     }
 
     /// `Ok` when its helper says it can write the format. The helper is
@@ -3923,9 +3928,13 @@ pub(crate) mod tests {
         let avif = Encoder::new(nowhere(), tool.limits(), HeifFormat::Avif);
         assert_eq!(heic.max_picture(), (35_651_584, 16_888));
         assert_eq!(avif.max_picture(), (35_651_584, 16_384));
+        // It decodes what a run sends, whatever it encodes.
+        assert_eq!(heic.max_decode_pixels(), 134_217_728);
+        assert_eq!(avif.max_decode_pixels(), 134_217_728);
         // A job's own limits only tighten it.
         let tight = Limits {
             helper: proto::Limits {
+                max_pixels: 1_000,
                 max_encode_pixels: 99,
                 max_encode_side: 20_000,
                 ..proto::Limits::DEFAULT
@@ -3934,6 +3943,7 @@ pub(crate) mod tests {
         };
         let heic = Encoder::new(nowhere(), tight, HeifFormat::Heic);
         assert_eq!(heic.max_picture(), (99, 16_888));
+        assert_eq!(heic.max_decode_pixels(), 1_000);
         // At the cap it runs.
         let at = Limits {
             helper: proto::Limits {

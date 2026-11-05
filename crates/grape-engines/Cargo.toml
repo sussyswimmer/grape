@@ -18,7 +18,8 @@ pdf-it = []
 # The RAR tests that run the real bsdtar: GRAPE_TEST_BSDTAR names it (the tests
 # fail, not skip, without it). Unit tests in src/archive/rar/it.rs (D27).
 rar-it = []
-# The HEIC tests that run the real helper (tests/heif.rs, D33): GRAPE_TEST_HEIF
+# The HEIC tests that run the real helper (tests/heif.rs, D33, and
+# tests/heic_compress.rs, D28): GRAPE_TEST_HEIF
 # names it (grape-heif.exe on Windows, grape-platform's grape-heif-worker on
 # macOS) and GRAPE_TEST_HEIF_FIXTURES the folder CI's grape-heif job made. The
 # tests fail, not skip, without them.
@@ -96,6 +97,12 @@ required-features = ["pdf-it"]
 
 [[test]]
 name = "heif"
+required-features = ["heif-it"]
+
+[[test]]
+# Compress on HEIC with the real helper (D28): GRAPE_TEST_HEIF and
+# GRAPE_TEST_HEIF_FIXTURES, as tests/heif.rs.
+name = "heic_compress"
 required-features = ["heif-it"]
 
 [lints]
