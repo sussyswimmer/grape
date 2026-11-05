@@ -24,9 +24,12 @@ src/
                     content, which decides the code that runs. tiff/ (D28): read.rs (a TIFF's model, by seeking),
                     write.rs (the compact writer the TIFF tools share), strip.rs + irb.rs (Remove Metadata on TIFF).
                     isobmff/ (D28): boxes.rs (top-level boxes by seeking, boxes in memory), items.rs (the file-level meta:
-                    items, locations, references, properties); heic.rs (Remove Metadata on HEIC, meta rebuilt in place).
+                    items, locations, references, properties), scan.rs (Compress on HEIC before the helper starts: what
+                    it carries, its refusals), graft.rs (the helper's out.heic with the source's metadata items put back,
+                    meta written again, checked); heic.rs (Remove Metadata on HEIC, meta rebuilt in place).
                     webp_compress.rs (D28): Compress on WebP, libwebp through grape-webp, the metadata put back by webp.rs's
-                    scan and assemble
+                    scan and assemble. heic_compress.rs (D28): Compress on HEIC, decoded and encoded by the image helper
+                    (heif.rs), scaled by scale.rs, the source's metadata items grafted back (isobmff/graft.rs)
   headers.rs        header readers that bound what the image decoders keep
   subtitle/         srt/vtt/txt: decode, parse, write (pure) + convert (D20)
   media/            FFmpeg: probe + args (pure, exact-argv tests), run (child process), convert (D22);

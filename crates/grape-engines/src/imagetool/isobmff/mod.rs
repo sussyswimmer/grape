@@ -4,9 +4,15 @@
 //!   box held in memory.
 //! - [`items`]: the one file-level `meta` and its items: where their data
 //!   is, how they refer to each other, their properties.
+//! - [`scan`]: what Compress on HEIC reads of a file before its helper
+//!   starts, and what it refuses then.
+//! - [`graft`]: the HEIC the helper wrote, with the source's metadata put
+//!   back.
 
 pub(crate) mod boxes;
+pub(crate) mod graft;
 pub(crate) mod items;
+pub(crate) mod scan;
 
 #[cfg(test)]
 pub(crate) mod tests;

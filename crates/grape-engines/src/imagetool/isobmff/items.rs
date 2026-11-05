@@ -98,9 +98,34 @@ pub(crate) enum Aux {
     Depth,
     /// Apple's Portrait mattes.
     Matte,
-    /// Apple's HDR gain map.
+    /// An HDR gain map: Apple's, Samsung's, or ISO 21496-1's.
     GainMap,
     Other,
+}
+
+impl Aux {
+    /// What an auxiliary image of `auxC` URN `urn` is.
+    pub(crate) fn of(urn: &[u8]) -> Aux {
+        match urn {
+            b"urn:mpeg:hevc:2015:auxid:1" | b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha" => {
+                Aux::Alpha
+            }
+            b"urn:mpeg:hevc:2015:auxid:2" | b"urn:mpeg:mpegB:cicp:systems:auxiliary:depth" => {
+                Aux::Depth
+            }
+            // Apple's `urn:com:apple:photo:2020:aux:hdrgainmap`, Samsung's
+            // `urn:com:samsung:photo:2024:aux:hdrgainmap`.
+            _ if urn.ends_with(b":hdrgainmap") || urn.starts_with(b"urn:iso:std:iso:ts:21496") => {
+                Aux::GainMap
+            }
+            _ if urn.starts_with(b"urn:com:apple:photo:2018:aux:")
+                || (urn.starts_with(b"urn:com:apple:photo:") && urn.ends_with(b"matte")) =>
+            {
+                Aux::Matte
+            }
+            _ => Aux::Other,
+        }
+    }
 }
 
 /// An item, from its `infe`.
@@ -634,6 +659,7 @@ impl Meta {
     }
 
     /// The properties item `id` has, in its associations' order.
+    #[cfg(test)]
     pub(crate) fn properties_of(&self, id: u32) -> impl Iterator<Item = &Child> + '_ {
         self.maps
             .iter()
@@ -645,28 +671,17 @@ impl Meta {
 
     /// What auxiliary image item `id` is, by its `auxC` property; `None`
     /// when it has none.
-    // Compress on HEIC reads it (D28).
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) fn aux(&self, id: u32) -> Option<Aux> {
         let auxc = self.properties_of(id).find(|p| &p.kind == b"auxC")?;
+        self.aux_of(auxc)
+    }
+
+    /// What an auxiliary image with the `auxC` property `auxc` is.
+    pub(crate) fn aux_of(&self, auxc: &Child) -> Option<Aux> {
         let mut f = Fields::new(&self.bytes, auxc.content());
         f.full().ok()?;
-        let urn = f.text();
-        Some(match urn {
-            b"urn:mpeg:hevc:2015:auxid:1" | b"urn:mpeg:mpegB:cicp:systems:auxiliary:alpha" => {
-                Aux::Alpha
-            }
-            b"urn:mpeg:hevc:2015:auxid:2" | b"urn:mpeg:mpegB:cicp:systems:auxiliary:depth" => {
-                Aux::Depth
-            }
-            b"urn:com:apple:photo:2020:aux:hdrgainmap" => Aux::GainMap,
-            _ if urn.starts_with(b"urn:com:apple:photo:2018:aux:")
-                || (urn.starts_with(b"urn:com:apple:photo:") && urn.ends_with(b"matte")) =>
-            {
-                Aux::Matte
-            }
-            _ => Aux::Other,
-        })
+        Some(Aux::of(f.text()))
     }
 
     /// Whether item `id` is a thumbnail: it has an outgoing `thmb`.
