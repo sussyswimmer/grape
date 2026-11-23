@@ -926,7 +926,7 @@ impl<E: Env> WheelController<E> {
 fn open_event(config: &ControllerConfig, open: &OpenWheel) -> WheelOpen {
     WheelOpen {
         seq: open.seq,
-        mode: open.mode,
+        mode: open.mode.into(),
         anchor: open.anchor,
         scale: open.scale,
         geometry: GEOMETRY,
@@ -1400,7 +1400,7 @@ mod tests {
         assert!(run.ctl.is_open());
         assert_eq!(
             run.opens().last().map(|o| o.mode),
-            Some(WheelMode::Conversions)
+            Some(WheelMode::Conversions.into())
         );
 
         // The next key is read with the new map: Shift now opens Tools.
@@ -1587,7 +1587,10 @@ mod tests {
         let mut run = open_at_400_300();
         run.signals(vec![keys(NONE), keys(Modifiers::CTRL)]);
         assert_eq!(run.last_content(), Some(&UiContent::Pending));
-        assert_eq!(run.opens().last().map(|o| o.mode), Some(WheelMode::Tools));
+        assert_eq!(
+            run.opens().last().map(|o| o.mode),
+            Some(WheelMode::Tools.into())
+        );
     }
 
     #[test]

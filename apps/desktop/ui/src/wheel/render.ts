@@ -14,6 +14,8 @@
  * - After drawing an open, the next animation frame reports `wheel_painted`
  *   to Rust (the M1 latency log). Errors there are swallowed.
  * - Highlight changes drive the synthesized tick (`tick.ts`).
+ * - A Shortcuts segment may carry an icon over its label (an emoji as text,
+ *   a glyph as stroked paths) and, for a group, a mark on the rim.
  */
 
 import {
@@ -30,6 +32,9 @@ import {
   applyOpen,
   buildScene,
   CLOSED,
+  emojiFontSize,
+  glyphTransform,
+  type SegmentIcon,
   type Sound,
   type Step,
   type TextBlock,
@@ -180,6 +185,32 @@ function textBlock(doc: Document, block: TextBlock, className: string): SVGTextE
   return text;
 }
 
+/**
+ * A shortcut's icon in its square: an emoji as centered text (through
+ * textContent only), a glyph as its paths moved and scaled onto the square.
+ */
+function iconNode(doc: Document, icon: SegmentIcon): SVGElement {
+  if (icon.art.kind === "emoji") {
+    const text = svgElement(doc, "text", {
+      x: formatNumber(icon.x),
+      y: formatNumber(icon.y),
+      "font-size": formatNumber(emojiFontSize(icon)),
+    });
+    text.classList.add("wheel-icon", "wheel-emoji");
+    text.textContent = icon.art.text;
+    return text;
+  }
+  const { x, y, scale } = glyphTransform(icon);
+  const group = svgElement(doc, "g", {
+    transform: `translate(${formatNumber(x)} ${formatNumber(y)}) scale(${formatNumber(scale)})`,
+  });
+  group.classList.add("wheel-icon", "wheel-glyph");
+  for (const d of icon.art.paths) {
+    group.append(svgElement(doc, "path", { d }));
+  }
+  return group;
+}
+
 /** Redraws `svg` from `scene`, keeping the element (and any running entry animation). */
 function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
   const doc = svg.ownerDocument;
@@ -226,18 +257,32 @@ function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
         d: segment.d,
         "fill-rule": "evenodd",
         "data-index": String(segment.index),
-        "aria-label": segment.title,
+        "aria-label": segment.name,
       });
       path.classList.add("wheel-segment");
       path.classList.toggle("is-highlighted", segment.highlighted);
       const tooltip = svgElement(doc, "title");
-      tooltip.textContent = segment.title;
+      tooltip.textContent = segment.name;
       path.append(tooltip);
       segments.append(path);
 
-      const label = textBlock(doc, segment.label, "wheel-label");
-      label.classList.toggle("is-highlighted", segment.highlighted);
-      labels.append(label);
+      if (segment.icon !== null) {
+        const icon = iconNode(doc, segment.icon);
+        icon.classList.toggle("is-highlighted", segment.highlighted);
+        labels.append(icon);
+      }
+      // A dense segment with an icon has no label lines.
+      if (segment.label.lines.length > 0 || segment.icon === null) {
+        const label = textBlock(doc, segment.label, "wheel-label");
+        label.classList.toggle("is-highlighted", segment.highlighted);
+        labels.append(label);
+      }
+      if (segment.mark !== null) {
+        const mark = svgElement(doc, "path", { d: segment.mark });
+        mark.classList.add("wheel-group-mark");
+        mark.classList.toggle("is-highlighted", segment.highlighted);
+        labels.append(mark);
+      }
     }
     children.push(segments, labels);
   }

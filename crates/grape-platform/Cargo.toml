@@ -101,10 +101,13 @@ objc2 = { version = "0.6.5", default-features = false, features = [
     "std",
     "exception",
 ] }
+# `NSBundle` reads a picked app's bundle id for the Shortcuts wheel (D47):
+# bindings only.
 objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "objc2-core-foundation",
     "NSArray",
+    "NSBundle",
     "NSEnumerator",
     "NSError",
     "NSFileManager",
@@ -151,6 +154,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 # Display bounds off the main thread (CGGetActiveDisplayList, CGDisplayBounds),
 # and the image helper worker's pixels (`macos::heif`, D33): images, color spaces,
 # the bitmap context it draws into and the data provider it encodes from.
+# `CGEvent`, `CGEventSource`, `CGEventTypes` and `CGRemoteOperation` post the
+# Shortcuts wheel's keys (`macos::input`, D47): bindings only, no new package
+# (bitflags and objc2-core-foundation's CFDate and CFMachPort are built
+# already).
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = [
     "std",
     "CGBitmapContext",
@@ -159,7 +166,11 @@ objc2-core-graphics = { version = "0.3.2", default-features = false, features = 
     "CGDataProvider",
     "CGDirectDisplay",
     "CGError",
+    "CGEvent",
+    "CGEventSource",
+    "CGEventTypes",
     "CGImage",
+    "CGRemoteOperation",
 ] }
 # The image helper worker's codec (`macos::heif`, D33): ImageIO's image source and
 # destination. The one new package in Cargo.lock for HEIC (2025-10-04,

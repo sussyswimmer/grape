@@ -62,7 +62,15 @@ pub(crate) use actions::{
 };
 pub(crate) use share::share;
 
-use crate::{DisplayBounds, DragMonitor, PlatformError};
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
+
+use crate::keys::Chord;
+use crate::shortcuts::{
+    HotkeyMonitor, InputAccess, LocalTime, OpenTarget, PickKind, Picked, Placement, PointerWatch,
+    Program, ProgramRequest, SystemControl, SystemPlan,
+};
+use crate::{DisplayBounds, DragMonitor, Modifiers, PlatformError};
 
 pub(crate) fn drag_monitor() -> Result<Box<dyn DragMonitor>, PlatformError> {
     Ok(Box::new(drag::WindowsDragMonitor::default()))
@@ -85,6 +93,88 @@ pub fn primary_button_down() -> bool {
 /// too.
 pub fn escape_down() -> bool {
     drag::key_down(::windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE)
+}
+
+// The Shortcuts wheel (`crate::shortcuts`) is on the Mac first: nothing here
+// yet.
+
+pub(crate) fn hotkey_monitor() -> Result<Box<dyn HotkeyMonitor>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn pointer_watch() -> Result<Box<dyn PointerWatch>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn input_access() -> InputAccess {
+    InputAccess::NotNeeded
+}
+
+pub(crate) fn request_input_access(_open_settings: bool) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn held_modifiers() -> Modifiers {
+    Modifiers::NONE
+}
+
+pub(crate) fn local_date_time() -> Option<LocalTime> {
+    None
+}
+
+pub(crate) fn send_chord(_chord: Chord) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn send_char_chord(_ch: char, _mods: Modifiers) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn type_text(_text: &str, _cancel: &AtomicBool) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn clipboard_text() -> Result<Option<String>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn clipboard_change_count() -> Result<i64, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn clear_clipboard() -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn open_target(_target: OpenTarget<'_>) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn program_for(_request: ProgramRequest<'_>) -> Result<Program, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn kill_group(_pid: u32) {}
+
+pub(crate) fn system_plan(_control: SystemControl) -> Result<SystemPlan, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn place_window(_pid: i32, _placement: Placement) -> Result<(), PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
+pub(crate) fn give_back_front() {}
+
+pub(crate) fn ensure_front(_pid: i32, _timeout: Duration) -> bool {
+    false
+}
+
+pub(crate) fn pick_target(
+    _kind: PickKind,
+    _owner: Option<isize>,
+) -> Result<Option<Picked>, PlatformError> {
+    Err(PlatformError::Unsupported)
 }
 
 #[cfg(test)]

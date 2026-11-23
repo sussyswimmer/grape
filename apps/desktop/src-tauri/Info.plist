@@ -23,5 +23,13 @@
 	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
 	<key>NSNetworkVolumesUsageDescription</key>
 	<string>Grape works with the files you drop on its wheel and saves what it makes next to them or in a folder you chose.</string>
+	<!-- The reason macOS shows under its "wants access to control …" prompt,
+	     the first time a shortcut's AppleScript step (or Grape's own dark
+	     mode and Keyboard Maestro steps) talks to another app
+	     (docs/design/m10-shortcuts-wheel.md §4). Grape's own words, one
+	     plain sentence. The prompt names the other app, so the sentence
+	     names none. -->
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Grape controls another app only when a shortcut you made on its Shortcuts wheel tells it to.</string>
 </dict>
 </plist>

@@ -2,8 +2,9 @@
 //! Grape's top-left points and back, the screen under a point, the text and
 //! arguments the file actions use, how Move judges each item, and the float
 //! shelf's drag out (what it offers, how it ended, whose drag it is, its
-//! icons and frames) and hand-back (the apps the user was last in), and
-//! the paired calls behind relaunch at login.
+//! icons and frames) and hand-back (the apps the user was last in), the
+//! paired calls behind relaunch at login, and the Shortcuts wheel's tables
+//! (virtual keys, Carbon and CGEvent masks), typing chunks and programs.
 //!
 //! No AppKit here, so these build and are tested on every OS, not only on a
 //! Mac. The `macos` module is the only caller outside the tests.
@@ -15,11 +16,16 @@
 //! primary screen's height, flips between them: `y_grape = H - y_cocoa` for
 //! a point, and `y_grape = H - (y_cocoa + height)` for a rectangle's top.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::file_actions::TerminalApp;
-use crate::{DisplayBounds, DragOutcome, Rect};
+use crate::keys::{Chord, KeyCode};
+use crate::shortcuts::{
+    HotkeyId, LocalTime, OpenTarget, PointerSignal, Program, ProgramRequest, SystemControl,
+    SystemPlan,
+};
+use crate::{DisplayBounds, DragOutcome, Modifiers, Rect};
 
 /// A rectangle in Cocoa's global space: points, origin at the bottom-left of
 /// the primary screen, y growing upwards.
@@ -486,6 +492,724 @@ pub(crate) fn relaunch_call(disabled: bool, relaunch: bool) -> Option<RelaunchCa
         (true, true) => Some(RelaunchCall::Enable),
         (false, true) | (true, false) => None,
     }
+}
+
+/// The US ANSI virtual key code (`kVK_ANSI_A` and the rest) of a key. A
+/// virtual key is a place on the keyboard on every layout, as a
+/// [`KeyCode`] is, so a chord is posted from where the user set it.
+pub(crate) fn virtual_key(key: KeyCode) -> u16 {
+    match key {
+        KeyCode::KeyA => 0,
+        KeyCode::KeyB => 11,
+        KeyCode::KeyC => 8,
+        KeyCode::KeyD => 2,
+        KeyCode::KeyE => 14,
+        KeyCode::KeyF => 3,
+        KeyCode::KeyG => 5,
+        KeyCode::KeyH => 4,
+        KeyCode::KeyI => 34,
+        KeyCode::KeyJ => 38,
+        KeyCode::KeyK => 40,
+        KeyCode::KeyL => 37,
+        KeyCode::KeyM => 46,
+        KeyCode::KeyN => 45,
+        KeyCode::KeyO => 31,
+        KeyCode::KeyP => 35,
+        KeyCode::KeyQ => 12,
+        KeyCode::KeyR => 15,
+        KeyCode::KeyS => 1,
+        KeyCode::KeyT => 17,
+        KeyCode::KeyU => 32,
+        KeyCode::KeyV => 9,
+        KeyCode::KeyW => 13,
+        KeyCode::KeyX => 7,
+        KeyCode::KeyY => 16,
+        KeyCode::KeyZ => 6,
+        KeyCode::Digit0 => 29,
+        KeyCode::Digit1 => 18,
+        KeyCode::Digit2 => 19,
+        KeyCode::Digit3 => 20,
+        KeyCode::Digit4 => 21,
+        KeyCode::Digit5 => 23,
+        KeyCode::Digit6 => 22,
+        KeyCode::Digit7 => 26,
+        KeyCode::Digit8 => 28,
+        KeyCode::Digit9 => 25,
+        KeyCode::F1 => 122,
+        KeyCode::F2 => 120,
+        KeyCode::F3 => 99,
+        KeyCode::F4 => 118,
+        KeyCode::F5 => 96,
+        KeyCode::F6 => 97,
+        KeyCode::F7 => 98,
+        KeyCode::F8 => 100,
+        KeyCode::F9 => 101,
+        KeyCode::F10 => 109,
+        KeyCode::F11 => 103,
+        KeyCode::F12 => 111,
+        KeyCode::F13 => 105,
+        KeyCode::F14 => 107,
+        KeyCode::F15 => 113,
+        KeyCode::F16 => 106,
+        KeyCode::F17 => 64,
+        KeyCode::F18 => 79,
+        KeyCode::F19 => 80,
+        KeyCode::F20 => 90,
+        KeyCode::Space => 49,
+        KeyCode::Enter => 36,
+        KeyCode::Tab => 48,
+        KeyCode::Escape => 53,
+        KeyCode::Backspace => 51,
+        KeyCode::Delete => 117,
+        KeyCode::ArrowUp => 126,
+        KeyCode::ArrowDown => 125,
+        KeyCode::ArrowLeft => 123,
+        KeyCode::ArrowRight => 124,
+        KeyCode::Home => 115,
+        KeyCode::End => 119,
+        KeyCode::PageUp => 116,
+        KeyCode::PageDown => 121,
+        KeyCode::Minus => 27,
+        KeyCode::Equal => 24,
+        KeyCode::BracketLeft => 33,
+        KeyCode::BracketRight => 30,
+        KeyCode::Backslash => 42,
+        KeyCode::Semicolon => 41,
+        KeyCode::Quote => 39,
+        KeyCode::Comma => 43,
+        KeyCode::Period => 47,
+        KeyCode::Slash => 44,
+        KeyCode::Backquote => 50,
+    }
+}
+
+/// The virtual key that types `ch` with no modifier on the US layout:
+/// letters (either case), digits and the punctuation keys. The fallback for
+/// a character chord when the current layout has no such key or can't be
+/// read.
+pub(crate) fn us_key_for_char(ch: char) -> Option<u16> {
+    let key = match ch.to_ascii_lowercase() {
+        'a' => KeyCode::KeyA,
+        'b' => KeyCode::KeyB,
+        'c' => KeyCode::KeyC,
+        'd' => KeyCode::KeyD,
+        'e' => KeyCode::KeyE,
+        'f' => KeyCode::KeyF,
+        'g' => KeyCode::KeyG,
+        'h' => KeyCode::KeyH,
+        'i' => KeyCode::KeyI,
+        'j' => KeyCode::KeyJ,
+        'k' => KeyCode::KeyK,
+        'l' => KeyCode::KeyL,
+        'm' => KeyCode::KeyM,
+        'n' => KeyCode::KeyN,
+        'o' => KeyCode::KeyO,
+        'p' => KeyCode::KeyP,
+        'q' => KeyCode::KeyQ,
+        'r' => KeyCode::KeyR,
+        's' => KeyCode::KeyS,
+        't' => KeyCode::KeyT,
+        'u' => KeyCode::KeyU,
+        'v' => KeyCode::KeyV,
+        'w' => KeyCode::KeyW,
+        'x' => KeyCode::KeyX,
+        'y' => KeyCode::KeyY,
+        'z' => KeyCode::KeyZ,
+        '0' => KeyCode::Digit0,
+        '1' => KeyCode::Digit1,
+        '2' => KeyCode::Digit2,
+        '3' => KeyCode::Digit3,
+        '4' => KeyCode::Digit4,
+        '5' => KeyCode::Digit5,
+        '6' => KeyCode::Digit6,
+        '7' => KeyCode::Digit7,
+        '8' => KeyCode::Digit8,
+        '9' => KeyCode::Digit9,
+        '-' => KeyCode::Minus,
+        '=' => KeyCode::Equal,
+        '[' => KeyCode::BracketLeft,
+        ']' => KeyCode::BracketRight,
+        '\\' => KeyCode::Backslash,
+        ';' => KeyCode::Semicolon,
+        '\'' => KeyCode::Quote,
+        ',' => KeyCode::Comma,
+        '.' => KeyCode::Period,
+        '/' => KeyCode::Slash,
+        '`' => KeyCode::Backquote,
+        _ => return None,
+    };
+    Some(virtual_key(key))
+}
+
+/// Carbon's `cmdKey`.
+const CARBON_COMMAND: u32 = 0x0100;
+/// Carbon's `shiftKey`.
+const CARBON_SHIFT: u32 = 0x0200;
+/// Carbon's `optionKey`.
+const CARBON_OPTION: u32 = 0x0800;
+/// Carbon's `controlKey`.
+const CARBON_CONTROL: u32 = 0x1000;
+
+/// The modifiers as `RegisterEventHotKey` takes them.
+pub(crate) fn carbon_modifiers(mods: Modifiers) -> u32 {
+    let mut mask = 0;
+    if mods.meta {
+        mask |= CARBON_COMMAND;
+    }
+    if mods.shift {
+        mask |= CARBON_SHIFT;
+    }
+    if mods.alt {
+        mask |= CARBON_OPTION;
+    }
+    if mods.ctrl {
+        mask |= CARBON_CONTROL;
+    }
+    mask
+}
+
+/// `kCGEventFlagMaskShift`.
+const CG_SHIFT: u64 = 0x2_0000;
+/// `kCGEventFlagMaskControl`.
+const CG_CONTROL: u64 = 0x4_0000;
+/// `kCGEventFlagMaskAlternate` (Option).
+const CG_OPTION: u64 = 0x8_0000;
+/// `kCGEventFlagMaskCommand`.
+const CG_COMMAND: u64 = 0x10_0000;
+
+/// The four modifier flags a posted key event may carry. They are cleared
+/// from the event's own flags before a chord's are set, so a key the user
+/// still holds never leaks into the chord.
+pub(crate) const CG_CHORD_FLAGS: u64 = CG_SHIFT | CG_CONTROL | CG_OPTION | CG_COMMAND;
+
+/// The modifiers as a `CGEvent`'s flags.
+pub(crate) fn cg_flags(mods: Modifiers) -> u64 {
+    let mut flags = 0;
+    if mods.shift {
+        flags |= CG_SHIFT;
+    }
+    if mods.ctrl {
+        flags |= CG_CONTROL;
+    }
+    if mods.alt {
+        flags |= CG_OPTION;
+    }
+    if mods.meta {
+        flags |= CG_COMMAND;
+    }
+    flags
+}
+
+/// The most UTF-16 units one typed key event carries.
+pub(crate) const TEXT_CHUNK_UNITS: usize = 20;
+
+/// One piece of a text to type, in order.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) enum TextPiece {
+    /// UTF-16 units for one key event: 1 to [`TEXT_CHUNK_UNITS`] of them.
+    Units(Vec<u16>),
+    /// Press Return: a `\n`, a `\r\n` or a lone `\r`.
+    Return,
+    /// Press Tab.
+    Tab,
+}
+
+/// Prints how many units, never the units: they are what the user typed.
+impl std::fmt::Debug for TextPiece {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Units(units) => write!(f, "Units({})", units.len()),
+            Self::Return => f.write_str("Return"),
+            Self::Tab => f.write_str("Tab"),
+        }
+    }
+}
+
+/// A zero-width joiner: it glues the characters on both sides of it into
+/// one (a family emoji is people joined this way).
+const ZERO_WIDTH_JOINER: char = '\u{200D}';
+
+/// `true` when `ch` changes the character before it: a combining mark
+/// (U+0300 to U+036F), a variation selector (U+FE00 to U+FE0F) or a
+/// zero-width joiner.
+fn joins_previous(ch: char) -> bool {
+    matches!(ch, '\u{0300}'..='\u{036F}' | '\u{FE00}'..='\u{FE0F}' | ZERO_WIDTH_JOINER)
+}
+
+/// `text` as the pieces `type_text` sends, in order. Line ends and tabs are
+/// keys of their own. The rest goes in chunks of at most
+/// [`TEXT_CHUNK_UNITS`] UTF-16 units that never end inside a surrogate pair,
+/// nor just before a combining mark, a variation selector or a zero-width
+/// joiner, nor just after a joiner: an app that takes each event as one
+/// insertion would otherwise show the halves apart. Only a run of such
+/// characters longer than a chunk is cut, and then between two characters.
+pub(crate) fn text_chunks(text: &str) -> Vec<TextPiece> {
+    let mut pieces = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let key = match ch {
+            '\r' => {
+                // `\r\n` is one line end.
+                chars.next_if_eq(&'\n');
+                TextPiece::Return
+            }
+            '\n' => TextPiece::Return,
+            '\t' => TextPiece::Tab,
+            _ => {
+                run.push(ch);
+                continue;
+            }
+        };
+        chunk_run(&run, &mut pieces);
+        run.clear();
+        pieces.push(key);
+    }
+    chunk_run(&run, &mut pieces);
+    pieces
+}
+
+/// Cuts a run with no line end or tab in it into [`TextPiece::Units`].
+fn chunk_run(run: &[char], pieces: &mut Vec<TextPiece>) {
+    let mut rest = run;
+    while !rest.is_empty() {
+        let mut units = 0;
+        // How many characters fit, and how many fit without a cut that
+        // would part a character from what joins it.
+        let mut fits = 0;
+        let mut clean = None;
+        for (index, ch) in rest.iter().enumerate() {
+            if units + ch.len_utf16() > TEXT_CHUNK_UNITS {
+                break;
+            }
+            units += ch.len_utf16();
+            fits = index + 1;
+            let parts_a_character = rest
+                .get(fits)
+                .is_some_and(|next| joins_previous(*next) || *ch == ZERO_WIDTH_JOINER);
+            if !parts_a_character {
+                clean = Some(fits);
+            }
+        }
+        // One character is two units at most, so at least one always fits.
+        let (chunk, after) = rest.split_at(clean.unwrap_or(fits));
+        let mut encoded = Vec::with_capacity(TEXT_CHUNK_UNITS);
+        let mut pair = [0_u16; 2];
+        for ch in chunk {
+            encoded.extend_from_slice(ch.encode_utf16(&mut pair));
+        }
+        pieces.push(TextPiece::Units(encoded));
+        rest = after;
+    }
+}
+
+/// `osascript`: runs AppleScript.
+const OSASCRIPT: &str = "/usr/bin/osascript";
+/// `open`: asks Launch Services to open an app, a file, a folder or a URL.
+const OPEN: &str = "/usr/bin/open";
+
+/// The Keyboard Maestro engine runs the macro named by the script's first
+/// argument. The name is never part of the script.
+const KEYBOARD_MAESTRO_LINE: &str =
+    "tell application \"Keyboard Maestro Engine\" to do script (item 1 of argv)";
+
+/// Mutes the sound output, or brings it back. Asks for no permission.
+const MUTE_SCRIPT: &str = "set volume output muted (not (output muted of (get volume settings)))";
+
+/// Turns the sound up by one of the volume keys' sixteen steps.
+const VOLUME_UP_SCRIPT: &str = "set level to (output volume of (get volume settings)) + 6\n\
+     if level > 100 then set level to 100\n\
+     set volume output volume level";
+
+/// Turns the sound down by the same step.
+const VOLUME_DOWN_SCRIPT: &str = "set level to (output volume of (get volume settings)) - 6\n\
+     if level < 0 then set level to 0\n\
+     set volume output volume level";
+
+/// Switches between the light and the dark appearance. macOS asks once
+/// whether Grape may control System Events.
+const DARK_MODE_SCRIPT: &str = "tell application \"System Events\" to tell appearance preferences \
+     to set dark mode to not dark mode";
+
+/// The Accessibility list in System Settings.
+const INPUT_ACCESS_URL: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+/// A program with these arguments and nothing on its standard input.
+fn program<const N: usize>(path: &str, args: [&OsStr; N]) -> Program {
+    Program {
+        program: PathBuf::from(path),
+        args: args.into_iter().map(OsStr::to_owned).collect(),
+        stdin: None,
+    }
+}
+
+/// `osascript -` with `source` on its standard input: a script never shows
+/// in the process list.
+fn applescript(source: &str) -> Program {
+    Program {
+        stdin: Some(source.to_owned()),
+        ..program(OSASCRIPT, ["-".as_ref()])
+    }
+}
+
+/// The program that does `request`. Each word the user typed is one
+/// argument or goes to standard input; nothing is spliced into a script.
+///
+/// - AppleScript: `osascript -`, the source on standard input.
+/// - Shell: `zsh -l -s`, the source on standard input. A login shell, so
+///   the user's own `PATH`.
+/// - Apple Shortcut: `shortcuts run <name>`.
+/// - Keyboard Maestro: an `osascript` whose script reads the macro's name
+///   from its arguments.
+/// - Speak: `say <text>`. A text starting with `-` gets a space in front,
+///   so `say` doesn't read it as an option.
+pub(crate) fn program_for(request: ProgramRequest<'_>) -> Program {
+    match request {
+        ProgramRequest::AppleScript(source) => applescript(source),
+        ProgramRequest::Shell(source) => Program {
+            stdin: Some(source.to_owned()),
+            ..program("/bin/zsh", ["-l".as_ref(), "-s".as_ref()])
+        },
+        ProgramRequest::AppleShortcut(name) => {
+            program("/usr/bin/shortcuts", ["run".as_ref(), name.as_ref()])
+        }
+        ProgramRequest::KeyboardMaestro(name) => program(
+            OSASCRIPT,
+            [
+                "-e".as_ref(),
+                "on run argv".as_ref(),
+                "-e".as_ref(),
+                KEYBOARD_MAESTRO_LINE.as_ref(),
+                "-e".as_ref(),
+                "end run".as_ref(),
+                "--".as_ref(),
+                name.as_ref(),
+            ],
+        ),
+        ProgramRequest::Speak(text) => {
+            if text.starts_with('-') {
+                let spaced = format!(" {text}");
+                program("/usr/bin/say", [spaced.as_ref()])
+            } else {
+                program("/usr/bin/say", [text.as_ref()])
+            }
+        }
+    }
+}
+
+/// The programs that open `target`, to try in order until one succeeds. An
+/// app with an id gets `open -b <id>` and then `open -a <path>`; anything
+/// else is one `open`. Each path, id and URL is one argument.
+pub(crate) fn open_programs(target: OpenTarget<'_>) -> Vec<Program> {
+    match target {
+        OpenTarget::App { path, id } => {
+            let by_path = program(OPEN, ["-a".as_ref(), path.as_os_str()]);
+            match id {
+                Some(id) => vec![program(OPEN, ["-b".as_ref(), id.as_ref()]), by_path],
+                None => vec![by_path],
+            }
+        }
+        OpenTarget::Path(path) => vec![program(OPEN, [path.as_os_str()])],
+        OpenTarget::Url(url) => vec![program(OPEN, [url.as_ref()])],
+    }
+}
+
+/// How macOS does `control`: a program, or the system's own chord by the
+/// character its key types (Lock screen is Control+Command+`q`, Screenshot
+/// area is Command+Shift+`4`).
+pub(crate) fn system_plan(control: SystemControl) -> SystemPlan {
+    let program = match control {
+        SystemControl::SleepDisplay => program("/usr/bin/pmset", ["displaysleepnow".as_ref()]),
+        SystemControl::LockScreen => {
+            return SystemPlan::CharChord {
+                ch: 'q',
+                mods: Modifiers {
+                    ctrl: true,
+                    meta: true,
+                    ..Modifiers::NONE
+                },
+            }
+        }
+        SystemControl::Screensaver => program(OPEN, ["-a".as_ref(), "ScreenSaverEngine".as_ref()]),
+        SystemControl::MissionControl => program(OPEN, ["-a".as_ref(), "Mission Control".as_ref()]),
+        SystemControl::ToggleMute => applescript(MUTE_SCRIPT),
+        SystemControl::VolumeUp => applescript(VOLUME_UP_SCRIPT),
+        SystemControl::VolumeDown => applescript(VOLUME_DOWN_SCRIPT),
+        SystemControl::ToggleDarkMode => applescript(DARK_MODE_SCRIPT),
+        SystemControl::ScreenshotArea => {
+            return SystemPlan::CharChord {
+                ch: '4',
+                mods: Modifiers {
+                    shift: true,
+                    meta: true,
+                    ..Modifiers::NONE
+                },
+            }
+        }
+    };
+    SystemPlan::Program(program)
+}
+
+/// `open <url>` for the Accessibility list in System Settings, where the
+/// user gives Grape input access.
+pub(crate) fn input_access_settings_program() -> Program {
+    program(OPEN, [INPUT_ACCESS_URL.as_ref()])
+}
+
+/// The four-character code on every hot key Grape registers.
+pub(crate) const HOTKEY_SIGNATURE: u32 = u32::from_be_bytes(*b"GRPE");
+
+/// The bits of a hot key's event id that hold its serial number.
+const HOTKEY_SERIAL_MASK: u32 = 0x00FF_FFFF;
+
+/// The `EventHotKeyID.id` of one registration: what the hot key is for in
+/// the top byte and a serial number below it, so each registration has an
+/// id of its own. The serial wraps after 16 million registrations, which
+/// only matters to a log reader.
+pub(crate) fn hotkey_event_id(id: HotkeyId, serial: u32) -> u32 {
+    let kind: u32 = match id {
+        HotkeyId::Open => 1,
+        HotkeyId::Escape => 2,
+        HotkeyId::Confirm => 3,
+    };
+    (kind << 24) | (serial & HOTKEY_SERIAL_MASK)
+}
+
+/// What the hot key with this event id is for. `None` for an id Grape
+/// never gave out.
+pub(crate) fn hotkey_for_event_id(event_id: u32) -> Option<HotkeyId> {
+    match event_id >> 24 {
+        1 => Some(HotkeyId::Open),
+        2 => Some(HotkeyId::Escape),
+        3 => Some(HotkeyId::Confirm),
+        _ => None,
+    }
+}
+
+/// One chord the OS has registered for Grape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HeldChord {
+    /// What it fires.
+    pub(crate) id: HotkeyId,
+    /// The chord.
+    pub(crate) chord: Chord,
+    /// Grape let go of it but the OS refused the unregister, so the OS
+    /// still has it.
+    pub(crate) stuck: bool,
+}
+
+/// What a bind does to the chords the OS holds for Grape.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct BindPlan {
+    /// The chords to register, in the order they were asked for.
+    pub(crate) register: Vec<Chord>,
+    /// Places in the held list to unregister, once every new chord is
+    /// registered.
+    pub(crate) release: Vec<usize>,
+    /// Places in the held list of stuck chords that are wanted again: they
+    /// are still registered, so they are kept as they are.
+    pub(crate) adopt: Vec<usize>,
+}
+
+/// How to make `id` fire for exactly `chords`, given what the OS `held`
+/// for Grape before. A chord asked for twice counts once. A chord another
+/// id holds is left to that id: one chord fires one thing, and registering
+/// it a second time would only be refused. Chords `id` already has stay
+/// registered, so a bind that changes nothing touches nothing.
+pub(crate) fn bind_plan(held: &[HeldChord], id: HotkeyId, chords: &[Chord]) -> BindPlan {
+    let mut wanted: Vec<Chord> = Vec::new();
+    for chord in chords {
+        let taken = held
+            .iter()
+            .any(|entry| entry.id != id && entry.chord == *chord);
+        if !taken && !wanted.contains(chord) {
+            wanted.push(*chord);
+        }
+    }
+    let mut plan = BindPlan::default();
+    for (place, entry) in held.iter().enumerate() {
+        if entry.id != id {
+            continue;
+        }
+        match (wanted.contains(&entry.chord), entry.stuck) {
+            (true, true) => plan.adopt.push(place),
+            (false, false) => plan.release.push(place),
+            // Kept as it is, or already let go of.
+            (true, false) | (false, true) => {}
+        }
+    }
+    plan.register = wanted
+        .into_iter()
+        .filter(|chord| {
+            !held
+                .iter()
+                .any(|entry| entry.id == id && entry.chord == *chord)
+        })
+        .collect();
+    plan
+}
+
+/// What the pointer watch remembers between two polls, and what each poll
+/// has to say.
+#[derive(Debug, Default)]
+pub(crate) struct PointerEdges {
+    /// Where the pointer was and whether the primary button was down at
+    /// the last poll since the watch was turned on.
+    seen: Option<((i32, i32), bool)>,
+}
+
+impl PointerEdges {
+    /// Forgets the last poll: the watch was turned off, or on again.
+    pub(crate) fn restart(&mut self) {
+        self.seen = None;
+    }
+
+    /// One poll while the watch is on: the pointer is `at` and the primary
+    /// button is `down`. The first poll says where the pointer is and
+    /// nothing about the button, so a button already down sends no `Down`.
+    /// Later polls say `Moved` when the position changed, then `Down` or
+    /// `Up` when the button did.
+    pub(crate) fn poll(&mut self, at: (i32, i32), down: bool) -> Vec<PointerSignal> {
+        let (x, y) = at;
+        let mut signals = Vec::new();
+        match self.seen {
+            None => signals.push(PointerSignal::Moved { x, y }),
+            Some((last, was_down)) => {
+                if last != at {
+                    signals.push(PointerSignal::Moved { x, y });
+                }
+                if down && !was_down {
+                    signals.push(PointerSignal::Down { x, y });
+                } else if was_down && !down {
+                    signals.push(PointerSignal::Up { x, y });
+                }
+            }
+        }
+        self.seen = Some((at, down));
+        signals
+    }
+}
+
+/// `true` for the number pad's virtual keys (`kVK_ANSI_Keypad…` and the
+/// JIS pad's comma).
+fn is_keypad_key(key: u16) -> bool {
+    matches!(
+        key,
+        65 | 67 | 69 | 71 | 75 | 76 | 78 | 81..=89 | 91 | 92 | 95
+    )
+}
+
+/// The modifier state `UCKeyTranslate` takes for a key pressed with
+/// Command or with nothing: Carbon's mask shifted down a byte.
+pub(crate) fn layout_modifier_state(command: bool) -> u32 {
+    if command {
+        CARBON_COMMAND >> 8
+    } else {
+        0
+    }
+}
+
+/// The virtual key a character chord is posted from. `typed(key, command)`
+/// is the one character `key` types on the current layout, with Command
+/// held or with nothing, if it types exactly one.
+///
+/// A chord with Command looks first at what the keys type with Command
+/// held, which is what an app compares a shortcut with: a layout such as
+/// Dvorak-QWERTY or Russian types Latin QWERTY letters then. Next comes
+/// what the keys type alone, and last the US table, for a layout that
+/// can't be read or has no such key. The number pad is never used: on a
+/// layout whose digits need Shift, Command+Shift+`4` would otherwise come
+/// from the pad, which isn't the system's chord.
+pub(crate) fn char_key(
+    ch: char,
+    command: bool,
+    typed: impl Fn(u16, bool) -> Option<char>,
+) -> Option<u16> {
+    let wanted = ch.to_ascii_lowercase();
+    let passes: &[bool] = if command { &[true, false] } else { &[false] };
+    for &with_command in passes {
+        let found = (0_u16..128)
+            .filter(|key| !is_keypad_key(*key))
+            .find(|key| typed(*key, with_command).is_some_and(|got| got == ch || got == wanted));
+        if found.is_some() {
+            return found;
+        }
+    }
+    us_key_for_char(ch)
+}
+
+/// `localtime_r`'s fields as a [`LocalTime`]: `tm_year` counts from 1900
+/// and `tm_mon` from 0. `None` when a field is out of its range.
+pub(crate) fn local_time(
+    tm_year: i32,
+    tm_mon: i32,
+    tm_mday: i32,
+    tm_hour: i32,
+    tm_min: i32,
+) -> Option<LocalTime> {
+    let field = |value: i32, least: i32, most: i32| {
+        u8::try_from(value)
+            .ok()
+            .filter(|_| (least..=most).contains(&value))
+    };
+    Some(LocalTime {
+        year: tm_year.checked_add(1900)?,
+        month: field(tm_mon.checked_add(1)?, 1, 12)?,
+        day: field(tm_mday, 1, 31)?,
+        hour: field(tm_hour, 0, 23)?,
+        minute: field(tm_min, 0, 59)?,
+    })
+}
+
+/// The process group [`crate::shortcuts::kill_group`] may signal for the
+/// program `pid`: never group 0 (the caller's own), never group 1
+/// (launchd's), and never Grape's own group, which a program that wasn't
+/// given a group of its own would still be in.
+pub(crate) fn killable_group(pid: u32, own_group: i32) -> Option<i32> {
+    let group = i32::try_from(pid).ok()?;
+    (group > 1 && group != own_group).then_some(group)
+}
+
+/// A window's frame as Accessibility gives it (top-left points already),
+/// rounded to whole points.
+pub(crate) fn ax_frame(x: f64, y: f64, width: f64, height: f64) -> Rect {
+    Rect {
+        x: round(x),
+        y: round(y),
+        width: round(width),
+        height: round(height),
+    }
+}
+
+/// The middle of `rect`, for finding the display a window is on.
+pub(crate) fn center(rect: Rect) -> (i32, i32) {
+    (
+        rect.x.saturating_add(rect.width / 2),
+        rect.y.saturating_add(rect.height / 2),
+    )
+}
+
+/// The name a picked app shows, from Finder's display name for it. Finder
+/// adds `.app` when the user asked to see every extension; the name goes
+/// without it. An empty display name falls back to the bundle's file name.
+pub(crate) fn app_name(display: &str, path: &Path) -> String {
+    fn without_app(name: &str) -> &str {
+        let cut = name.len().saturating_sub(4);
+        match name.get(cut..) {
+            Some(end) if end.eq_ignore_ascii_case(".app") => &name[..cut],
+            _ => name,
+        }
+    }
+    let shown = without_app(display.trim()).trim();
+    if !shown.is_empty() {
+        return shown.to_owned();
+    }
+    let file = path
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+    without_app(&file).to_owned()
 }
 
 #[cfg(test)]
@@ -999,5 +1723,984 @@ mod tests {
         }
         assert_eq!(relaunch_call(false, true), None);
         assert_eq!(relaunch_call(true, false), None);
+    }
+    /// The US ANSI `kVK_*` codes, written out a second time by W3C code.
+    const KEY_TABLE: &str = "
+        KeyA=0 KeyS=1 KeyD=2 KeyF=3 KeyH=4 KeyG=5 KeyZ=6 KeyX=7 KeyC=8 KeyV=9 KeyB=11
+        KeyQ=12 KeyW=13 KeyE=14 KeyR=15 KeyY=16 KeyT=17 Digit1=18 Digit2=19 Digit3=20
+        Digit4=21 Digit6=22 Digit5=23 Equal=24 Digit9=25 Digit7=26 Minus=27 Digit8=28
+        Digit0=29 BracketRight=30 KeyO=31 KeyU=32 BracketLeft=33 KeyI=34 KeyP=35 Enter=36
+        KeyL=37 KeyJ=38 Quote=39 KeyK=40 Semicolon=41 Backslash=42 Comma=43 Slash=44
+        KeyN=45 KeyM=46 Period=47 Tab=48 Space=49 Backquote=50 Backspace=51 Escape=53
+        F17=64 F18=79 F19=80 F20=90 F5=96 F6=97 F7=98 F3=99 F8=100 F9=101 F11=103 F13=105
+        F16=106 F14=107 F10=109 F12=111 F15=113 Home=115 PageUp=116 Delete=117 F4=118
+        End=119 F2=120 PageDown=121 F1=122 ArrowLeft=123 ArrowRight=124 ArrowDown=125
+        ArrowUp=126";
+
+    fn held(shift: bool, ctrl: bool, alt: bool, meta: bool) -> Modifiers {
+        Modifiers {
+            shift,
+            ctrl,
+            alt,
+            meta,
+        }
+    }
+
+    #[test]
+    fn every_key_has_its_own_virtual_key() {
+        let mut seen = std::collections::HashSet::new();
+        for &key in KeyCode::ALL {
+            let code = virtual_key(key);
+            assert!(code < 128, "{}", key.id());
+            assert!(seen.insert(code), "{} shares code {code}", key.id());
+        }
+        assert_eq!(seen.len(), KeyCode::ALL.len());
+    }
+
+    #[test]
+    fn the_virtual_keys_are_the_us_ansi_table() {
+        let mut checked = 0;
+        for pair in KEY_TABLE.split_whitespace() {
+            let (id, code) = pair.split_once('=').unwrap();
+            let key = KeyCode::from_id(id).unwrap();
+            assert_eq!(virtual_key(key), code.parse::<u16>().unwrap(), "{id}");
+            checked += 1;
+        }
+        assert_eq!(checked, KeyCode::ALL.len());
+        // The ones the wheel itself binds and presses.
+        assert_eq!(virtual_key(KeyCode::Escape), 53);
+        assert_eq!(virtual_key(KeyCode::Enter), 36);
+        assert_eq!(virtual_key(KeyCode::Tab), 48);
+        assert_eq!(virtual_key(KeyCode::KeyG), 5);
+        assert_eq!(virtual_key(KeyCode::KeyA), 0);
+    }
+
+    #[test]
+    fn a_character_finds_its_us_key_in_either_case() {
+        assert_eq!(us_key_for_char('c'), Some(8));
+        assert_eq!(us_key_for_char('C'), Some(8));
+        assert_eq!(us_key_for_char('v'), Some(9));
+        assert_eq!(us_key_for_char('q'), Some(12));
+        assert_eq!(us_key_for_char('4'), Some(21));
+        assert_eq!(us_key_for_char('`'), Some(50));
+        assert_eq!(us_key_for_char('\\'), Some(42));
+        for (letter, key) in ('a'..='z').zip(KeyCode::ALL) {
+            assert_eq!(us_key_for_char(letter), Some(virtual_key(*key)));
+            assert_eq!(
+                us_key_for_char(letter.to_ascii_uppercase()),
+                Some(virtual_key(*key))
+            );
+        }
+        for digit in '0'..='9' {
+            let key = KeyCode::from_id(&format!("Digit{digit}")).unwrap();
+            assert_eq!(us_key_for_char(digit), Some(virtual_key(key)));
+        }
+        // Each punctuation key is found by the sign on it.
+        let signs = r"-=[]\;',./`";
+        for sign in signs.chars() {
+            let key = KeyCode::ALL
+                .iter()
+                .find(|key| key.label() == sign.to_string())
+                .unwrap();
+            assert_eq!(us_key_for_char(sign), Some(virtual_key(*key)), "{sign}");
+        }
+        assert_eq!(signs.chars().count(), 11);
+    }
+
+    #[test]
+    fn a_character_the_us_layout_types_with_shift_or_not_at_all_has_no_key() {
+        for ch in [
+            ' ', '\n', '\t', '!', '@', '_', '+', '{', '"', '?', '~', 'é', 'ß', '字', '↑', '😀',
+        ] {
+            assert_eq!(us_key_for_char(ch), None, "{ch:?}");
+        }
+    }
+
+    #[test]
+    fn carbon_and_cg_masks_are_the_systems_own() {
+        assert_eq!(carbon_modifiers(Modifiers::NONE), 0);
+        assert_eq!(carbon_modifiers(Modifiers::META), 0x0100);
+        assert_eq!(carbon_modifiers(Modifiers::SHIFT), 0x0200);
+        assert_eq!(carbon_modifiers(Modifiers::ALT), 0x0800);
+        assert_eq!(carbon_modifiers(Modifiers::CTRL), 0x1000);
+        // The default hot key: Control+Option.
+        assert_eq!(carbon_modifiers(held(false, true, true, false)), 0x1800);
+        assert_eq!(carbon_modifiers(held(true, true, true, true)), 0x1B00);
+
+        assert_eq!(cg_flags(Modifiers::NONE), 0);
+        assert_eq!(cg_flags(Modifiers::SHIFT), 0x2_0000);
+        assert_eq!(cg_flags(Modifiers::CTRL), 0x4_0000);
+        assert_eq!(cg_flags(Modifiers::ALT), 0x8_0000);
+        assert_eq!(cg_flags(Modifiers::META), 0x10_0000);
+        assert_eq!(cg_flags(held(true, false, false, true)), 0x12_0000);
+        assert_eq!(cg_flags(held(true, true, true, true)), CG_CHORD_FLAGS);
+        assert_eq!(CG_CHORD_FLAGS, 0x1E_0000);
+    }
+
+    #[test]
+    fn each_set_of_modifiers_has_its_own_mask() {
+        let mut carbon = std::collections::HashSet::new();
+        let mut cg = std::collections::HashSet::new();
+        for bits in 0_u8..16 {
+            let mods = held(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
+            assert!(carbon.insert(carbon_modifiers(mods)));
+            assert!(cg.insert(cg_flags(mods)));
+            assert_eq!(cg_flags(mods) & !CG_CHORD_FLAGS, 0);
+            assert_eq!(carbon_modifiers(mods).count_ones() as usize, mods.count());
+            assert_eq!(cg_flags(mods).count_ones() as usize, mods.count());
+        }
+    }
+
+    fn units(text: &str) -> TextPiece {
+        TextPiece::Units(text.encode_utf16().collect())
+    }
+
+    /// What the pieces type, with every line end as `\n`.
+    fn typed(pieces: &[TextPiece]) -> String {
+        let mut all = Vec::new();
+        for piece in pieces {
+            match piece {
+                TextPiece::Units(units) => all.extend_from_slice(units),
+                TextPiece::Return => all.push(u16::from(b'\n')),
+                TextPiece::Tab => all.push(u16::from(b'\t')),
+            }
+        }
+        String::from_utf16(&all).unwrap()
+    }
+
+    /// Fails unless every chunk is whole text of the right length that
+    /// parts no character from what joins it.
+    fn assert_whole_chunks(pieces: &[TextPiece]) {
+        for piece in pieces {
+            let TextPiece::Units(chunk) = piece else {
+                continue;
+            };
+            assert!((1..=TEXT_CHUNK_UNITS).contains(&chunk.len()));
+            // A chunk that is valid UTF-16 on its own splits no pair.
+            let text = String::from_utf16(chunk).unwrap();
+            assert!(!text.contains(['\n', '\r', '\t']));
+            let first = text.chars().next().unwrap();
+            let last = text.chars().next_back().unwrap();
+            assert!(!joins_previous(first), "a chunk starts with a joining mark");
+            assert_ne!(last, ZERO_WIDTH_JOINER, "a chunk ends with a joiner");
+        }
+    }
+
+    #[test]
+    fn short_text_is_one_chunk() {
+        assert_eq!(text_chunks(""), vec![]);
+        assert_eq!(text_chunks("hello"), vec![units("hello")]);
+        let twenty = "abcdefghijklmnopqrst";
+        assert_eq!(text_chunks(twenty), vec![units(twenty)]);
+        assert_eq!(
+            text_chunks("abcdefghijklmnopqrstu"),
+            vec![units(twenty), units("u")]
+        );
+    }
+
+    #[test]
+    fn line_ends_and_tabs_are_keys_of_their_own() {
+        assert_eq!(
+            text_chunks("a\nb\tc"),
+            vec![
+                units("a"),
+                TextPiece::Return,
+                units("b"),
+                TextPiece::Tab,
+                units("c")
+            ]
+        );
+        // `\r\n` and a lone `\r` are one Return each.
+        assert_eq!(
+            text_chunks("a\r\nb\rc\n\r\n\n\r"),
+            vec![
+                units("a"),
+                TextPiece::Return,
+                units("b"),
+                TextPiece::Return,
+                units("c"),
+                TextPiece::Return,
+                TextPiece::Return,
+                TextPiece::Return,
+                TextPiece::Return,
+            ]
+        );
+        assert_eq!(text_chunks("\n"), vec![TextPiece::Return]);
+        assert_eq!(text_chunks("\t\t"), vec![TextPiece::Tab, TextPiece::Tab]);
+        // A long line still chunks on each side of the key.
+        let pieces = text_chunks("abcdefghijklmnopqrstuvwxy\tz");
+        assert_eq!(
+            pieces,
+            vec![
+                units("abcdefghijklmnopqrst"),
+                units("uvwxy"),
+                TextPiece::Tab,
+                units("z")
+            ]
+        );
+    }
+
+    #[test]
+    fn a_chunk_never_ends_inside_a_surrogate_pair() {
+        // Nineteen letters, then an emoji that would straddle the limit.
+        let text = "abcdefghijklmnopqrs😀!";
+        assert_eq!(
+            text_chunks(text),
+            vec![units("abcdefghijklmnopqrs"), units("😀!")]
+        );
+        // Ten emoji fill a chunk exactly; the eleventh starts the next.
+        let emoji = "😀".repeat(11);
+        assert_eq!(
+            text_chunks(&emoji),
+            vec![units(&"😀".repeat(10)), units("😀")]
+        );
+        for lead in 0..TEXT_CHUNK_UNITS + 2 {
+            let text = format!("{}{}", "x".repeat(lead), "🎉🇫🇷🇯🇵👍🏽".repeat(4));
+            let pieces = text_chunks(&text);
+            assert_whole_chunks(&pieces);
+            assert_eq!(typed(&pieces), text);
+        }
+    }
+
+    #[test]
+    fn a_chunk_never_parts_a_character_from_its_marks() {
+        // The accent would be the twenty-first unit: the `e` goes with it.
+        let text = "abcdefghijklmnopqrse\u{0301}!";
+        assert_eq!(
+            text_chunks(text),
+            vec![units("abcdefghijklmnopqrs"), units("e\u{0301}!")]
+        );
+        // A heart with its variation selector.
+        let text = "abcdefghijklmnopqrs\u{2764}\u{FE0F}";
+        assert_eq!(
+            text_chunks(text),
+            vec![units("abcdefghijklmnopqrs"), units("\u{2764}\u{FE0F}")]
+        );
+        // Two marks on one letter stay with it.
+        let text = "abcdefghijklmnopqro\u{0302}\u{0303}";
+        assert_eq!(
+            text_chunks(text),
+            vec![units("abcdefghijklmnopqr"), units("o\u{0302}\u{0303}")]
+        );
+    }
+
+    #[test]
+    fn a_family_stays_one_chunk() {
+        // Four people and three joiners: eleven units.
+        let family = "👨\u{200D}👩\u{200D}👧\u{200D}👦";
+        assert_eq!(family.encode_utf16().count(), 11);
+        for lead in 0..TEXT_CHUNK_UNITS + 2 {
+            let text = format!("{}{family}{family}", "x".repeat(lead));
+            let pieces = text_chunks(&text);
+            assert_whole_chunks(&pieces);
+            assert_eq!(typed(&pieces), text);
+            let whole = pieces
+                .iter()
+                .filter(|piece| {
+                    let TextPiece::Units(chunk) = piece else {
+                        return false;
+                    };
+                    String::from_utf16(chunk).unwrap().contains(family)
+                })
+                .count();
+            assert_eq!(whole, 2, "lead {lead}");
+        }
+    }
+
+    #[test]
+    fn a_run_of_marks_longer_than_a_chunk_is_cut_between_characters() {
+        let text = format!("a{}", "\u{0301}".repeat(45));
+        let pieces = text_chunks(&text);
+        assert_eq!(typed(&pieces), text);
+        let lengths: Vec<usize> = pieces
+            .iter()
+            .map(|piece| match piece {
+                TextPiece::Units(chunk) => chunk.len(),
+                TextPiece::Return | TextPiece::Tab => 0,
+            })
+            .collect();
+        assert_eq!(lengths, vec![20, 20, 6]);
+        // Joined emoji past a chunk's length are cut too, never mid-pair.
+        let chain = format!("👩{}", "\u{200D}👩".repeat(12));
+        let pieces = text_chunks(&chain);
+        assert_eq!(typed(&pieces), chain);
+        for piece in &pieces {
+            let TextPiece::Units(chunk) = piece else {
+                panic!("only text here");
+            };
+            assert!(chunk.len() <= TEXT_CHUNK_UNITS);
+            assert!(String::from_utf16(chunk).is_ok());
+        }
+    }
+
+    #[test]
+    fn four_thousand_units_chunk_whole() {
+        let unit = "Grüße, 世界! e\u{0301}\u{0302} 😀👍🏽 🇫🇷 👨\u{200D}👩\u{200D}👧 \u{2764}\u{FE0F}\tok\r\n";
+        let mut text = String::new();
+        while text.encode_utf16().count() + unit.encode_utf16().count() <= 4000 {
+            text.push_str(unit);
+        }
+        while text.encode_utf16().count() < 4000 {
+            text.push('z');
+        }
+        assert_eq!(text.encode_utf16().count(), 4000);
+        let pieces = text_chunks(&text);
+        assert_whole_chunks(&pieces);
+        assert_eq!(typed(&pieces), text.replace("\r\n", "\n"));
+        let returns = pieces
+            .iter()
+            .filter(|piece| **piece == TextPiece::Return)
+            .count();
+        assert_eq!(returns, text.matches("\r\n").count());
+        assert!(returns > 50);
+    }
+
+    #[test]
+    fn a_text_piece_prints_its_length_only() {
+        let pieces = text_chunks("s3cret\n\tmarker");
+        assert_eq!(format!("{pieces:?}"), "[Units(6), Return, Tab, Units(6)]");
+    }
+
+    fn args(program: &Program) -> Vec<&str> {
+        program
+            .args
+            .iter()
+            .map(|arg| arg.to_str().unwrap())
+            .collect()
+    }
+
+    /// A script, a name or a text nobody should ever see in a process list
+    /// when it is a script, and that would do harm if a shell read it.
+    const TYPED: &str = "display dialog \"hi\"; $(rm -rf ~) 'x' -- && s3cret";
+
+    #[test]
+    fn scripts_go_in_on_standard_input() {
+        let apple = program_for(ProgramRequest::AppleScript(TYPED));
+        assert_eq!(apple.program, Path::new("/usr/bin/osascript"));
+        assert_eq!(args(&apple), ["-"]);
+        assert_eq!(apple.stdin.as_deref(), Some(TYPED));
+
+        let shell = program_for(ProgramRequest::Shell(TYPED));
+        assert_eq!(shell.program, Path::new("/bin/zsh"));
+        assert_eq!(args(&shell), ["-l", "-s"]);
+        assert_eq!(shell.stdin.as_deref(), Some(TYPED));
+
+        // Even an empty script goes to standard input, so nothing waits for
+        // a terminal.
+        let empty = program_for(ProgramRequest::AppleScript(""));
+        assert_eq!(empty.stdin.as_deref(), Some(""));
+        assert_eq!(args(&empty), ["-"]);
+    }
+
+    #[test]
+    fn names_are_one_argument_each() {
+        let shortcut = program_for(ProgramRequest::AppleShortcut(TYPED));
+        assert_eq!(shortcut.program, Path::new("/usr/bin/shortcuts"));
+        assert_eq!(args(&shortcut), ["run", TYPED]);
+        assert_eq!(shortcut.stdin, None);
+
+        let macro_run = program_for(ProgramRequest::KeyboardMaestro(TYPED));
+        assert_eq!(macro_run.program, Path::new("/usr/bin/osascript"));
+        assert_eq!(
+            args(&macro_run),
+            [
+                "-e",
+                "on run argv",
+                "-e",
+                "tell application \"Keyboard Maestro Engine\" to do script (item 1 of argv)",
+                "-e",
+                "end run",
+                "--",
+                TYPED,
+            ]
+        );
+        assert_eq!(macro_run.stdin, None);
+        // The name is the last argument and in no script line.
+        let lines = &macro_run.args[..macro_run.args.len() - 1];
+        assert!(lines
+            .iter()
+            .all(|line| !line.to_string_lossy().contains("s3cret")));
+    }
+
+    #[test]
+    fn speak_keeps_a_leading_dash_from_being_an_option() {
+        let plain = program_for(ProgramRequest::Speak("Build finished"));
+        assert_eq!(plain.program, Path::new("/usr/bin/say"));
+        assert_eq!(args(&plain), ["Build finished"]);
+        assert_eq!(plain.stdin, None);
+        assert_eq!(
+            args(&program_for(ProgramRequest::Speak("-v Fred hello"))),
+            [" -v Fred hello"]
+        );
+        assert_eq!(args(&program_for(ProgramRequest::Speak("--"))), [" --"]);
+        // A dash further in is just text.
+        assert_eq!(
+            args(&program_for(ProgramRequest::Speak("well - done"))),
+            ["well - done"]
+        );
+        assert_eq!(args(&program_for(ProgramRequest::Speak(TYPED))), [TYPED]);
+    }
+
+    #[test]
+    fn no_request_puts_a_script_in_the_arguments() {
+        for request in [
+            ProgramRequest::AppleScript(TYPED),
+            ProgramRequest::Shell(TYPED),
+        ] {
+            let program = program_for(request);
+            assert!(program
+                .args
+                .iter()
+                .all(|arg| !arg.to_string_lossy().contains("s3cret")));
+            assert_eq!(program.stdin.as_deref(), Some(TYPED));
+            assert!(program.program.is_absolute());
+        }
+        // Grape's own scripts go the same way.
+        for control in SYSTEM_CONTROLS {
+            let SystemPlan::Program(program) = system_plan(control) else {
+                continue;
+            };
+            assert!(program.program.is_absolute());
+            if program.program == Path::new("/usr/bin/osascript") {
+                assert_eq!(args(&program), ["-"]);
+                assert!(program.stdin.is_some_and(|source| !source.is_empty()));
+            } else {
+                assert_eq!(program.stdin, None);
+            }
+        }
+    }
+
+    #[test]
+    fn an_app_opens_by_id_first_and_then_by_path() {
+        let path = Path::new("/Applications/My Notes; $(whoami).app");
+        let both = open_programs(OpenTarget::App {
+            path,
+            id: Some("com.example.notes"),
+        });
+        assert_eq!(both.len(), 2);
+        assert_eq!(args(&both[0]), ["-b", "com.example.notes"]);
+        assert_eq!(
+            args(&both[1]),
+            ["-a", "/Applications/My Notes; $(whoami).app"]
+        );
+        let by_path = open_programs(OpenTarget::App { path, id: None });
+        assert_eq!(by_path.len(), 1);
+        assert_eq!(
+            args(&by_path[0]),
+            ["-a", "/Applications/My Notes; $(whoami).app"]
+        );
+        for program in both.iter().chain(&by_path) {
+            assert_eq!(program.program, Path::new("/usr/bin/open"));
+            assert_eq!(program.stdin, None);
+        }
+    }
+
+    #[test]
+    fn a_path_or_a_url_is_the_only_argument_of_open() {
+        let file = Path::new("/Users/max/a \"b\" $c.pdf");
+        let opened = open_programs(OpenTarget::Path(file));
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].program, Path::new("/usr/bin/open"));
+        assert_eq!(args(&opened[0]), ["/Users/max/a \"b\" $c.pdf"]);
+        assert_eq!(opened[0].stdin, None);
+
+        let url = "https://example.com/?q=a b&c=$(d)";
+        let opened = open_programs(OpenTarget::Url(url));
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].program, Path::new("/usr/bin/open"));
+        assert_eq!(args(&opened[0]), [url]);
+        assert_eq!(opened[0].stdin, None);
+    }
+
+    const SYSTEM_CONTROLS: [SystemControl; 9] = [
+        SystemControl::SleepDisplay,
+        SystemControl::LockScreen,
+        SystemControl::Screensaver,
+        SystemControl::MissionControl,
+        SystemControl::ToggleMute,
+        SystemControl::VolumeUp,
+        SystemControl::VolumeDown,
+        SystemControl::ToggleDarkMode,
+        SystemControl::ScreenshotArea,
+    ];
+
+    fn plan_program(control: SystemControl) -> Program {
+        match system_plan(control) {
+            SystemPlan::Program(program) => program,
+            SystemPlan::CharChord { .. } => panic!("{control:?} is a chord"),
+        }
+    }
+
+    #[test]
+    fn system_controls_that_are_programs() {
+        let sleep = plan_program(SystemControl::SleepDisplay);
+        assert_eq!(sleep.program, Path::new("/usr/bin/pmset"));
+        assert_eq!(args(&sleep), ["displaysleepnow"]);
+        assert_eq!(sleep.stdin, None);
+
+        let saver = plan_program(SystemControl::Screensaver);
+        assert_eq!(saver.program, Path::new("/usr/bin/open"));
+        assert_eq!(args(&saver), ["-a", "ScreenSaverEngine"]);
+
+        let mission = plan_program(SystemControl::MissionControl);
+        assert_eq!(mission.program, Path::new("/usr/bin/open"));
+        assert_eq!(args(&mission), ["-a", "Mission Control"]);
+    }
+
+    #[test]
+    fn system_controls_that_are_scripts() {
+        let script = |control| {
+            let program = plan_program(control);
+            assert_eq!(program.program, Path::new("/usr/bin/osascript"));
+            assert_eq!(args(&program), ["-"]);
+            program.stdin.unwrap()
+        };
+        assert_eq!(
+            script(SystemControl::ToggleMute),
+            "set volume output muted (not (output muted of (get volume settings)))"
+        );
+        assert_eq!(
+            script(SystemControl::VolumeUp),
+            "set level to (output volume of (get volume settings)) + 6\n\
+             if level > 100 then set level to 100\n\
+             set volume output volume level"
+        );
+        assert_eq!(
+            script(SystemControl::VolumeDown),
+            "set level to (output volume of (get volume settings)) - 6\n\
+             if level < 0 then set level to 0\n\
+             set volume output volume level"
+        );
+        assert_eq!(
+            script(SystemControl::ToggleDarkMode),
+            "tell application \"System Events\" to tell appearance preferences \
+             to set dark mode to not dark mode"
+        );
+        // Only dark mode talks to another app (one Automation prompt).
+        for control in [
+            SystemControl::ToggleMute,
+            SystemControl::VolumeUp,
+            SystemControl::VolumeDown,
+        ] {
+            assert!(!script(control).contains("tell application"));
+        }
+    }
+
+    #[test]
+    fn system_controls_that_are_the_systems_own_chords() {
+        assert_eq!(
+            system_plan(SystemControl::LockScreen),
+            SystemPlan::CharChord {
+                ch: 'q',
+                mods: held(false, true, false, true),
+            }
+        );
+        assert_eq!(
+            system_plan(SystemControl::ScreenshotArea),
+            SystemPlan::CharChord {
+                ch: '4',
+                mods: held(true, false, false, true),
+            }
+        );
+        // Each character has a key on the US layout to fall back on.
+        let chords = SYSTEM_CONTROLS
+            .into_iter()
+            .filter_map(|control| match system_plan(control) {
+                SystemPlan::CharChord { ch, .. } => Some(ch),
+                SystemPlan::Program(_) => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(chords, vec!['q', '4']);
+        assert!(chords.iter().all(|ch| us_key_for_char(*ch).is_some()));
+    }
+
+    #[test]
+    fn the_accessibility_list_opens_by_its_url() {
+        let program = input_access_settings_program();
+        assert_eq!(program.program, Path::new("/usr/bin/open"));
+        assert_eq!(
+            args(&program),
+            ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"]
+        );
+        assert_eq!(program.stdin, None);
+    }
+
+    #[test]
+    fn a_hot_key_event_id_says_what_it_is_for() {
+        let ids = [HotkeyId::Open, HotkeyId::Escape, HotkeyId::Confirm];
+        let mut seen = std::collections::HashSet::new();
+        for id in ids {
+            for serial in [0, 1, 2, 0x00FF_FFFF, 0x0100_0000, u32::MAX] {
+                let event_id = hotkey_event_id(id, serial);
+                assert_eq!(hotkey_for_event_id(event_id), Some(id), "{id:?} {serial}");
+                seen.insert(event_id);
+            }
+        }
+        // The serial wraps inside its 24 bits and never reaches the kind.
+        assert_eq!(
+            hotkey_event_id(HotkeyId::Open, 0x0100_0000),
+            hotkey_event_id(HotkeyId::Open, 0)
+        );
+        assert_eq!(seen.len(), 3 * 4);
+        // Registrations made one after another never share an id.
+        let run: std::collections::HashSet<u32> = (0..64)
+            .map(|serial| hotkey_event_id(ids[serial as usize % 3], serial))
+            .collect();
+        assert_eq!(run.len(), 64);
+        for stranger in [0, 0x00FF_FFFF, 4 << 24, u32::MAX] {
+            assert_eq!(hotkey_for_event_id(stranger), None);
+        }
+        assert_eq!(HOTKEY_SIGNATURE, 0x4752_5045);
+    }
+
+    fn chord(key: KeyCode, mods: Modifiers) -> Chord {
+        Chord { key, mods }
+    }
+
+    fn holding(id: HotkeyId, chord: Chord) -> HeldChord {
+        HeldChord {
+            id,
+            chord,
+            stuck: false,
+        }
+    }
+
+    #[test]
+    fn a_first_bind_registers_each_chord_once() {
+        let g = chord(KeyCode::KeyG, held(false, true, true, false));
+        let f5 = chord(KeyCode::F5, Modifiers::NONE);
+        assert_eq!(
+            bind_plan(&[], HotkeyId::Open, &[g, f5, g]),
+            BindPlan {
+                register: vec![g, f5],
+                release: vec![],
+                adopt: vec![],
+            }
+        );
+        assert_eq!(bind_plan(&[], HotkeyId::Open, &[]), BindPlan::default());
+    }
+
+    #[test]
+    fn a_bind_replaces_what_the_id_had_and_keeps_what_stays() {
+        let old = chord(KeyCode::KeyG, held(false, true, true, false));
+        let new = chord(KeyCode::KeyJ, held(false, true, false, false));
+        let esc = chord(KeyCode::Escape, Modifiers::NONE);
+        let table = [holding(HotkeyId::Open, old), holding(HotkeyId::Escape, esc)];
+        assert_eq!(
+            bind_plan(&table, HotkeyId::Open, &[new]),
+            BindPlan {
+                register: vec![new],
+                release: vec![0],
+                adopt: vec![],
+            }
+        );
+        // The same chords again: nothing to do.
+        assert_eq!(
+            bind_plan(&table, HotkeyId::Open, &[old]),
+            BindPlan::default()
+        );
+        // One stays, one goes, one comes.
+        let both = [holding(HotkeyId::Open, old), holding(HotkeyId::Open, new)];
+        let third = chord(KeyCode::F13, Modifiers::NONE);
+        assert_eq!(
+            bind_plan(&both, HotkeyId::Open, &[third, new]),
+            BindPlan {
+                register: vec![third],
+                release: vec![0],
+                adopt: vec![],
+            }
+        );
+        // An empty list unbinds the id and leaves the others alone.
+        assert_eq!(
+            bind_plan(&table, HotkeyId::Escape, &[]),
+            BindPlan {
+                register: vec![],
+                release: vec![1],
+                adopt: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn a_chord_another_id_holds_is_left_to_it() {
+        // The wheel opens with Control+Option+Esc, so that subset of Esc
+        // stays the Open hot key's.
+        let open = chord(KeyCode::Escape, held(false, true, true, false));
+        let table = [holding(HotkeyId::Open, open)];
+        let subsets = open.with_modifier_subsets();
+        let plan = bind_plan(&table, HotkeyId::Escape, &subsets);
+        assert_eq!(plan.register.len(), 3);
+        assert!(!plan.register.contains(&open));
+        assert!(plan.release.is_empty() && plan.adopt.is_empty());
+        // Even one the OS is still to let go of.
+        let stuck = [HeldChord {
+            id: HotkeyId::Confirm,
+            chord: open,
+            stuck: true,
+        }];
+        assert_eq!(
+            bind_plan(&stuck, HotkeyId::Escape, &[open]),
+            BindPlan::default()
+        );
+    }
+
+    #[test]
+    fn a_stuck_chord_is_adopted_when_wanted_again_and_left_alone_when_not() {
+        let esc = chord(KeyCode::Escape, Modifiers::NONE);
+        let ctrl_esc = chord(KeyCode::Escape, Modifiers::CTRL);
+        let table = [
+            HeldChord {
+                id: HotkeyId::Escape,
+                chord: esc,
+                stuck: true,
+            },
+            holding(HotkeyId::Escape, ctrl_esc),
+        ];
+        assert_eq!(
+            bind_plan(&table, HotkeyId::Escape, &[esc, ctrl_esc]),
+            BindPlan {
+                register: vec![],
+                release: vec![],
+                adopt: vec![0],
+            }
+        );
+        // Unbinding lets go of the live one; the stuck one is retried
+        // apart from the plan.
+        assert_eq!(
+            bind_plan(&table, HotkeyId::Escape, &[]),
+            BindPlan {
+                register: vec![],
+                release: vec![1],
+                adopt: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn the_first_poll_says_where_the_pointer_is_and_nothing_else() {
+        for down in [false, true] {
+            let mut edges = PointerEdges::default();
+            assert_eq!(
+                edges.poll((10, 20), down),
+                vec![PointerSignal::Moved { x: 10, y: 20 }]
+            );
+            // A pointer at rest says nothing more.
+            assert_eq!(edges.poll((10, 20), down), vec![]);
+        }
+    }
+
+    #[test]
+    fn a_click_is_a_down_and_an_up_where_they_happened() {
+        let mut edges = PointerEdges::default();
+        edges.poll((0, 0), false);
+        assert_eq!(
+            edges.poll((0, 0), true),
+            vec![PointerSignal::Down { x: 0, y: 0 }]
+        );
+        assert_eq!(edges.poll((0, 0), true), vec![]);
+        // Moving with the button held, then letting go somewhere else: the
+        // move comes first, the release at the new place.
+        assert_eq!(
+            edges.poll((3, 4), true),
+            vec![PointerSignal::Moved { x: 3, y: 4 }]
+        );
+        assert_eq!(
+            edges.poll((5, -6), false),
+            vec![
+                PointerSignal::Moved { x: 5, y: -6 },
+                PointerSignal::Up { x: 5, y: -6 },
+            ]
+        );
+        assert_eq!(edges.poll((5, -6), false), vec![]);
+    }
+
+    #[test]
+    fn a_button_already_down_sends_no_down_but_its_release_is_seen() {
+        let mut edges = PointerEdges::default();
+        assert_eq!(
+            edges.poll((7, 7), true),
+            vec![PointerSignal::Moved { x: 7, y: 7 }]
+        );
+        assert_eq!(
+            edges.poll((7, 7), false),
+            vec![PointerSignal::Up { x: 7, y: 7 }]
+        );
+    }
+
+    #[test]
+    fn turning_the_watch_on_again_starts_over() {
+        let mut edges = PointerEdges::default();
+        edges.poll((1, 1), false);
+        edges.poll((1, 1), true);
+        edges.restart();
+        // The same place and a held button: one Moved, no Down, and no Up
+        // for the press that happened before.
+        assert_eq!(
+            edges.poll((1, 1), true),
+            vec![PointerSignal::Moved { x: 1, y: 1 }]
+        );
+        edges.restart();
+        assert_eq!(
+            edges.poll((1, 1), false),
+            vec![PointerSignal::Moved { x: 1, y: 1 }]
+        );
+        assert_eq!(edges.poll((1, 1), false), vec![]);
+    }
+
+    /// A layout as a list of (virtual key, what it types alone, what it
+    /// types with Command).
+    fn keyboard(keys: &[(u16, char, char)]) -> impl Fn(u16, bool) -> Option<char> + '_ {
+        move |key, command| {
+            keys.iter()
+                .find(|(code, _, _)| *code == key)
+                .map(|(_, alone, with_command)| if command { *with_command } else { *alone })
+        }
+    }
+
+    #[test]
+    fn a_character_chord_comes_from_the_key_that_types_it() {
+        // AZERTY: the US `Q` key types `a`, and the US `A` key types `q`.
+        let azerty = keyboard(&[(0, 'q', 'q'), (12, 'a', 'a'), (8, 'c', 'c')]);
+        assert_eq!(char_key('q', true, &azerty), Some(0));
+        assert_eq!(char_key('q', false, &azerty), Some(0));
+        assert_eq!(char_key('c', true, &azerty), Some(8));
+        assert_eq!(char_key('C', true, &azerty), Some(8));
+        // A layout that can't be read: the US table.
+        let unread = |_: u16, _: bool| None;
+        assert_eq!(char_key('q', true, unread), Some(12));
+        assert_eq!(char_key('4', true, unread), Some(21));
+        assert_eq!(char_key('é', true, unread), None);
+    }
+
+    #[test]
+    fn a_command_chord_reads_what_the_keys_type_with_command() {
+        // Dvorak-QWERTY: the US `I` key (34) types `c` alone, and the US
+        // `C` key (8) types `j` alone but `c` with Command.
+        let dvorak_qwerty = keyboard(&[(34, 'c', 'i'), (8, 'j', 'c')]);
+        assert_eq!(char_key('c', true, &dvorak_qwerty), Some(8));
+        assert_eq!(char_key('c', false, &dvorak_qwerty), Some(34));
+        // Russian: no key types `c` alone, the US `C` key does with
+        // Command.
+        let russian = keyboard(&[(8, 'с', 'c'), (9, 'м', 'v')]);
+        assert_eq!(char_key('c', true, &russian), Some(8));
+        assert_eq!(char_key('v', true, &russian), Some(9));
+        // With Command it finds nothing, alone it does.
+        let odd = keyboard(&[(40, 'q', '\u{F700}')]);
+        assert_eq!(char_key('q', true, &odd), Some(40));
+    }
+
+    #[test]
+    fn a_character_chord_never_comes_from_the_number_pad() {
+        // AZERTY types `4` with Shift on the main row, so alone only the
+        // pad's key (86) types it: the chord falls back to the US `4` key.
+        let azerty = keyboard(&[(21, '\'', '\''), (86, '4', '4')]);
+        assert_eq!(char_key('4', true, &azerty), Some(21));
+        assert_eq!(char_key('4', false, &azerty), Some(21));
+        // The main row wins over the pad where both type it.
+        let us = keyboard(&[(21, '4', '4'), (86, '4', '4')]);
+        assert_eq!(char_key('4', true, &us), Some(21));
+        for pad in [65, 67, 69, 71, 75, 76, 78, 81, 82, 89, 91, 92, 95] {
+            assert!(is_keypad_key(pad), "{pad}");
+        }
+        // No key of Grape's own table is on the pad.
+        for key in KeyCode::ALL {
+            assert!(!is_keypad_key(virtual_key(*key)), "{key:?}");
+        }
+        assert_eq!(layout_modifier_state(false), 0);
+        assert_eq!(layout_modifier_state(true), 1);
+    }
+
+    #[test]
+    fn the_clock_fields_become_a_local_time() {
+        assert_eq!(
+            local_time(126, 10, 23, 14, 5),
+            Some(LocalTime {
+                year: 2026,
+                month: 11,
+                day: 23,
+                hour: 14,
+                minute: 5,
+            })
+        );
+        assert_eq!(
+            local_time(100, 0, 1, 0, 0),
+            Some(LocalTime {
+                year: 2000,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+            })
+        );
+        assert!(local_time(126, 11, 31, 23, 59).is_some());
+        for bad in [
+            local_time(126, 12, 1, 0, 0),
+            local_time(126, -1, 1, 0, 0),
+            local_time(126, 0, 0, 0, 0),
+            local_time(126, 0, 32, 0, 0),
+            local_time(126, 0, 1, 24, 0),
+            local_time(126, 0, 1, -1, 0),
+            local_time(126, 0, 1, 0, 60),
+            local_time(i32::MAX, 0, 1, 0, 0),
+            local_time(126, i32::MAX, 1, 0, 0),
+        ] {
+            assert_eq!(bad, None);
+        }
+    }
+
+    #[test]
+    fn only_a_group_of_its_own_is_ended() {
+        assert_eq!(killable_group(4321, 77), Some(4321));
+        assert_eq!(killable_group(2, 77), Some(2));
+        // Never the caller's own group, launchd's, or Grape's.
+        assert_eq!(killable_group(0, 77), None);
+        assert_eq!(killable_group(1, 77), None);
+        assert_eq!(killable_group(77, 77), None);
+        // A pid that isn't one: as a negative number it would name every
+        // process.
+        assert_eq!(killable_group(u32::MAX, 77), None);
+        assert_eq!(killable_group(1 << 31, 77), None);
+    }
+
+    #[test]
+    fn a_window_frame_is_rounded_and_has_a_center() {
+        let frame = ax_frame(-1279.6, 24.5, 640.4, 480.0);
+        assert_eq!(
+            frame,
+            Rect {
+                x: -1280,
+                y: 25,
+                width: 640,
+                height: 480,
+            }
+        );
+        assert_eq!(center(frame), (-960, 265));
+        // Nonsense from an app stays a number.
+        assert_eq!(ax_frame(f64::NAN, f64::INFINITY, -1.0, 0.0).x, 0);
+        let far = Rect {
+            x: i32::MAX,
+            y: i32::MAX,
+            width: i32::MAX,
+            height: 3,
+        };
+        assert_eq!(center(far), (i32::MAX, i32::MAX));
+    }
+
+    #[test]
+    fn a_picked_app_is_named_without_its_extension() {
+        let path = Path::new("/Applications/Notes.app");
+        assert_eq!(app_name("Notes", path), "Notes");
+        assert_eq!(app_name("Notes.app", path), "Notes");
+        assert_eq!(app_name("Notes.APP", path), "Notes");
+        assert_eq!(app_name("  Notizen  ", path), "Notizen");
+        // A name that only looks like the extension, or ends in other
+        // letters, stays whole.
+        assert_eq!(app_name("Snapp", path), "Snapp");
+        assert_eq!(app_name("メモ", path), "メモ");
+        assert_eq!(app_name("é.app", path), "é");
+        // No display name: the bundle's own file name.
+        assert_eq!(app_name("", path), "Notes");
+        assert_eq!(app_name(".app", path), "Notes");
+        assert_eq!(app_name("", Path::new("/")), "");
     }
 }

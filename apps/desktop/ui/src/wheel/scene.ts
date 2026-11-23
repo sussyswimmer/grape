@@ -9,13 +9,16 @@
  */
 
 import type {
+  ShortcutSegment,
   WheelClosePayload,
   WheelContent,
   WheelHighlightPayload,
+  WheelIcon,
   WheelOpenPayload,
 } from "../shared/events";
-import { emptyMessage, PENDING_LABEL, wheelLabel } from "./copy";
-import { labelAnchor, segmentPath } from "./geometry";
+import { emptyMessage, PENDING_LABEL, segmentName, SHORTCUTS_EMPTY, wheelLabel } from "./copy";
+import { groupMarkPath, labelAnchor, segmentPath } from "./geometry";
+import { GLYPH_GRID, glyphPaths } from "./glyphs";
 
 // ---------------------------------------------------------------------------
 // State and the seq guard
@@ -50,9 +53,9 @@ function unchanged(state: WheelState): Step {
   return { state, paint: "none", sound: "none" };
 }
 
-/** `index` if it names a drawn segment of `content`, else `null`. */
+/** `index` if it names a drawn segment of `content` (entries or shortcuts), else `null`. */
 export function validHighlight(content: WheelContent, index: number | null): number | null {
-  if (index === null || content.kind !== "entries") {
+  if (index === null || (content.kind !== "entries" && content.kind !== "shortcuts")) {
     return null;
   }
   return Number.isSafeInteger(index) && index >= 0 && index < content.segments.length
@@ -150,6 +153,83 @@ export function wrapLines(text: string, maxChars: number, maxLines: number): str
   return kept;
 }
 
+/**
+ * A unit that draws about twice as wide as a Latin letter: CJK, kana,
+ * hangul, fullwidth forms and emoji.
+ */
+const WIDE =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Emoji_Presentation}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6\ufe0f\u20e3]/u;
+
+/**
+ * User-typed text as the units a line may break between: whole characters
+ * as a reader sees them (an emoji with its joiners, a letter with its
+ * accents), or code points where the webview can't tell. Never half of a
+ * surrogate pair.
+ */
+export function textUnits(text: string): string[] {
+  if (typeof Intl.Segmenter === "function") {
+    const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+    return Array.from(segmenter.segment(text), (part) => part.segment);
+  }
+  return Array.from(text);
+}
+
+/** How wide `text` draws, in Latin-letter widths: a wide unit counts 2. */
+export function textCells(text: string): number {
+  return textUnits(text).reduce((sum, unit) => sum + (WIDE.test(unit) ? 2 : 1), 0);
+}
+
+/**
+ * Word wrap for text the user typed, measured with `textCells`: at most
+ * `maxCells` per line and `maxLines` lines. A word wider than a line
+ * breaks between units, and overflow ends the last line with "…".
+ */
+export function wrapCells(text: string, maxCells: number, maxLines: number): string[] {
+  const words = text.trim().split(/\s+/).filter((word) => word.length > 0);
+  const lines: string[] = [];
+  let current = "";
+  let used = 0;
+  const endLine = (): void => {
+    if (current !== "") {
+      lines.push(current);
+    }
+    current = "";
+    used = 0;
+  };
+  for (const word of words) {
+    const space = current === "" ? 0 : 1;
+    const width = textCells(word);
+    if (used + space + width <= maxCells) {
+      current = space === 0 ? word : `${current} ${word}`;
+      used += space + width;
+      continue;
+    }
+    endLine();
+    for (const unit of textUnits(word)) {
+      const cells = textCells(unit);
+      if (used > 0 && used + cells > maxCells) {
+        endLine();
+      }
+      current += unit;
+      used += cells;
+    }
+  }
+  endLine();
+  if (maxLines < 1) {
+    return [];
+  }
+  if (lines.length <= maxLines) {
+    return lines;
+  }
+  const kept = lines.slice(0, maxLines);
+  const units = textUnits(kept[maxLines - 1] ?? "");
+  while (units.length > 0 && textCells(units.join("")) + 1 > maxCells) {
+    units.pop();
+  }
+  kept[maxLines - 1] = `${units.join("").trimEnd()}${ELLIPSIS}`;
+  return kept;
+}
+
 /** Typography, in CSS px. Font sizes live in overlay.css; these must match it. */
 export const TEXT = {
   /** Segment labels: characters per line and line height. */
@@ -168,6 +248,14 @@ export const TEXT = {
   messageWideChars: 32,
   messageLineHeight: 17,
   messageLines: 3,
+  /** A shortcut's icon: the side of its square, and the space under it. */
+  iconSize: 20,
+  denseIconSize: 18,
+  iconGap: 2,
+  /** An emoji's font size as a share of the icon's side. */
+  emojiScale: 0.85,
+  /** How much of a typed emoji is drawn, in `textCells`: one emoji, or two letters. */
+  emojiCells: 2,
 } as const;
 
 /** The empty-state message as at most 3 lines. */
@@ -182,6 +270,19 @@ export function messageLines(text: string): string[] {
 /** A segment label as at most 2 lines, narrower in the dense style. */
 export function labelLines(title: string, dense: boolean): string[] {
   return wrapLines(title, dense ? TEXT.denseLabelChars : TEXT.labelChars, TEXT.labelLines);
+}
+
+/**
+ * A shortcut's label as at most `maxLines` lines (2 unless told), narrower
+ * in the dense style. The name is what the user typed, so a long word
+ * breaks instead of running over, and a cut line ends with "…".
+ */
+export function shortcutLabelLines(
+  title: string,
+  dense: boolean,
+  maxLines: number = TEXT.labelLines,
+): string[] {
+  return wrapCells(title, dense ? TEXT.denseLabelChars : TEXT.labelChars, maxLines);
 }
 
 export interface TextLine {
@@ -228,12 +329,104 @@ export function pendingPaths(payload: WheelOpenPayload): string[] {
   );
 }
 
+/** What an icon draws: text for an emoji, stroked paths on the glyph grid for a glyph. */
+export type IconArt =
+  | { readonly kind: "emoji"; readonly text: string }
+  | { readonly kind: "glyph"; readonly paths: readonly string[] };
+
+/**
+ * What `icon` draws, or `null` for no icon: the kind `none`, a glyph id
+ * the page doesn't know, or an emoji with nothing in it. Only the start of
+ * a typed emoji is drawn (`TEXT.emojiCells`), so it stays in its square.
+ */
+export function iconArt(icon: WheelIcon): IconArt | null {
+  switch (icon.kind) {
+    case "none":
+      return null;
+    case "glyph": {
+      const paths = glyphPaths(icon.value);
+      return paths === null ? null : { kind: "glyph", paths };
+    }
+    case "emoji": {
+      let text = "";
+      for (const unit of textUnits(icon.value.trim())) {
+        if (text !== "" && textCells(text + unit) > TEXT.emojiCells) {
+          break;
+        }
+        text += unit;
+      }
+      return text === "" ? null : { kind: "emoji", text };
+    }
+  }
+}
+
+/** An icon and the square it is drawn in: its center and side (CSS px, wheel space). */
+export interface SegmentIcon {
+  readonly x: number;
+  readonly y: number;
+  readonly size: number;
+  readonly art: IconArt;
+}
+
+/** A glyph's `transform`: the 24 × 24 grid moved and scaled onto the icon's square. */
+export function glyphTransform(icon: SegmentIcon): { x: number; y: number; scale: number } {
+  return { x: icon.x - icon.size / 2, y: icon.y - icon.size / 2, scale: icon.size / GLYPH_GRID };
+}
+
+/** An emoji's font size for its square. */
+export function emojiFontSize(icon: SegmentIcon): number {
+  return icon.size * TEXT.emojiScale;
+}
+
+export interface ShortcutLayout {
+  readonly icon: SegmentIcon | null;
+  readonly label: TextBlock;
+}
+
+/**
+ * Where a shortcut's icon and label go, centered together on Rust's label
+ * point. No icon: the label alone, as on the other wheels. An icon sits
+ * over one line of label; in the dense style it stands alone, and the name
+ * shows in the center on hover.
+ */
+export function shortcutLayout(
+  seg: Pick<ShortcutSegment, "labelX" | "labelY" | "title" | "icon">,
+  dense: boolean,
+): ShortcutLayout {
+  const at = labelAnchor(seg);
+  const art = iconArt(seg.icon);
+  const lineHeight = dense ? TEXT.denseLabelLineHeight : TEXT.labelLineHeight;
+  if (art === null) {
+    return {
+      icon: null,
+      label: stackLines(shortcutLabelLines(seg.title, dense), at.x, at.y, lineHeight),
+    };
+  }
+  const size = dense ? TEXT.denseIconSize : TEXT.iconSize;
+  const lines = dense ? [] : shortcutLabelLines(seg.title, false, 1);
+  if (lines.length === 0) {
+    return { icon: { x: at.x, y: at.y, size, art }, label: stackLines([], at.x, at.y, lineHeight) };
+  }
+  const top = at.y - (size + TEXT.iconGap + lineHeight) / 2;
+  return {
+    icon: { x: at.x, y: top + size / 2, size, art },
+    label: stackLines(lines, at.x, top + size + TEXT.iconGap + lineHeight / 2, lineHeight),
+  };
+}
+
 export interface SegmentShape {
   readonly index: number;
   readonly d: string;
+  /** The full name, as sent. */
   readonly title: string;
+  /** The spoken name: the title, and "group" in words for a group. */
+  readonly name: string;
   readonly highlighted: boolean;
   readonly label: TextBlock;
+  /** A shortcut's icon, or `null`. */
+  readonly icon: SegmentIcon | null;
+  /** The path of a group's mark, or `null`. */
+  readonly mark: string | null;
 }
 
 export interface WheelScene {
@@ -311,8 +504,11 @@ export function buildScene(state: WheelState): WheelScene | null {
           index,
           d: segmentPath(seg, n, g),
           title: seg.title,
+          name: seg.title,
           highlighted: index === highlight,
           label: stackLines(labelLines(seg.title, content.dense), at.x, at.y, lineHeight),
+          icon: null,
+          mark: null,
         };
       });
       const hovered = highlight === null ? undefined : content.segments[highlight];
@@ -330,6 +526,41 @@ export function buildScene(state: WheelState): WheelScene | null {
                 0,
                 TEXT.centerLineHeight,
               ),
+        message: null,
+      };
+    }
+    case "shortcuts": {
+      const n = content.segments.length;
+      if (n === 0) {
+        return {
+          ...base,
+          dense: false,
+          segments: [],
+          placeholders: [],
+          center: null,
+          message: stackLines(messageLines(SHORTCUTS_EMPTY), 0, 0, TEXT.messageLineHeight),
+        };
+      }
+      const highlight = validHighlight(content, state.highlight);
+      const segments = content.segments.map((seg, index) => ({
+        index,
+        d: segmentPath(seg, n, g),
+        title: seg.title,
+        name: segmentName(seg.title, seg.group),
+        highlighted: index === highlight,
+        ...shortcutLayout(seg, content.dense),
+        mark: seg.group ? groupMarkPath(seg, n, g) || null : null,
+      }));
+      // The hovered name, else the open group's, else nothing.
+      const hovered = highlight === null ? undefined : content.segments[highlight];
+      const named = hovered?.title ?? content.trail[content.trail.length - 1] ?? "";
+      const lines = wrapCells(named, TEXT.centerChars, TEXT.centerLines);
+      return {
+        ...base,
+        dense: content.dense,
+        segments,
+        placeholders: [],
+        center: lines.length === 0 ? null : stackLines(lines, 0, 0, TEXT.centerLineHeight),
         message: null,
       };
     }

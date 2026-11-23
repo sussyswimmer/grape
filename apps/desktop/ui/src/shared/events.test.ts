@@ -34,15 +34,18 @@ import {
 import { clone, get, type Json, mutate, objectPaths, paths, wrongType } from "../test-support/json";
 
 // The golden payloads from docs/design/m1-drag-wheel.md §C, plus the float
-// shelf's (M5) and the tool panel's (M4). The Rust side `include_str!`s the
-// same files, so both suites test one contract. The Settings views share
-// the folder (src/settings/model.test.ts covers them), and so do the
-// panel's command args, UI → Rust, which aren't events
-// (src/panel/model.test.ts covers them).
+// shelf's (M5), the tool panel's (M4) and the Shortcuts wheel's (M10). The
+// Rust side `include_str!`s the same files, so both suites test one
+// contract. The Settings views share the folder (src/settings/model.test.ts
+// covers them), and so do the Shortcuts section's views and step edits
+// (src/settings covers them) and the panel's command args, UI → Rust,
+// which aren't events (src/panel/model.test.ts covers them).
 const raw = import.meta.glob<string>(
   [
     "./fixtures/*.json",
     "!./fixtures/settings-view-*.json",
+    "!./fixtures/shortcuts-view-*.json",
+    "!./fixtures/shortcuts-step-*.json",
     "!./fixtures/panel-run-*.json",
     "!./fixtures/panel-cancel.json",
   ],
@@ -84,9 +87,12 @@ const CASES: readonly (readonly [string, string])[] = [
   ["wheel-open-pending.json", "isWheelOpenPayload"],
   ["wheel-open-entries.json", "isWheelOpenPayload"],
   ["wheel-open-empty.json", "isWheelOpenPayload"],
+  ["wheel-open-shortcuts.json", "isWheelOpenPayload"],
+  ["wheel-open-shortcuts-empty.json", "isWheelOpenPayload"],
   ["wheel-highlight.json", "isWheelHighlightPayload"],
   ["wheel-highlight-null.json", "isWheelHighlightPayload"],
   ["wheel-close.json", "isWheelClosePayload"],
+  ["wheel-close-picked.json", "isWheelClosePayload"],
   ["toast-show-working.json", "isToastShowPayload"],
   ["toast-show-done.json", "isToastShowPayload"],
   ["toast-hide.json", "isToastHidePayload"],
@@ -135,7 +141,7 @@ describe("event names", () => {
 });
 
 describe("golden fixtures", () => {
-  it("are exactly the nine payloads from §C, the float shelf's three and the panel's five", () => {
+  it("are exactly the nine payloads from §C, the float shelf's three, the panel's five and the Shortcuts wheel's three", () => {
     expect(Object.keys(raw).sort()).toEqual(CASES.map(([name]) => `./fixtures/${name}`).sort());
   });
 
@@ -249,7 +255,18 @@ describe("semantic checks", () => {
     ).toBe(false);
     expect(isWheelClosePayload({ seq: 1, reason: "dropped" })).toBe(false);
     expect(isWheelClosePayload({ seq: 1, reason: "NoFiles" })).toBe(false);
-    for (const reason of ["drop", "cancel", "escape", "noFiles", "dragEnded", "watchdog", "paused"]) {
+    expect(isWheelClosePayload({ seq: 1, reason: "pick" })).toBe(false);
+    expect(isWheelClosePayload({ seq: 1, reason: "Picked" })).toBe(false);
+    for (const reason of [
+      "drop",
+      "cancel",
+      "escape",
+      "noFiles",
+      "dragEnded",
+      "watchdog",
+      "paused",
+      "picked",
+    ]) {
       expect(isWheelClosePayload({ seq: 1, reason })).toBe(true);
     }
     const done = clone(parsed("toast-show-done.json"));
@@ -367,6 +384,128 @@ describe("semantic checks", () => {
     const working = clone(parsed("toast-show-working.json"));
     expect(isToastShowPayload(mutate(working, ["detail"], "photo.png"))).toBe(true);
     expect(isToastShowPayload(mutate(working, ["detail"], undefined))).toBe(false);
+  });
+});
+
+describe("Shortcuts wheel semantic checks", () => {
+  const shortcuts = clone(parsed("wheel-open-shortcuts.json"));
+  const none = clone(parsed("wheel-open-shortcuts-empty.json"));
+  const entries = clone(parsed("wheel-open-entries.json"));
+  const pending = clone(parsed("wheel-open-pending.json"));
+  const empty = clone(parsed("wheel-open-empty.json"));
+
+  it("pairs the shortcuts mode with the shortcuts kind, both ways", () => {
+    // The mode with another wheel's content.
+    for (const other of [entries, pending, empty]) {
+      expect(isWheelOpenPayload(other)).toBe(true);
+      expect(isWheelOpenPayload(mutate(other, ["mode"], "shortcuts"))).toBe(false);
+    }
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content"], get(entries, ["content"])))).toBe(false);
+    // The content under another wheel's mode.
+    for (const mode of ["conversions", "tools", "actions"]) {
+      expect(isWheelOpenPayload(mutate(shortcuts, ["mode"], mode))).toBe(false);
+      expect(isWheelOpenPayload(mutate(none, ["mode"], mode))).toBe(false);
+    }
+    expect(isWheelOpenPayload(mutate(entries, ["content"], get(shortcuts, ["content"])))).toBe(false);
+  });
+
+  it("allows no segments for the shortcuts kind only", () => {
+    expect(isWheelOpenPayload(none)).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments"], []))).toBe(true);
+    // An empty group: a trail, and nothing in it.
+    expect(isWheelOpenPayload(mutate(none, ["content", "trail"], ["Edit"]))).toBe(true);
+    expect(isWheelOpenPayload(mutate(entries, ["content", "segments"], []))).toBe(false);
+  });
+
+  it("checks what the user typed for its type, never its length", () => {
+    const long = "n".repeat(500);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 0, "title"], long))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail", 0], long))).toBe(true);
+    expect(
+      isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 0, "icon", "value"], long)),
+    ).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 0, "title"], ""))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail", 0], ""))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 0, "icon", "value"], ""))).toBe(
+      true,
+    );
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 2, "title"], "保存 💾\u200d"))).toBe(
+      true,
+    );
+  });
+
+  it("accepts a trail of any depth, and only names in it", () => {
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail"], []))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail"], ["Edit", "More", "Deeper"]))).toBe(
+      true,
+    );
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail"], ["Edit", null]))).toBe(false);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "trail"], { 0: "Edit" }))).toBe(false);
+  });
+
+  it("accepts the three icon kinds and a glyph id it has never heard of", () => {
+    const icon = ["content", "segments", 0, "icon"] as const;
+    expect(isWheelOpenPayload(mutate(shortcuts, icon, { kind: "none" }))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, icon, { kind: "emoji", value: "🍇" }))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, icon, { kind: "glyph", value: "key" }))).toBe(true);
+    expect(isWheelOpenPayload(mutate(shortcuts, icon, { kind: "glyph", value: "rocket" }))).toBe(true);
+  });
+
+  it("rejects an unknown icon kind and an icon with another kind's fields", () => {
+    const icon = ["content", "segments", 0, "icon"] as const;
+    for (const bad of [
+      { kind: "image", value: "a.png" },
+      { kind: "Emoji", value: "🍇" },
+      { kind: "none", value: "" },
+      { kind: "emoji" },
+      { kind: "glyph" },
+      { kind: "glyph", value: null },
+      { kind: "emoji", value: "🍇", size: 2 },
+      { value: "🍇" },
+      "🍇",
+      null,
+      [],
+    ]) {
+      expect(isWheelOpenPayload(mutate(shortcuts, icon, bad)), JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("rejects indexes out of order", () => {
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments", 1, "index"], 2))).toBe(false);
+    const [first, second, third] = get(shortcuts, ["content", "segments"]) as Json[];
+    const swapped = mutate(shortcuts, ["content", "segments"], [second, first, third]);
+    expect(isWheelOpenPayload(swapped)).toBe(false);
+  });
+
+  it("rejects a segment of the other wheels, and the reverse", () => {
+    const entry = get(entries, ["content", "segments", 0]);
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments"], [entry]))).toBe(false);
+    const shortcut = get(shortcuts, ["content", "segments", 0]);
+    expect(isWheelOpenPayload(mutate(entries, ["content", "segments"], [shortcut]))).toBe(false);
+    const both = { ...(shortcut as object), entry: { kind: "action", key: "copy" } };
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments"], [both]))).toBe(false);
+  });
+
+  it("accepts a group under a trail and more segments than a ring holds (the limits are Rust's)", () => {
+    expect(isWheelOpenPayload(shortcuts)).toBe(true);
+    expect(get(shortcuts, ["content", "segments", 1, "group"])).toBe(true);
+    const segment = get(shortcuts, ["content", "segments", 0]) as object;
+    const many = Array.from({ length: 13 }, (_, index) => ({ ...segment, index }));
+    expect(isWheelOpenPayload(mutate(shortcuts, ["content", "segments"], many))).toBe(true);
+  });
+
+  it("rejects shortcuts content with another kind's fields or without its own", () => {
+    expect(
+      isWheelOpenPayload(mutate(none, ["content"], { kind: "shortcuts", dense: false, segments: [] })),
+    ).toBe(false);
+    expect(
+      isWheelOpenPayload(
+        mutate(none, ["content"], { kind: "shortcuts", dense: false, trail: [], segments: [], state: "noTools" }),
+      ),
+    ).toBe(false);
+    expect(
+      isWheelOpenPayload(mutate(none, ["content"], { kind: "shortcuts", dense: 0, trail: [], segments: [] })),
+    ).toBe(false);
   });
 });
 

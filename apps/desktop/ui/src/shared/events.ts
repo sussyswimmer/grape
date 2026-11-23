@@ -9,7 +9,9 @@
  * by the panel's seq and item ids, never paths. The types mirror
  * `apps/desktop/src-tauri/src/events.rs`, and both sides test against the
  * same golden JSON in `./fixtures/` (the `panel-run-*` and `panel-cancel`
- * files are command args, UI → Rust, not events).
+ * files are command args, UI → Rust, not events). The Shortcuts wheel (M10,
+ * docs/design/m10-shortcuts-wheel.md §6) reuses the three `wheel://…`
+ * events with one more content kind.
  *
  * Payloads arrive as `unknown`. Every one goes through its guard before the
  * UI touches it, so a contract drift fails loudly in one place instead of
@@ -22,20 +24,29 @@ import { type Fields, hasExactKeys, isOneOf } from "./guards";
 // Types (§C, verbatim)
 // ---------------------------------------------------------------------------
 
-export type WheelMode = "conversions" | "tools" | "actions";
+export type WheelMode = "conversions" | "tools" | "actions" | "shortcuts";
 export interface Point { x: number; y: number }
 export interface Geometry { innerR: number; outerR: number; backdropR: number; gap: number; corner: number; labelR: number; denseAt: number; screenMargin: number }
 export type WheelEntry = { kind: "convert" | "tool" | "action"; key: string };
 export interface UiSegment { index: number; center: number; start: number; end: number; labelX: number; labelY: number; title: string; entry: WheelEntry }
 export type EmptyState = "noConversions" | "noTools";
+/** A shortcut's icon. An emoji's `value` is what the user typed; a glyph's is an id from `wheel/glyphs.ts`. */
+export type WheelIcon =
+  | { kind: "none" }
+  | { kind: "emoji"; value: string }
+  | { kind: "glyph"; value: string };
+/** One segment of the Shortcuts wheel. `title` is the name as typed; a `group` opens a second ring. */
+export interface ShortcutSegment { index: number; center: number; start: number; end: number; labelX: number; labelY: number; title: string; icon: WheelIcon; group: boolean }
+/** `shortcuts` may have no segments. `trail` is the open groups' names, outermost first. */
 export type WheelContent =
   | { kind: "pending" }
   | { kind: "entries"; dense: boolean; segments: UiSegment[] }
-  | { kind: "empty"; state: EmptyState };
+  | { kind: "empty"; state: EmptyState }
+  | { kind: "shortcuts"; dense: boolean; trail: string[]; segments: ShortcutSegment[] };
 export interface KeyNames { conversions: string; tools: string; actions: string }
 export interface WheelOpenPayload { seq: number; mode: WheelMode; anchor: Point; scale: number; geometry: Geometry; keys: KeyNames; sounds: boolean; content: WheelContent }
 export interface WheelHighlightPayload { seq: number; index: number | null }
-export type CloseReason = "drop" | "cancel" | "escape" | "noFiles" | "dragEnded" | "watchdog" | "paused";
+export type CloseReason = "drop" | "cancel" | "escape" | "noFiles" | "dragEnded" | "watchdog" | "paused" | "picked";
 export interface WheelClosePayload { seq: number; reason: CloseReason }
 export type ToastTone = "working" | "done" | "error" | "info";
 export interface ToastShowPayload { id: number; tone: ToastTone; title: string; detail: string | null; progress: number | null; revealable: boolean }
@@ -151,7 +162,7 @@ export const PANEL_WINDOW = "panel";
 // here until the guard knows it.
 // ---------------------------------------------------------------------------
 
-const WHEEL_MODES: readonly WheelMode[] = ["conversions", "tools", "actions"];
+const WHEEL_MODES: readonly WheelMode[] = ["conversions", "tools", "actions", "shortcuts"];
 const ENTRY_KINDS: readonly WheelEntry["kind"][] = ["convert", "tool", "action"];
 const EMPTY_STATES: readonly EmptyState[] = ["noConversions", "noTools"];
 const CLOSE_REASONS: readonly CloseReason[] = [
@@ -162,6 +173,7 @@ const CLOSE_REASONS: readonly CloseReason[] = [
   "dragEnded",
   "watchdog",
   "paused",
+  "picked",
 ];
 const TOAST_TONES: readonly ToastTone[] = ["working", "done", "error", "info"];
 const FLOAT_KINDS: readonly FloatKind[] = ["file", "folder"];
@@ -252,6 +264,18 @@ function isWheelEntry(value: unknown): value is WheelEntry {
   );
 }
 
+/** The layout fields every segment carries. Rust zips `wheel_layout(n)` with the items, so index == position. */
+function hasSegmentLayout(value: Fields, position: number): boolean {
+  return (
+    value["index"] === position &&
+    isFiniteNumber(value["center"]) &&
+    isFiniteNumber(value["start"]) &&
+    isFiniteNumber(value["end"]) &&
+    isFiniteNumber(value["labelX"]) &&
+    isFiniteNumber(value["labelY"])
+  );
+}
+
 function isUiSegment(value: unknown, position: number): value is UiSegment {
   return (
     hasExactKeys(value, [
@@ -264,15 +288,54 @@ function isUiSegment(value: unknown, position: number): value is UiSegment {
       "title",
       "entry",
     ]) &&
-    // Rust zips `wheel_layout(n)` with the entries, so index == position.
-    value["index"] === position &&
-    isFiniteNumber(value["center"]) &&
-    isFiniteNumber(value["start"]) &&
-    isFiniteNumber(value["end"]) &&
-    isFiniteNumber(value["labelX"]) &&
-    isFiniteNumber(value["labelY"]) &&
+    hasSegmentLayout(value, position) &&
     typeof value["title"] === "string" &&
     isWheelEntry(value["entry"])
+  );
+}
+
+/**
+ * A shortcut's icon. The `value` is checked for its type only: an emoji is
+ * what the user typed, and a glyph id the page doesn't know draws no icon.
+ */
+function isWheelIcon(value: unknown): value is WheelIcon {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const kind: unknown = (value as Fields)["kind"];
+  switch (kind) {
+    case "none":
+      return hasExactKeys(value, ["kind"]);
+    case "emoji":
+    case "glyph":
+      return hasExactKeys(value, ["kind", "value"]) && typeof value["value"] === "string";
+    default:
+      return false;
+  }
+}
+
+/**
+ * One Shortcuts segment. `title` is user-typed, so only its type is
+ * checked, never its length: Rust owns the limits, and a guard that
+ * disagreed would drop the open while Rust held Esc.
+ */
+function isShortcutSegment(value: unknown, position: number): value is ShortcutSegment {
+  return (
+    hasExactKeys(value, [
+      "index",
+      "center",
+      "start",
+      "end",
+      "labelX",
+      "labelY",
+      "title",
+      "icon",
+      "group",
+    ]) &&
+    hasSegmentLayout(value, position) &&
+    typeof value["title"] === "string" &&
+    isWheelIcon(value["icon"]) &&
+    typeof value["group"] === "boolean"
   );
 }
 
@@ -299,6 +362,21 @@ function isWheelContent(value: unknown): value is WheelContent {
     }
     case "empty":
       return hasExactKeys(value, ["kind", "state"]) && isOneOf(value["state"], EMPTY_STATES);
+    case "shortcuts": {
+      if (!hasExactKeys(value, ["kind", "dense", "trail", "segments"])) {
+        return false;
+      }
+      const trail = value["trail"];
+      const segments = value["segments"];
+      // An empty menu has no segments: the page shows its message instead.
+      return (
+        typeof value["dense"] === "boolean" &&
+        Array.isArray(trail) &&
+        trail.every((name: unknown) => typeof name === "string") &&
+        Array.isArray(segments) &&
+        segments.every((segment: unknown, position: number) => isShortcutSegment(segment, position))
+      );
+    }
     default:
       return false;
   }
@@ -308,7 +386,10 @@ function isWheelContent(value: unknown): value is WheelContent {
 // Payload guards
 // ---------------------------------------------------------------------------
 
-/** Guards a `wheel://open` payload. */
+/**
+ * Guards a `wheel://open` payload. The mode is `shortcuts` exactly when
+ * the content kind is.
+ */
 export function isWheelOpenPayload(value: unknown): value is WheelOpenPayload {
   return (
     hasExactKeys(value, [
@@ -329,7 +410,8 @@ export function isWheelOpenPayload(value: unknown): value is WheelOpenPayload {
     isGeometry(value["geometry"]) &&
     isKeyNames(value["keys"]) &&
     typeof value["sounds"] === "boolean" &&
-    isWheelContent(value["content"])
+    isWheelContent(value["content"]) &&
+    (value["mode"] === "shortcuts") === (value["content"].kind === "shortcuts")
   );
 }
 

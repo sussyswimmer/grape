@@ -238,6 +238,25 @@ export function segmentPath(seg: SegmentAngle, n: number, g: Geometry): string {
   return parts.join(" ");
 }
 
+/** Half the angle a group's mark spans, at most (radians). */
+const MARK_HALF_SPAN = 0.12;
+
+/**
+ * The mark of a segment that opens a group: a short arc on the backdrop's
+ * rim, midway between the ring and the backdrop's edge, centered on the
+ * segment. It sits outside the segment, so it never crosses the label.
+ * Returns "" when the geometry can't be drawn.
+ */
+export function groupMarkPath(seg: SegmentAngle, n: number, g: Geometry): string {
+  if (!canDraw(n, g) || !Number.isFinite(seg.center) || !Number.isFinite(g.backdropR)) {
+    return "";
+  }
+  const r = (g.outerR + g.backdropR) / 2;
+  const half = Math.min(MARK_HALF_SPAN, Math.PI / n / 2);
+  const at = (angle: number): Vec => ({ x: r * Math.cos(angle), y: -r * Math.sin(angle) });
+  return `M ${point(at(seg.center + half))} ${arc(r, false, true, at(seg.center - half))}`;
+}
+
 /** Where a segment's label sits: Rust's `(labelX, labelY)`, unchanged. */
 export function labelAnchor(seg: Pick<UiSegment, "labelX" | "labelY">): Vec {
   return { x: seg.labelX, y: seg.labelY };

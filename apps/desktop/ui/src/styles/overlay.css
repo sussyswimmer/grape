@@ -42,6 +42,8 @@ body {
   height: 100%;
   overflow: hidden;
   background: var(--overlay-hit-fill);
+  /* A sticky Shortcuts wheel gets real pointer events: nothing selects. */
+  -webkit-user-select: none;
   user-select: none;
   cursor: default;
   font-family: var(--font-ui);
@@ -89,7 +91,8 @@ body {
 
 .wheel-label,
 .wheel-center,
-.wheel-message {
+.wheel-message,
+.wheel-emoji {
   text-anchor: middle;
   dominant-baseline: central;
   pointer-events: none;
@@ -111,6 +114,46 @@ body {
 
 .wheel-label.is-highlighted {
   fill: var(--wheel-label-highlight);
+}
+
+/*
+ * A shortcut's icon. An emoji is text sized by render.ts (its fill only
+ * shows when the user typed letters); a glyph is drawn on a 24 x 24 grid
+ * that render.ts scales, so its stroke scales with it.
+ */
+.wheel-emoji {
+  fill: var(--wheel-label);
+  font-weight: 650;
+}
+
+.wheel-glyph {
+  fill: none;
+  stroke: var(--wheel-label);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  pointer-events: none;
+}
+
+.wheel-emoji.is-highlighted {
+  fill: var(--wheel-label-highlight);
+}
+
+.wheel-glyph.is-highlighted {
+  stroke: var(--wheel-label-highlight);
+}
+
+/* A group's mark: a short arc on the backdrop's rim, outside its segment. */
+.wheel-group-mark {
+  fill: none;
+  stroke: var(--wheel-label);
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}
+
+.wheel-group-mark.is-highlighted {
+  stroke: var(--wheel-segment-highlight);
 }
 
 .wheel-center {
@@ -180,11 +223,26 @@ body {
 
   .wheel-label,
   .wheel-center,
-  .wheel-message {
+  .wheel-message,
+  .wheel-emoji {
     fill: CanvasText;
   }
 
-  .wheel-label.is-highlighted {
+  .wheel-label.is-highlighted,
+  .wheel-emoji.is-highlighted {
     fill: HighlightText;
+  }
+
+  .wheel-glyph,
+  .wheel-group-mark {
+    stroke: CanvasText;
+  }
+
+  .wheel-glyph.is-highlighted {
+    stroke: HighlightText;
+  }
+
+  .wheel-group-mark.is-highlighted {
+    stroke: Highlight;
   }
 }

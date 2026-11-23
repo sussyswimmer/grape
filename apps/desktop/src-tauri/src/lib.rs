@@ -14,6 +14,7 @@ mod float;
 mod jobs;
 mod panel;
 mod settings;
+mod shortcuts;
 mod sidecars;
 mod toast;
 mod tray;

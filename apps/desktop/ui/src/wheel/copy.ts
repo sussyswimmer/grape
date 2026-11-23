@@ -19,6 +19,9 @@ export const EMPTY_COPY: Readonly<Record<EmptyState, string>> = {
     "No tools fit here. Switch to conversions with {conversions} or file actions with {actions}.",
 };
 
+/** The message of a Shortcuts menu or group with nothing in it. It names no key. */
+export const SHORTCUTS_EMPTY = "No shortcuts here yet. Add some in Settings.";
+
 /** The center label while Rust is still waiting for the dragged paths. */
 export const PENDING_LABEL = "…";
 
@@ -52,9 +55,26 @@ const MODE_NAMES: Readonly<Record<WheelMode, string>> = {
   conversions: "Convert",
   tools: "Tools",
   actions: "File actions",
+  shortcuts: "Shortcuts",
 };
 
-/** The whole wheel's accessible name, e.g. "Convert wheel, 5 choices". */
+/** A segment's spoken name: its title, and for a group the word "group". */
+export function segmentName(title: string, group: boolean): string {
+  return group ? `${title}, group` : title;
+}
+
+function choices(n: number): string {
+  if (n === 0) {
+    return "no choices";
+  }
+  return `${n} ${n === 1 ? "choice" : "choices"}`;
+}
+
+/**
+ * The whole wheel's accessible name, e.g. "Convert wheel, 5 choices". A
+ * Shortcuts wheel inside a group names the group too: "Shortcuts wheel,
+ * Edit, 3 choices".
+ */
 export function wheelLabel(mode: WheelMode, content: WheelContent): string {
   const name = `${MODE_NAMES[mode]} wheel`;
   switch (content.kind) {
@@ -62,9 +82,12 @@ export function wheelLabel(mode: WheelMode, content: WheelContent): string {
       return `${name}, loading`;
     case "empty":
       return `${name}, no choices`;
-    case "entries": {
-      const n = content.segments.length;
-      return `${name}, ${n} ${n === 1 ? "choice" : "choices"}`;
+    case "entries":
+      return `${name}, ${choices(content.segments.length)}`;
+    case "shortcuts": {
+      const group = content.trail[content.trail.length - 1];
+      const where = group === undefined ? name : `${name}, ${group}`;
+      return `${where}, ${choices(content.segments.length)}`;
     }
   }
 }

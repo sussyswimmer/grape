@@ -22,7 +22,9 @@ use std::sync::mpsc::SyncSender;
 #[cfg(feature = "avif-encode")]
 pub mod avif;
 pub mod file_actions;
+pub mod keys;
 pub mod mock;
+pub mod shortcuts;
 pub mod tracker;
 
 // The pure flips and picks under the macOS layer, tested on every OS.

@@ -39,6 +39,12 @@
 //! - `login`: [`set_relaunch_on_login`], which keeps macOS's own relaunch
 //!   at login off while Grape's launch at login is on (its LaunchAgent
 //!   starts Grape then), with the AppKit calls paired.
+//! - `hotkey`, `input`, `shortcuts`: the Shortcuts wheel behind
+//!   [`crate::shortcuts`]. `hotkey` is Carbon's hot keys, kept on the main
+//!   thread. `input` is Accessibility's trust check, posted key events,
+//!   typing, the general pasteboard's text, the clock and the pointer
+//!   poller. `shortcuts` is `open`, the programs `crate::mac_rules` builds,
+//!   Accessibility's window moves, the hand-back and the pickers.
 //! - `heif`: the image helper worker's codec, [`heif::ImageIo`] (DECISIONS
 //!   D33, D41): ImageIO behind `grape_heif_proto::Codec` for HEIC and AVIF
 //!   (AVIF written by [`crate::avif`]), run only in the worker process
@@ -62,7 +68,10 @@ mod display;
 mod drag;
 mod drag_out;
 pub mod heif;
+mod hotkey;
+mod input;
 mod login;
+mod shortcuts;
 mod window;
 
 pub use activations::follow_app_activations;
@@ -77,6 +86,15 @@ pub use window::{
 pub(crate) use actions::{
     copy_files, copy_paths, haptic_tick, move_to_chosen_folder, open_terminal, pick_folder, reveal,
     share,
+};
+pub(crate) use hotkey::hotkey_monitor;
+pub(crate) use input::{
+    clear_clipboard, clipboard_change_count, clipboard_text, held_modifiers, input_access,
+    local_date_time, pointer_watch, request_input_access, send_char_chord, send_chord, type_text,
+};
+pub(crate) use shortcuts::{
+    ensure_front, give_back_front, kill_group, open_target, pick_target, place_window, program_for,
+    system_plan,
 };
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};

@@ -2,9 +2,12 @@
 //! contract in `docs/design/m1-drag-wheel.md` §C, the float shelf's
 //! `float://view` and `float://drag-ended`, and the tool panel's
 //! `panel://open` and `panel://close`, plus what the panel sends back in
-//! `panel_run` ([`PanelRun`]). The UI mirrors these types in
+//! `panel_run` ([`PanelRun`]). The Shortcuts wheel's content follows
+//! `docs/design/m10-shortcuts-wheel.md` §6. The UI mirrors these types in
 //! `ui/src/shared/events.ts`, and both sides test against the same golden
 //! JSON in `ui/src/shared/fixtures/`.
+
+use std::fmt;
 
 use grape_core::{wheel_layout, EmptyState, Geometry, Platform, Point, Segment, WheelContent};
 use grape_core::{Channels, CompressPreset, WheelEntry, WheelMode, GEOMETRY};
@@ -18,8 +21,8 @@ use crate::controller::KeyMap;
 pub struct WheelOpen {
     /// The wheel instance. Stays the same across swaps and content updates.
     pub seq: u64,
-    /// Which wheel.
-    pub mode: WheelMode,
+    /// Which wheel. `Shortcuts` exactly when the content is.
+    pub mode: UiMode,
     /// The wheel's center, in logical pixels from the overlay's top-left.
     pub anchor: Point,
     /// Physical pixels per logical pixel on the overlay's monitor.
@@ -34,8 +37,39 @@ pub struct WheelOpen {
     pub content: UiContent,
 }
 
-/// What the wheel shows.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// Which wheel the overlay draws: a drag wheel or the Shortcuts wheel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum UiMode {
+    /// The conversions wheel.
+    Conversions,
+    /// The tools wheel.
+    Tools,
+    /// The file actions wheel.
+    Actions,
+    /// The Shortcuts wheel, which opens from a hotkey and needs no drag.
+    Shortcuts,
+}
+
+impl From<WheelMode> for UiMode {
+    fn from(mode: WheelMode) -> Self {
+        match mode {
+            WheelMode::Conversions => UiMode::Conversions,
+            WheelMode::Tools => UiMode::Tools,
+            WheelMode::Actions => UiMode::Actions,
+        }
+    }
+}
+
+impl PartialEq<WheelMode> for UiMode {
+    fn eq(&self, other: &WheelMode) -> bool {
+        *self == UiMode::from(*other)
+    }
+}
+
+/// What the wheel shows. `Debug` is written by hand: a Shortcuts wheel
+/// carries names the user typed, and they must never reach a log line.
+#[derive(Clone, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -56,6 +90,41 @@ pub enum UiContent {
         /// Which message.
         state: EmptyState,
     },
+    /// The Shortcuts wheel's ring. No segments: the page shows its "nothing
+    /// here yet" message.
+    Shortcuts {
+        /// At `DENSE_AT` segments or more, use the compact label style.
+        dense: bool,
+        /// The open groups' names, outermost first. Empty at the menu's root.
+        trail: Vec<String>,
+        /// Geometry, name and icon for each segment.
+        segments: Vec<UiShortcutSegment>,
+    },
+}
+
+impl fmt::Debug for UiContent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            UiContent::Pending => f.write_str("Pending"),
+            UiContent::Entries { dense, segments } => f
+                .debug_struct("Entries")
+                .field("dense", dense)
+                .field("segments", segments)
+                .finish(),
+            UiContent::Empty { state } => f.debug_struct("Empty").field("state", state).finish(),
+            // The trail is names: print how many, never which.
+            UiContent::Shortcuts {
+                dense,
+                trail,
+                segments,
+            } => f
+                .debug_struct("Shortcuts")
+                .field("dense", dense)
+                .field("trail", &trail.len())
+                .field("segments", segments)
+                .finish(),
+        }
+    }
 }
 
 impl UiContent {
@@ -80,6 +149,31 @@ impl UiContent {
             }
         }
     }
+
+    /// The Shortcuts wheel's ring for `items` in ring order, each one its
+    /// name as typed, its icon and whether it is a group. `trail` is the
+    /// open groups' names, outermost first.
+    pub fn shortcuts<I>(trail: Vec<String>, items: I) -> Self
+    where
+        I: IntoIterator<Item = (String, UiIcon, bool)>,
+    {
+        let items = items.into_iter().collect::<Vec<_>>();
+        let segments = wheel_layout(items.len())
+            .into_iter()
+            .zip(items)
+            .map(|(geo, (title, icon, group))| UiShortcutSegment {
+                geo,
+                title,
+                icon,
+                group,
+            })
+            .collect::<Vec<_>>();
+        UiContent::Shortcuts {
+            dense: segments.len() >= GEOMETRY.dense_at,
+            trail,
+            segments,
+        }
+    }
 }
 
 /// One segment: grape-core's geometry plus what it does.
@@ -93,6 +187,90 @@ pub struct UiSegment {
     /// What a drop here does.
     pub entry: WheelEntry,
 }
+
+/// One segment of the Shortcuts wheel: grape-core's geometry plus what the
+/// user made. `Debug` leaves the name out.
+#[derive(Clone, PartialEq, Serialize)]
+pub struct UiShortcutSegment {
+    /// Index, angles and label point.
+    #[serde(flatten)]
+    pub geo: Segment,
+    /// The shortcut's name, as typed.
+    pub title: String,
+    /// What to draw with the name.
+    pub icon: UiIcon,
+    /// Picking it opens a second ring instead of running steps.
+    pub group: bool,
+}
+
+impl fmt::Debug for UiShortcutSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UiShortcutSegment")
+            .field("geo", &self.geo)
+            .field("icon", &self.icon)
+            .field("group", &self.group)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A shortcut's icon. `Debug` prints the kind only: an emoji is text the
+/// user typed.
+#[derive(Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum UiIcon {
+    /// No icon: the name alone.
+    None,
+    /// Text drawn as the icon, usually one emoji.
+    Emoji {
+        /// The text, as typed.
+        value: String,
+    },
+    /// One of Grape's own drawings.
+    Glyph {
+        /// An id from [`GLYPHS`]. The page draws nothing for one it doesn't
+        /// know.
+        value: String,
+    },
+}
+
+impl fmt::Debug for UiIcon {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            UiIcon::None => "None",
+            UiIcon::Emoji { .. } => "Emoji",
+            UiIcon::Glyph { .. } => "Glyph",
+        })
+    }
+}
+
+/// Every glyph id, in the order Settings offers them. The page has one
+/// 24×24 stroke drawing of Grape's own for each.
+pub const GLYPHS: [&str; 24] = [
+    "key",
+    "text",
+    "clipboard",
+    "app",
+    "file",
+    "folder",
+    "link",
+    "bolt",
+    "script",
+    "terminal",
+    "window",
+    "gear",
+    "bell",
+    "speaker",
+    "clock",
+    "stack",
+    "star",
+    "heart",
+    "home",
+    "search",
+    "mail",
+    "music",
+    "camera",
+    "lock",
+];
 
 /// The keys that open each wheel, as the user would name them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -152,6 +330,8 @@ pub enum CloseReason {
     Watchdog,
     /// Tray → Pause Grape.
     Paused,
+    /// A shortcut was picked on the Shortcuts wheel.
+    Picked,
 }
 
 /// `toast://show`: replace whatever the toast shows.
@@ -373,10 +553,23 @@ mod tests {
         serde_json::to_value(value).unwrap()
     }
 
-    fn open(seq: u64, mode: WheelMode, scale: f64, sounds: bool, content: UiContent) -> WheelOpen {
+    /// What a fixture file holds: the value on one line, then a newline.
+    fn line<T: Serialize>(value: &T) -> String {
+        let mut text = serde_json::to_string(value).unwrap();
+        text.push('\n');
+        text
+    }
+
+    fn open(
+        seq: u64,
+        mode: impl Into<UiMode>,
+        scale: f64,
+        sounds: bool,
+        content: UiContent,
+    ) -> WheelOpen {
         WheelOpen {
             seq,
-            mode,
+            mode: mode.into(),
             anchor: Point { x: 400.0, y: 300.0 },
             scale,
             geometry: GEOMETRY,
@@ -396,12 +589,9 @@ mod tests {
     #[test]
     fn open_pending_matches_the_fixture() {
         let payload = open(1, WheelMode::Conversions, 1.5, true, UiContent::Pending);
-        assert_eq!(
-            json(&payload),
-            golden(include_str!(
-                "../../ui/src/shared/fixtures/wheel-open-pending.json"
-            ))
-        );
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-open-pending.json");
+        assert_eq!(json(&payload), golden(fixture));
+        assert_eq!(line(&payload), fixture);
     }
 
     #[test]
@@ -424,12 +614,9 @@ mod tests {
             segments: vec![segment],
         };
         let payload = open(2, WheelMode::Conversions, 1.0, false, content);
-        assert_eq!(
-            json(&payload),
-            golden(include_str!(
-                "../../ui/src/shared/fixtures/wheel-open-entries.json"
-            ))
-        );
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-open-entries.json");
+        assert_eq!(json(&payload), golden(fixture));
+        assert_eq!(line(&payload), fixture);
     }
 
     #[test]
@@ -438,12 +625,87 @@ mod tests {
             state: EmptyState::NoTools,
         };
         let payload = open(3, WheelMode::Tools, 1.0, true, content);
-        assert_eq!(
-            json(&payload),
-            golden(include_str!(
-                "../../ui/src/shared/fixtures/wheel-open-empty.json"
-            ))
-        );
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-open-empty.json");
+        assert_eq!(json(&payload), golden(fixture));
+        assert_eq!(line(&payload), fixture);
+    }
+
+    fn shortcut_segment(
+        index: usize,
+        angles: [f64; 3],
+        label: (f64, f64),
+        title: &str,
+        icon: UiIcon,
+        group: bool,
+    ) -> UiShortcutSegment {
+        let [center, start, end] = angles;
+        UiShortcutSegment {
+            geo: Segment {
+                index,
+                center,
+                start,
+                end,
+                label_x: label.0,
+                label_y: label.1,
+            },
+            title: title.to_owned(),
+            icon,
+            group,
+        }
+    }
+
+    #[test]
+    fn open_shortcuts_matches_the_fixture() {
+        // Round numbers by hand again: sin and cos differ in the last digit
+        // from one OS to the next. The fixture shows every shape at once,
+        // not a ring a real menu could hold (a group sits inside a group).
+        let content = UiContent::Shortcuts {
+            dense: false,
+            trail: vec!["Edit".to_owned()],
+            segments: vec![
+                shortcut_segment(
+                    0,
+                    [1.5, 2.5, 0.5],
+                    (0.0, -84.0),
+                    "Save",
+                    UiIcon::Emoji {
+                        value: "💾".to_owned(),
+                    },
+                    false,
+                ),
+                shortcut_segment(
+                    1,
+                    [-0.5, 0.5, -1.5],
+                    (72.0, 42.0),
+                    "Tidy up",
+                    UiIcon::Glyph {
+                        value: "stack".to_owned(),
+                    },
+                    true,
+                ),
+                shortcut_segment(
+                    2,
+                    [-2.5, -1.5, -3.5],
+                    (-72.0, 42.0),
+                    "Select all",
+                    UiIcon::None,
+                    false,
+                ),
+            ],
+        };
+        let payload = open(4, UiMode::Shortcuts, 1.0, true, content);
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-open-shortcuts.json");
+        assert_eq!(json(&payload), golden(fixture));
+        assert_eq!(line(&payload), fixture);
+    }
+
+    #[test]
+    fn open_shortcuts_empty_matches_the_fixture() {
+        let content = UiContent::shortcuts(vec![], []);
+        let payload = open(5, UiMode::Shortcuts, 1.0, false, content);
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-open-shortcuts-empty.json");
+        assert_eq!(json(&payload), golden(fixture));
+        assert_eq!(line(&payload), fixture);
     }
 
     #[test]
@@ -475,6 +737,13 @@ mod tests {
                 "../../ui/src/shared/fixtures/wheel-close.json"
             ))
         );
+        let picked = WheelClose {
+            seq: 4,
+            reason: CloseReason::Picked,
+        };
+        let fixture = include_str!("../../ui/src/shared/fixtures/wheel-close-picked.json");
+        assert_eq!(json(&picked), golden(fixture));
+        assert_eq!(line(&picked), fixture);
     }
 
     #[test]
@@ -585,6 +854,7 @@ mod tests {
             CloseReason::DragEnded,
             CloseReason::Watchdog,
             CloseReason::Paused,
+            CloseReason::Picked,
         ]
         .iter()
         .map(json)
@@ -598,7 +868,8 @@ mod tests {
                 "noFiles",
                 "dragEnded",
                 "watchdog",
-                "paused"
+                "paused",
+                "picked"
             ]
             .map(Value::from)
         );
@@ -639,6 +910,157 @@ mod tests {
             panic!("expected entries");
         };
         assert!(dense);
+    }
+
+    #[test]
+    fn the_ui_mode_follows_the_wheel_mode() {
+        let pairs = [
+            (WheelMode::Conversions, UiMode::Conversions),
+            (WheelMode::Tools, UiMode::Tools),
+            (WheelMode::Actions, UiMode::Actions),
+        ];
+        for (wheel, ui) in pairs {
+            assert_eq!(UiMode::from(wheel), ui);
+            assert_eq!(ui, wheel);
+            assert_eq!(json(&ui), json(&wheel), "{wheel:?}");
+            assert_ne!(UiMode::Shortcuts, wheel);
+            for (other, _) in pairs {
+                assert_eq!(ui == other, wheel == other, "{wheel:?} and {other:?}");
+            }
+        }
+        assert_eq!(json(&UiMode::Shortcuts), Value::from("shortcuts"));
+    }
+
+    #[test]
+    fn icons_carry_their_kind_and_value() {
+        assert_eq!(
+            serde_json::to_string(&UiIcon::None).unwrap(),
+            r#"{"kind":"none"}"#
+        );
+        let emoji = UiIcon::Emoji {
+            value: "🍇".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&emoji).unwrap(),
+            r#"{"kind":"emoji","value":"🍇"}"#
+        );
+        let glyph = UiIcon::Glyph {
+            value: GLYPHS[0].to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&glyph).unwrap(),
+            r#"{"kind":"glyph","value":"key"}"#
+        );
+    }
+
+    fn named(names: &[&str]) -> Vec<(String, UiIcon, bool)> {
+        names
+            .iter()
+            .map(|name| ((*name).to_owned(), UiIcon::None, false))
+            .collect()
+    }
+
+    #[test]
+    fn shortcuts_are_laid_out_in_ring_order() {
+        let items = vec![
+            (
+                "Copy".to_owned(),
+                UiIcon::Glyph {
+                    value: "clipboard".to_owned(),
+                },
+                false,
+            ),
+            ("More".to_owned(), UiIcon::None, true),
+            (
+                "Mute".to_owned(),
+                UiIcon::Emoji {
+                    value: "🔇".to_owned(),
+                },
+                false,
+            ),
+        ];
+        let content = UiContent::shortcuts(vec!["Sound".to_owned()], items.clone());
+        let UiContent::Shortcuts {
+            dense,
+            trail,
+            segments,
+        } = content
+        else {
+            panic!("expected shortcuts");
+        };
+        assert!(!dense);
+        assert_eq!(trail, ["Sound"]);
+        assert_eq!(
+            segments.iter().map(|s| s.geo).collect::<Vec<_>>(),
+            wheel_layout(3)
+        );
+        let drawn: Vec<(String, UiIcon, bool)> = segments
+            .into_iter()
+            .map(|s| (s.title, s.icon, s.group))
+            .collect();
+        assert_eq!(drawn, items);
+    }
+
+    #[test]
+    fn shortcuts_are_dense_from_seven_and_may_be_none() {
+        for (count, expected) in [(0, false), (1, false), (6, false), (7, true), (12, true)] {
+            let content = UiContent::shortcuts(vec![], named(&vec!["Name"; count]));
+            let UiContent::Shortcuts {
+                dense, segments, ..
+            } = content
+            else {
+                panic!("expected shortcuts");
+            };
+            assert_eq!(segments.len(), count);
+            assert_eq!(dense, expected, "{count} segments");
+        }
+    }
+
+    #[test]
+    fn glyph_ids_are_unique_lower_case_ascii() {
+        for (at, id) in GLYPHS.iter().enumerate() {
+            assert!(!id.is_empty());
+            assert!(id.bytes().all(|b| b.is_ascii_lowercase()), "{id}");
+            assert!(!GLYPHS[..at].contains(id), "{id} is listed twice");
+        }
+    }
+
+    #[test]
+    fn debug_never_prints_what_the_user_typed() {
+        const MARKER: &str = "zq-marker";
+        let content = UiContent::shortcuts(
+            vec![format!("trail {MARKER}")],
+            vec![
+                (
+                    format!("name {MARKER}"),
+                    UiIcon::Emoji {
+                        value: MARKER.to_owned(),
+                    },
+                    false,
+                ),
+                (
+                    MARKER.to_owned(),
+                    UiIcon::Glyph {
+                        value: MARKER.to_owned(),
+                    },
+                    true,
+                ),
+            ],
+        );
+        let payload = open(6, UiMode::Shortcuts, 1.0, true, content);
+        // The payload itself does carry them.
+        assert_eq!(line(&payload).matches(MARKER).count(), 5);
+        for printed in [format!("{payload:?}"), format!("{payload:#?}")] {
+            assert!(!printed.contains(MARKER), "{printed}");
+            assert!(printed.contains("Shortcuts"), "{printed}");
+            assert!(printed.contains("Emoji"), "{printed}");
+            assert!(printed.contains("Glyph"), "{printed}");
+        }
+        let UiContent::Shortcuts { segments, .. } = &payload.content else {
+            panic!("expected shortcuts");
+        };
+        assert!(!format!("{:?}", segments[0]).contains(MARKER));
+        assert!(!format!("{:?}", segments[0].icon).contains(MARKER));
     }
 
     fn panel_open(seq: u64, title: &str, names: &[&str], panel: PanelSpec) -> PanelOpen {

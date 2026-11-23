@@ -6,6 +6,7 @@
  * import { mountWheel, wireOverlay } from "./wheel";
  * import { mustGetElementById } from "./shared/dom";
  *
+ * quietPage(document);
  * const view = mountWheel(mustGetElementById(document, "wheel-root"));
  * void wireOverlay(view);
  * ```
@@ -49,4 +50,19 @@ export function wireOverlay(view: WheelView, listenFn?: ListenFn): Promise<() =>
     "Grape overlay: could not listen for wheel events",
     listenFn,
   );
+}
+
+/** The page gestures the overlay cancels. */
+export const QUIET_EVENTS = ["contextmenu", "mousedown", "dragstart"] as const;
+
+/**
+ * Cancels the webview's own answers to a press anywhere on `page`: no menu,
+ * no selection and no page drag. A sticky Shortcuts wheel is the first
+ * time the overlay gets real pointer events. The page still reads none of
+ * them: Rust watches the pointer and decides.
+ */
+export function quietPage(page: Pick<EventTarget, "addEventListener">): void {
+  for (const type of QUIET_EVENTS) {
+    page.addEventListener(type, (event) => event.preventDefault());
+  }
 }
