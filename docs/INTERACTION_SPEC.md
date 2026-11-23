@@ -3,6 +3,7 @@
 This is the heart of Grape. Every rule below is tagged:
 - **[observed]** came from Tangerine's demo via REA (see `REA_FINDINGS.md`).
 - **[Grape]** is our own design choice.
+- **[Radial]** is used in §12 only, and is defined there: it isn't Tangerine's demo.
 
 ## 1. State machine
 
@@ -20,6 +21,15 @@ WheelOpen(mode)
  ├─(drop on a panel tool)─────────────▶ Idle            (the wheel is done; the tool's panel opens, §11)
  ├─(drop off-ring / on empty wheel)───▶ Idle            (cancel, nothing happens)
  └─(Esc)──────────────────────────────▶ Idle            (overlay hides; on Windows and macOS the source cancels the drag)
+Idle
+ └─(the Shortcuts hotkey, no drag)────▶ Shortcuts       (§12; macOS first. No file is involved)
+Shortcuts
+ ├─(pointer over a segment)───────────▶ highlight segment + play tick
+ ├─(pick a shortcut)──────────────────▶ Running(steps) ─▶ Idle
+ ├─(pick a group / click the center)──▶ Shortcuts       (another ring, drawn in place)
+ ├─(Esc / click outside the ring)─────▶ Idle            (cancel, nothing runs)
+ ├─(not painted in 1 s / 30 s quiet)──▶ Idle            (the watchdogs, §12)
+ └─(OS file drag begins)──────────────▶ Dragging        (the wheel closes; a drag always wins)
 ```
 
 ## 2. Opening the wheel
@@ -96,14 +106,14 @@ These are Grape's values, in points/DIPs at 1× scale. The site's values were �
 
 ## 8. Keyboard and touch (demo-only, informational)
 
-The demo also supports Enter-to-open, arrow keys, Home/End and Space/Enter-to-apply, plus long-press on touch. These were **[observed] on the website only**. Whether the real app supports them in Finder is **unknown**: Enter in Finder renames a file. Grape v1 ignores this; consider a global hotkey in v2.
+The demo also supports Enter-to-open, arrow keys, Home/End and Space/Enter-to-apply, plus long-press on touch. These were **[observed] on the website only**. Whether the real app supports them in Finder is **unknown**: Enter in Finder renames a file. Grape's drag wheels ignore this. A wheel opened by a global hotkey, with Return to pick, is the Shortcuts wheel (§12, D47); it has no arrow keys.
 
 ## 9. Things Grape must handle that the demo doesn't
 
 - Drags that aren't files (text, images from browsers, URL drags): if no file paths arrive, close the wheel and don't block the drop.
 - Huge selections (> 200 files): cap the wheel, show a count, and queue jobs.
 - Read-only source folder: write outputs to the fallback location (Settings), then notify.
-- Grape crashing mid-drag: the overlay must never stay up. A watchdog hides it after 30 s with no events.
+- Grape crashing mid-drag: the overlay must never stay up. A watchdog hides it after 30 s with no events. A Shortcuts wheel has a paint deadline too: if the overlay hasn't reported it painted 1 s after the hotkey, the wheel closes, because an undrawn wheel must not hold Esc, Return and the screen (§12).
 
 ## 10. The float shelf
 
@@ -135,3 +145,49 @@ The demo also supports Enter-to-open, arrow keys, Home/End and Space/Enter-to-ap
 - **[Grape]** **Merge order:** the list starts in the drag's order, which Explorer and Finder don't document. The first file in the list names the merged PDF ("{first} Merged.pdf") and picks its folder. The panel shows the plain name even when the output will get " 2".
 - **[Grape]** **Drops on the panel do nothing:** on Windows it refuses them (D13); on macOS a file dropped on it is accepted as a copy and ignored (D18). It's never moved.
 - **[Grape]** The page only ever sees a request number, item ids and display names, never a path (`ARCHITECTURE.md`).
+
+## 12. The Shortcuts wheel
+
+A fourth wheel that needs no drag (`DECISIONS.md` D47). The user presses a global hotkey, the wheel opens, and each segment is a **shortcut** the user made in Settings. It is on macOS first; on Windows nothing of it runs yet (`PLATFORM_WINDOWS.md` → "Shortcuts wheel").
+
+Its behavior is modeled on Radial, a pie-menu app for the Mac. Rules in this section are tagged:
+- **[Radial]** was stated on Radial's public website (`RADIAL_FINDINGS.md`, with the finding's number). The app itself was never run, so this is weaker than the **[observed]** tag, which everywhere in this file means Tangerine's demo.
+- **[Grape]** is our own choice, as above.
+
+Grape's words are *Shortcuts wheel*, *shortcut*, *step*, *group*, *menu* and *Everywhere*. The file format, the limits, the commands and the Settings section are in `docs/design/m10-shortcuts-wheel.md`; the Mac calls are in `PLATFORM_MACOS.md` → "Shortcuts wheel". None of this has run on a Mac or the PC: the rules below are checked by unit tests on Linux only, and `TESTING.md` → "Shortcuts wheel, M10" lists what a person has to see.
+
+- **[Radial]** A keyboard trigger opens a circular menu with no drag. Each segment is something the user set up, picking one runs it, and the menu closes (R1). A shortcut is a name, an icon and steps that run in order (R6).
+- **[Grape]** **Off until turned on.** The wheel is off until the user turns it on in Settings, so an update never takes a key by itself. The default hotkey is Control+Option+G.
+- **[Grape]** **The hotkey** needs Control, Option or Command, unless its key is F1 to F20: "Add Control, Option or Command, or use a function key." Shift alone isn't enough, since it would eat capital letters. Command with Q, W, H, M, Tab, Space, C, V, X, A, Z or S, with or without Shift, is refused: "Every app already uses that one. Try another." The hotkey and a Press keys step can never be the same key combination: "That one opens the wheel. Pick another." one way, "One of your shortcuts presses that. Try another." the other.
+- **[Grape]** Grape holds the hotkey only while the wheel is on and Grape isn't paused. Off or paused, the key combination reaches the app in front as if Grape weren't installed.
+- **[Radial]** **Opening:** the wheel opens at the cursor, or in the middle of the screen (R10). **[Grape]** "The wheel opens" in Settings chooses: "At the pointer" (the default) or "In the middle of the screen", which is the middle of the work area of the display under the cursor. The anchor is clamped as in §3 and doesn't follow the cursor. The ring's geometry, the hit test, the highlight, the tick, the haptic and Reduce Motion are §4's and §5's, unchanged.
+- **[Grape]** The wheel never takes the keyboard from the app in front (RI2 is only an inference about Radial). Grape notes which app is in front at the press, before anything of its own shows.
+- **[Grape]** A press opens no wheel while a mouse button is down, or when Grape can't tell where the cursor is. The log says why.
+- **[Radial]** **Hold and tap:** Radial has two keyboard triggers: a held modifier that shows the menu until it's let go, and a key combination that toggles it (R2). **[Grape]** One hotkey does both, told apart by how long it's held:
+  - Let go 300 ms or more after the press → the highlighted shortcut runs. With nothing highlighted the wheel closes and nothing runs.
+  - Let go sooner → that was a tap. The wheel stays open, whatever is highlighted, and waits for a click, Return or Esc.
+  - Pressing the hotkey again on a wheel that stayed open closes it. While the hotkey is still held, a repeat of it does nothing.
+- **[Radial]** **Picking** is by moving toward an item. Items keep their place in the ring, so the hand learns them (R4). **[Grape]** A shortcut's place is its place in the Settings list, starting at the top as in §4.
+- **[Grape]** **A click** counts when the button goes up, at the place it goes up, and only if it went down while the wheel was open:
+  - on a segment → that shortcut is picked;
+  - nearer the anchor than `INNER_R` → back one group, or the wheel closes when no group is open;
+  - farther than `OUTER_R` → the wheel closes and nothing runs;
+  - in a gap or a cut-off corner → nothing.
+  The overlay covers the display and takes the click, so it never lands in the app underneath.
+- **[Radial]** **Groups:** a segment can open another ring in place of the current one, and the user can go back (R8). **[Grape]** A group holds shortcuts, never another group: two levels (how deep Radial goes is unknown, RU4). A ring holds 12 at most. Picking a group redraws the wheel in place at the same anchor with no animation, and the center shows the group's name while nothing is hovered. The wheel then stays open as after a tap, so letting go of a held hotkey over a group opens it instead of closing the wheel. A click in the center goes back. A group's segment carries a small mark on the wheel's rim.
+- **[Grape]** **Esc and Return:** while a Shortcuts wheel is open, Esc closes it and Return picks the highlighted shortcut (with nothing highlighted, Return does nothing). Both are Grape's for that time: the app in front doesn't see them. They go back to the apps the moment the wheel closes. Command+Option+Esc stays the system's. If Grape can't take Esc when the wheel opens, the wheel closes at once: a wheel Esc can't close doesn't stay up (golden rule 4).
+- **[Radial]** **Which menu shows** depends on the app in front: an app can have its own menu, and a global one covers the rest (R5). **[Grape]** The global menu is *Everywhere*. An app with a menu of its own shows that one instead, not both in one ring (RI3). "Also show Everywhere" on an app's menu adds one more group at its end, named "Everywhere", with the Everywhere menu's shortcuts (its groups left out, since a group can't hold a group). When that group would be a 13th segment it's left out, and Settings says "Everywhere didn't fit in this menu." An app with no bundle id, and Grape's own Settings window in front, show Everywhere.
+- **[Grape]** A change made in Settings shows the next time the wheel opens. An open wheel keeps the ring it opened with.
+- **[Grape]** **An empty menu** still opens, with no segments and the message "No shortcuts here yet. Add some in Settings." So does an empty group. It closes like any other wheel.
+- **[Grape]** **Labels:** a segment shows the shortcut's icon (an emoji, or one of Grape's own drawings) over one line of its name, or up to two lines of the name with no icon. From `DENSE_AT` items the icon stands alone, and the name shows in the center on hover. A name too long for its line is cut with "…".
+- **[Radial]** **What a pick runs:** the shortcut's steps, in order (R6). **[Grape]** The wheel closes first and the app the user was in gets the front back; then the steps run, one shortcut at a time. Pressing the hotkey while one still runs opens no wheel and shows "Still running {name}".
+- **[Grape]** **Step kinds** (Radial lists more, R7): Press keys, Type text (with `{date}`, `{time}` and `{clipboard}` filled in when it runs), Clipboard (Copy, Paste, Clear the clipboard), Open an app, Open a file or folder, Open a link, Run an Apple Shortcut, Run AppleScript, Run a shell script, Run a Keyboard Maestro macro, Move the window, System, Show a notice, Speak and Wait. There's no AI step and no online library: both need the network (golden rule 3). A step with nothing chosen or typed yet is skipped. A shortcut with nothing to run still closes the wheel and says "Nothing to run yet" / "Add a step to it in Settings."
+- **[Grape]** **Before the first step that presses keys, types, copies, pastes or moves a window,** Grape checks three things, once per run:
+  - Accessibility access (that Radial needs it too is an inference, RI1). Without it: "Grape needs Accessibility access to press keys. Turn it on in System Settings, then try again.", and the first time in a launch macOS shows its own prompt.
+  - Every modifier key is up, within 500 ms: a key still held from the hotkey would join the keys Grape presses. Otherwise: "Let go of the keys first."
+  - The app the user was in is in front again, within 400 ms. Otherwise: "The app you were in didn't come back to the front." With Grape's own window in front at the press there's no such app: "Click the app you want first."
+- **[Grape]** **A failure** stops the run at that step; the steps after it don't run (what Radial does is unknown, RU3). An error toast near where the wheel was says "Couldn't finish {name}" over one plain sentence, such as "That app wouldn't open.", "The shell script stopped with an error." or "That window wouldn't move." A program a step starts gets 60 s: "A step was still going after a minute, so Grape stopped it." A run that finishes shows nothing, unless a Show a notice step says something.
+- **[Grape]** **Pause** closes an open Shortcuts wheel, stops a running shortcut (its program too) and lets go of the hotkey. It doesn't stop a conversion. Quit stops a running shortcut as well.
+- **[Grape]** **A drag always wins.** While an OS file drag is going on (Dragging and WheelOpen in §1, and after its Esc until the button goes up) the hotkey does nothing. A file drag that starts while a Shortcuts wheel is open closes that wheel, and the drag carries on as from Idle. So does any drag that reaches the overlay.
+- **[Grape]** **Watchdogs:** a Shortcuts wheel the overlay hasn't painted 1 s after the hotkey closes. So does one with no key or pointer input for 30 s (§9). Neither runs anything.
+- **[Grape]** **Nothing the user typed is logged:** no name, text, script, link or path. The log names a picked segment by its number and a step by its kind.
