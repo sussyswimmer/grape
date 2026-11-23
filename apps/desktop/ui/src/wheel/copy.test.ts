@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import type { KeyNames, UiSegment } from "../shared/events";
-import { EMPTY_COPY, emptyMessage, PENDING_LABEL, wheelLabel, withKeyNames } from "./copy";
+import type { KeyNames, ShortcutSegment, UiSegment } from "../shared/events";
+import {
+  EMPTY_COPY,
+  emptyMessage,
+  PENDING_LABEL,
+  segmentName,
+  SHORTCUTS_EMPTY,
+  wheelLabel,
+  withKeyNames,
+} from "./copy";
 
 const WINDOWS: KeyNames = { conversions: "Shift", tools: "Ctrl", actions: "Alt" };
 
@@ -14,6 +22,20 @@ function segment(index: number): UiSegment {
     labelY: 0,
     title: "PNG",
     entry: { kind: "convert", key: "png" },
+  };
+}
+
+function shortcut(index: number): ShortcutSegment {
+  return {
+    index,
+    center: 0,
+    start: 0,
+    end: 0,
+    labelX: 0,
+    labelY: 0,
+    title: "Save",
+    icon: { kind: "none" },
+    group: false,
   };
 }
 
@@ -84,6 +106,42 @@ describe("wheelLabel", () => {
         segments: [segment(0), segment(1), segment(2)],
       }),
     ).toBe("Convert wheel, 3 choices");
+  });
+});
+
+describe("the Shortcuts wheel's words", () => {
+  it("says an empty menu has nothing yet, and where to add some", () => {
+    expect(SHORTCUTS_EMPTY).toBe("No shortcuts here yet. Add some in Settings.");
+  });
+
+  it("names no key in the empty message (the hotkey is the user's own)", () => {
+    expect(SHORTCUTS_EMPTY).not.toMatch(/Shift|Ctrl|Alt|Command|Control|Option|\{/);
+  });
+
+  it("names the wheel, the open group and how many choices it has", () => {
+    expect(
+      wheelLabel("shortcuts", { kind: "shortcuts", dense: false, trail: [], segments: [] }),
+    ).toBe("Shortcuts wheel, no choices");
+    expect(
+      wheelLabel("shortcuts", { kind: "shortcuts", dense: false, trail: [], segments: [shortcut(0)] }),
+    ).toBe("Shortcuts wheel, 1 choice");
+    expect(
+      wheelLabel("shortcuts", {
+        kind: "shortcuts",
+        dense: false,
+        trail: ["Work", "Edit"],
+        segments: [shortcut(0), shortcut(1)],
+      }),
+    ).toBe("Shortcuts wheel, Edit, 2 choices");
+    expect(
+      wheelLabel("shortcuts", { kind: "shortcuts", dense: false, trail: ["Edit"], segments: [] }),
+    ).toBe("Shortcuts wheel, Edit, no choices");
+  });
+
+  it("says group in words after a group's name", () => {
+    expect(segmentName("Tidy up", true)).toBe("Tidy up, group");
+    expect(segmentName("Tidy up", false)).toBe("Tidy up");
+    expect(segmentName("", true)).toBe(", group");
   });
 });
 

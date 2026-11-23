@@ -158,7 +158,7 @@ export function wrapLines(text: string, maxChars: number, maxLines: number): str
  * hangul, fullwidth forms and emoji.
  */
 const WIDE =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\p{Emoji_Presentation}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6\ufe0f\u20e3]/u;
+  /[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Hangul}\p{Emoji_Presentation}\uff01-\uff60\uffe0-\uffe6\ufe0f\u20e3]/u;
 
 /**
  * User-typed text as the units a line may break between: whole characters
@@ -174,9 +174,14 @@ export function textUnits(text: string): string[] {
   return Array.from(text);
 }
 
+/** How wide one unit draws, in Latin-letter widths. */
+function unitCells(unit: string): number {
+  return WIDE.test(unit) ? 2 : 1;
+}
+
 /** How wide `text` draws, in Latin-letter widths: a wide unit counts 2. */
 export function textCells(text: string): number {
-  return textUnits(text).reduce((sum, unit) => sum + (WIDE.test(unit) ? 2 : 1), 0);
+  return textUnits(text).reduce((sum, unit) => sum + unitCells(unit), 0);
 }
 
 /**
@@ -198,15 +203,16 @@ export function wrapCells(text: string, maxCells: number, maxLines: number): str
   };
   for (const word of words) {
     const space = current === "" ? 0 : 1;
-    const width = textCells(word);
+    const units = textUnits(word);
+    const width = units.reduce((sum, unit) => sum + unitCells(unit), 0);
     if (used + space + width <= maxCells) {
       current = space === 0 ? word : `${current} ${word}`;
       used += space + width;
       continue;
     }
     endLine();
-    for (const unit of textUnits(word)) {
-      const cells = textCells(unit);
+    for (const unit of units) {
+      const cells = unitCells(unit);
       if (used > 0 && used + cells > maxCells) {
         endLine();
       }
@@ -221,12 +227,23 @@ export function wrapCells(text: string, maxCells: number, maxLines: number): str
   if (lines.length <= maxLines) {
     return lines;
   }
-  const kept = lines.slice(0, maxLines);
-  const units = textUnits(kept[maxLines - 1] ?? "");
-  while (units.length > 0 && textCells(units.join("")) + 1 > maxCells) {
-    units.pop();
+  // The last line takes as much of what is left as fits, then "…". Every
+  // line is a piece of the words joined by single spaces, in order.
+  const kept = lines.slice(0, maxLines - 1);
+  let rest = words.join(" ");
+  for (const line of kept) {
+    rest = rest.slice(line.length).trimStart();
   }
-  kept[maxLines - 1] = `${units.join("").trimEnd()}${ELLIPSIS}`;
+  let last = "";
+  let room = maxCells - 1;
+  for (const unit of textUnits(rest)) {
+    room -= unitCells(unit);
+    if (room < 0) {
+      break;
+    }
+    last += unit;
+  }
+  kept.push(`${last.trimEnd()}${ELLIPSIS}`);
   return kept;
 }
 
@@ -349,8 +366,10 @@ export function iconArt(icon: WheelIcon): IconArt | null {
     }
     case "emoji": {
       let text = "";
+      let cells = 0;
       for (const unit of textUnits(icon.value.trim())) {
-        if (text !== "" && textCells(text + unit) > TEXT.emojiCells) {
+        cells += unitCells(unit);
+        if (text !== "" && cells > TEXT.emojiCells) {
           break;
         }
         text += unit;

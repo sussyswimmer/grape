@@ -5,6 +5,7 @@ import {
   filletAngle,
   filletRadius,
   formatNumber,
+  groupMarkPath,
   labelAnchor,
   segmentCorners,
   segmentPath,
@@ -566,6 +567,83 @@ describe("segmentPath", () => {
     expect(segmentPath({ center: 0 }, 0, G)).toBe("");
     expect(segmentPath({ center: 0 }, 4, { ...G, gap: Number.NaN })).toBe("");
     expect(segmentPath({ center: 0 }, 1, { ...G, outerR: 1 })).toBe("");
+  });
+});
+
+describe("groupMarkPath", () => {
+  /** The arc's two ends and its radius, read back from the path. */
+  function parts(d: string): { from: Vec; to: Vec; r: number; flags: string } {
+    const match = /^M (\S+) (\S+) A (\S+) (\S+) 0 (\d) (\d) (\S+) (\S+)$/.exec(d);
+    if (match === null) throw new Error(`not one arc: "${d}"`);
+    const [, x0, y0, rx, ry, large, sweep, x1, y1] = match;
+    expect(rx).toBe(ry);
+    return {
+      from: { x: Number(x0), y: Number(y0) },
+      to: { x: Number(x1), y: Number(y1) },
+      r: Number(rx),
+      flags: `${large}${sweep}`,
+    };
+  }
+
+  /** A screen point's math angle. */
+  function angleOf(p: Vec): number {
+    return Math.atan2(-p.y, p.x);
+  }
+
+  /** The signed turn from angle `a` to angle `b`, in −π..π. */
+  function turn(a: number, b: number): number {
+    return Math.atan2(Math.sin(b - a), Math.cos(b - a));
+  }
+
+  it("is one short arc on the backdrop's rim, between the ring and the backdrop's edge", () => {
+    const r = (G.outerR + G.backdropR) / 2;
+    for (const n of NS) {
+      for (const seg of layout(n)) {
+        const mark = parts(groupMarkPath(seg, n, G));
+        expect(mark.r).toBeCloseTo(r, 6);
+        expect(norm(mark.from)).toBeCloseTo(r, 4);
+        expect(norm(mark.to)).toBeCloseTo(r, 4);
+        expect(mark.r).toBeGreaterThan(G.outerR);
+        expect(mark.r).toBeLessThan(G.backdropR);
+        // A minor arc, clockwise on screen like the segment's own outer arc.
+        expect(mark.flags).toBe("01");
+      }
+    }
+  });
+
+  it("is centered on its segment and narrower than it", () => {
+    for (const n of NS) {
+      for (const seg of layout(n)) {
+        const mark = parts(groupMarkPath(seg, n, G));
+        const before = turn(seg.center, angleOf(mark.from));
+        const after = turn(seg.center, angleOf(mark.to));
+        expect(before).toBeGreaterThan(0);
+        expect(before).toBeCloseTo(-after, 5);
+        expect(before).toBeLessThanOrEqual(Math.PI / n / 2 + EPS);
+        expect(before).toBeLessThanOrEqual(0.12 + EPS);
+      }
+    }
+  });
+
+  it("narrows with the segments once they are thinner than the mark", () => {
+    const [seg] = layout(20);
+    if (seg === undefined) throw new Error("no segment");
+    const mark = parts(groupMarkPath(seg, 20, G));
+    expect(turn(seg.center, angleOf(mark.from))).toBeCloseTo(Math.PI / 40, 5);
+  });
+
+  it("reads only the center angle", () => {
+    const [seg] = layout(6);
+    if (seg === undefined) throw new Error("no segment");
+    expect(groupMarkPath({ center: seg.center }, 6, G)).toBe(groupMarkPath(seg, 6, G));
+  });
+
+  it("returns an empty path for geometry it can't draw", () => {
+    expect(groupMarkPath({ center: 0 }, 0, G)).toBe("");
+    expect(groupMarkPath({ center: Number.NaN }, 4, G)).toBe("");
+    expect(groupMarkPath({ center: 0 }, 4, { ...G, outerR: G.innerR })).toBe("");
+    expect(groupMarkPath({ center: 0 }, 4, { ...G, backdropR: Number.POSITIVE_INFINITY })).toBe("");
+    expect(groupMarkPath({ center: 0 }, 1000, G)).toBe("");
   });
 });
 

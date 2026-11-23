@@ -21,9 +21,6 @@
 //! type here that holds one has a hand-written `Debug` that prints kinds
 //! and counts only, and no refusal or report repeats what was typed.
 
-// Nothing calls this yet: the commands, the session and the runner do.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -1693,6 +1690,23 @@ pub fn set_target(config: &mut Config, step: Id, target: &Target) -> Result<(), 
     };
     steps[at].kind = kind;
     Ok(())
+}
+
+/// Which picker step `step` gets: the app picker for an Open app step, the
+/// file and folder one for an Open file step. Refused for any other kind
+/// of step, since only those two have a target.
+pub fn pick_kind(config: &Config, step: Id) -> Result<PickKind, &'static str> {
+    let kind = config
+        .steps()
+        .into_iter()
+        .find(|own| own.id == step)
+        .map(|own| own.kind.id())
+        .ok_or(STEP_GONE)?;
+    match kind {
+        StepKindId::OpenApp => Ok(PickKind::App),
+        StepKindId::OpenFile => Ok(PickKind::FileOrFolder),
+        _ => Err(KIND_MISMATCH),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -3563,7 +3577,7 @@ mod tests {
     // ----- defaults -----
 
     #[test]
-    fn the_limits_are_the_design_notes() {
+    fn the_limits_are_the_ones_the_page_is_told() {
         assert_eq!(
             json_of(&LIMITS),
             json!({
@@ -3642,7 +3656,7 @@ mod tests {
     }
 
     #[test]
-    fn the_stored_form_is_the_design_notes() {
+    fn the_stored_form_is_one_line_in_this_order() {
         let mut config = Config::defaults(MAC);
         let ring = &mut config.menus[0].items;
         ring.truncate(1);
@@ -4717,6 +4731,28 @@ mod tests {
         assert_eq!(why, KIND_MISMATCH);
         let why = refused(&mut config, |c| set_target(c, 999, &safari));
         assert_eq!(why, STEP_GONE);
+    }
+
+    #[test]
+    fn each_open_step_gets_its_own_picker() {
+        let (mut config, menu) = empty();
+        let (_, app) = shortcut_with(&mut config, menu, StepKindId::OpenApp);
+        let (_, file) = shortcut_with(&mut config, menu, StepKindId::OpenFile);
+        let group = add_item(&mut config, menu, None, NewItem::Group).unwrap();
+        let inner = add_item(&mut config, menu, Some(group), NewItem::Steps).unwrap();
+        let nested = add_step(&mut config, inner, StepKindId::OpenFile).unwrap();
+        assert_eq!(pick_kind(&config, app), Ok(PickKind::App));
+        assert_eq!(pick_kind(&config, file), Ok(PickKind::FileOrFolder));
+        assert_eq!(pick_kind(&config, nested), Ok(PickKind::FileOrFolder));
+        assert_eq!(pick_kind(&config, u64::MAX), Err(STEP_GONE));
+        let others = add_item(&mut config, menu, None, NewItem::Steps).unwrap();
+        for kind in StepKindId::ALL {
+            if matches!(kind, StepKindId::OpenApp | StepKindId::OpenFile) {
+                continue;
+            }
+            let step = add_step(&mut config, others, kind).unwrap();
+            assert_eq!(pick_kind(&config, step), Err(KIND_MISMATCH), "{kind:?}");
+        }
     }
 
     #[test]

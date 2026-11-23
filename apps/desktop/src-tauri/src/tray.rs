@@ -7,6 +7,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::controller::Input;
+use crate::shortcuts::{self, Why};
 use crate::wheel::WheelInputs;
 use crate::{jobs, panel, ui_windows, GrapeState};
 
@@ -56,6 +57,7 @@ fn on_menu_event(app: &AppHandle, event: &MenuEvent, pause: &PauseItem) {
             // At once, so a long job starts stopping before the exit
             // request goes round the event loop. `RunEvent::Exit` waits.
             jobs::cancel_all(app);
+            shortcuts::cancel_run(app, Why::Quitting);
             app.exit(0);
         }
         #[cfg(debug_assertions)]
@@ -78,6 +80,9 @@ fn toggle_pause(app: &AppHandle, pause: &PauseItem) {
     if paused {
         panel::cancel_open(app, "paused");
     }
+    // A pause stops the running shortcut and lets go of the wheel's hot
+    // key; a resume binds it again.
+    shortcuts::set_paused(app, paused);
 
     if let Err(err) = pause.set_checked(paused) {
         log::warn!("could not update the Pause check mark: {err}");

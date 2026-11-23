@@ -23,6 +23,23 @@ fn main() {
             "settings_set_toggle",
             "settings_set_terminal",
             "settings_dismiss_welcome",
+            "shortcuts_get",
+            "shortcuts_set_enabled",
+            "shortcuts_set_hotkey",
+            "shortcuts_set_opens_at",
+            "shortcuts_request_access",
+            "shortcuts_add_menu",
+            "shortcuts_remove_menu",
+            "shortcuts_set_menu_everywhere",
+            "shortcuts_add_item",
+            "shortcuts_set_item",
+            "shortcuts_remove_item",
+            "shortcuts_move_item",
+            "shortcuts_add_step",
+            "shortcuts_set_step",
+            "shortcuts_remove_step",
+            "shortcuts_move_step",
+            "shortcuts_pick_target",
         ]));
     if let Err(err) = tauri_build::try_build(attributes) {
         panic!("tauri-build failed: {err:#}");

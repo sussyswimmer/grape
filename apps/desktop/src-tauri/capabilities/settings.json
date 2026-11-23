@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "settings",
-  "description": "The Settings window reads and changes Grape's settings through the settings_* commands. It never sends a path: folders are picked on the Rust side. It can't call the store or autostart plugins directly.",
+  "description": "The Settings window reads and changes Grape's settings through the settings_* commands, and edits the Shortcuts wheel's menus, shortcuts and steps through the shortcuts_* commands. It never sends a path: folders, apps and files are picked on the Rust side. It does send what the user typed for a shortcut (names, text, scripts, links). No command runs a shortcut. It can't call the store or autostart plugins directly.",
   "windows": ["settings"],
   "permissions": [
     "allow-settings-get",
@@ -11,6 +11,23 @@
     "allow-settings-use-default-fallback",
     "allow-settings-set-toggle",
     "allow-settings-set-terminal",
-    "allow-settings-dismiss-welcome"
+    "allow-settings-dismiss-welcome",
+    "allow-shortcuts-get",
+    "allow-shortcuts-set-enabled",
+    "allow-shortcuts-set-hotkey",
+    "allow-shortcuts-set-opens-at",
+    "allow-shortcuts-request-access",
+    "allow-shortcuts-add-menu",
+    "allow-shortcuts-remove-menu",
+    "allow-shortcuts-set-menu-everywhere",
+    "allow-shortcuts-add-item",
+    "allow-shortcuts-set-item",
+    "allow-shortcuts-remove-item",
+    "allow-shortcuts-move-item",
+    "allow-shortcuts-add-step",
+    "allow-shortcuts-set-step",
+    "allow-shortcuts-remove-step",
+    "allow-shortcuts-move-step",
+    "allow-shortcuts-pick-target"
   ]
 }

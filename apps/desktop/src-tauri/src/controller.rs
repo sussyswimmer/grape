@@ -28,19 +28,35 @@
 //! can't read the key itself (`docs/DECISIONS.md` D7). A refused drop
 //! brings its Leave within [`REFUSED_LEAVE_WINDOW`] of the button-up; a
 //! button-up later than that after a Leave follows Esc, so nothing runs.
+//!
+//! The Shortcuts wheel (`docs/design/m10-shortcuts-wheel.md` §5) needs no
+//! drag: a hot key opens it while nothing else is going on, and the pointer
+//! watch reports from then on. It is one more state here. What it holds
+//! and how it answers a key or a click is [`Session`]'s; this module turns
+//! each of its [`Decision`]s into effects. A drag always wins over it, and
+//! it sends [`Effect::Track`], [`Effect::GiveBack`], [`Effect::RunShortcut`]
+//! and [`Effect::StillRunning`], which no drag wheel ever does.
 
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use grape_core::{
-    clamp_anchor, hit_test, wheel_content, Features, Platform, Point, SelectionItem, WheelContent,
-    WheelEntry, WheelMode, GEOMETRY,
+    wheel_content, Features, Platform, Point, SelectionItem, WheelContent, WheelEntry, WheelMode,
+    GEOMETRY,
 };
+use grape_platform::shortcuts::{HotkeyId, HotkeySignal, PointerSignal, PressContext};
 use grape_platform::{DisplayBounds, DragSignal, DropEvent, Modifiers, Rect};
 use serde::{Deserialize, Serialize};
 
-use crate::events::{CloseReason, KeyNames, UiContent, WheelClose, WheelHighlight, WheelOpen};
+use crate::events::{
+    CloseReason, KeyNames, UiContent, UiMode, WheelClose, WheelHighlight, WheelOpen,
+};
+use crate::shortcuts::model::{ShortcutRun, Snapshot};
+use crate::shortcuts::session::{
+    place_for, Decision, Expired, Session, WheelPlace, PAINT_DEADLINE,
+};
 
 /// Hide the overlay if nothing happens for this long while it's open
 /// (`docs/INTERACTION_SPEC.md` §9).
@@ -265,6 +281,16 @@ pub enum Input {
         /// Whether the overlay plays its highlight tick.
         sounds: bool,
     },
+    /// From the hot key monitor.
+    Hotkey(HotkeySignal),
+    /// From the pointer watch, which runs only between
+    /// [`Effect::Track`]`(true)` and `(false)`.
+    Pointer(PointerSignal),
+    /// The Shortcuts wheel's switch, where it opens and its menus. Sent at
+    /// start and after every change; an open wheel isn't redrawn.
+    Shortcuts(Arc<Snapshot>),
+    /// The run a [`Effect::RunShortcut`] started is over, however it ended.
+    RunEnded,
 }
 
 /// A drop on a segment: what to run, on what.
@@ -338,6 +364,24 @@ pub enum Effect {
     Run(RunRequest),
     /// A line for the log.
     Log(String),
+    /// Start (`true`) or stop the pointer watch, and bind or unbind the
+    /// Escape and Confirm hot keys. Only the Shortcuts wheel sends it.
+    Track(bool),
+    /// Give the front back to the app the user was in, queued after the
+    /// overlay's hide. Only the Shortcuts wheel sends it.
+    GiveBack,
+    /// Run a picked shortcut, then answer with [`Input::RunEnded`]. Until
+    /// that answer the hot key opens no wheel. A shortcut with nothing to
+    /// run yet comes this way too; the runner says so.
+    RunShortcut(ShortcutRun),
+    /// The hot key went down while a shortcut was still running: say so
+    /// near where the wheel would have opened.
+    StillRunning {
+        /// Where the wheel's center would have been, in global coordinates.
+        anchor: (i32, i32),
+        /// The display under the cursor.
+        display: DisplayBounds,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -360,17 +404,17 @@ enum State {
     /// wheel, not a file drag, a drop, Pause): stay out of the way until the
     /// drag ends.
     Dismissed,
+    /// The Shortcuts wheel is open. No drag is going on. Only
+    /// [`WheelController::close`] may replace this state.
+    Shortcuts(Box<Session>),
 }
 
 #[derive(Debug, Clone)]
 struct OpenWheel {
     seq: u64,
     mode: WheelMode,
-    display: DisplayBounds,
-    /// `display.scale`, made safe to divide by.
-    scale: f64,
-    /// Logical pixels from the monitor's top-left.
-    anchor: Point,
+    /// The display, its safe scale and the anchor.
+    place: WheelPlace,
     held: Modifiers,
     highlight: Option<usize>,
     /// From the drop target's Enter; `None` while pending.
@@ -407,7 +451,7 @@ impl OpenWheel {
 
     /// `true` while the last cursor position is on this wheel's monitor.
     fn cursor_on_monitor(&self) -> bool {
-        contains(self.display.monitor, self.cursor)
+        contains(self.place.display.monitor, self.cursor)
     }
 
     /// `true` if a pending Leave came at most [`REFUSED_LEAVE_WINDOW`]
@@ -430,28 +474,8 @@ impl OpenWheel {
         }
     }
 
-    /// A global point as a logical offset from the anchor (y
-    /// down), which is what `hit_test` takes.
-    fn offset(&self, x: i32, y: i32) -> Point {
-        let monitor = self.display.monitor;
-        Point {
-            x: f64::from(x - monitor.x) / self.scale - self.anchor.x,
-            y: f64::from(y - monitor.y) / self.scale - self.anchor.y,
-        }
-    }
-
     fn hit(&self, x: i32, y: i32) -> Option<usize> {
-        let offset = self.offset(x, y);
-        hit_test(offset.x, offset.y, self.segment_count())
-    }
-
-    /// The anchor in global coordinates.
-    fn anchor_global(&self) -> (i32, i32) {
-        let monitor = self.display.monitor;
-        (
-            monitor.x + (self.anchor.x * self.scale).round() as i32,
-            monitor.y + (self.anchor.y * self.scale).round() as i32,
-        )
+        self.place.hit(x, y, self.segment_count())
     }
 }
 
@@ -462,7 +486,14 @@ pub struct WheelController<E> {
     config: ControllerConfig,
     state: State,
     paused: bool,
+    /// The last wheel's number. Drag wheels and the Shortcuts wheel share
+    /// the counter.
     seq: u64,
+    /// The Shortcuts wheel's settings; `None` until the first arrive.
+    shortcuts: Option<Arc<Snapshot>>,
+    /// A picked shortcut is running: from [`Effect::RunShortcut`] until
+    /// [`Input::RunEnded`].
+    running: bool,
 }
 
 impl<E: Env> WheelController<E> {
@@ -474,10 +505,12 @@ impl<E: Env> WheelController<E> {
             state: State::Idle,
             paused: false,
             seq: 0,
+            shortcuts: None,
+            running: false,
         }
     }
 
-    /// `true` while the wheel is open.
+    /// `true` while a drag wheel is open. The Shortcuts wheel doesn't count.
     pub fn is_open(&self) -> bool {
         matches!(self.state, State::Open(_))
     }
@@ -490,6 +523,13 @@ impl<E: Env> WheelController<E> {
             Input::Painted { seq } => self.on_painted(seq, now),
             Input::SetPaused(paused) => self.on_paused(paused),
             Input::Configure { keys, sounds } => self.on_configure(keys, sounds),
+            Input::Hotkey(signal) => self.on_hotkey(signal, now),
+            Input::Pointer(signal) => self.on_pointer(signal, now),
+            Input::Shortcuts(snapshot) => self.on_shortcuts(snapshot),
+            Input::RunEnded => {
+                self.running = false;
+                Vec::new()
+            }
         };
         out.extend(self.tick(now));
         out
@@ -497,8 +537,10 @@ impl<E: Env> WheelController<E> {
 
     /// The next time [`tick`](Self::tick) has work, if any.
     pub fn next_deadline(&self) -> Option<Instant> {
-        let State::Open(open) = &self.state else {
-            return None;
+        let open = match &self.state {
+            State::Open(open) => open,
+            State::Shortcuts(session) => return Some(session.deadline(WATCHDOG)),
+            State::Idle | State::Dragging { .. } | State::Dismissed => return None,
         };
         [
             Some(open.last_event + WATCHDOG),
@@ -515,10 +557,32 @@ impl<E: Env> WheelController<E> {
     /// drop came (under `release_fallback` that may run the highlighted
     /// segment instead), the drag left with the button down and didn't
     /// come back (under `leave_ends_drag`), no files arrived, or the
-    /// watchdog fired.
+    /// watchdog fired. A Shortcuts wheel closes when the overlay never
+    /// painted it, or when the watchdog fired.
     pub fn tick(&mut self, now: Instant) -> Vec<Effect> {
-        let State::Open(open) = &self.state else {
-            return Vec::new();
+        let open = match &self.state {
+            State::Open(open) => open,
+            State::Shortcuts(session) => {
+                let Some(why) = session.expired(now, WATCHDOG) else {
+                    return Vec::new();
+                };
+                let log = match why {
+                    Expired::NotPainted => format!(
+                        "wheel {}: the overlay didn't paint it within {} ms of the hot key",
+                        session.seq(),
+                        PAINT_DEADLINE.as_millis()
+                    ),
+                    Expired::Quiet => format!(
+                        "wheel {}: no key or pointer input for {} s",
+                        session.seq(),
+                        WATCHDOG.as_secs()
+                    ),
+                };
+                let mut out = self.close(CloseReason::Watchdog, State::Idle);
+                out.push(Effect::Log(log));
+                return out;
+            }
+            State::Idle | State::Dragging { .. } | State::Dismissed => return Vec::new(),
         };
         let (reason, next) = if open.ended_at.is_some_and(|at| now >= at + DROP_GRACE) {
             if let Some((run, log)) = release_run(&self.config, open) {
@@ -547,20 +611,32 @@ impl<E: Env> WheelController<E> {
         self.close(reason, next)
     }
 
-    /// Closes the open wheel (if any) and moves to `next`.
+    /// Closes the open wheel (if any) and moves to `next`. The one way out
+    /// of both wheel states: a Shortcuts wheel also stops the pointer watch
+    /// and hands the front back, in that order after the hide.
     fn close(&mut self, reason: CloseReason, next: State) -> Vec<Effect> {
         let previous = std::mem::replace(&mut self.state, next);
-        let State::Open(open) = previous else {
-            return Vec::new();
-        };
-        vec![
-            Effect::Close(WheelClose {
-                seq: open.seq,
-                reason,
-            }),
-            Effect::HideOverlay,
-            Effect::Log(format!("wheel {} closed: {reason:?}", open.seq)),
-        ]
+        match previous {
+            State::Open(open) => vec![
+                Effect::Close(WheelClose {
+                    seq: open.seq,
+                    reason,
+                }),
+                Effect::HideOverlay,
+                Effect::Log(format!("wheel {} closed: {reason:?}", open.seq)),
+            ],
+            State::Shortcuts(session) => vec![
+                Effect::Close(WheelClose {
+                    seq: session.seq(),
+                    reason,
+                }),
+                Effect::HideOverlay,
+                Effect::Track(false),
+                Effect::GiveBack,
+                Effect::Log(format!("wheel {} closed: {reason:?}", session.seq())),
+            ],
+            State::Idle | State::Dragging { .. } | State::Dismissed => Vec::new(),
+        }
     }
 
     fn on_signal(&mut self, signal: DragSignal, now: Instant) -> Vec<Effect> {
@@ -575,8 +651,13 @@ impl<E: Env> WheelController<E> {
                         cursor: None,
                     }
                 };
-                // A wheel still open here missed its button-up.
-                self.close(CloseReason::DragEnded, next)
+                // A wheel still open here missed its button-up. A Shortcuts
+                // wheel gives way: a drag always wins.
+                let reason = match self.state {
+                    State::Shortcuts(_) => CloseReason::Cancel,
+                    _ => CloseReason::DragEnded,
+                };
+                self.close(reason, next)
             }
             DragSignal::Moved { x, y } => match &mut self.state {
                 State::Dragging { cursor, .. } => {
@@ -597,7 +678,7 @@ impl<E: Env> WheelController<E> {
                     }
                     Vec::new()
                 }
-                State::Idle | State::Dismissed => Vec::new(),
+                State::Idle | State::Dismissed | State::Shortcuts(_) => Vec::new(),
             },
             DragSignal::Modifiers(held) => self.on_modifiers(held, now),
             DragSignal::Escape => match self.state {
@@ -611,7 +692,8 @@ impl<E: Env> WheelController<E> {
                         "Esc during the drag: no wheel until the button goes up".to_owned(),
                     )]
                 }
-                State::Idle | State::Dismissed => Vec::new(),
+                // The Shortcuts wheel hears Esc through its own hot key.
+                State::Idle | State::Dismissed | State::Shortcuts(_) => Vec::new(),
             },
             DragSignal::Ended => {
                 let release_fallback = self.config.release_fallback;
@@ -644,7 +726,9 @@ impl<E: Env> WheelController<E> {
                         out.extend(log.map(Effect::Log));
                         out
                     }
-                    _ => {
+                    // A drag ended that never said it started.
+                    State::Shortcuts(_) => self.close(CloseReason::Cancel, State::Idle),
+                    State::Idle | State::Dragging { .. } | State::Dismissed => {
                         self.state = State::Idle;
                         Vec::new()
                     }
@@ -695,7 +779,7 @@ impl<E: Env> WheelController<E> {
                     _ => Vec::new(),
                 }
             }
-            State::Idle | State::Dismissed => Vec::new(),
+            State::Idle | State::Dismissed | State::Shortcuts(_) => Vec::new(),
         }
     }
 
@@ -711,26 +795,13 @@ impl<E: Env> WheelController<E> {
                 "wheel not opened: no display found under ({x}, {y})"
             ))];
         };
-        let scale = sane_scale(display.scale);
+        let place = WheelPlace::at(display, (x, y));
         let monitor = display.monitor;
-        let to_logical = |px: i32, origin: i32| f64::from(px - origin) / scale;
-        let cursor = Point {
-            x: to_logical(x, monitor.x),
-            y: to_logical(y, monitor.y),
-        };
-        let work_area = grape_core::Rect {
-            x: to_logical(display.work_area.x, monitor.x),
-            y: to_logical(display.work_area.y, monitor.y),
-            width: f64::from(display.work_area.width) / scale,
-            height: f64::from(display.work_area.height) / scale,
-        };
         self.seq += 1;
         let open = OpenWheel {
             seq: self.seq,
             mode,
-            display,
-            scale,
-            anchor: clamp_anchor(cursor, work_area),
+            place,
             held,
             highlight: None,
             items: None,
@@ -750,9 +821,9 @@ impl<E: Env> WheelController<E> {
             open.seq,
             monitor.width,
             monitor.height,
-            scale * 100.0,
-            open.anchor.x,
-            open.anchor.y
+            place.scale * 100.0,
+            place.anchor.x,
+            place.anchor.y
         );
         let event = open_event(&self.config, &open);
         self.state = State::Open(Box::new(open));
@@ -764,6 +835,14 @@ impl<E: Env> WheelController<E> {
     }
 
     fn on_drop_event(&mut self, event: DropEvent, now: Instant) -> Vec<Effect> {
+        if matches!(self.state, State::Shortcuts(_)) {
+            // Some drag reached the wheel: it gives way. Nothing else from
+            // the drop target means anything to it.
+            return match event {
+                DropEvent::Enter { .. } => self.close(CloseReason::Cancel, State::Idle),
+                DropEvent::Over { .. } | DropEvent::Leave | DropEvent::Drop { .. } => Vec::new(),
+            };
+        }
         let State::Open(open) = &mut self.state else {
             return vec![Effect::Log(format!(
                 "drop target event with the wheel closed, ignored: {event:?}"
@@ -837,14 +916,14 @@ impl<E: Env> WheelController<E> {
             mode: open.mode,
             segment,
             entry,
-            offset: open.offset(x, y),
+            offset: open.place.offset(x, y),
         };
         let run = entry.map(|entry| RunRequest {
             seq: open.seq,
             items: self.env.classify(&report.paths),
             entry,
-            anchor: open.anchor_global(),
-            display: open.display,
+            anchor: open.place.anchor_global(),
+            display: open.place.display,
         });
         let next = if open.ended_at.is_some() {
             State::Idle
@@ -890,6 +969,15 @@ impl<E: Env> WheelController<E> {
                     "wheel {seq} painted {ms:.0} ms after the key (target: under 100 ms)"
                 ))]
             }
+            State::Shortcuts(session) if session.seq() == seq => {
+                let Some(after) = session.painted(now) else {
+                    return Vec::new();
+                };
+                let ms = after.as_secs_f64() * 1000.0;
+                vec![Effect::Log(format!(
+                    "wheel {seq} painted {ms:.0} ms after the hot key (target: under 100 ms)"
+                ))]
+            }
             _ => Vec::new(),
         }
     }
@@ -915,10 +1003,146 @@ impl<E: Env> WheelController<E> {
             return Vec::new();
         }
         let next = match self.state {
-            State::Idle => State::Idle,
+            // No drag is behind a Shortcuts wheel, so nothing is left to
+            // sit out.
+            State::Idle | State::Shortcuts(_) => State::Idle,
             _ => State::Dismissed,
         };
         self.close(CloseReason::Paused, next)
+    }
+
+    /// New Shortcuts settings. An open wheel keeps the ring it opened with.
+    fn on_shortcuts(&mut self, snapshot: Arc<Snapshot>) -> Vec<Effect> {
+        let log = format!(
+            "shortcuts wheel: {}, {} menu(s)",
+            if snapshot.enabled { "on" } else { "off" },
+            snapshot.menus.len()
+        );
+        self.shortcuts = Some(snapshot);
+        vec![Effect::Log(log)]
+    }
+
+    fn on_hotkey(&mut self, signal: HotkeySignal, now: Instant) -> Vec<Effect> {
+        match &mut self.state {
+            State::Shortcuts(session) => {
+                let decision = session.hotkey(&signal, now);
+                self.decide(decision)
+            }
+            State::Idle => match signal {
+                HotkeySignal::Pressed(HotkeyId::Open, context) => self.open_shortcuts(context, now),
+                // In flight when the wheel closed.
+                HotkeySignal::Pressed(HotkeyId::Escape | HotkeyId::Confirm, _)
+                | HotkeySignal::Released(_) => Vec::new(),
+            },
+            // A drag always wins.
+            State::Dragging { .. } | State::Open(_) | State::Dismissed => Vec::new(),
+        }
+    }
+
+    fn on_pointer(&mut self, signal: PointerSignal, now: Instant) -> Vec<Effect> {
+        let State::Shortcuts(session) = &mut self.state else {
+            // In flight when the wheel closed, or a drag is going on.
+            return Vec::new();
+        };
+        let decision = session.pointer(signal, now);
+        self.decide(decision)
+    }
+
+    /// The hot key went down with nothing else going on: opens the
+    /// Shortcuts wheel, or says in the log why not.
+    fn open_shortcuts(&mut self, context: PressContext, now: Instant) -> Vec<Effect> {
+        let refused = |why: &str| vec![Effect::Log(format!("shortcuts wheel not opened: {why}"))];
+        let Some(snapshot) = self.shortcuts.as_ref().filter(|snapshot| snapshot.enabled) else {
+            return refused("it's switched off");
+        };
+        if self.paused {
+            return refused("Grape is paused");
+        }
+        if context.button_down {
+            return refused("a mouse button is down");
+        }
+        let Some((x, y)) = context.cursor else {
+            return refused("the cursor's position is unknown");
+        };
+        let Some(display) = self.env.display_at(x, y) else {
+            return refused(&format!("no display found under ({x}, {y})"));
+        };
+        if self.running {
+            return vec![
+                Effect::StillRunning {
+                    anchor: place_for(snapshot.opens_at, display, (x, y)).anchor_global(),
+                    display,
+                },
+                Effect::Log("shortcuts wheel not opened: a shortcut is still running".to_owned()),
+            ];
+        }
+        self.seq += 1;
+        let session = Session::open(self.seq, snapshot, context.front, display, (x, y), now);
+        let place = session.place();
+        let monitor = display.monitor;
+        let log = format!(
+            "wheel {} open: Shortcuts at ({x}, {y}) on a {}×{} monitor at {:.0} % scale; anchor ({:.0}, {:.0}); {} segment(s)",
+            session.seq(),
+            monitor.width,
+            monitor.height,
+            place.scale * 100.0,
+            place.anchor.x,
+            place.anchor.y,
+            session.segment_count()
+        );
+        let event = shortcuts_event(&self.config, &session);
+        self.state = State::Shortcuts(Box::new(session));
+        vec![
+            Effect::Open(event),
+            Effect::ShowOverlay { monitor },
+            Effect::Track(true),
+            Effect::Log(log),
+        ]
+    }
+
+    /// Carries out what the open Shortcuts wheel decided.
+    fn decide(&mut self, decision: Decision) -> Vec<Effect> {
+        let State::Shortcuts(session) = &self.state else {
+            return Vec::new();
+        };
+        let seq = session.seq();
+        match decision {
+            Decision::Nothing => Vec::new(),
+            Decision::Highlight(index) => {
+                vec![Effect::Highlight(WheelHighlight { seq, index })]
+            }
+            Decision::Redraw { highlight } => {
+                let mut out = vec![Effect::Open(shortcuts_event(&self.config, session))];
+                out.extend(highlight.map(|index| {
+                    Effect::Highlight(WheelHighlight {
+                        seq,
+                        index: Some(index),
+                    })
+                }));
+                out.push(Effect::Log(format!(
+                    "wheel {seq}: {} group(s) open; {} segment(s)",
+                    session.depth(),
+                    session.segment_count()
+                )));
+                out
+            }
+            Decision::Close(reason) => self.close(reason, State::Idle),
+            Decision::Pick(pick) => {
+                let mut out = self.close(CloseReason::Picked, State::Idle);
+                out.push(Effect::Log(format!(
+                    "wheel {seq}: picked segment {}{}",
+                    pick.index,
+                    if pick.runnable {
+                        ""
+                    } else {
+                        ", which has nothing to run yet"
+                    }
+                )));
+                self.running = true;
+                out.push(Effect::RunShortcut(pick.run));
+                out
+            }
+        }
     }
 }
 
@@ -927,14 +1151,29 @@ fn open_event(config: &ControllerConfig, open: &OpenWheel) -> WheelOpen {
     WheelOpen {
         seq: open.seq,
         mode: open.mode.into(),
-        anchor: open.anchor,
-        scale: open.scale,
+        anchor: open.place.anchor,
+        scale: open.place.scale,
         geometry: GEOMETRY,
         keys: KeyNames::of(config.keys),
         sounds: config.sounds,
         content: open.content.as_ref().map_or(UiContent::Pending, |content| {
             UiContent::from_core(content, config.platform)
         }),
+    }
+}
+
+/// The `wheel://open` payload for an open Shortcuts wheel as it is now.
+fn shortcuts_event(config: &ControllerConfig, session: &Session) -> WheelOpen {
+    let place = session.place();
+    WheelOpen {
+        seq: session.seq(),
+        mode: UiMode::Shortcuts,
+        anchor: place.anchor,
+        scale: place.scale,
+        geometry: GEOMETRY,
+        keys: KeyNames::of(config.keys),
+        sounds: config.sounds,
+        content: session.content(),
     }
 }
 
@@ -978,8 +1217,8 @@ fn release_run(config: &ControllerConfig, open: &OpenWheel) -> Option<(RunReques
         seq: open.seq,
         items,
         entry,
-        anchor: open.anchor_global(),
-        display: open.display,
+        anchor: open.place.anchor_global(),
+        display: open.place.display,
     };
     Some((run, log))
 }
@@ -1002,20 +1241,14 @@ fn contains(rect: Rect, (x, y): (i32, i32)) -> bool {
     x >= left && x < left + i64::from(rect.width) && y >= top && y < top + i64::from(rect.height)
 }
 
-/// A usable scale factor: anything not finite or not positive counts as 1.
-fn sane_scale(scale: f64) -> f64 {
-    if scale.is_finite() && scale > 0.0 {
-        scale
-    } else {
-        1.0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shortcuts::model::{set_opens_at, OpensAt};
+    use crate::shortcuts::session::{fixture, sane_scale, TAP};
     use grape_core::{ActionKey, Format};
-    use grape_platform::mock::scripts;
+    use grape_platform::mock::{scripts, ScriptEvent};
+    use grape_platform::shortcuts::FrontApp;
 
     const NONE: Modifiers = Modifiers::NONE;
     /// How far the clock moves before each input.
@@ -2382,5 +2615,1585 @@ mod tests {
         let expected = format!("Shift+{}", Key::Meta.name());
         assert_eq!(held_names(held), expected);
         assert_eq!(held_names(NONE), "");
+    }
+
+    // Two drag flows with every effect written out. They were pinned
+    // before the Shortcuts wheel existed and must never change with it.
+
+    /// The `wheel://open` a drag wheel sends on the default fake OS.
+    fn drag_open(seq: u64, mode: WheelMode, content: UiContent) -> Effect {
+        Effect::Open(WheelOpen {
+            seq,
+            mode: mode.into(),
+            anchor: Point { x: 400.0, y: 300.0 },
+            scale: 1.0,
+            geometry: GEOMETRY,
+            keys: KeyNames::of(KeyMap::WINDOWS),
+            sounds: true,
+            content,
+        })
+    }
+
+    fn show_default_monitor() -> Effect {
+        Effect::ShowOverlay {
+            monitor: Rect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        }
+    }
+
+    fn log(line: &str) -> Effect {
+        Effect::Log(line.to_owned())
+    }
+
+    #[test]
+    fn a_drop_on_a_segment_sends_exactly_these_effects() {
+        let mut run = png_wheel();
+        run.drop_event(DropEvent::Over { x: 400, y: 216 });
+        run.signals(vec![DragSignal::Ended]);
+        run.drop_event(drop_at(png(), 400, 216));
+        let items = vec![SelectionItem::file(png()[0].clone())];
+        let content = UiContent::from_core(
+            &wheel_content(&items, WheelMode::Conversions, Features::V1_ONLY),
+            Platform::Windows,
+        );
+        let display = FakeEnv::at(0, 0, 1.0).display_at(0, 0).unwrap();
+        assert_eq!(
+            run.effects,
+            vec![
+                drag_open(1, WheelMode::Conversions, UiContent::Pending),
+                show_default_monitor(),
+                log("wheel 1 open: Conversions at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300)"),
+                drag_open(1, WheelMode::Conversions, content),
+                log("wheel 1: 1 item(s) entered; 7 segment(s)"),
+                Effect::Highlight(WheelHighlight {
+                    seq: 1,
+                    index: Some(0),
+                }),
+                Effect::Close(WheelClose {
+                    seq: 1,
+                    reason: CloseReason::Drop,
+                }),
+                Effect::HideOverlay,
+                log("wheel 1 closed: Drop"),
+                log(r"drop on the Conversions wheel: segment 0 (Convert(Jpg)), at (0, -84) from the anchor; 1 item(s): C:\Users\max\Pictures\shot.png"),
+                Effect::Run(RunRequest {
+                    seq: 1,
+                    items,
+                    entry: WheelEntry::Convert(Format::Jpg),
+                    anchor: (400, 300),
+                    display,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn esc_then_a_second_drag_send_exactly_these_effects() {
+        let mut run = Run::new();
+        run.signals(scripts::escape());
+        run.signals(vec![started(), moved(400, 300), keys(Modifiers::CTRL)]);
+        run.painted();
+        run.input(Input::SetPaused(true));
+        run.signals(vec![DragSignal::Ended]);
+        run.input(Input::SetPaused(false));
+        run.signals(scripts::shift_tap());
+        assert_eq!(
+            run.effects,
+            vec![
+                drag_open(1, WheelMode::Conversions, UiContent::Pending),
+                show_default_monitor(),
+                log("wheel 1 open: Conversions at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300)"),
+                Effect::Close(WheelClose {
+                    seq: 1,
+                    reason: CloseReason::Escape,
+                }),
+                Effect::HideOverlay,
+                log("wheel 1 closed: Escape"),
+                drag_open(2, WheelMode::Tools, UiContent::Pending),
+                show_default_monitor(),
+                log("wheel 2 open: Tools at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300)"),
+                log("wheel 2 painted 10 ms after the key (target: under 100 ms)"),
+                Effect::Close(WheelClose {
+                    seq: 2,
+                    reason: CloseReason::Paused,
+                }),
+                Effect::HideOverlay,
+                log("wheel 2 closed: Paused"),
+                drag_open(3, WheelMode::Conversions, UiContent::Pending),
+                show_default_monitor(),
+                log("wheel 3 open: Conversions at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300)"),
+                Effect::Close(WheelClose {
+                    seq: 3,
+                    reason: CloseReason::DragEnded,
+                }),
+                Effect::HideOverlay,
+                log("wheel 3 closed: DragEnded"),
+            ]
+        );
+    }
+
+    // The Shortcuts wheel (`docs/design/m10-shortcuts-wheel.md` §5). The
+    // fixture's ring has four segments, clockwise from the top: "Copy", the
+    // group "Tidy" ("Left" and "Right"), "Later" (nothing to run yet) and
+    // "Paste". The hot key goes down with the cursor at (400, 300).
+
+    const TOP: (i32, i32) = (400, 216);
+    const RIGHT: (i32, i32) = (484, 300);
+    const BOTTOM: (i32, i32) = (400, 384);
+    const LEFT: (i32, i32) = (316, 300);
+    /// In the dead zone.
+    const MIDDLE: (i32, i32) = (410, 300);
+    /// Past the ring.
+    const OUTSIDE: (i32, i32) = (900, 700);
+    /// Longer than a tap, shorter than the paint deadline.
+    const HOLD: Duration = Duration::from_millis(500);
+
+    impl Run {
+        fn shortcuts(&mut self, snapshot: Snapshot) -> &mut Self {
+            self.input(Input::Shortcuts(Arc::new(snapshot)))
+        }
+
+        fn hotkey(&mut self, signal: HotkeySignal) -> &mut Self {
+            self.input(Input::Hotkey(signal))
+        }
+
+        /// The pointer moves to `at`.
+        fn point(&mut self, (x, y): (i32, i32)) -> &mut Self {
+            self.input(Input::Pointer(PointerSignal::Moved { x, y }))
+        }
+
+        fn button_down(&mut self, (x, y): (i32, i32)) -> &mut Self {
+            self.input(Input::Pointer(PointerSignal::Down { x, y }))
+        }
+
+        fn button_up(&mut self, (x, y): (i32, i32)) -> &mut Self {
+            self.input(Input::Pointer(PointerSignal::Up { x, y }))
+        }
+
+        /// The pointer moves to `at` and the button goes down and up there.
+        fn click(&mut self, at: (i32, i32)) -> &mut Self {
+            self.point(at).button_down(at).button_up(at)
+        }
+
+        /// Replays one of the mock's Shortcuts scripts.
+        fn script(&mut self, script: Vec<ScriptEvent>) -> &mut Self {
+            for event in script {
+                match event {
+                    ScriptEvent::Hotkey(signal) => self.input(Input::Hotkey(signal)),
+                    ScriptEvent::Pointer(signal) => self.input(Input::Pointer(signal)),
+                    ScriptEvent::Wait(by) => self.wait(by),
+                };
+            }
+            self
+        }
+
+        fn in_shortcuts(&self) -> bool {
+            matches!(self.ctl.state, State::Shortcuts(_))
+        }
+
+        fn is_idle(&self) -> bool {
+            matches!(self.ctl.state, State::Idle)
+        }
+
+        fn tracks(&self) -> Vec<bool> {
+            self.effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::Track(on) => Some(*on),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn shortcut_runs(&self) -> Vec<&ShortcutRun> {
+            self.effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::RunShortcut(run) => Some(run),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// The open groups' names and the segments' names of the last
+        /// `wheel://open`.
+        fn shown(&self) -> (Vec<String>, Vec<String>) {
+            let Some(UiContent::Shortcuts {
+                trail, segments, ..
+            }) = self.last_content()
+            else {
+                panic!("{:?}", self.effects);
+            };
+            (
+                trail.clone(),
+                segments.iter().map(|s| s.title.clone()).collect(),
+            )
+        }
+    }
+
+    /// Something done to a wheel in a test.
+    type Way = fn(&mut Run);
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn press_with(context: PressContext) -> HotkeySignal {
+        HotkeySignal::Pressed(HotkeyId::Open, context)
+    }
+
+    /// The hot key going down at `cursor`, the mock's app in front.
+    fn press_at(cursor: (i32, i32)) -> HotkeySignal {
+        press_with(PressContext {
+            cursor: Some(cursor),
+            front: Some(scripts::front_app()),
+            button_down: false,
+        })
+    }
+
+    /// `id` going down as the mock's scripts send it.
+    fn pressed(id: HotkeyId) -> HotkeySignal {
+        match scripts::press(id) {
+            ScriptEvent::Hotkey(signal) => signal,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn released(id: HotkeyId) -> HotkeySignal {
+        HotkeySignal::Released(id)
+    }
+
+    /// Every hot key and pointer signal there is.
+    fn every_shortcuts_input() -> Vec<Input> {
+        let ids = [HotkeyId::Open, HotkeyId::Escape, HotkeyId::Confirm];
+        let (x, y) = TOP;
+        let mut inputs: Vec<Input> = ids
+            .into_iter()
+            .flat_map(|id| [pressed(id), released(id)])
+            .map(Input::Hotkey)
+            .collect();
+        inputs.extend(
+            [
+                PointerSignal::Moved { x, y },
+                PointerSignal::Down { x, y },
+                PointerSignal::Up { x, y },
+            ]
+            .map(Input::Pointer),
+        );
+        inputs
+    }
+
+    /// `snapshot` is in and the hot key just went down: the Shortcuts wheel
+    /// is open and the key is still held.
+    fn shortcuts_wheel_with(snapshot: Snapshot) -> Run {
+        let mut run = Run::new();
+        run.shortcuts(snapshot).hotkey(pressed(HotkeyId::Open));
+        assert!(run.in_shortcuts(), "{:?}", run.effects);
+        run
+    }
+
+    fn shortcuts_wheel() -> Run {
+        shortcuts_wheel_with(fixture::snapshot())
+    }
+
+    /// As above, then the hot key let go at once: a tap, so the wheel stays.
+    fn sticky_wheel() -> Run {
+        let mut run = shortcuts_wheel();
+        run.hotkey(released(HotkeyId::Open));
+        run
+    }
+
+    /// The one teardown: `effects` hold exactly one close (for `reason`),
+    /// one hide, one `Track(false)` and one `GiveBack`, in that order, and
+    /// never start the watch again.
+    fn assert_torn_down(effects: &[Effect], reason: CloseReason) {
+        let places = |wanted: fn(&Effect) -> bool| -> Vec<usize> {
+            effects
+                .iter()
+                .enumerate()
+                .filter(|(_, effect)| wanted(effect))
+                .map(|(place, _)| place)
+                .collect()
+        };
+        let closes = places(|e| matches!(e, Effect::Close(_)));
+        let hides = places(|e| matches!(e, Effect::HideOverlay));
+        let untracks = places(|e| matches!(e, Effect::Track(false)));
+        let give_backs = places(|e| matches!(e, Effect::GiveBack));
+        let (&[close], &[hide], &[untrack], &[give_back]) = (
+            closes.as_slice(),
+            hides.as_slice(),
+            untracks.as_slice(),
+            give_backs.as_slice(),
+        ) else {
+            panic!("{effects:?}");
+        };
+        assert!(
+            close < hide && hide < untrack && untrack < give_back,
+            "{effects:?}"
+        );
+        assert!(
+            matches!(&effects[close], Effect::Close(close) if close.reason == reason),
+            "{effects:?}"
+        );
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::Track(true))),
+            "{effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_hot_key_opens_the_shortcuts_wheel_at_the_cursor() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        assert_eq!(run.effects, vec![log("shortcuts wheel: on, 1 menu(s)")]);
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        let [Effect::Open(open), show, Effect::Track(true), line] = run.effects.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(*show, show_default_monitor());
+        assert_eq!(
+            *line,
+            log("wheel 1 open: Shortcuts at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300); 4 segment(s)")
+        );
+        assert_eq!(open.seq, 1);
+        assert_eq!(open.mode, UiMode::Shortcuts);
+        assert_eq!(open.anchor, Point { x: 400.0, y: 300.0 });
+        assert!((open.scale - 1.0).abs() < 1e-9);
+        assert_eq!(open.geometry, GEOMETRY);
+        assert_eq!(open.keys, KeyNames::of(KeyMap::WINDOWS));
+        assert!(open.sounds);
+        assert_eq!(
+            run.shown(),
+            (Vec::new(), names(&["Copy", "Tidy", "Later", "Paste"]))
+        );
+        let State::Shortcuts(session) = &run.ctl.state else {
+            panic!("{:?}", run.ctl.state);
+        };
+        assert!(!session.is_sticky());
+        assert_eq!(session.highlight(), None);
+        // A drag wheel it isn't.
+        assert!(!run.ctl.is_open());
+        assert_eq!(run.ctl.next_deadline(), Some(run.now + PAINT_DEADLINE));
+    }
+
+    #[test]
+    fn the_app_in_front_chooses_the_menu() {
+        let run = shortcuts_wheel_with(fixture::with_app_menu());
+        assert_eq!(run.shown(), (Vec::new(), names(&["Build", "Everywhere"])));
+
+        // Grape itself in front, or an app with no menu: Everywhere.
+        for front in [
+            None,
+            Some(FrontApp { pid: 7, id: None }),
+            Some(FrontApp {
+                pid: 7,
+                id: Some("com.example.other".to_owned()),
+            }),
+        ] {
+            let mut run = Run::new();
+            run.shortcuts(fixture::with_app_menu())
+                .hotkey(press_with(PressContext {
+                    cursor: Some(scripts::WHEEL_AT),
+                    front,
+                    button_down: false,
+                }));
+            assert_eq!(
+                run.shown(),
+                (Vec::new(), names(&["Copy", "Tidy", "Later", "Paste"]))
+            );
+        }
+    }
+
+    #[test]
+    fn a_press_that_cant_open_a_wheel_only_logs() {
+        let open = || pressed(HotkeyId::Open);
+        let off = {
+            let mut config = fixture::config();
+            crate::shortcuts::model::set_enabled(&mut config, false).unwrap();
+            Snapshot::of(&config)
+        };
+        let no_display = FakeEnv {
+            has_display: false,
+            ..FakeEnv::at(0, 0, 1.0)
+        };
+        let here = FakeEnv::at(0, 0, 1.0);
+        let on = fixture::snapshot;
+        let cases: Vec<(&str, FakeEnv, Option<Snapshot>, bool, HotkeySignal)> = vec![
+            ("it's switched off", here, None, false, open()),
+            ("it's switched off", here, Some(off), false, open()),
+            ("Grape is paused", here, Some(on()), true, open()),
+            (
+                "a mouse button is down",
+                here,
+                Some(on()),
+                false,
+                press_with(PressContext {
+                    cursor: Some(scripts::WHEEL_AT),
+                    front: None,
+                    button_down: true,
+                }),
+            ),
+            (
+                "the cursor's position is unknown",
+                here,
+                Some(on()),
+                false,
+                press_with(PressContext {
+                    cursor: None,
+                    front: Some(scripts::front_app()),
+                    button_down: false,
+                }),
+            ),
+            (
+                "no display found under (400, 300)",
+                no_display,
+                Some(on()),
+                false,
+                open(),
+            ),
+        ];
+        for (why, env, snapshot, paused, press) in cases {
+            let mut run = Run::on(env);
+            if let Some(snapshot) = snapshot {
+                run.shortcuts(snapshot);
+            }
+            if paused {
+                run.input(Input::SetPaused(true));
+            }
+            run.effects.clear();
+            run.hotkey(press);
+            assert_eq!(
+                run.effects,
+                vec![log(&format!("shortcuts wheel not opened: {why}"))]
+            );
+            assert!(run.is_idle());
+            assert_eq!(run.ctl.next_deadline(), None);
+            // Whatever follows such a press is ignored too.
+            run.effects.clear();
+            run.hotkey(released(HotkeyId::Open)).click(TOP);
+            assert!(run.effects.is_empty(), "{why}: {:?}", run.effects);
+        }
+    }
+
+    #[test]
+    fn a_press_while_a_shortcut_runs_opens_nothing_and_says_so() {
+        let mut run = sticky_wheel();
+        run.click(TOP);
+        assert_eq!(run.shortcut_runs().len(), 1);
+        assert!(run.is_idle());
+        run.effects.clear();
+        run.hotkey(press_at((5, 5)));
+        let display = FakeEnv::at(0, 0, 1.0).display_at(0, 0).unwrap();
+        assert_eq!(
+            run.effects,
+            vec![
+                // Where the wheel would have been: moved in from the corner.
+                Effect::StillRunning {
+                    anchor: (140, 140),
+                    display,
+                },
+                log("shortcuts wheel not opened: a shortcut is still running"),
+            ]
+        );
+        assert!(run.is_idle());
+        // The hot key coming up, and a second press, change nothing.
+        run.hotkey(released(HotkeyId::Open));
+        run.hotkey(pressed(HotkeyId::Open));
+        assert!(run.opens().is_empty());
+        assert!(run.is_idle());
+
+        // Once the run is over the hot key opens the next wheel.
+        run.input(Input::RunEnded);
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        assert!(run.in_shortcuts());
+        assert_eq!(run.opens().first().map(|o| o.seq), Some(2));
+    }
+
+    #[test]
+    fn a_press_while_a_shortcut_runs_with_no_place_for_the_notice_only_logs() {
+        let mut run = sticky_wheel();
+        run.click(TOP);
+        run.effects.clear();
+        run.hotkey(press_with(PressContext {
+            cursor: None,
+            front: None,
+            button_down: false,
+        }));
+        assert_eq!(
+            run.effects,
+            vec![log(
+                "shortcuts wheel not opened: the cursor's position is unknown"
+            )]
+        );
+    }
+
+    #[test]
+    fn idle_ignores_signals_that_were_in_flight_when_the_wheel_closed() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.effects.clear();
+        for input in every_shortcuts_input() {
+            if input == Input::Hotkey(pressed(HotkeyId::Open)) {
+                continue;
+            }
+            run.input(input.clone());
+            assert!(run.effects.is_empty(), "{input:?}: {:?}", run.effects);
+            assert!(run.is_idle());
+            assert_eq!(run.ctl.next_deadline(), None);
+        }
+    }
+
+    #[test]
+    fn a_drag_always_wins_over_the_hot_key_and_the_pointer() {
+        // A drag with no wheel, a drag wheel, and a drag after Esc.
+        let setups: [Way; 3] = [
+            |run| {
+                run.signals(vec![started(), moved(400, 300)]);
+            },
+            |run| {
+                run.signals(vec![started(), moved(400, 300), keys(Modifiers::SHIFT)]);
+                run.drop_event(enter(png(), 400, 300));
+            },
+            |run| {
+                run.signals(vec![started(), moved(400, 300), DragSignal::Escape]);
+            },
+        ];
+        for setup in setups {
+            let mut run = Run::new();
+            run.shortcuts(fixture::snapshot());
+            setup(&mut run);
+            let before = format!("{:?}", run.ctl.state);
+            run.effects.clear();
+            for input in every_shortcuts_input() {
+                run.input(input.clone());
+                assert!(run.effects.is_empty(), "{input:?}: {:?}", run.effects);
+            }
+            assert_eq!(format!("{:?}", run.ctl.state), before);
+            assert!(!run.in_shortcuts());
+        }
+
+        // And the drag goes on as if the hot key had never been pressed.
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.signals(vec![started(), moved(400, 300)]);
+        run.hotkey(pressed(HotkeyId::Open));
+        run.hotkey(released(HotkeyId::Open));
+        run.signals(vec![keys(Modifiers::SHIFT)]);
+        assert!(run.ctl.is_open());
+        assert_eq!(
+            run.opens().last().map(|o| o.mode),
+            Some(UiMode::Conversions)
+        );
+        assert!(run.tracks().is_empty());
+    }
+
+    #[test]
+    fn the_pointer_highlights_the_segment_under_it() {
+        let mut run = shortcuts_wheel();
+        // The watch's first report: where the wheel opened.
+        run.point(scripts::WHEEL_AT);
+        assert!(run.highlights().is_empty());
+        run.point(TOP).point((401, 216)).point(LEFT).point(MIDDLE);
+        assert_eq!(run.highlights(), vec![Some(0), Some(3), None]);
+        let seqs: Vec<u64> = run
+            .effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::Highlight(h) => Some(h.seq),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(seqs, vec![1, 1, 1]);
+        assert!(run.in_shortcuts());
+    }
+
+    #[test]
+    fn a_button_up_counts_only_after_a_button_down_was_seen() {
+        let mut run = sticky_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        run.button_up(TOP);
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        run.button_down(TOP);
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        run.button_up(TOP);
+        assert_eq!(run.closes(), vec![CloseReason::Picked]);
+        assert_eq!(run.shortcut_runs().len(), 1);
+    }
+
+    #[test]
+    fn a_tap_then_a_click_on_a_segment_runs_its_shortcut() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.script(scripts::hotkey_tap_then_click());
+        let display = FakeEnv::at(0, 0, 1.0).display_at(0, 0).unwrap();
+        let tail = &run.effects[run.effects.len() - 7..];
+        let [close, hide, untrack, give_back, closed, picked, Effect::RunShortcut(request)] = tail
+        else {
+            panic!("{tail:?}");
+        };
+        assert_eq!(
+            [close, hide, untrack, give_back, closed, picked],
+            [
+                &Effect::Close(WheelClose {
+                    seq: 1,
+                    reason: CloseReason::Picked,
+                }),
+                &Effect::HideOverlay,
+                &Effect::Track(false),
+                &Effect::GiveBack,
+                &log("wheel 1 closed: Picked"),
+                &log("wheel 1: picked segment 0"),
+            ]
+        );
+        assert_eq!(request.seq, 1);
+        assert_eq!(request.name, "Copy");
+        assert_eq!(request.steps.len(), 1);
+        assert_eq!(request.front, Some(scripts::front_app()));
+        assert_eq!(request.anchor, scripts::WHEEL_AT);
+        assert_eq!(request.display, display);
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        assert_eq!(run.tracks(), vec![true, false]);
+        assert_eq!(run.shows(), 1);
+        assert!(run.is_idle());
+        // Drag wheels' runs are another effect.
+        assert!(run.runs().is_empty());
+    }
+
+    #[test]
+    fn a_shortcut_with_nothing_to_run_still_closes_and_goes_to_the_runner() {
+        let mut run = sticky_wheel();
+        run.click(BOTTOM);
+        assert_eq!(run.closes(), vec![CloseReason::Picked]);
+        let runs = run.shortcut_runs();
+        let [request] = runs.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(request.name, "Later");
+        assert!(!crate::shortcuts::model::runnable(&request.steps));
+        assert!(run
+            .logs()
+            .contains(&"wheel 1: picked segment 2, which has nothing to run yet"));
+        assert!(run.is_idle());
+    }
+
+    #[test]
+    fn a_click_in_the_middle_cancels_at_the_root() {
+        let mut run = sticky_wheel();
+        run.click(MIDDLE);
+        assert_eq!(run.closes(), vec![CloseReason::Cancel]);
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+    }
+
+    #[test]
+    fn a_click_past_the_ring_cancels() {
+        let mut run = sticky_wheel();
+        run.click(OUTSIDE);
+        assert_eq!(run.closes(), vec![CloseReason::Cancel]);
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+    }
+
+    #[test]
+    fn a_click_in_a_gap_or_a_cut_off_corner_does_nothing() {
+        let mut run = sticky_wheel();
+        run.effects.clear();
+        // Between the top and right segments, then just outside the top
+        // segment's rounded corner. Both are on the ring's band.
+        for at in [(459, 241), (479, 213)] {
+            assert_eq!(hit_test_at(at), None);
+            run.click(at);
+            assert!(run.effects.is_empty(), "{at:?}: {:?}", run.effects);
+            assert!(run.in_shortcuts());
+        }
+        // The wheel is still there for the next click.
+        run.click(LEFT);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Paste")
+        );
+    }
+
+    /// grape-core's hit test for the four-segment ring at (400, 300), with
+    /// the point checked to be between the ring's two radii.
+    fn hit_test_at((x, y): (i32, i32)) -> Option<usize> {
+        let (dx, dy) = (f64::from(x - 400), f64::from(y - 300));
+        let distance = dx.hypot(dy);
+        assert!(distance > GEOMETRY.inner_r && distance < GEOMETRY.outer_r);
+        grape_core::hit_test(dx, dy, 4)
+    }
+
+    #[test]
+    fn a_tap_never_picks_even_when_the_wheel_opened_under_the_cursor() {
+        // The wheel opens in the middle of the work area, (960, 516), and
+        // the cursor happens to be on its top segment.
+        let mut config = fixture::config();
+        set_opens_at(&mut config, OpensAt::Center).unwrap();
+        let cursor = (960, 516 - 84);
+        let mut run = Run::new();
+        run.shortcuts(Snapshot::of(&config))
+            .hotkey(press_at(cursor));
+        assert_eq!(
+            run.opens().first().map(|o| o.anchor),
+            Some(Point { x: 960.0, y: 516.0 })
+        );
+        // Nothing is highlighted until the pointer watch reports.
+        assert!(run.highlights().is_empty());
+        run.point(cursor);
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        run.effects.clear();
+        run.wait(TAP - STEP * 3);
+        run.hotkey(released(HotkeyId::Open));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        // The highlight is still there for Return or a click.
+        run.hotkey(pressed(HotkeyId::Confirm));
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Copy")
+        );
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.anchor),
+            Some((960, 516))
+        );
+    }
+
+    #[test]
+    fn the_tap_ends_at_300_ms() {
+        // The release is one STEP after the wait.
+        let mut run = shortcuts_wheel();
+        run.point(TOP)
+            .wait(TAP - STEP * 2 - Duration::from_millis(1));
+        run.hotkey(released(HotkeyId::Open));
+        assert!(run.in_shortcuts());
+        assert!(run.closes().is_empty());
+
+        let mut run = shortcuts_wheel();
+        run.point(TOP).wait(TAP - STEP * 2);
+        run.hotkey(released(HotkeyId::Open));
+        assert_eq!(run.closes(), vec![CloseReason::Picked]);
+    }
+
+    #[test]
+    fn letting_go_after_a_hold_picks_the_highlight() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.script(scripts::hotkey_hold_and_release());
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        assert_eq!(run.closes(), vec![CloseReason::Picked]);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Copy")
+        );
+        assert!(run.is_idle());
+    }
+
+    #[test]
+    fn letting_go_after_a_hold_over_nothing_cancels() {
+        let mut run = shortcuts_wheel();
+        run.point(MIDDLE).wait(HOLD);
+        run.hotkey(released(HotkeyId::Open));
+        assert_eq!(run.closes(), vec![CloseReason::Cancel]);
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+    }
+
+    #[test]
+    fn a_repeat_of_the_press_is_ignored_while_the_key_is_held() {
+        let mut run = shortcuts_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        run.hotkey(press_at(OUTSIDE));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+    }
+
+    #[test]
+    fn a_sticky_wheel_ignores_the_release_and_closes_on_the_next_press() {
+        let mut run = sticky_wheel();
+        run.point(TOP).wait(HOLD);
+        run.effects.clear();
+        run.hotkey(released(HotkeyId::Open));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        run.hotkey(pressed(HotkeyId::Open));
+        assert_torn_down(&run.effects, CloseReason::Cancel);
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+        // That press's own release finds no wheel.
+        run.effects.clear();
+        run.hotkey(released(HotkeyId::Open));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+    }
+
+    #[test]
+    fn confirm_picks_the_highlight_and_does_nothing_without_one() {
+        let mut run = shortcuts_wheel();
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Confirm));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        run.point(LEFT).hotkey(pressed(HotkeyId::Confirm));
+        assert_eq!(run.closes(), vec![CloseReason::Picked]);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Paste")
+        );
+        assert!(run.logs().contains(&"wheel 1: picked segment 3"));
+        // Return coming up finds no wheel.
+        run.effects.clear();
+        run.hotkey(released(HotkeyId::Confirm));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+    }
+
+    #[test]
+    fn escape_closes_the_wheel_and_runs_nothing() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.script(scripts::hotkey_escape());
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        assert_eq!(run.closes(), vec![CloseReason::Escape]);
+        assert_eq!(run.hides(), 1);
+        assert_eq!(run.tracks(), vec![true, false]);
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+
+        // Held or sticky, with or without a highlight.
+        let mut run = shortcuts_wheel();
+        run.hotkey(pressed(HotkeyId::Escape));
+        assert_eq!(run.closes(), vec![CloseReason::Escape]);
+    }
+
+    #[test]
+    fn the_other_keys_coming_up_mean_nothing_to_an_open_wheel() {
+        let mut run = sticky_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        run.hotkey(released(HotkeyId::Escape));
+        run.hotkey(released(HotkeyId::Confirm));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+    }
+
+    #[test]
+    fn painted_logs_the_time_since_the_hot_key_once() {
+        let mut run = shortcuts_wheel();
+        run.effects.clear();
+        run.input(Input::Painted { seq: 8 });
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        run.input(Input::Painted { seq: 1 });
+        assert_eq!(
+            run.effects,
+            vec![log(
+                "wheel 1 painted 20 ms after the hot key (target: under 100 ms)"
+            )]
+        );
+        run.input(Input::Painted { seq: 1 });
+        assert_eq!(run.effects.len(), 1);
+        // A redraw for a group is painted again, and isn't logged again.
+        run.click(RIGHT);
+        run.effects.clear();
+        run.input(Input::Painted { seq: 1 });
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+    }
+
+    #[test]
+    fn a_wheel_the_overlay_never_painted_closes_after_a_second() {
+        let mut run = shortcuts_wheel();
+        let opened = run.now;
+        run.point(TOP);
+        assert_eq!(run.ctl.next_deadline(), Some(opened + PAINT_DEADLINE));
+        run.wait(PAINT_DEADLINE - STEP * 2);
+        assert!(run.in_shortcuts());
+        run.effects.clear();
+        run.wait(STEP);
+        assert_torn_down(&run.effects, CloseReason::Watchdog);
+        assert!(run
+            .logs()
+            .contains(&"wheel 1: the overlay didn't paint it within 1000 ms of the hot key"));
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+        assert_eq!(run.ctl.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_painted_wheel_outlives_the_paint_deadline() {
+        let mut run = shortcuts_wheel();
+        let opened = run.now;
+        run.painted();
+        assert_eq!(run.ctl.next_deadline(), Some(opened + WATCHDOG));
+        run.wait(PAINT_DEADLINE * 3);
+        assert!(run.in_shortcuts());
+        assert!(run.closes().is_empty());
+    }
+
+    #[test]
+    fn the_watchdog_closes_a_wheel_nobody_touches() {
+        let mut run = sticky_wheel();
+        run.painted();
+        run.point(TOP);
+        let touched = run.now;
+        assert_eq!(run.ctl.next_deadline(), Some(touched + WATCHDOG));
+        run.wait(WATCHDOG - Duration::from_secs(1));
+        assert!(run.in_shortcuts());
+        run.effects.clear();
+        run.wait(Duration::from_secs(1));
+        assert_torn_down(&run.effects, CloseReason::Watchdog);
+        assert!(run
+            .logs()
+            .contains(&"wheel 1: no key or pointer input for 30 s"));
+        assert!(run.is_idle());
+        assert_eq!(run.ctl.next_deadline(), None);
+    }
+
+    #[test]
+    fn only_keys_and_the_pointer_feed_the_watchdog() {
+        let mut run = shortcuts_wheel();
+        let opened = run.now;
+        run.painted();
+        // None of these is the user at the wheel.
+        run.input(Input::Painted { seq: 1 });
+        run.input(Input::Configure {
+            keys: SWAPPED,
+            sounds: false,
+        });
+        run.shortcuts(fixture::with_app_menu());
+        run.input(Input::RunEnded);
+        run.signals(vec![
+            moved(500, 500),
+            keys(Modifiers::SHIFT),
+            DragSignal::Escape,
+        ]);
+        run.drop_event(DropEvent::Over { x: 400, y: 216 });
+        run.drop_event(DropEvent::Leave);
+        run.hotkey(pressed(HotkeyId::Open));
+        run.hotkey(released(HotkeyId::Escape));
+        run.hotkey(released(HotkeyId::Confirm));
+        assert!(run.in_shortcuts());
+        assert_eq!(run.ctl.next_deadline(), Some(opened + WATCHDOG));
+        // These are.
+        run.point(TOP);
+        assert_eq!(run.ctl.next_deadline(), Some(run.now + WATCHDOG));
+        run.button_down(TOP);
+        assert_eq!(run.ctl.next_deadline(), Some(run.now + WATCHDOG));
+        run.hotkey(released(HotkeyId::Open));
+        assert_eq!(run.ctl.next_deadline(), Some(run.now + WATCHDOG));
+        let tapped = run.now;
+        // Sticky now: the key coming up again is ignored.
+        run.hotkey(released(HotkeyId::Open));
+        assert_eq!(run.ctl.next_deadline(), Some(tapped + WATCHDOG));
+    }
+
+    #[test]
+    fn a_drag_starting_closes_the_wheel_and_then_gets_its_own() {
+        let mut run = sticky_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        run.signals(vec![started()]);
+        assert_eq!(
+            run.effects,
+            vec![
+                Effect::Close(WheelClose {
+                    seq: 1,
+                    reason: CloseReason::Cancel,
+                }),
+                Effect::HideOverlay,
+                Effect::Track(false),
+                Effect::GiveBack,
+                log("wheel 1 closed: Cancel"),
+            ]
+        );
+        assert!(matches!(run.ctl.state, State::Dragging { .. }));
+        assert_eq!(run.ctl.next_deadline(), None);
+
+        // From here it is the drag flow, effect for effect.
+        run.effects.clear();
+        run.signals(vec![moved(400, 300), keys(Modifiers::SHIFT)]);
+        assert_eq!(
+            run.effects,
+            vec![
+                drag_open(2, WheelMode::Conversions, UiContent::Pending),
+                show_default_monitor(),
+                log("wheel 2 open: Conversions at (400, 300) on a 1920×1080 monitor at 100 % scale; anchor (400, 300)"),
+            ]
+        );
+        run.drop_event(enter(png(), 400, 300));
+        run.signals(vec![DragSignal::Ended]);
+        run.drop_event(drop_at(png(), 400, 216));
+        assert_eq!(run.closes(), vec![CloseReason::Drop]);
+        assert_eq!(
+            run.runs().first().map(|r| r.entry),
+            Some(WheelEntry::Convert(Format::Jpg))
+        );
+        assert!(run.tracks().is_empty());
+        assert!(run.shortcut_runs().is_empty());
+        assert!(!run.effects.contains(&Effect::GiveBack));
+        // A leftover pointer signal from the watch changes nothing.
+        let effects = run.effects.len();
+        run.point(TOP);
+        assert_eq!(run.effects.len(), effects);
+    }
+
+    #[test]
+    fn the_drag_monitors_moves_keys_and_esc_are_ignored() {
+        let mut run = sticky_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        run.signals(vec![
+            moved(500, 500),
+            keys(Modifiers::SHIFT),
+            keys(NONE),
+            DragSignal::Escape,
+        ]);
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        // The highlight is the pointer watch's, not the drag monitor's.
+        run.hotkey(pressed(HotkeyId::Confirm));
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Copy")
+        );
+    }
+
+    #[test]
+    fn a_drag_ending_cancels_the_wheel() {
+        let mut run = sticky_wheel();
+        run.effects.clear();
+        run.signals(vec![DragSignal::Ended]);
+        assert_torn_down(&run.effects, CloseReason::Cancel);
+        assert!(run.is_idle());
+        assert_eq!(run.ctl.next_deadline(), None);
+    }
+
+    #[test]
+    fn a_drag_entering_the_overlay_cancels_the_wheel() {
+        let mut run = sticky_wheel();
+        run.point(TOP);
+        run.effects.clear();
+        // Nothing else from the drop target means anything, or is logged.
+        run.drop_event(DropEvent::Over { x: 400, y: 216 });
+        run.drop_event(DropEvent::Leave);
+        run.drop_event(drop_at(png(), 400, 216));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        assert!(run.in_shortcuts());
+        run.drop_event(enter(png(), 400, 216));
+        assert_torn_down(&run.effects, CloseReason::Cancel);
+        assert!(run.runs().is_empty());
+        assert!(run.shortcut_runs().is_empty());
+        assert!(run.is_idle());
+        // No path reached the log on the way.
+        assert!(run.logs().iter().all(|line| !line.contains("shot.png")));
+    }
+
+    #[test]
+    fn pause_closes_the_wheel_and_leaves_grape_idle() {
+        let mut run = sticky_wheel();
+        run.effects.clear();
+        run.input(Input::SetPaused(true));
+        assert_torn_down(&run.effects, CloseReason::Paused);
+        assert!(run.is_idle());
+        assert_eq!(run.ctl.next_deadline(), None);
+        // A press that was already on its way.
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        assert_eq!(
+            run.effects,
+            vec![log("shortcuts wheel not opened: Grape is paused")]
+        );
+        run.input(Input::SetPaused(false));
+        run.hotkey(pressed(HotkeyId::Open));
+        assert!(run.in_shortcuts());
+        assert_eq!(run.opens().last().map(|o| o.seq), Some(2));
+    }
+
+    #[test]
+    fn new_settings_are_kept_for_the_next_wheel() {
+        let mut run = sticky_wheel();
+        run.effects.clear();
+        run.input(Input::Configure {
+            keys: SWAPPED,
+            sounds: false,
+        });
+        let (empty, _) = fixture::empty();
+        run.shortcuts(Snapshot::of(&empty));
+        assert!(
+            run.effects.iter().all(|e| matches!(e, Effect::Log(_))),
+            "{:?}",
+            run.effects
+        );
+        assert!(run.logs().contains(&"shortcuts wheel: on, 1 menu(s)"));
+        // The open wheel still has the ring it opened with.
+        assert!(run.in_shortcuts());
+        run.click(LEFT);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Paste")
+        );
+        run.input(Input::RunEnded);
+        // The next one has the new menus, sounds and key names.
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        assert_eq!(run.shown(), (Vec::new(), Vec::new()));
+        let opens = run.opens();
+        let [open] = opens.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert!(!open.sounds);
+        assert_eq!(open.keys, KeyNames::of(SWAPPED));
+    }
+
+    #[test]
+    fn switching_the_feature_off_leaves_an_open_wheel_and_stops_the_next() {
+        let mut run = sticky_wheel();
+        let mut config = fixture::config();
+        crate::shortcuts::model::set_enabled(&mut config, false).unwrap();
+        run.shortcuts(Snapshot::of(&config));
+        assert!(run.logs().contains(&"shortcuts wheel: off, 1 menu(s)"));
+        assert!(run.in_shortcuts());
+        run.hotkey(pressed(HotkeyId::Escape));
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Open));
+        assert_eq!(
+            run.effects,
+            vec![log("shortcuts wheel not opened: it's switched off")]
+        );
+    }
+
+    #[test]
+    fn every_way_out_tears_the_wheel_down_once_and_in_order() {
+        use CloseReason::{Cancel, Escape, Paused, Picked, Watchdog};
+        let ways: Vec<(&str, CloseReason, Way)> = vec![
+            ("a click on a segment", Picked, |run| {
+                run.click(TOP);
+            }),
+            ("letting go after a hold", Picked, |run| {
+                run.point(TOP).wait(HOLD).hotkey(released(HotkeyId::Open));
+            }),
+            ("Return", Picked, |run| {
+                run.point(TOP).hotkey(pressed(HotkeyId::Confirm));
+            }),
+            ("a shortcut inside a group", Picked, |run| {
+                run.click(RIGHT).click(TOP);
+            }),
+            ("a click in the middle", Cancel, |run| {
+                run.click(MIDDLE);
+            }),
+            ("a click past the ring", Cancel, |run| {
+                run.click(OUTSIDE);
+            }),
+            ("letting go over nothing", Cancel, |run| {
+                run.wait(HOLD).hotkey(released(HotkeyId::Open));
+            }),
+            ("a second press", Cancel, |run| {
+                run.hotkey(released(HotkeyId::Open))
+                    .hotkey(pressed(HotkeyId::Open));
+            }),
+            ("Esc", Escape, |run| {
+                run.hotkey(pressed(HotkeyId::Escape));
+            }),
+            ("never painted", Watchdog, |run| {
+                run.wait(PAINT_DEADLINE);
+            }),
+            ("nobody there", Watchdog, |run| {
+                run.painted().wait(WATCHDOG);
+            }),
+            ("a drag starting", Cancel, |run| {
+                run.signals(vec![started()]);
+            }),
+            ("a drag ending", Cancel, |run| {
+                run.signals(vec![DragSignal::Ended]);
+            }),
+            ("a drag reaching the overlay", Cancel, |run| {
+                run.drop_event(enter(png(), 400, 300));
+            }),
+            ("Pause", Paused, |run| {
+                run.input(Input::SetPaused(true));
+            }),
+        ];
+        for (name, reason, way) in ways {
+            let mut run = shortcuts_wheel();
+            assert!(run.ctl.next_deadline().is_some(), "{name}");
+            run.effects.clear();
+            way(&mut run);
+            assert_torn_down(&run.effects, reason);
+            assert!(!run.in_shortcuts(), "{name}");
+            assert_eq!(run.ctl.next_deadline(), None, "{name}");
+            assert!(
+                run.logs()
+                    .contains(&format!("wheel 1 closed: {reason:?}").as_str()),
+                "{name}"
+            );
+            // A run follows the teardown for a pick, and nothing else.
+            let give_back = run
+                .effects
+                .iter()
+                .position(|e| matches!(e, Effect::GiveBack));
+            let ran = run
+                .effects
+                .iter()
+                .position(|e| matches!(e, Effect::RunShortcut(_)));
+            if reason == Picked {
+                assert_eq!(run.shortcut_runs().len(), 1, "{name}");
+                assert!(give_back < ran, "{name}");
+            } else {
+                assert_eq!(ran, None, "{name}");
+            }
+            // Nothing is left to tear down a second time.
+            run.effects.clear();
+            run.hotkey(released(HotkeyId::Open))
+                .hotkey(pressed(HotkeyId::Escape))
+                .click(TOP)
+                .wait(WATCHDOG * 2);
+            assert!(run.effects.is_empty(), "{name}: {:?}", run.effects);
+        }
+    }
+
+    #[test]
+    fn opening_a_group_sends_the_wheel_again_with_the_same_seq() {
+        let mut run = shortcuts_wheel();
+        run.painted();
+        // On the right segment, above its middle: the top half of the
+        // group's two-segment ring.
+        let at = (470, 260);
+        run.point(at);
+        assert_eq!(run.highlights(), vec![Some(1)]);
+        run.effects.clear();
+        run.button_down(at).button_up(at);
+        let [Effect::Open(open), highlight, line] = run.effects.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(open.seq, 1);
+        assert_eq!(open.mode, UiMode::Shortcuts);
+        assert_eq!(open.anchor, Point { x: 400.0, y: 300.0 });
+        assert_eq!(run.shown(), (names(&["Tidy"]), names(&["Left", "Right"])));
+        // The old highlight went with the old ring; the new ring gets the
+        // segment under the pointer.
+        assert_eq!(
+            *highlight,
+            Effect::Highlight(WheelHighlight {
+                seq: 1,
+                index: Some(0),
+            })
+        );
+        assert_eq!(*line, log("wheel 1: 1 group(s) open; 2 segment(s)"));
+        assert!(run.in_shortcuts());
+        // Sticky from here: letting go of the hot key, however late, picks
+        // nothing.
+        run.effects.clear();
+        run.wait(HOLD).hotkey(released(HotkeyId::Open));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        run.hotkey(pressed(HotkeyId::Confirm));
+        let runs = run.shortcut_runs();
+        let [request] = runs.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(request.name, "Left");
+        assert_eq!(request.seq, 1);
+        assert!(run.logs().contains(&"wheel 1: picked segment 0"));
+    }
+
+    #[test]
+    fn a_group_opened_from_a_gap_of_its_ring_highlights_nothing() {
+        let mut run = sticky_wheel();
+        run.click(RIGHT);
+        assert_eq!(run.highlights(), vec![Some(1)]);
+        let opens = run.opens();
+        let [_, redraw] = opens.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(redraw.seq, 1);
+        // The overlay was shown and the pointer watch started once only.
+        assert_eq!(run.shows(), 1);
+        assert_eq!(run.tracks(), vec![true]);
+        // Return finds no highlight: the old one didn't carry over.
+        run.effects.clear();
+        run.hotkey(pressed(HotkeyId::Confirm));
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+    }
+
+    #[test]
+    fn the_middle_leaves_a_group_and_then_cancels() {
+        let mut run = sticky_wheel();
+        run.click(RIGHT).point(BOTTOM);
+        assert_eq!(run.highlights(), vec![Some(1), Some(1)]);
+        run.effects.clear();
+        run.click(MIDDLE);
+        let [Effect::Highlight(cleared), Effect::Open(open), line] = run.effects.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        // The move into the dead zone cleared the highlight before the click.
+        assert_eq!(cleared.index, None);
+        assert_eq!(open.seq, 1);
+        assert_eq!(*line, log("wheel 1: 0 group(s) open; 4 segment(s)"));
+        assert_eq!(
+            run.shown(),
+            (Vec::new(), names(&["Copy", "Tidy", "Later", "Paste"]))
+        );
+        assert!(run.in_shortcuts());
+        assert!(run.closes().is_empty());
+        run.click(MIDDLE);
+        assert_eq!(run.closes(), vec![CloseReason::Cancel]);
+        assert!(run.shortcut_runs().is_empty());
+    }
+
+    #[test]
+    fn letting_go_over_a_group_opens_it_and_keeps_the_wheel() {
+        let mut run = shortcuts_wheel();
+        run.point(RIGHT).wait(HOLD).hotkey(released(HotkeyId::Open));
+        assert!(run.in_shortcuts());
+        assert!(run.closes().is_empty());
+        assert_eq!(run.shown(), (names(&["Tidy"]), names(&["Left", "Right"])));
+        run.click(BOTTOM);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Right")
+        );
+    }
+
+    #[test]
+    fn the_everywhere_group_of_an_apps_menu_opens_like_any_other() {
+        let mut run = shortcuts_wheel_with(fixture::with_app_menu());
+        run.hotkey(released(HotkeyId::Open)).click(BOTTOM);
+        assert_eq!(
+            run.shown(),
+            (names(&["Everywhere"]), names(&["Copy", "Later", "Paste"]))
+        );
+        // Three segments start on the left.
+        run.click(LEFT);
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.name.as_str()),
+            Some("Copy")
+        );
+    }
+
+    #[test]
+    fn an_empty_menu_opens_with_no_segments_and_closes_like_any_other() {
+        let (empty, _) = fixture::empty();
+        let mut run = shortcuts_wheel_with(Snapshot::of(&empty));
+        assert_eq!(
+            run.last_content(),
+            Some(&UiContent::Shortcuts {
+                dense: false,
+                trail: Vec::new(),
+                segments: Vec::new(),
+            })
+        );
+        assert_eq!(run.opens().first().map(|o| o.mode), Some(UiMode::Shortcuts));
+        assert_eq!(run.tracks(), vec![true]);
+        assert!(run.logs().iter().any(|line| line.ends_with("0 segment(s)")));
+        // Nothing to highlight or pick anywhere.
+        run.effects.clear();
+        run.point(TOP).hotkey(pressed(HotkeyId::Confirm));
+        run.click(TOP);
+        assert!(run.effects.is_empty(), "{:?}", run.effects);
+        run.wait(HOLD).hotkey(released(HotkeyId::Open));
+        assert_torn_down(&run.effects, CloseReason::Cancel);
+
+        for (reason, way) in [
+            (
+                CloseReason::Escape,
+                (|run| {
+                    run.hotkey(pressed(HotkeyId::Escape));
+                }) as fn(&mut Run),
+            ),
+            (CloseReason::Cancel, |run| {
+                run.click(MIDDLE);
+            }),
+            (CloseReason::Cancel, |run| {
+                run.click(OUTSIDE);
+            }),
+        ] {
+            let (empty, _) = fixture::empty();
+            let mut run = shortcuts_wheel_with(Snapshot::of(&empty));
+            run.effects.clear();
+            way(&mut run);
+            assert_torn_down(&run.effects, reason);
+            assert!(run.is_idle());
+        }
+    }
+
+    #[test]
+    fn it_opens_in_the_middle_of_the_work_area_when_asked() {
+        let mut config = fixture::config();
+        set_opens_at(&mut config, OpensAt::Center).unwrap();
+        let mut run = Run::new();
+        run.shortcuts(Snapshot::of(&config))
+            .hotkey(press_at((5, 5)));
+        let opens = run.opens();
+        let [open] = opens.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        // The work area is 1920×1032.
+        assert_eq!(open.anchor, Point { x: 960.0, y: 516.0 });
+        assert!(run.logs().iter().any(|line| line.contains(
+            "Shortcuts at (5, 5) on a 1920×1080 monitor at 100 % scale; anchor (960, 516)"
+        )));
+        // Hits are measured from there, not from the cursor.
+        run.point((5, 5)).point((960, 516 - 84));
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        run.hotkey(pressed(HotkeyId::Confirm));
+        assert_eq!(
+            run.shortcut_runs().first().map(|r| r.anchor),
+            Some((960, 516))
+        );
+    }
+
+    #[test]
+    fn the_anchor_is_clamped_like_a_drag_wheels() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot())
+            .hotkey(press_at((5, 1075)));
+        assert_eq!(
+            run.opens().first().map(|o| o.anchor),
+            Some(Point {
+                x: 140.0,
+                y: 1032.0 - 140.0
+            })
+        );
+        // The same press as a drag's key.
+        let mut drag = Run::new();
+        drag.signals(vec![started(), moved(5, 1075), keys(Modifiers::SHIFT)]);
+        assert_eq!(
+            drag.opens().first().map(|o| o.anchor),
+            run.opens().first().map(|o| o.anchor)
+        );
+    }
+
+    #[test]
+    fn a_scaled_offset_monitor_keeps_logical_and_physical_apart() {
+        let env = FakeEnv::at(-1920, 0, 1.5);
+        let mut run = Run::on(env);
+        run.shortcuts(fixture::snapshot())
+            .hotkey(press_at((-1915, 1075)));
+        let opens = run.opens();
+        let [open] = opens.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert!((open.scale - 1.5).abs() < 1e-9);
+        assert!((open.anchor.x - 140.0).abs() < 1e-9, "{:?}", open.anchor);
+        assert!(
+            (open.anchor.y - (1032.0 / 1.5 - 140.0)).abs() < 1e-9,
+            "{:?}",
+            open.anchor
+        );
+        assert!(run.effects.contains(&Effect::ShowOverlay {
+            monitor: Rect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
+        }));
+        // The anchor in physical pixels: 140 and 548 logical at 150 %.
+        let (ax, ay) = (-1920 + 210, 822);
+        // 60 physical px up is 40 logical: the dead zone, though 60
+        // logical would be on the ring.
+        run.point((ax, ay - 60));
+        assert!(run.highlights().is_empty());
+        // 84 logical px up is 126 physical.
+        run.point((ax, ay - 126));
+        assert_eq!(run.highlights(), vec![Some(0)]);
+        // Past the ring in logical pixels (121), on it in physical (181).
+        run.hotkey(released(HotkeyId::Open));
+        run.click((ax, ay - 182));
+        assert_eq!(run.closes(), vec![CloseReason::Cancel]);
+
+        // A pick's anchor is global and physical, for the toast.
+        let mut run = Run::on(FakeEnv::at(1920, 0, 1.5));
+        run.shortcuts(fixture::snapshot())
+            .hotkey(press_at((2400, 600)))
+            .point((2400, 600 - 126))
+            .hotkey(pressed(HotkeyId::Confirm));
+        let runs = run.shortcut_runs();
+        let [request] = runs.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(request.anchor, (2400, 600));
+        assert_eq!(request.display.monitor.x, 1920);
+        assert!((request.display.scale - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn drag_wheels_and_the_shortcuts_wheel_share_one_counter() {
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot());
+        run.signals(scripts::shift_tap());
+        run.script(scripts::hotkey_escape());
+        run.signals(scripts::shift_tap());
+        run.script(scripts::hotkey_tap_then_click());
+        let mut seqs: Vec<u64> = run.opens().iter().map(|o| o.seq).collect();
+        seqs.dedup();
+        assert_eq!(seqs, vec![1, 2, 3, 4]);
+        let modes: Vec<UiMode> = run.opens().iter().map(|o| o.mode).collect();
+        assert_eq!(
+            modes,
+            [
+                UiMode::Conversions,
+                UiMode::Shortcuts,
+                UiMode::Conversions,
+                UiMode::Shortcuts
+            ]
+        );
+        assert_eq!(run.shortcut_runs().first().map(|r| r.seq), Some(4));
+        // Only the Shortcuts wheels tracked the pointer and gave back.
+        assert_eq!(run.tracks(), vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn nothing_the_user_typed_reaches_debug_or_the_log() {
+        let marker = fixture::MARKER;
+        let front = FrontApp {
+            pid: 4,
+            id: Some(format!("com.{marker}")),
+        };
+        let (x, y) = TOP;
+        let inputs = vec![
+            Input::Shortcuts(Arc::new(fixture::marked())),
+            Input::Hotkey(press_with(PressContext {
+                cursor: Some(scripts::WHEEL_AT),
+                front: Some(front.clone()),
+                button_down: false,
+            })),
+            Input::Pointer(PointerSignal::Moved { x, y }),
+            Input::Hotkey(pressed(HotkeyId::Confirm)),
+            Input::RunEnded,
+        ];
+        let mut run = Run::new();
+        let mut printed = Vec::new();
+        for input in inputs {
+            printed.push(format!("{input:?}"));
+            printed.push(format!("{input:#?}"));
+            run.input(input);
+            printed.push(format!("{:?}", run.ctl));
+            printed.push(format!("{:#?}", run.ctl));
+        }
+        // The sample really carries the marker everywhere it can.
+        let runs = run.shortcut_runs();
+        let [request] = runs.as_slice() else {
+            panic!("{:?}", run.effects);
+        };
+        assert_eq!(request.name, marker);
+        assert_eq!(request.front, Some(front));
+        assert_eq!(run.shown(), (Vec::new(), names(&[marker])));
+        assert!(serde_json::to_string(run.opens()[0])
+            .unwrap()
+            .contains(marker));
+        for effect in &run.effects {
+            printed.push(format!("{effect:?}"));
+            printed.push(format!("{effect:#?}"));
+        }
+        assert!(printed.len() > 40);
+        for text in printed {
+            assert!(!text.contains(marker), "{text}");
+        }
     }
 }

@@ -20,9 +20,6 @@
 //! text. Log lines here carry counts, fixed words and the copy's own name,
 //! never the folder or anything from the file.
 
-// Nothing calls this yet: the commands do.
-#![allow(dead_code)]
-
 use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};

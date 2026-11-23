@@ -1,6 +1,7 @@
 //! Grape's Tauri app: a tray icon, a hidden overlay window, the wheel
-//! controller, the tool panels, the Settings window's settings and, on
-//! Windows and macOS, the float shelf. See `CLAUDE.md` in this crate.
+//! controller, the tool panels, the Settings window's settings, the
+//! Shortcuts wheel and, on Windows and macOS, the float shelf. See
+//! `CLAUDE.md` in this crate.
 //!
 //! There is no main window. On Windows the app lives in the notification
 //! area; on macOS it's a menu-bar accessory app with no Dock icon
@@ -112,7 +113,24 @@ pub fn run() -> anyhow::Result<()> {
             settings::settings_use_default_fallback,
             settings::settings_set_toggle,
             settings::settings_set_terminal,
-            settings::settings_dismiss_welcome
+            settings::settings_dismiss_welcome,
+            shortcuts::shortcuts_get,
+            shortcuts::shortcuts_set_enabled,
+            shortcuts::shortcuts_set_hotkey,
+            shortcuts::shortcuts_set_opens_at,
+            shortcuts::shortcuts_request_access,
+            shortcuts::shortcuts_add_menu,
+            shortcuts::shortcuts_remove_menu,
+            shortcuts::shortcuts_set_menu_everywhere,
+            shortcuts::shortcuts_add_item,
+            shortcuts::shortcuts_set_item,
+            shortcuts::shortcuts_remove_item,
+            shortcuts::shortcuts_move_item,
+            shortcuts::shortcuts_add_step,
+            shortcuts::shortcuts_set_step,
+            shortcuts::shortcuts_remove_step,
+            shortcuts::shortcuts_move_step,
+            shortcuts::shortcuts_pick_target
         ])
         .on_window_event(wheel::on_overlay_window_event)
         .on_window_event(float::on_window_event)
@@ -154,6 +172,10 @@ pub fn run() -> anyhow::Result<()> {
             // Before the wheel, which starts with the user's keys, sounds
             // and haptics.
             app.manage(SettingsState::load(app.handle()));
+            // Before the wheel too, which starts the hot keys and sends
+            // the controller the shortcuts. Never fatal: without them the
+            // Shortcuts wheel is just not available.
+            app.manage(shortcuts::ShortcutsState::load(app.handle()));
             let settings = app.state::<SettingsState>();
             wheel::start(
                 app.handle(),
@@ -182,21 +204,26 @@ pub fn run() -> anyhow::Result<()> {
         RunEvent::ExitRequested {
             code: None, api, ..
         } => api.prevent_exit(),
-        // Grape is going (tray → Quit, or a restart): stop every job now,
-        // and forget the open panel so a late Run is ignored.
+        // Grape is going (tray → Quit, or a restart): stop every job and
+        // the running shortcut now, and forget the open panel so a late
+        // Run is ignored.
         RunEvent::ExitRequested { code: Some(_), .. } => {
             panel::shut(app);
             jobs::cancel_all(app);
+            shortcuts::cancel_run(app, shortcuts::Why::Quitting);
         }
-        // Unhook the mouse before the process goes, and give the cancelled
-        // jobs a moment to kill their children and delete their temp
-        // files, so none outlives Grape. Cancelling again covers an exit
-        // that skipped the request.
+        // Unhook the mouse and let go of the hot keys before the process
+        // goes, and give the cancelled jobs and the cancelled shortcut a
+        // moment to kill their children and delete their temp files, so
+        // none outlives Grape. Cancelling again covers an exit that
+        // skipped the request.
         RunEvent::Exit => {
             panel::shut(app);
             jobs::cancel_all(app);
+            shortcuts::cancel_run(app, shortcuts::Why::Quitting);
             wheel::stop(app);
             jobs::wait_for_all(app);
+            shortcuts::wait_for_run(app);
         }
         // Opening Grape again while it runs (Finder, Launchpad, Spotlight)
         // opens Settings, like a second launch does on Windows.

@@ -18,7 +18,12 @@
 //! - Settings reach the controller as [`Input::Configure`] (keys, sounds)
 //!   and a shared haptics flag read on every highlight
 //!   ([`crate::settings`]).
+//! - The Shortcuts wheel's hot key monitor and pointer watch feed the same
+//!   channel. Its effects go to [`crate::shortcuts`]: the Escape and
+//!   Return hot keys and the pointer watch around an open wheel, the front
+//!   handed back after the hide, and the picked shortcut's run.
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -27,6 +32,7 @@ use std::thread;
 use std::time::Instant;
 
 use grape_core::{SelectionItem, WheelEntry};
+use grape_platform::shortcuts::{HotkeyId, HotkeySignal, PointerSignal, PressContext};
 use grape_platform::{DisplayBounds, DragMonitor, DragSignal, DropEvent, PlatformError, Rect};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
@@ -37,6 +43,7 @@ use crate::actions;
 use crate::controller::{ControllerConfig, Effect, Env, Input, RunRequest, WheelController};
 use crate::jobs;
 use crate::panel::{self, model::Route};
+use crate::shortcuts;
 use crate::ui_windows::OVERLAY;
 
 /// Inputs buffered for the controller thread.
@@ -54,6 +61,17 @@ impl WheelInputs {
     pub fn send(&self, input: Input) {
         if self.0.try_send(input).is_err() {
             log::warn!("wheel controller queue full or gone; an input was dropped");
+        }
+    }
+
+    /// Queues an input the controller must not miss (the Shortcuts wheel's
+    /// menus, the end of a run), waiting for room if the queue is full.
+    /// Never call it on the main thread once the controller runs, or on
+    /// the controller's own thread: either may be what the queue waits
+    /// for.
+    pub fn send_waiting(&self, input: Input) {
+        if self.0.send(input).is_err() {
+            log::warn!("wheel controller gone; an input was dropped");
         }
     }
 }
@@ -115,6 +133,7 @@ pub fn start(app: &AppHandle, config: ControllerConfig, haptics: Arc<AtomicBool>
     app.manage(WheelInputs(tx.clone()));
 
     app.manage(Monitor(Mutex::new(start_monitor(&tx))));
+    start_shortcuts(app, &tx);
 
     #[cfg(target_os = "macos")]
     app.manage(OverlayFrame::default());
@@ -134,7 +153,8 @@ pub fn start(app: &AppHandle, config: ControllerConfig, haptics: Arc<AtomicBool>
     }
 }
 
-/// Stops the drag monitor (unhooks the mouse). Call on exit.
+/// Stops the drag monitor (unhooks the mouse), the hot key monitor and the
+/// pointer watch. Call on exit.
 pub fn stop(app: &AppHandle) {
     if let Some(monitor) = app.try_state::<Monitor>() {
         let mut monitor = monitor.0.lock().unwrap_or_else(PoisonError::into_inner);
@@ -143,6 +163,7 @@ pub fn stop(app: &AppHandle) {
             log::info!("drag monitor stopped");
         }
     }
+    shortcuts::stop(app);
 }
 
 /// The overlay reports that wheel `seq` is on screen.
@@ -171,6 +192,25 @@ fn start_monitor(tx: &SyncSender<Input>) -> Option<Box<dyn DragMonitor>> {
     forward(signal_rx, tx.clone(), Input::Signal, "grape-signal-forward");
     log::info!("drag monitor running");
     Some(monitor)
+}
+
+/// Starts the Shortcuts wheel's hot key monitor and pointer watch, sends
+/// the controller the shortcuts as loaded and binds the hot key if the
+/// wheel is on. Where the wheel isn't available this does nothing.
+fn start_shortcuts(app: &AppHandle, tx: &SyncSender<Input>) {
+    let (hotkey_tx, hotkey_rx) = mpsc::sync_channel::<HotkeySignal>(SOURCE_CAPACITY);
+    let (pointer_tx, pointer_rx) = mpsc::sync_channel::<PointerSignal>(SOURCE_CAPACITY);
+    if !shortcuts::start_sources(app, hotkey_tx, pointer_tx) {
+        return;
+    }
+    forward(hotkey_rx, tx.clone(), Input::Hotkey, "grape-hotkey-forward");
+    forward(
+        pointer_rx,
+        tx.clone(),
+        Input::Pointer,
+        "grape-pointer-forward",
+    );
+    shortcuts::publish(app);
 }
 
 /// Moves everything from `rx` into the controller's queue on its own
@@ -206,18 +246,30 @@ fn run_controller(
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         let now = Instant::now();
-        let effects = match input {
+        let mut effects = match input {
             Ok(input) => controller.handle(input, now),
             Err(RecvTimeoutError::Timeout) => controller.tick(now),
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        for effect in effects {
-            apply(app, effect, haptics);
+        // What an effect asks of the controller in turn is handled here,
+        // before the next input: this thread can't wait on its own queue.
+        let mut answers = VecDeque::new();
+        loop {
+            for effect in effects {
+                answers.extend(apply(app, effect, haptics));
+            }
+            let Some(answer) = answers.pop_front() else {
+                break;
+            };
+            effects = controller.handle(answer, Instant::now());
         }
     }
 }
 
-fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) {
+/// Carries out one effect. `Some` is an input the controller must get
+/// before anything else: the close of a wheel whose Esc couldn't be bound,
+/// or the end of a run that never started.
+fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) -> Option<Input> {
     match effect {
         Effect::Open(open) => emit(app, "wheel://open", open),
         Effect::ShowOverlay { monitor } => show_overlay(app, monitor),
@@ -239,6 +291,41 @@ fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) {
         }
         Effect::Run(request) => run(app, &request),
         Effect::Log(line) => log::info!("{line}"),
+        Effect::Track(on) => {
+            // Returns once the OS has bound or let go of the keys, so a
+            // run that follows a close never meets Grape's own Esc.
+            if !shortcuts::track(app, on) {
+                return Some(escape_pressed());
+            }
+        }
+        Effect::GiveBack => give_back(app),
+        Effect::RunShortcut(run) => return shortcuts::start_run(app, run),
+        Effect::StillRunning { anchor, display } => {
+            shortcuts::show_still_running(app, anchor, &display);
+        }
+    }
+    None
+}
+
+/// What closes a Shortcuts wheel that can't be left with Esc: the press
+/// itself. Esc always closes the wheel (golden rule 4), so a wheel without
+/// it doesn't stay open.
+fn escape_pressed() -> Input {
+    Input::Hotkey(HotkeySignal::Pressed(
+        HotkeyId::Escape,
+        PressContext {
+            cursor: None,
+            front: None,
+            button_down: false,
+        },
+    ))
+}
+
+/// Gives the front back to the app the user was in, on the main thread
+/// after the overlay's hide (the same queue), if Grape took it.
+fn give_back(app: &AppHandle) {
+    if let Err(err) = app.run_on_main_thread(grape_platform::shortcuts::give_back_front) {
+        log::error!("could not give the front back: no main thread: {err}");
     }
 }
 
@@ -595,6 +682,65 @@ mod tests {
                 assert!(!text.contains(leak), "{text}");
             }
         }
+    }
+
+    #[test]
+    fn a_wheel_that_cannot_have_esc_closes_as_esc_would() {
+        use std::sync::Arc;
+
+        use grape_platform::mock::{scripts, ScriptEvent};
+
+        use crate::events::{CloseReason, WheelClose};
+        use crate::shortcuts::session::fixture;
+
+        struct OneDisplay;
+
+        impl Env for OneDisplay {
+            fn display_at(&self, _x: i32, _y: i32) -> Option<DisplayBounds> {
+                Some(fixture::display(0, 0, 1.0))
+            }
+
+            fn classify(&self, _paths: &[PathBuf]) -> Vec<SelectionItem> {
+                Vec::new()
+            }
+        }
+
+        let mut controller = WheelController::new(OneDisplay, ControllerConfig::for_this_os());
+        let now = Instant::now();
+        controller.handle(Input::Shortcuts(Arc::new(fixture::snapshot())), now);
+        let ScriptEvent::Hotkey(press) = scripts::press(HotkeyId::Open) else {
+            panic!("a press is a hot key signal");
+        };
+        let opened = controller.handle(Input::Hotkey(press), now);
+        assert!(opened.contains(&Effect::Track(true)));
+
+        // What `apply` answers when that `Track(true)` couldn't bind Esc.
+        let closed = controller.handle(escape_pressed(), now);
+        let done: Vec<&Effect> = closed
+            .iter()
+            .filter(|effect| !matches!(effect, Effect::Log(_)))
+            .collect();
+        assert!(
+            matches!(
+                done.as_slice(),
+                [
+                    Effect::Close(WheelClose {
+                        reason: CloseReason::Escape,
+                        ..
+                    }),
+                    Effect::HideOverlay,
+                    Effect::Track(false),
+                    Effect::GiveBack,
+                ]
+            ),
+            "{done:?}"
+        );
+        // And the hot key opens a wheel again.
+        let ScriptEvent::Hotkey(press) = scripts::press(HotkeyId::Open) else {
+            panic!("a press is a hot key signal");
+        };
+        let again = controller.handle(Input::Hotkey(press), now);
+        assert!(again.contains(&Effect::Track(true)));
     }
 
     #[test]

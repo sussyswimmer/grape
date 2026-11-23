@@ -6,9 +6,9 @@
  * `preventDefault` and `stopPropagation`), focus, pointer capture, a
  * form control's `value` and `checked` (plain fields: a test sets them,
  * then dispatches `change`), and plain `disabled`, `tabIndex`, `scrollTop`
- * and `hidden` fields (no reflection to attributes, no clamping); and the
- * document's `body`, for "nothing is focused" checks. Nothing else. Test
- * code only.
+ * and `hidden` fields (no reflection to attributes, no clamping); the
+ * document's `body`, for "nothing is focused" checks; and, for a page that
+ * listens to its window, `fakeWindow`. Nothing else. Test code only.
  */
 
 export class FakeClassList {
@@ -130,6 +130,26 @@ export class FakeElement {
     node.parent = null;
   }
 
+  /** Puts `node` just before `before`, or last when `before` is `null`. */
+  insertBefore(node: FakeElement, before: FakeElement | null): void {
+    node.parent?.removeChild(node);
+    const at = before === null ? -1 : this.children.indexOf(before);
+    if (before !== null && at < 0) {
+      throw new Error("insertBefore: the reference node is not a child");
+    }
+    node.parent = this;
+    this.children.splice(at < 0 ? this.children.length : at, 0, node);
+    this.text = "";
+  }
+
+  /** True for this element and everything inside it. */
+  contains(other: FakeElement | null): boolean {
+    for (let node = other; node !== null; node = node.parent) {
+      if (node === this) return true;
+    }
+    return false;
+  }
+
   replaceChildren(...nodes: FakeElement[]): void {
     for (const child of this.children) child.parent = null;
     this.children = [];
@@ -208,8 +228,37 @@ export class FakeElement {
   }
 }
 
-export class FakeDocument {
-  readonly defaultView = null;
+/** A listener on the document or the window: it gets no event object. */
+type PlainListener = () => void;
+
+/** Listeners by event type, for the document and the window. */
+class FakeTarget {
+  private readonly plain = new Map<string, PlainListener[]>();
+
+  addEventListener(type: string, listener: PlainListener): void {
+    const list = this.plain.get(type) ?? [];
+    list.push(listener);
+    this.plain.set(type, list);
+  }
+
+  /** Test helper: calls every listener for `type`. */
+  dispatch(type: string): void {
+    for (const listener of this.plain.get(type) ?? []) listener();
+  }
+}
+
+/** The window of a document that has one (see `fakeWindow`). */
+export class FakeWindow extends FakeTarget {
+  constructor(readonly document: FakeDocument) {
+    super();
+  }
+}
+
+export class FakeDocument extends FakeTarget {
+  /** `null` unless a test gives the document a window with `fakeWindow`. */
+  defaultView: FakeWindow | null = null;
+  /** A plain field: a test sets it, then dispatches `visibilitychange`. */
+  visibilityState: "visible" | "hidden" = "visible";
   activeElement: FakeElement | null = null;
   readonly body: FakeElement = new FakeElement(this, "http://www.w3.org/1999/xhtml", "body");
 
@@ -226,6 +275,13 @@ export class FakeDocument {
 export function fakeRoot(): { doc: FakeDocument; root: FakeElement } {
   const doc = new FakeDocument();
   return { doc, root: doc.createElement("div") };
+}
+
+/** Gives `doc` a window, for pages that listen for `focus` or `pagehide`. Call it before mounting. */
+export function fakeWindow(doc: FakeDocument): FakeWindow {
+  const win = new FakeWindow(doc);
+  doc.defaultView = win;
+  return win;
 }
 
 /** Every descendant of `element`, depth first. */

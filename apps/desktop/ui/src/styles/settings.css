@@ -663,3 +663,280 @@ body {
   color: var(--color-text-muted);
   font-size: 0.9rem;
 }
+
+/*
+ * The Shortcuts section (src/settings/shortcuts-view.ts): a card of its own
+ * under the others. Nothing here moves, so there is nothing to still under
+ * prefers-reduced-motion.
+ */
+.shortcuts {
+  margin-bottom: 1.25rem;
+}
+
+.shortcuts .section-hint:empty {
+  display: none;
+}
+
+/* A label that only a screen reader needs: the field's place says the rest. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.sc-body {
+  display: grid;
+  gap: 0.85rem;
+}
+
+/* The key combination, the menus and the chosen menu's shortcuts. */
+.sc-block {
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-border);
+}
+
+.sc-title {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.sc-hint,
+.sc-binding,
+.sc-limit,
+.sc-warning,
+.sc-access-text,
+.sc-item-summary {
+  margin: 0.3rem 0 0;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.sc-limit:empty,
+.sc-binding:empty {
+  display: none;
+}
+
+.sc-access {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.sc-access-text {
+  margin-top: 0;
+  color: var(--color-text);
+}
+
+.sc-access .button {
+  margin-top: 0.5rem;
+}
+
+/* A chord: four checkboxes, the key, then how it reads. */
+.sc-chord,
+.sc-chord-mods,
+.sc-line,
+.sc-buttons,
+.sc-item-head,
+.sc-step-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sc-chord-mods {
+  gap: 0.75rem;
+}
+
+.sc-check,
+.sc-chord-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.sc-chord-label {
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.sc-buttons,
+.sc-line {
+  margin-top: 0.6rem;
+}
+
+.shortcuts .button:disabled,
+.shortcuts .field-select:disabled {
+  opacity: 0.45;
+}
+
+.sc-items,
+.sc-steps,
+.sc-children {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.sc-steps:empty,
+.sc-children:empty,
+.sc-items:empty {
+  display: none;
+}
+
+/* One shortcut or group: its row, then its editor. */
+.sc-item {
+  padding: 0.6rem 0.75rem 0.75rem;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.sc-item-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 1.75rem;
+  height: 1.75rem;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--color-accent);
+}
+
+/* Our own glyphs are strokes on a 24 by 24 grid, never filled. */
+.sc-glyph {
+  flex: none;
+  width: 1.25rem;
+  height: 1.25rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.75;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sc-input,
+.sc-text {
+  box-sizing: border-box;
+  min-height: 2rem;
+  padding: 0.25rem 0.5rem;
+  font: inherit;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.sc-name {
+  flex: 1 1 8rem;
+  min-width: 0;
+  font-weight: 550;
+}
+
+.sc-emoji {
+  width: 6.5rem;
+}
+
+.sc-number {
+  width: 7rem;
+}
+
+.sc-text {
+  display: block;
+  width: 100%;
+  resize: vertical;
+}
+
+/* Scripts and links read better in a fixed-width face. */
+.sc-code {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+/* Names are long and may have no spaces: let them break anywhere. */
+.sc-item-summary,
+.sc-picked {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sc-item-editor {
+  margin-top: 0.6rem;
+}
+
+.sc-steps,
+.sc-children {
+  margin-top: 0.6rem;
+}
+
+/* A group's shortcuts sit one step in. */
+.sc-children {
+  padding-left: 0.75rem;
+  border-left: 2px solid var(--color-border);
+}
+
+.sc-children .sc-item {
+  background: var(--color-surface);
+}
+
+.sc-step {
+  padding: 0.5rem 0.6rem 0.6rem;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+}
+
+.sc-children .sc-step {
+  background: var(--color-bg);
+}
+
+.sc-step-title {
+  flex: 1 1 auto;
+  font-weight: 550;
+}
+
+.sc-step-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.6rem;
+  margin-top: 0.45rem;
+}
+
+.sc-step-body .sc-hint {
+  flex: 1 1 100%;
+  margin-top: 0;
+}
+
+.sc-picked.is-unset {
+  color: var(--color-text-muted);
+}
+
+/* High contrast on Windows: system colors for the rows' edges and for what's off. */
+@media (forced-colors: active) {
+  .sc-block,
+  .sc-access,
+  .sc-item,
+  .sc-step,
+  .sc-children {
+    border-color: CanvasText;
+  }
+
+  .shortcuts .button:disabled,
+  .shortcuts .field-select:disabled {
+    opacity: 1;
+    color: GrayText;
+    border-color: GrayText;
+  }
+
+  .sc-item-icon,
+  .sc-picked.is-unset {
+    color: CanvasText;
+  }
+}
