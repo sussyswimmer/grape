@@ -367,9 +367,11 @@ pub enum Effect {
     /// Start (`true`) or stop the pointer watch, and bind or unbind the
     /// Escape and Confirm hot keys. Only the Shortcuts wheel sends it.
     Track(bool),
-    /// Give the front back to the app the user was in, queued after the
-    /// overlay's hide. Only the Shortcuts wheel sends it.
-    GiveBack,
+    /// Give the front back to the app the wheel opened over, by its pid,
+    /// queued after the overlay's hide. `None` when there is nothing to
+    /// give back: no click on the wheel made Grape the active app, or the
+    /// wheel opened over Grape itself. Only the Shortcuts wheel sends it.
+    GiveBack(Option<i32>),
     /// Run a picked shortcut, then answer with [`Input::RunEnded`]. Until
     /// that answer the hot key opens no wheel. A shortcut with nothing to
     /// run yet comes this way too; the runner says so.
@@ -632,7 +634,7 @@ impl<E: Env> WheelController<E> {
                 }),
                 Effect::HideOverlay,
                 Effect::Track(false),
-                Effect::GiveBack,
+                Effect::GiveBack(session.give_back()),
                 Effect::Log(format!("wheel {} closed: {reason:?}", session.seq())),
             ],
             State::Idle | State::Dragging { .. } | State::Dismissed => Vec::new(),
@@ -2922,7 +2924,7 @@ mod tests {
         let closes = places(|e| matches!(e, Effect::Close(_)));
         let hides = places(|e| matches!(e, Effect::HideOverlay));
         let untracks = places(|e| matches!(e, Effect::Track(false)));
-        let give_backs = places(|e| matches!(e, Effect::GiveBack));
+        let give_backs = places(|e| matches!(e, Effect::GiveBack(_)));
         let (&[close], &[hide], &[untrack], &[give_back]) = (
             closes.as_slice(),
             hides.as_slice(),
@@ -3248,7 +3250,8 @@ mod tests {
                 }),
                 &Effect::HideOverlay,
                 &Effect::Track(false),
-                &Effect::GiveBack,
+                // The click made Grape active: the front goes back.
+                &Effect::GiveBack(Some(scripts::front_app().pid)),
                 &log("wheel 1 closed: Picked"),
                 &log("wheel 1: picked segment 0"),
             ]
@@ -3608,7 +3611,8 @@ mod tests {
                 }),
                 Effect::HideOverlay,
                 Effect::Track(false),
-                Effect::GiveBack,
+                // No click was seen, so Grape took nothing.
+                Effect::GiveBack(None),
                 log("wheel 1 closed: Cancel"),
             ]
         );
@@ -3636,7 +3640,7 @@ mod tests {
         );
         assert!(run.tracks().is_empty());
         assert!(run.shortcut_runs().is_empty());
-        assert!(!run.effects.contains(&Effect::GiveBack));
+        assert!(!run.effects.iter().any(|e| matches!(e, Effect::GiveBack(_))));
         // A leftover pointer signal from the watch changes nothing.
         let effects = run.effects.len();
         run.point(TOP);
@@ -3769,6 +3773,63 @@ mod tests {
     }
 
     #[test]
+    fn the_front_is_given_back_to_the_app_the_wheel_opened_over_after_a_click() {
+        let give_backs = |run: &Run| -> Vec<Option<i32>> {
+            run.effects
+                .iter()
+                .filter_map(|e| match e {
+                    Effect::GiveBack(pid) => Some(*pid),
+                    _ => None,
+                })
+                .collect()
+        };
+        let pid = scripts::front_app().pid;
+        // A click, wherever on the wheel's display, made Grape active.
+        for at in [TOP, MIDDLE, OUTSIDE] {
+            let mut run = sticky_wheel();
+            run.click(at);
+            assert_eq!(give_backs(&run), [Some(pid)], "{at:?}");
+        }
+        // Also when the wheel closes some other way after it.
+        let mut run = sticky_wheel();
+        run.button_down(TOP).hotkey(pressed(HotkeyId::Escape));
+        assert_eq!(give_backs(&run), [Some(pid)]);
+
+        // No click: Grape took nothing, so nothing is handed anywhere.
+        let ways: [Way; 3] = [
+            |run| {
+                run.point(TOP).wait(HOLD).hotkey(released(HotkeyId::Open));
+            },
+            |run| {
+                run.point(TOP).hotkey(pressed(HotkeyId::Confirm));
+            },
+            |run| {
+                run.hotkey(pressed(HotkeyId::Escape));
+            },
+        ];
+        for way in ways {
+            let mut run = shortcuts_wheel();
+            way(&mut run);
+            assert_eq!(give_backs(&run), [None]);
+        }
+        // A click on another display went to whatever is there.
+        let mut run = sticky_wheel();
+        run.click((2500, 300));
+        assert_eq!(give_backs(&run), [None]);
+
+        // Opened over Grape itself: there is no app to give it back to.
+        let mut run = Run::new();
+        run.shortcuts(fixture::snapshot())
+            .hotkey(press_with(PressContext {
+                cursor: Some(scripts::WHEEL_AT),
+                front: None,
+                button_down: false,
+            }));
+        run.hotkey(released(HotkeyId::Open)).click(OUTSIDE);
+        assert_eq!(give_backs(&run), [None]);
+    }
+
+    #[test]
     fn every_way_out_tears_the_wheel_down_once_and_in_order() {
         use CloseReason::{Cancel, Escape, Paused, Picked, Watchdog};
         let ways: Vec<(&str, CloseReason, Way)> = vec![
@@ -3836,7 +3897,7 @@ mod tests {
             let give_back = run
                 .effects
                 .iter()
-                .position(|e| matches!(e, Effect::GiveBack));
+                .position(|e| matches!(e, Effect::GiveBack(_)));
             let ran = run
                 .effects
                 .iter()

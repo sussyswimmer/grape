@@ -772,7 +772,9 @@ body {
   margin-top: 0.6rem;
 }
 
+/* aria-disabled: a button whose press hasn't answered. It keeps focus and stays in the Tab order. */
 .shortcuts .button:disabled,
+.shortcuts .button[aria-disabled="true"],
 .shortcuts .field-select:disabled {
   opacity: 0.45;
 }
@@ -918,6 +920,23 @@ body {
   color: var(--color-text-muted);
 }
 
+/* Text Rust refused stays in its field, edged in the error color, with why on the line under it. */
+.sc-input[aria-invalid="true"],
+.sc-text[aria-invalid="true"] {
+  border-color: var(--color-error);
+}
+
+.sc-unsaved {
+  flex: 1 1 100%;
+  margin: 0;
+  color: var(--color-error);
+  font-size: 0.875rem;
+}
+
+.sc-unsaved:empty {
+  display: none;
+}
+
 /* High contrast on Windows: system colors for the rows' edges and for what's off. */
 @media (forced-colors: active) {
   .sc-block,
@@ -929,10 +948,16 @@ body {
   }
 
   .shortcuts .button:disabled,
+  .shortcuts .button[aria-disabled="true"],
   .shortcuts .field-select:disabled {
     opacity: 1;
     color: GrayText;
     border-color: GrayText;
+  }
+
+  /* The edge can't carry it there: the line under the field does. */
+  .sc-unsaved {
+    color: CanvasText;
   }
 
   .sc-item-icon,

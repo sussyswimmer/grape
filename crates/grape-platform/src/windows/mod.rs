@@ -67,8 +67,8 @@ use std::time::Duration;
 
 use crate::keys::Chord;
 use crate::shortcuts::{
-    HotkeyMonitor, InputAccess, LocalTime, OpenTarget, PickKind, Picked, Placement, PointerWatch,
-    Program, ProgramRequest, SystemControl, SystemPlan,
+    FrontApp, HotkeyMonitor, InputAccess, LocalTime, OpenTarget, PickKind, Picked, Placement,
+    PointerWatch, Program, ProgramRequest, SystemControl, SystemPlan,
 };
 use crate::{DisplayBounds, DragMonitor, Modifiers, PlatformError};
 
@@ -150,6 +150,10 @@ pub(crate) fn open_target(_target: OpenTarget<'_>) -> Result<(), PlatformError> 
     Err(PlatformError::Unsupported)
 }
 
+pub(crate) fn open_programs(_target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
+
 pub(crate) fn program_for(_request: ProgramRequest<'_>) -> Result<Program, PlatformError> {
     Err(PlatformError::Unsupported)
 }
@@ -164,7 +168,11 @@ pub(crate) fn place_window(_pid: i32, _placement: Placement) -> Result<(), Platf
     Err(PlatformError::Unsupported)
 }
 
-pub(crate) fn give_back_front() {}
+pub(crate) fn give_back_front(_pid: Option<i32>) {}
+
+pub(crate) fn front_app() -> Result<Option<FrontApp>, PlatformError> {
+    Err(PlatformError::Unsupported)
+}
 
 pub(crate) fn ensure_front(_pid: i32, _timeout: Duration) -> bool {
     false

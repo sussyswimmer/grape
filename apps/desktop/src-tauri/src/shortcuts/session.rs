@@ -187,6 +187,9 @@ pub struct Session {
     sticky: bool,
     /// A button-down was seen while open, so the next button-up counts.
     button_seen: bool,
+    /// A button went down on the wheel's display while it was open. The
+    /// overlay covers that display, so the click made Grape the active app.
+    clicked: bool,
     painted: bool,
     /// When the hot key went down.
     opened_at: Instant,
@@ -233,6 +236,7 @@ impl Session {
             pointer: cursor,
             sticky: false,
             button_seen: false,
+            clicked: false,
             painted: false,
             opened_at: now,
             last_event: now,
@@ -257,6 +261,18 @@ impl Session {
     /// How many groups are open.
     pub fn depth(&self) -> usize {
         self.trail.len()
+    }
+
+    /// The app to give the front back to when the wheel closes: the one it
+    /// opened over, by its pid, if a click on the wheel made Grape the
+    /// active app. `None` when no click did (Grape took nothing, and the
+    /// user may be in another app by now) and when the wheel opened over
+    /// Grape itself.
+    pub fn give_back(&self) -> Option<i32> {
+        self.front
+            .as_ref()
+            .filter(|_| self.clicked)
+            .map(|app| app.pid)
     }
 
     /// The highlighted segment.
@@ -355,6 +371,15 @@ impl Session {
             PointerSignal::Down { x, y } => {
                 self.pointer = (x, y);
                 self.button_seen = true;
+                // A click on another display went to whatever is there.
+                let monitor = self.place.display.monitor;
+                let inside = |at: i32, from: i32, size: i32| {
+                    let offset = i64::from(at) - i64::from(from);
+                    (0..i64::from(size)).contains(&offset)
+                };
+                if inside(x, monitor.x, monitor.width) && inside(y, monitor.y, monitor.height) {
+                    self.clicked = true;
+                }
                 Decision::Nothing
             }
             PointerSignal::Up { x, y } => {
@@ -1162,6 +1187,39 @@ mod tests {
         assert_eq!(session.deadline(WATCHDOG), tap + WATCHDOG);
         session.hotkey(&HotkeySignal::Released(HotkeyId::Open), later);
         assert_eq!(session.deadline(WATCHDOG), tap + WATCHDOG);
+    }
+
+    #[test]
+    fn the_front_goes_back_only_after_a_click_on_the_wheels_display() {
+        let now = Instant::now();
+        let front = scripts::front_app();
+        // No click: Grape never took the front.
+        let mut session = open(now);
+        assert_eq!(session.give_back(), None);
+        session.pointer(moved(TOP), now);
+        session.pointer(up(TOP), now);
+        assert_eq!(session.give_back(), None);
+        // A button down anywhere on the wheel's display is a click on the
+        // overlay, wherever it lands: on a segment, in a gap, past the ring.
+        for at in [TOP, scripts::WHEEL_AT, (0, 0), (1919, 1079)] {
+            let mut session = open(now);
+            session.pointer(down(at), now);
+            assert_eq!(session.give_back(), Some(front.pid), "{at:?}");
+            // It stays so after the button is up and a group has opened.
+            session.pointer(up(at), now);
+            assert_eq!(session.give_back(), Some(front.pid), "{at:?}");
+        }
+        // A click on another display went to what is there, not to Grape.
+        for at in [(1920, 300), (-1, 300), (400, 1080), (400, -1)] {
+            let mut session = open(now);
+            session.pointer(down(at), now);
+            assert_eq!(session.give_back(), None, "{at:?}");
+        }
+        // Opened over Grape itself: nobody to give it back to.
+        let mut session = open(now);
+        session.front = None;
+        session.pointer(down(TOP), now);
+        assert_eq!(session.give_back(), None);
     }
 
     #[test]

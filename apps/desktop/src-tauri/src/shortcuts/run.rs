@@ -4,8 +4,9 @@
 //!   method per need. [`SystemActuator`] is the real one; tests use a
 //!   recording fake.
 //! - [`run_steps`] is the sequencing and nothing else: which call follows
-//!   which, the checks before the first step that presses keys, the waits,
-//!   and where a run stops. It reads no clock and never logs.
+//!   which, the checks before the first step that presses keys, which app
+//!   the keys are aimed at, the waits, and where a run stops. It reads no
+//!   clock and never logs.
 //! - [`run_shortcut`] is what the `"grape-shortcut"` thread calls: it times
 //!   [`run_steps`] and writes the log line.
 //! - [`toast_for`] words an [`Outcome`] for the toast.
@@ -15,11 +16,13 @@
 //! and fixed words only. The one exception is the toast, which names the
 //! shortcut.
 
+use std::ffi::OsString;
 use std::fmt;
-use std::io::Write;
-use std::path::PathBuf;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,6 +38,7 @@ use super::model::{
     date_text, expand_text, needs_clipboard, runnable, time_text, ClipboardAction, ShortcutRun,
     StepKind, StepKindId,
 };
+use super::store::private_file;
 
 /// One slice of a wait. A cancel is noticed within one.
 const SLICE: Duration = Duration::from_millis(20);
@@ -42,10 +46,20 @@ const SLICE: Duration = Duration::from_millis(20);
 const KEYS_WAIT: Duration = Duration::from_millis(500);
 /// How long the app the user was in has to come back to the front.
 const FRONT_WAIT: Duration = Duration::from_millis(400);
+/// How long an app other than Grape has to be in front, and stay there,
+/// after a step that may have brought another app forward.
+const SETTLE_WAIT: Duration = Duration::from_millis(1500);
+/// The time between two looks at the app in front.
+const SETTLE_SLICE: Duration = Duration::from_millis(50);
 /// How long a Copy has to reach the clipboard.
 const COPY_WAIT: Duration = Duration::from_millis(500);
 /// The longest a program may run.
 const PROGRAM_LIMIT: Duration = Duration::from_secs(60);
+/// The longest an opener may take: it only hands its target on.
+const OPEN_LIMIT: Duration = Duration::from_secs(10);
+/// The longest a Speak step may talk: its text can be far more than a
+/// minute's worth.
+const SPEAK_LIMIT: Duration = Duration::from_secs(600);
 /// How often a running program is looked at.
 const PROGRAM_POLL: Duration = Duration::from_millis(10);
 /// How long a program has to end by itself once its group was asked to:
@@ -79,6 +93,12 @@ pub trait Actuator {
     fn held_modifiers(&self) -> Modifiers;
     /// Waits up to `timeout` for the app `pid` to be in front.
     fn ensure_front(&self, pid: i32, timeout: Duration) -> bool;
+    /// The pid of the app in front right now. `None` when that is Grape
+    /// itself, or nothing.
+    ///
+    /// # Errors
+    /// When the OS didn't say.
+    fn front_app(&self) -> Result<Option<i32>, PlatformError>;
     /// Presses `chord` from its place on the keyboard.
     ///
     /// # Errors
@@ -109,11 +129,12 @@ pub trait Actuator {
     /// # Errors
     /// When the clipboard couldn't be changed.
     fn clear_clipboard(&self) -> Result<(), PlatformError>;
-    /// Opens an app, a file, a folder or a link, and waits for the answer.
+    /// The programs that open an app, a file, a folder or a link here, to
+    /// try in order until one ends well.
     ///
     /// # Errors
-    /// When it couldn't be opened.
-    fn open_target(&self, target: OpenTarget<'_>) -> Result<(), PlatformError>;
+    /// Where this OS has none.
+    fn open_programs(&self, target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError>;
     /// The program that does `request` here.
     ///
     /// # Errors
@@ -148,7 +169,8 @@ pub enum Failure {
     KeysHeld,
     /// The app the user was in didn't come back to the front.
     NotInFront,
-    /// No app was in front when the wheel opened.
+    /// No app was in front when the wheel opened, or none but Grape was
+    /// when a later step went to press keys.
     NoFrontApp,
     /// The OS call the step makes failed.
     Platform(PlatformError),
@@ -215,14 +237,28 @@ impl From<Failure> for Stop {
     }
 }
 
+/// The app the keys Grape presses are meant for, and whose window a
+/// Window step moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Aim {
+    /// The app that was in front when the wheel opened. Not looked at yet.
+    Opener,
+    /// Whatever is in front when the next step that presses keys starts:
+    /// a step of this run opened something or ran a program, which may
+    /// have brought another app forward on purpose.
+    InFront,
+    /// The app with this pid: it was in front at the last look.
+    App(i32),
+}
+
 /// One run in progress.
 struct Sequence<'a> {
     run: &'a ShortcutRun,
     actuator: &'a dyn Actuator,
     cancel: &'a AtomicBool,
-    /// The front app's pid, once the checks before the first key press
-    /// passed.
-    front: Option<i32>,
+    /// Input access and the modifier keys were checked. Once per run.
+    checked: bool,
+    aim: Aim,
 }
 
 impl Sequence<'_> {
@@ -240,13 +276,44 @@ impl Sequence<'_> {
         }
     }
 
-    /// The checks before the first step that presses keys, types, copies,
-    /// pastes or moves a window. They run once; later steps go straight
-    /// through. Returns the front app's pid.
+    /// What comes before a step that presses keys, types, copies, pastes or
+    /// moves a window. Returns the pid of the app the step is aimed at.
+    ///
+    /// - Input access and the modifier keys are checked once per run.
+    /// - The aim starts as the app that was in front when the wheel
+    ///   opened, which gets [`FRONT_WAIT`] to be in front again.
+    /// - After a step that may have brought another app forward
+    ///   ([`retarget`](Self::retarget)), the aim is whatever app is in
+    ///   front by now. Nothing is pressed while that is Grape itself.
+    /// - Once an app was found in front, later steps go straight through.
     fn gate(&mut self) -> Result<i32, Stop> {
-        if let Some(pid) = self.front {
+        if let Aim::App(pid) = self.aim {
             return Ok(pid);
         }
+        if !self.checked {
+            self.check()?;
+            self.checked = true;
+        }
+        let pid = match self.aim {
+            Aim::App(pid) => pid,
+            Aim::Opener => {
+                let Some(front) = &self.run.front else {
+                    return Err(Failure::NoFrontApp.into());
+                };
+                self.live()?;
+                if !self.actuator.ensure_front(front.pid, FRONT_WAIT) {
+                    return Err(Failure::NotInFront.into());
+                }
+                front.pid
+            }
+            Aim::InFront => self.settled_front()?,
+        };
+        self.aim = Aim::App(pid);
+        Ok(pid)
+    }
+
+    /// Input access, then the modifier keys let go.
+    fn check(&self) -> Result<(), Stop> {
         self.live()?;
         if self.actuator.input_access() == InputAccess::Denied {
             self.live()?;
@@ -259,7 +326,7 @@ impl Sequence<'_> {
         loop {
             self.live()?;
             if self.actuator.held_modifiers() == Modifiers::NONE {
-                break;
+                return Ok(());
             }
             if waited >= KEYS_WAIT {
                 return Err(Failure::KeysHeld.into());
@@ -268,15 +335,35 @@ impl Sequence<'_> {
             self.actuator.sleep(SLICE);
             waited += SLICE;
         }
-        let Some(front) = &self.run.front else {
-            return Err(Failure::NoFrontApp.into());
-        };
-        self.live()?;
-        if !self.actuator.ensure_front(front.pid, FRONT_WAIT) {
-            return Err(Failure::NotInFront.into());
+    }
+
+    /// The app in front once it has settled: the same app, and not Grape,
+    /// at two looks in a row, within [`SETTLE_WAIT`]. An app a step just
+    /// opened takes a moment to come forward.
+    fn settled_front(&self) -> Result<i32, Stop> {
+        let mut seen = None;
+        let mut waited = Duration::ZERO;
+        loop {
+            self.live()?;
+            let front = self.actuator.front_app()?;
+            if let (Some(pid), true) = (front, front == seen) {
+                return Ok(pid);
+            }
+            seen = front;
+            if waited >= SETTLE_WAIT {
+                // Grape is in front, or the apps keep changing places.
+                return Err(Failure::NoFrontApp.into());
+            }
+            self.live()?;
+            self.actuator.sleep(SETTLE_SLICE);
+            waited += SETTLE_SLICE;
         }
-        self.front = Some(front.pid);
-        Ok(front.pid)
+    }
+
+    /// A step may have brought another app forward on purpose: the next
+    /// step that presses keys is meant for whatever is in front then.
+    fn retarget(&mut self) {
+        self.aim = Aim::InFront;
     }
 
     fn step(&mut self, kind: &StepKind) -> Result<(), Stop> {
@@ -297,8 +384,7 @@ impl Sequence<'_> {
                 let Some(path) = path else {
                     return Ok(());
                 };
-                self.live()?;
-                self.actuator.open_target(OpenTarget::App {
+                self.open(OpenTarget::App {
                     path,
                     id: bundle_id.as_deref(),
                 })?;
@@ -307,22 +393,26 @@ impl Sequence<'_> {
                 let Some(path) = path else {
                     return Ok(());
                 };
-                self.live()?;
-                self.actuator.open_target(OpenTarget::Path(path))?;
+                self.open(OpenTarget::Path(path))?;
             }
-            StepKind::OpenUrl { url } => {
-                self.live()?;
-                self.actuator.open_target(OpenTarget::Url(url))?;
-            }
+            StepKind::OpenUrl { url } => self.open(OpenTarget::Url(url))?,
+            // What a script, an Apple Shortcut or a macro does is its own
+            // business: it may well bring an app forward.
             StepKind::AppleShortcut { name } => {
-                self.program_for(ProgramRequest::AppleShortcut(name))?;
+                self.program_for(ProgramRequest::AppleShortcut(name), PROGRAM_LIMIT)?;
+                self.retarget();
             }
             StepKind::AppleScript { source } => {
-                self.program_for(ProgramRequest::AppleScript(source))?;
+                self.program_for(ProgramRequest::AppleScript(source), PROGRAM_LIMIT)?;
+                self.retarget();
             }
-            StepKind::Shell { source } => self.program_for(ProgramRequest::Shell(source))?,
+            StepKind::Shell { source } => {
+                self.program_for(ProgramRequest::Shell(source), PROGRAM_LIMIT)?;
+                self.retarget();
+            }
             StepKind::KeyboardMaestro { name } => {
-                self.program_for(ProgramRequest::KeyboardMaestro(name))?;
+                self.program_for(ProgramRequest::KeyboardMaestro(name), PROGRAM_LIMIT)?;
+                self.retarget();
             }
             StepKind::Window { placement } => {
                 let pid = self.gate()?;
@@ -332,7 +422,12 @@ impl Sequence<'_> {
             StepKind::System { control } => {
                 self.live()?;
                 match self.actuator.system_plan((*control).into())? {
-                    SystemPlan::Program(program) => self.program(&program)?,
+                    // Mission Control and the like put something else in
+                    // front.
+                    SystemPlan::Program(program) => {
+                        self.program(&program, PROGRAM_LIMIT)?;
+                        self.retarget();
+                    }
                     SystemPlan::CharChord { ch, mods } => {
                         self.gate()?;
                         self.live()?;
@@ -344,7 +439,10 @@ impl Sequence<'_> {
                 self.live()?;
                 self.actuator.notify(text);
             }
-            StepKind::Speak { text } => self.program_for(ProgramRequest::Speak(text))?,
+            // Speaking leaves the app in front where it is.
+            StepKind::Speak { text } => {
+                self.program_for(ProgramRequest::Speak(text), SPEAK_LIMIT)?;
+            }
             StepKind::Delay { ms } => {
                 let mut left = Duration::from_millis(u64::from(*ms));
                 while !left.is_zero() {
@@ -420,18 +518,39 @@ impl Sequence<'_> {
         Ok(())
     }
 
-    fn program_for(&self, request: ProgramRequest<'_>) -> Result<(), Stop> {
+    /// Opens `target` with the OS's openers, run like any other program so
+    /// Pause, Quit and a time limit reach them. They are tried in order;
+    /// the first that ends well has opened it.
+    fn open(&mut self, target: OpenTarget<'_>) -> Result<(), Stop> {
         self.live()?;
-        let program = self.actuator.program_for(request)?;
-        self.program(&program)
+        let programs = self.actuator.open_programs(target)?;
+        let mut why = Failure::NotStarted;
+        for program in &programs {
+            self.live()?;
+            match self.actuator.run_program(program, self.cancel, OPEN_LIMIT) {
+                ProgramEnd::Success => {
+                    self.retarget();
+                    return Ok(());
+                }
+                ProgramEnd::Failed => why = Failure::ExitedWithError,
+                ProgramEnd::NotStarted => why = Failure::NotStarted,
+                // The next opener would only wait as long again.
+                ProgramEnd::TimedOut => return Err(Failure::TimedOut.into()),
+                ProgramEnd::Cancelled => return Err(Stop::Cancelled),
+            }
+        }
+        Err(why.into())
     }
 
-    fn program(&self, program: &Program) -> Result<(), Stop> {
+    fn program_for(&self, request: ProgramRequest<'_>, limit: Duration) -> Result<(), Stop> {
         self.live()?;
-        match self
-            .actuator
-            .run_program(program, self.cancel, PROGRAM_LIMIT)
-        {
+        let program = self.actuator.program_for(request)?;
+        self.program(&program, limit)
+    }
+
+    fn program(&self, program: &Program, limit: Duration) -> Result<(), Stop> {
+        self.live()?;
+        match self.actuator.run_program(program, self.cancel, limit) {
             ProgramEnd::Success => Ok(()),
             ProgramEnd::Failed => Err(Failure::ExitedWithError.into()),
             ProgramEnd::NotStarted => Err(Failure::NotStarted.into()),
@@ -455,7 +574,8 @@ fn sequence(
         run,
         actuator,
         cancel,
-        front: None,
+        checked: false,
+        aim: Aim::Opener,
     };
     for (index, step) in run.steps.iter().enumerate() {
         if !step.kind.is_set() {
@@ -491,8 +611,13 @@ fn sequence(
 ///   nothing, the answer is [`Outcome::NothingToRun`] and nothing is called.
 /// - Before the first step that presses keys, types, copies, pastes or
 ///   moves a window: input access, then up to 500 ms for the modifier keys
-///   to be let go, then up to 400 ms for the app the user was in to be in
-///   front. Once per run.
+///   to be let go. Once per run.
+/// - Those steps are aimed at the app the user was in, which gets up to
+///   400 ms to be in front again. After a step that opens something or
+///   runs a script, an Apple Shortcut, a macro or a system program, they
+///   are aimed at whatever app is in front when the next of them starts:
+///   it gets up to 1.5 s to be there, and to be an app other than Grape.
+/// - An opener gets 10 s, a Speak step 10 minutes, any other program 60 s.
 /// - The first failure stops the run.
 /// - `cancel` is checked before every step, before every call inside one
 ///   and in every slice of a wait.
@@ -549,6 +674,8 @@ const NOT_IN_FRONT: &str = "The app you were in didn't come back to the front.";
 const NO_FRONT_APP: &str = "Click the app you want first.";
 const NOT_HERE: &str = "That step doesn't work on this computer yet.";
 const TIMED_OUT: &str = "A step was still going after a minute, so Grape stopped it.";
+const OPEN_TIMED_OUT: &str = "That took too long to open, so Grape stopped waiting.";
+const SPEAK_TIMED_OUT: &str = "Grape was still speaking after ten minutes, so it stopped.";
 
 /// What a toast about a run says. `Debug` prints neither line: the title
 /// names the shortcut.
@@ -621,7 +748,12 @@ fn sentence(kind: StepKindId, why: &Failure) -> &'static str {
         Failure::NotInFront => NOT_IN_FRONT,
         Failure::NoFrontApp => NO_FRONT_APP,
         Failure::Platform(PlatformError::Unsupported) => NOT_HERE,
-        Failure::TimedOut => TIMED_OUT,
+        // Each kind of program has its own limit.
+        Failure::TimedOut => match kind {
+            StepKindId::OpenApp | StepKindId::OpenFile | StepKindId::OpenUrl => OPEN_TIMED_OUT,
+            StepKindId::Speak => SPEAK_TIMED_OUT,
+            _ => TIMED_OUT,
+        },
         Failure::Platform(_) | Failure::NotStarted | Failure::ExitedWithError => match kind {
             StepKindId::Keys => "Grape couldn't press those keys.",
             StepKindId::TypeText => "Grape couldn't type that text.",
@@ -766,10 +898,105 @@ fn own_group(command: &mut Command) {
 #[cfg(not(unix))]
 fn own_group(_command: &mut Command) {}
 
+/// What a script's folder is called in the temp folder, before this
+/// process's id and a number.
+const SCRIPT_DIR_PREFIX: &str = "grape-shortcut-";
+/// The script's file in its folder.
+const SCRIPT_FILE: &str = "script";
+/// How many folder names are tried: one an earlier Grape with this
+/// process id left behind is never used.
+const SCRIPT_DIR_TRIES: u32 = 16;
+/// Numbers this launch's script folders.
+static SCRIPT_NUMBER: AtomicU64 = AtomicU64::new(0);
+
+/// A new folder only the user can enter. Fails if anything is at `path`
+/// already, a link included.
+#[cfg(unix)]
+fn private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(0o700).create(path)
+}
+
+/// A new folder. Fails if anything is at `path` already.
+#[cfg(not(unix))]
+fn private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// A script in a file of its own, for a program that runs one from a file
+/// ([`Program::script`]). The file and its folder are removed when this is
+/// dropped. No `Debug`, and the path never reaches a log: only this and
+/// the program know it.
+struct ScriptFile {
+    dir: PathBuf,
+    file: PathBuf,
+}
+
+impl ScriptFile {
+    /// Writes `text` to a new file only the user can read, in a new folder
+    /// only the user can enter, in `root`.
+    fn write(root: &Path, text: &str) -> io::Result<Self> {
+        if !root.is_absolute() {
+            // The program runs in the home folder, not here.
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        for _ in 0..SCRIPT_DIR_TRIES {
+            let number = SCRIPT_NUMBER.fetch_add(1, Ordering::Relaxed);
+            let name = format!("{SCRIPT_DIR_PREFIX}{}-{number}", std::process::id());
+            let dir = root.join(name);
+            match private_dir(&dir) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(err),
+            }
+            let script = Self {
+                file: dir.join(SCRIPT_FILE),
+                dir,
+            };
+            // A failed write drops `script`, which removes what there is.
+            private_file(&script.file)?.write_all(text.as_bytes())?;
+            return Ok(script);
+        }
+        Err(io::ErrorKind::AlreadyExists.into())
+    }
+}
+
+impl Drop for ScriptFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.file);
+        let _ = fs::remove_dir(&self.dir);
+    }
+}
+
+/// Removes script folders an earlier Grape left in `root` when it was
+/// killed mid-script: each holds a script in clear text. Run once at
+/// launch, before any shortcut can run. Returns how many went.
+pub fn sweep_script_folders(root: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with(SCRIPT_DIR_PREFIX))
+        })
+        // Never follow a link: a folder of ours is a real folder.
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter(|entry| {
+            let dir = entry.path();
+            let _ = fs::remove_file(dir.join(SCRIPT_FILE));
+            fs::remove_dir(&dir).is_ok()
+        })
+        .count()
+}
+
 /// Writes `text` to the program's standard input and closes it, on a
-/// thread of its own: a shell reads its script as it goes, so a long one
-/// would otherwise hold the run past its time limit. `false` when the
-/// thread couldn't start.
+/// thread of its own: a program may run for a while before it reads the
+/// rest, and a long text would otherwise hold the run past its time
+/// limit. `false` when the thread couldn't start.
 fn feed(mut pipe: ChildStdin, text: String) -> bool {
     thread::Builder::new()
         .name("grape-shortcut-stdin".to_owned())
@@ -803,6 +1030,11 @@ impl Actuator for SystemActuator {
         platform::ensure_front(pid, timeout)
     }
 
+    fn front_app(&self) -> Result<Option<i32>, PlatformError> {
+        // The pid only: the app's id is the user's business.
+        Ok(platform::front_app()?.map(|app| app.pid))
+    }
+
     fn send_chord(&self, chord: Chord) -> Result<(), PlatformError> {
         platform::send_chord(chord)
     }
@@ -827,8 +1059,8 @@ impl Actuator for SystemActuator {
         platform::clear_clipboard()
     }
 
-    fn open_target(&self, target: OpenTarget<'_>) -> Result<(), PlatformError> {
-        platform::open_target(target)
+    fn open_programs(&self, target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError> {
+        platform::open_programs(target)
     }
 
     fn program_for(&self, request: ProgramRequest<'_>) -> Result<Program, PlatformError> {
@@ -852,9 +1084,24 @@ impl Actuator for SystemActuator {
             log::warn!("shortcut: no home folder to run a program in");
             return ProgramEnd::NotStarted;
         };
+        // A script the program runs from a file: written first, named
+        // last, and gone again when this returns, however the program ends.
+        let script = match &program.script {
+            Some(text) => match ScriptFile::write(&std::env::temp_dir(), text) {
+                Ok(script) => Some(script),
+                Err(err) => {
+                    // The kind only: the error's own words can hold a path.
+                    log::warn!("shortcut: a script's file wasn't written: {}", err.kind());
+                    return ProgramEnd::NotStarted;
+                }
+            },
+            None => None,
+        };
+        let script_arg: Option<OsString> = script.as_ref().map(|script| script.file.clone().into());
         let mut command = Command::new(&program.program);
         command
             .args(&program.args)
+            .args(script_arg)
             .current_dir(home)
             .stdin(if program.stdin.is_some() {
                 Stdio::piped()
@@ -931,7 +1178,7 @@ pub(crate) mod fake {
 
     use super::*;
 
-    /// What was asked to open.
+    /// What the openers were asked for.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) enum Opened {
         App { path: PathBuf, id: Option<String> },
@@ -956,6 +1203,7 @@ pub(crate) mod fake {
         RequestAccess,
         HeldModifiers,
         EnsureFront(i32, Duration),
+        FrontApp,
         SendChord(Chord),
         SendCharChord(char, Modifiers),
         TypeText(String),
@@ -975,6 +1223,7 @@ pub(crate) mod fake {
     /// A call that can fail.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(crate) enum Fallible {
+        FrontApp,
         SendChord,
         SendCharChord,
         TypeText,
@@ -1000,8 +1249,22 @@ pub(crate) mod fake {
             program: PathBuf::from(format!("/fake/{kind}")),
             args: Vec::new(),
             stdin: Some(text.to_owned()),
+            script: None,
         }
     }
+
+    /// The openers the fake gives: two for an app with an id, as on the
+    /// Mac (by its id, then by where it is), and one for anything else.
+    pub(crate) fn openers(by_id: bool) -> Vec<Program> {
+        if by_id {
+            vec![program("open", "by id"), program("open", "by path")]
+        } else {
+            vec![program("open", "")]
+        }
+    }
+
+    /// The app the fake says is in front once a step brought one forward.
+    pub(crate) const OPENED: i32 = 902;
 
     pub(crate) struct FakeActuator {
         calls: RefCell<Vec<Call>>,
@@ -1015,6 +1278,10 @@ pub(crate) mod fake {
         pub(crate) held_after: Cell<Modifiers>,
         /// Whether the app comes to the front. It does at first.
         pub(crate) front: Cell<bool>,
+        /// What the next looks at the app in front say, in order.
+        pub(crate) fronts: RefCell<VecDeque<Option<i32>>>,
+        /// What they say once `fronts` is used up. [`OPENED`] at first.
+        pub(crate) front_after: Cell<Option<i32>>,
         /// What the next reads of the change count say, in order. The last
         /// one repeats.
         pub(crate) counts: RefCell<VecDeque<i64>>,
@@ -1022,7 +1289,10 @@ pub(crate) mod fake {
         pub(crate) clipboard: RefCell<Option<String>>,
         /// The clock. Unknown at first.
         pub(crate) now: Cell<Option<LocalTime>>,
-        /// How every program ends. Well at first.
+        /// How the next programs end, in order.
+        pub(crate) program_ends: RefCell<VecDeque<ProgramEnd>>,
+        /// How every program ends once `program_ends` is used up. Well at
+        /// first.
         pub(crate) program_end: Cell<ProgramEnd>,
         /// The call that fails with [`BROKEN`], and the one that says the
         /// OS can't.
@@ -1040,9 +1310,12 @@ pub(crate) mod fake {
                 held: RefCell::new(VecDeque::new()),
                 held_after: Cell::new(Modifiers::NONE),
                 front: Cell::new(true),
+                fronts: RefCell::new(VecDeque::new()),
+                front_after: Cell::new(Some(OPENED)),
                 counts: RefCell::new(VecDeque::from([7])),
                 clipboard: RefCell::new(None),
                 now: Cell::new(None),
+                program_ends: RefCell::new(VecDeque::new()),
                 program_end: Cell::new(ProgramEnd::Success),
                 broken: Cell::new(None),
                 unsupported: Cell::new(None),
@@ -1106,6 +1379,13 @@ pub(crate) mod fake {
             self.front.get()
         }
 
+        fn front_app(&self) -> Result<Option<i32>, PlatformError> {
+            self.note(Call::FrontApp);
+            self.answer(Fallible::FrontApp)?;
+            let next = self.fronts.borrow_mut().pop_front();
+            Ok(next.unwrap_or(self.front_after.get()))
+        }
+
         fn send_chord(&self, chord: Chord) -> Result<(), PlatformError> {
             self.note(Call::SendChord(chord));
             self.answer(Fallible::SendChord)
@@ -1144,7 +1424,8 @@ pub(crate) mod fake {
             self.answer(Fallible::ClearClipboard)
         }
 
-        fn open_target(&self, target: OpenTarget<'_>) -> Result<(), PlatformError> {
+        fn open_programs(&self, target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError> {
+            let by_id = matches!(target, OpenTarget::App { id: Some(_), .. });
             self.note(Call::Open(match target {
                 OpenTarget::App { path, id } => Opened::App {
                     path: path.to_path_buf(),
@@ -1153,7 +1434,8 @@ pub(crate) mod fake {
                 OpenTarget::Path(path) => Opened::Path(path.to_path_buf()),
                 OpenTarget::Url(url) => Opened::Url(url.to_owned()),
             }));
-            self.answer(Fallible::Open)
+            self.answer(Fallible::Open)?;
+            Ok(openers(by_id))
         }
 
         fn program_for(&self, request: ProgramRequest<'_>) -> Result<Program, PlatformError> {
@@ -1225,7 +1507,8 @@ pub(crate) mod fake {
             limit: Duration,
         ) -> ProgramEnd {
             self.note(Call::RunProgram(program.clone(), limit));
-            self.program_end.get()
+            let next = self.program_ends.borrow_mut().pop_front();
+            next.unwrap_or(self.program_end.get())
         }
 
         fn notify(&self, text: &str) {
@@ -1246,7 +1529,9 @@ mod tests {
     use grape_platform::shortcuts::FrontApp;
     use grape_platform::{DisplayBounds, Rect};
 
-    use super::fake::{program, Asked, Call, FakeActuator, Fallible, Opened, BROKEN};
+    use super::fake::{
+        openers, program, Asked, Call, FakeActuator, Fallible, Opened, BROKEN, OPENED,
+    };
     use super::*;
     use crate::shortcuts::model::{ControlId, PlacementId, Step};
 
@@ -1352,6 +1637,36 @@ mod tests {
         all
     }
 
+    /// The calls of the checks when a step brought another app forward
+    /// first: no wait for the app the user was in, and two looks at the
+    /// app in front.
+    fn gate_after_an_open() -> Vec<Call> {
+        vec![
+            Call::InputAccess,
+            Call::HeldModifiers,
+            Call::FrontApp,
+            Call::Sleep(MS(50)),
+            Call::FrontApp,
+        ]
+    }
+
+    /// An opener's run: ten seconds at most.
+    fn opened(program: &Program) -> Call {
+        Call::RunProgram(program.clone(), Duration::from_secs(10))
+    }
+
+    fn app(id: Option<&str>) -> StepKind {
+        StepKind::OpenApp {
+            path: Some(PathBuf::from("/Applications/Notes.app")),
+            bundle_id: id.map(str::to_owned),
+            name: Some("Notes".to_owned()),
+        }
+    }
+
+    fn count(calls: &[Call], wanted: fn(&Call) -> bool) -> usize {
+        calls.iter().filter(|call| wanted(call)).count()
+    }
+
     fn failed(step: usize, kind: StepKindId, why: Failure) -> Outcome {
         Outcome::Failed { step, kind, why }
     }
@@ -1370,6 +1685,7 @@ mod tests {
 
     #[test]
     fn keys_presses_the_chord_after_the_checks() {
+        // The app the user was in is waited for, and nothing else is asked.
         assert_eq!(
             finished(vec![keys()]),
             gate_then(vec![Call::SendChord(SAVE)])
@@ -1487,40 +1803,96 @@ mod tests {
     }
 
     #[test]
-    fn the_open_steps_open_their_targets_without_the_checks() {
-        let app = PathBuf::from("/Applications/Notes.app");
+    fn the_open_steps_run_their_openers_without_the_checks() {
         let file = PathBuf::from("/Users/max/todo.txt");
         let calls = finished(vec![
-            StepKind::OpenApp {
-                path: Some(app.clone()),
-                bundle_id: Some("com.example.notes".to_owned()),
-                name: Some("Notes".to_owned()),
-            },
-            StepKind::OpenApp {
-                path: Some(app.clone()),
-                bundle_id: None,
-                name: Some("Notes".to_owned()),
-            },
+            app(Some("com.example.notes")),
+            app(None),
             StepKind::OpenFile {
                 path: Some(file.clone()),
                 folder: false,
             },
             url("https://example.com/a?b=c"),
         ]);
+        let path = PathBuf::from("/Applications/Notes.app");
         assert_eq!(
             calls,
             vec![
                 Call::Open(Opened::App {
-                    path: app.clone(),
+                    path: path.clone(),
                     id: Some("com.example.notes".to_owned()),
                 }),
-                Call::Open(Opened::App {
-                    path: app,
-                    id: None
-                }),
+                // The first opener did it: the second isn't run.
+                opened(&openers(true)[0]),
+                Call::Open(Opened::App { path, id: None }),
+                opened(&openers(false)[0]),
                 Call::Open(Opened::Path(file)),
+                opened(&openers(false)[0]),
                 Call::Open(Opened::Url("https://example.com/a?b=c".to_owned())),
+                opened(&openers(false)[0]),
             ]
+        );
+    }
+
+    #[test]
+    fn an_opener_that_fails_gives_the_next_one_its_turn() {
+        let fake = FakeActuator::new();
+        fake.program_ends
+            .borrow_mut()
+            .extend([ProgramEnd::Failed, ProgramEnd::Success]);
+        let run = run_of(vec![app(Some("com.example.notes")), notify("after")]);
+        assert_eq!(run_steps(&run, &fake, fake.cancel()), Outcome::Finished);
+        let calls = fake.calls();
+        assert_eq!(
+            calls[1..],
+            [
+                opened(&openers(true)[0]),
+                opened(&openers(true)[1]),
+                Call::Notify("after".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_open_fails_as_its_last_opener_did() {
+        let cases = [
+            (
+                vec![ProgramEnd::Failed, ProgramEnd::Failed],
+                Failure::ExitedWithError,
+                2,
+            ),
+            (
+                vec![ProgramEnd::Failed, ProgramEnd::NotStarted],
+                Failure::NotStarted,
+                2,
+            ),
+            // An opener that hangs isn't followed by another wait.
+            (vec![ProgramEnd::TimedOut], Failure::TimedOut, 1),
+        ];
+        for (ends, why, ran) in cases {
+            let fake = FakeActuator::new();
+            fake.program_ends.borrow_mut().extend(ends);
+            let run = run_of(vec![app(Some("com.example.notes")), notify("never")]);
+            assert_eq!(
+                run_steps(&run, &fake, fake.cancel()),
+                failed(0, StepKindId::OpenApp, why)
+            );
+            let calls = fake.calls();
+            assert_eq!(count(&calls, |c| matches!(c, Call::RunProgram(..))), ran);
+            assert!(!calls.contains(&Call::Notify("never".to_owned())));
+        }
+    }
+
+    #[test]
+    fn a_cancelled_opener_is_a_cancelled_run() {
+        let fake = FakeActuator::new();
+        fake.program_end.set(ProgramEnd::Cancelled);
+        let run = run_of(vec![app(Some("com.example.notes")), notify("never")]);
+        assert_eq!(run_steps(&run, &fake, fake.cancel()), Outcome::Cancelled);
+        // The by-path opener isn't tried after a cancel.
+        assert_eq!(
+            count(&fake.calls(), |c| matches!(c, Call::RunProgram(..))),
+            1
         );
     }
 
@@ -1538,9 +1910,6 @@ mod tests {
             StepKind::KeyboardMaestro {
                 name: "Tidy".to_owned(),
             },
-            StepKind::Speak {
-                text: "hello".to_owned(),
-            },
         ]);
         assert_eq!(
             calls,
@@ -1553,8 +1922,21 @@ mod tests {
                 Call::RunProgram(program("shell", "true"), minute),
                 Call::ProgramFor(Asked::KeyboardMaestro("Tidy".to_owned())),
                 Call::RunProgram(program("keyboardMaestro", "Tidy"), minute),
+            ]
+        );
+    }
+
+    #[test]
+    fn speaking_gets_ten_minutes() {
+        // A minute is about 900 characters of speech; a text can be 4,000.
+        let calls = finished(vec![StepKind::Speak {
+            text: "hello".to_owned(),
+        }]);
+        assert_eq!(
+            calls,
+            vec![
                 Call::ProgramFor(Asked::Speak("hello".to_owned())),
-                Call::RunProgram(program("speak", "hello"), minute),
+                Call::RunProgram(program("speak", "hello"), Duration::from_secs(600)),
             ]
         );
     }
@@ -1615,9 +1997,10 @@ mod tests {
         ]);
         let mut expected = vec![
             Call::Open(Opened::Url("https://example.com/".to_owned())),
+            opened(&openers(false)[0]),
             Call::Sleep(MS(20)),
         ];
-        expected.extend(gate());
+        expected.extend(gate_after_an_open());
         expected.extend([Call::SendChord(SAVE), Call::Notify("saved".to_owned())]);
         assert_eq!(calls, expected);
     }
@@ -1716,6 +2099,7 @@ mod tests {
         for call in gate() {
             assert!(!calls.contains(&call), "{call:?}");
         }
+        assert!(!calls.contains(&Call::FrontApp));
     }
 
     #[test]
@@ -1844,6 +2228,203 @@ mod tests {
         assert_eq!(fronts, 2);
     }
 
+    // --- Which app the keys are for. ---------------------------------
+
+    #[test]
+    fn keys_after_an_open_go_to_the_app_it_brought_forward() {
+        // "Open Notes, then press keys" isn't held to the app the wheel
+        // opened over: that one is behind Notes now, on purpose.
+        let calls = finished(vec![app(Some("com.example.notes")), keys()]);
+        let mut expected = vec![
+            Call::Open(Opened::App {
+                path: PathBuf::from("/Applications/Notes.app"),
+                id: Some("com.example.notes".to_owned()),
+            }),
+            opened(&openers(true)[0]),
+        ];
+        expected.extend(gate_after_an_open());
+        expected.push(Call::SendChord(SAVE));
+        assert_eq!(calls, expected);
+        assert_eq!(count(&calls, |c| matches!(c, Call::EnsureFront(..))), 0);
+    }
+
+    #[test]
+    fn text_after_a_script_goes_to_whatever_is_in_front_by_then() {
+        let calls = finished(vec![shell("open -a Notes"), typed("hello")]);
+        let mut expected = vec![
+            Call::ProgramFor(Asked::Shell("open -a Notes".to_owned())),
+            Call::RunProgram(program("shell", "open -a Notes"), Duration::from_secs(60)),
+        ];
+        expected.extend(gate_after_an_open());
+        expected.extend([Call::LocalDateTime, Call::TypeText("hello".to_owned())]);
+        assert_eq!(calls, expected);
+    }
+
+    #[test]
+    fn every_step_that_may_bring_an_app_forward_changes_the_aim() {
+        let forward = vec![
+            app(None),
+            StepKind::OpenFile {
+                path: Some(PathBuf::from("/Users/max/todo.txt")),
+                folder: true,
+            },
+            url("https://example.com/"),
+            StepKind::AppleShortcut {
+                name: "Morning".to_owned(),
+            },
+            StepKind::AppleScript {
+                source: "activate".to_owned(),
+            },
+            shell("true"),
+            StepKind::KeyboardMaestro {
+                name: "Tidy".to_owned(),
+            },
+            system(ControlId::MissionControl),
+            system(ControlId::ToggleDarkMode),
+        ];
+        for kind in forward {
+            let calls = finished(vec![kind.clone(), keys()]);
+            assert!(calls.contains(&Call::FrontApp), "{:?}", kind.id());
+            assert_eq!(
+                count(&calls, |c| matches!(c, Call::EnsureFront(..))),
+                0,
+                "{:?}",
+                kind.id()
+            );
+        }
+        // These leave the app in front where it is.
+        let stay = vec![
+            notify("n"),
+            delay(20),
+            clipboard(ClipboardAction::Clear),
+            StepKind::Speak {
+                text: "hello".to_owned(),
+            },
+            system(ControlId::ScreenshotArea),
+            keys(),
+        ];
+        for kind in stay {
+            let calls = finished(vec![kind.clone(), keys()]);
+            assert!(!calls.contains(&Call::FrontApp), "{:?}", kind.id());
+            assert_eq!(
+                count(&calls, |c| matches!(c, Call::EnsureFront(..))),
+                1,
+                "{:?}",
+                kind.id()
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_pressed_while_grape_is_in_front_after_an_open() {
+        let fake = FakeActuator::new();
+        fake.front_after.set(None);
+        let run = run_of(vec![url("https://example.com/"), keys(), notify("never")]);
+        assert_eq!(
+            run_steps(&run, &fake, fake.cancel()),
+            failed(1, StepKindId::Keys, Failure::NoFrontApp)
+        );
+        let calls = fake.calls();
+        assert_eq!(count(&calls, |c| matches!(c, Call::SendChord(_))), 0);
+        assert!(!calls.contains(&Call::Notify("never".to_owned())));
+        // It looked for a second and a half first, and one last time.
+        assert_eq!(count(&calls, |c| *c == Call::Sleep(MS(50))), 30);
+        assert_eq!(count(&calls, |c| *c == Call::FrontApp), 31);
+        assert_eq!(calls.last(), Some(&Call::FrontApp));
+        assert_eq!(
+            toast_for("Tidy up", &failed(1, StepKindId::Keys, Failure::NoFrontApp))
+                .and_then(|toast| toast.detail)
+                .as_deref(),
+            Some("Click the app you want first.")
+        );
+    }
+
+    #[test]
+    fn the_app_in_front_has_to_stay_there_for_two_looks() {
+        // Grape, the old app, then the opened one twice.
+        let fake = FakeActuator::new();
+        fake.fronts
+            .borrow_mut()
+            .extend([None, Some(PID), Some(OPENED), Some(OPENED)]);
+        let run = run_of(vec![
+            url("https://example.com/"),
+            window(PlacementId::LeftHalf),
+        ]);
+        assert_eq!(run_steps(&run, &fake, fake.cancel()), Outcome::Finished);
+        let calls = fake.calls();
+        assert_eq!(count(&calls, |c| *c == Call::FrontApp), 4);
+        assert_eq!(
+            calls.last(),
+            Some(&Call::PlaceWindow(OPENED, Placement::LeftHalf))
+        );
+
+        // Apps that keep changing places never settle.
+        let fake = FakeActuator::new();
+        let flip = (0..40).map(|look| Some(if look % 2 == 0 { PID } else { OPENED }));
+        fake.fronts.borrow_mut().extend(flip);
+        assert_eq!(
+            run_steps(&run, &fake, fake.cancel()),
+            failed(1, StepKindId::Window, Failure::NoFrontApp)
+        );
+        assert_eq!(
+            count(&fake.calls(), |c| matches!(c, Call::PlaceWindow(..))),
+            0
+        );
+    }
+
+    #[test]
+    fn a_window_step_after_an_open_moves_the_opened_apps_window() {
+        let calls = finished(vec![
+            keys(),
+            app(Some("com.example.notes")),
+            window(PlacementId::LeftHalf),
+            window(PlacementId::Fill),
+        ]);
+        // The first key press was for the app the user was in.
+        assert_eq!(calls[..4], gate_then(vec![Call::SendChord(SAVE)]));
+        assert_eq!(
+            calls[6..],
+            [
+                // Access and the modifiers were checked already.
+                Call::FrontApp,
+                Call::Sleep(MS(50)),
+                Call::FrontApp,
+                Call::PlaceWindow(OPENED, Placement::LeftHalf),
+                // The app found in front is looked for once.
+                Call::PlaceWindow(OPENED, Placement::Fill),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_run_with_no_front_app_can_open_one_and_press_keys_in_it() {
+        let fake = FakeActuator::new();
+        let mut run = run_of(vec![app(None), keys()]);
+        run.front = None;
+        assert_eq!(run_steps(&run, &fake, fake.cancel()), Outcome::Finished);
+        assert_eq!(fake.calls().last(), Some(&Call::SendChord(SAVE)));
+    }
+
+    #[test]
+    fn the_checks_still_come_first_after_an_open() {
+        let fake = FakeActuator::new();
+        fake.access.set(InputAccess::Denied);
+        let run = run_of(vec![url("https://example.com/"), keys()]);
+        assert_eq!(
+            run_steps(&run, &fake, fake.cancel()),
+            failed(1, StepKindId::Keys, Failure::NeedsAccess)
+        );
+        assert!(!fake.calls().contains(&Call::FrontApp));
+
+        let fake = FakeActuator::new();
+        fake.held_after.set(Modifiers::ALT);
+        assert_eq!(
+            run_steps(&run, &fake, fake.cancel()),
+            failed(1, StepKindId::Keys, Failure::KeysHeld)
+        );
+        assert!(!fake.calls().contains(&Call::FrontApp));
+    }
+
     // --- Failures. ---------------------------------------------------
 
     #[test]
@@ -1921,6 +2502,7 @@ mod tests {
                 StepKindId::Clipboard,
             ),
             (Fallible::Open, url("x:y"), StepKindId::OpenUrl),
+            (Fallible::Open, app(Some("a.b")), StepKindId::OpenApp),
             (Fallible::ProgramFor, shell("true"), StepKindId::Shell),
             (
                 Fallible::SystemPlan,
@@ -1991,6 +2573,13 @@ mod tests {
             for (kind, id) in [
                 (shell("exit 3"), StepKindId::Shell),
                 (system(ControlId::ToggleDarkMode), StepKindId::System),
+                (url("x:y"), StepKindId::OpenUrl),
+                (
+                    StepKind::Speak {
+                        text: "hello".to_owned(),
+                    },
+                    StepKindId::Speak,
+                ),
             ] {
                 let fake = FakeActuator::new();
                 fake.program_end.set(end);
@@ -2087,6 +2676,8 @@ mod tests {
             system(ControlId::LockScreen),
             window(PlacementId::Fill),
             shell("true"),
+            app(Some("com.example.notes")),
+            keys(),
         ];
         let fresh = || {
             let fake = FakeActuator::new();
@@ -2217,6 +2808,15 @@ mod tests {
         assert_eq!(
             detail(StepKindId::AppleScript, Failure::TimedOut).as_deref(),
             Some("A step was still going after a minute, so Grape stopped it.")
+        );
+        // An opener and a Speak step have limits of their own.
+        assert_eq!(
+            detail(StepKindId::OpenFile, Failure::TimedOut).as_deref(),
+            Some("That took too long to open, so Grape stopped waiting.")
+        );
+        assert_eq!(
+            detail(StepKindId::Speak, Failure::TimedOut).as_deref(),
+            Some("Grape was still speaking after ten minutes, so it stopped.")
         );
         assert_eq!(
             detail(StepKindId::OpenApp, Failure::Platform(BROKEN)).as_deref(),
@@ -2376,6 +2976,7 @@ mod tests {
         // Every call fails in turn, both ways, and so do the checks and
         // the programs.
         let fallible = [
+            Fallible::FrontApp,
             Fallible::SendChord,
             Fallible::SendCharChord,
             Fallible::TypeText,
@@ -2484,6 +3085,7 @@ mod tests {
             program: PathBuf::from("/bin/sh"),
             args: vec!["-c".into(), "exit 0".into()],
             stdin: None,
+            script: None,
         };
         let cancel = AtomicBool::new(false);
         assert_eq!(
@@ -2512,6 +3114,18 @@ mod tests {
                 program: PathBuf::from("/bin/sh"),
                 args: args.iter().map(Into::into).collect(),
                 stdin: stdin.map(str::to_owned),
+                script: None,
+            }
+        }
+
+        /// `/bin/sh` running `source` from a file, as the Mac's login
+        /// shell runs a Shell step.
+        fn script(source: &str) -> Program {
+            Program {
+                program: PathBuf::from("/bin/sh"),
+                args: Vec::new(),
+                stdin: None,
+                script: Some(source.to_owned()),
             }
         }
 
@@ -2521,6 +3135,181 @@ mod tests {
             let end = actuator.run_program(program, &cancel, limit);
             assert_eq!(child.pid(), None);
             end
+        }
+
+        /// A file a script notes its own path in, removed when dropped.
+        struct Where(PathBuf);
+
+        impl Where {
+            fn new(name: &str) -> Self {
+                let file = format!("grape-run-test-{name}-{}", std::process::id());
+                let path = std::env::temp_dir().join(file);
+                let _ = fs::remove_file(&path);
+                Self(path)
+            }
+
+            /// The line that notes the script's path.
+            fn note(&self) -> String {
+                format!("printf %s \"$0\" > '{}'\n", self.0.display())
+            }
+
+            /// The script's path, once it was noted.
+            fn script(&self) -> Option<PathBuf> {
+                let text = fs::read_to_string(&self.0).ok()?;
+                (!text.is_empty()).then(|| PathBuf::from(text))
+            }
+        }
+
+        impl Drop for Where {
+            fn drop(&mut self) {
+                let _ = fs::remove_file(&self.0);
+            }
+        }
+
+        /// The script's file and its folder are both gone.
+        fn assert_removed(script: &Path) {
+            assert!(script.is_absolute());
+            assert!(fs::symlink_metadata(script).is_err());
+            let folder = script.parent().unwrap();
+            assert!(fs::symlink_metadata(folder).is_err());
+            assert!(folder
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(SCRIPT_DIR_PREFIX));
+        }
+
+        #[test]
+        fn a_script_runs_from_a_file_its_commands_cant_swallow() {
+            // On standard input, `cat` would eat the lines after it and
+            // the shell would end well having run none of them.
+            assert_eq!(
+                end_of(&script("cat\nread line\nexit 3\n"), LONG),
+                ProgramEnd::Failed
+            );
+            assert_eq!(
+                end_of(&script("cat\nread line\nexit 0\n"), LONG),
+                ProgramEnd::Success
+            );
+            // Its commands read nothing: no terminal, no pipe of Grape's.
+            assert_eq!(
+                end_of(&script("test -z \"$(cat)\"\n"), LONG),
+                ProgramEnd::Success
+            );
+        }
+
+        #[test]
+        fn a_scripts_file_is_private_named_last_and_removed_after() {
+            let noted = Where::new("private");
+            let source = format!(
+                concat!(
+                    "case \"$0\" in /*) ;; *) exit 11 ;; esac\n",
+                    "test \"$(ls -ld \"$0\" | cut -c1-10)\" = '-rw-------' || exit 12\n",
+                    "dir=$(dirname \"$0\")\n",
+                    "test \"$(ls -ld \"$dir\" | cut -c1-10)\" = 'drwx------' || exit 13\n",
+                    // Nothing else is in the folder.
+                    "test \"$(ls -A \"$dir\")\" = script || exit 14\n",
+                    "{}",
+                    // `-e`, given before the path, is still in force.
+                    "false\n",
+                    "exit 0\n",
+                ),
+                noted.note()
+            );
+            let mut program = script(&source);
+            assert_eq!(end_of(&program, LONG), ProgramEnd::Success);
+            assert_removed(&noted.script().unwrap());
+
+            program.args = vec!["-e".into()];
+            assert_eq!(end_of(&program, LONG), ProgramEnd::Failed);
+            assert_removed(&noted.script().unwrap());
+        }
+
+        #[test]
+        fn a_script_that_is_cancelled_or_runs_too_long_leaves_no_file() {
+            let noted = Where::new("timed-out");
+            let source = format!("{}exec sleep 30\n", noted.note());
+            assert_eq!(end_of(&script(&source), MS(800)), ProgramEnd::TimedOut);
+            assert_removed(&noted.script().unwrap());
+
+            let noted = Arc::new(Where::new("cancelled"));
+            let source = format!("{}exec sleep 30\n", noted.note());
+            let (actuator, child) = actuator();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let canceller = {
+                let (noted, child, cancel) =
+                    (Arc::clone(&noted), Arc::clone(&child), Arc::clone(&cancel));
+                thread::spawn(move || {
+                    let started = Instant::now();
+                    while noted.script().is_none() && started.elapsed() < LONG {
+                        thread::sleep(MS(2));
+                    }
+                    cancel.store(true, Ordering::SeqCst);
+                    child.kill();
+                })
+            };
+            let end = actuator.run_program(&script(&source), &cancel, LONG);
+            canceller.join().unwrap();
+            assert_eq!(end, ProgramEnd::Cancelled);
+            assert_removed(&noted.script().unwrap());
+        }
+
+        #[test]
+        fn a_script_and_input_can_go_to_one_program() {
+            let mut program = script("test \"$(cat)\" = 'a b'\n");
+            program.stdin = Some("a b".to_owned());
+            assert_eq!(end_of(&program, LONG), ProgramEnd::Success);
+        }
+
+        #[test]
+        fn a_script_folder_is_never_one_that_was_there() {
+            let root =
+                std::env::temp_dir().join(format!("grape-run-test-folders-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            let first = ScriptFile::write(&root, "one").unwrap();
+            let second = ScriptFile::write(&root, "two").unwrap();
+            assert_ne!(first.dir, second.dir);
+            assert_eq!(fs::read_to_string(&first.file).unwrap(), "one");
+            assert_eq!(fs::read_to_string(&second.file).unwrap(), "two");
+            let (dir, file) = (first.dir.clone(), first.file.clone());
+            drop(first);
+            assert!(!file.exists() && !dir.exists());
+            assert!(second.file.exists());
+            drop(second);
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 0);
+            // A relative folder would be read against the program's own.
+            assert!(ScriptFile::write(Path::new("relative"), "x").is_err());
+            fs::remove_dir_all(&root).unwrap();
+        }
+
+        #[test]
+        fn folders_left_by_an_earlier_run_are_swept_and_nothing_else() {
+            let root =
+                std::env::temp_dir().join(format!("grape-run-test-sweep-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            // Two leftovers: one with its script, one already emptied.
+            let left = root.join(format!("{SCRIPT_DIR_PREFIX}123-0"));
+            fs::create_dir(&left).unwrap();
+            fs::write(left.join(SCRIPT_FILE), "echo").unwrap();
+            fs::create_dir(root.join(format!("{SCRIPT_DIR_PREFIX}123-1"))).unwrap();
+            // Not ours: another name, and a file with our prefix.
+            fs::create_dir(root.join("someone-elses")).unwrap();
+            fs::write(root.join(format!("{SCRIPT_DIR_PREFIX}file")), "x").unwrap();
+            // Ours by name but holding something else: left alone.
+            let odd = root.join(format!("{SCRIPT_DIR_PREFIX}123-2"));
+            fs::create_dir(&odd).unwrap();
+            fs::write(odd.join("other"), "x").unwrap();
+
+            assert_eq!(sweep_script_folders(&root), 2);
+            assert!(!left.exists());
+            assert!(root.join("someone-elses").is_dir());
+            assert!(root.join(format!("{SCRIPT_DIR_PREFIX}file")).is_file());
+            assert!(odd.join("other").is_file());
+            assert_eq!(sweep_script_folders(&root), 0);
+            assert_eq!(sweep_script_folders(&root.join("missing")), 0);
+            fs::remove_dir_all(&root).unwrap();
         }
 
         #[test]
@@ -2545,6 +3334,7 @@ mod tests {
                 program: PathBuf::from("/nonexistent/grape-test-program"),
                 args: Vec::new(),
                 stdin: Some("exit 0".to_owned()),
+                script: None,
             };
             assert_eq!(end_of(&program, LONG), ProgramEnd::NotStarted);
         }
@@ -2681,6 +3471,9 @@ mod tests {
                 fn ensure_front(&self, _pid: i32, _timeout: Duration) -> bool {
                     false
                 }
+                fn front_app(&self) -> Result<Option<i32>, PlatformError> {
+                    Err(PlatformError::Unsupported)
+                }
                 fn send_chord(&self, _chord: Chord) -> Result<(), PlatformError> {
                     Err(PlatformError::Unsupported)
                 }
@@ -2707,7 +3500,10 @@ mod tests {
                 fn clear_clipboard(&self) -> Result<(), PlatformError> {
                     Err(PlatformError::Unsupported)
                 }
-                fn open_target(&self, _target: OpenTarget<'_>) -> Result<(), PlatformError> {
+                fn open_programs(
+                    &self,
+                    _target: OpenTarget<'_>,
+                ) -> Result<Vec<Program>, PlatformError> {
                     Err(PlatformError::Unsupported)
                 }
                 fn program_for(
@@ -2715,7 +3511,8 @@ mod tests {
                     request: ProgramRequest<'_>,
                 ) -> Result<Program, PlatformError> {
                     match request {
-                        ProgramRequest::Shell(source) => Ok(sh(&["-s"], Some(source))),
+                        // As the Mac's login shell gets it: in a file.
+                        ProgramRequest::Shell(source) => Ok(script(source)),
                         _ => Err(PlatformError::Unsupported),
                     }
                 }

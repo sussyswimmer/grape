@@ -6,6 +6,8 @@
 //!
 //! - Open: `/usr/bin/open`, waited for, so a target that can't be opened is
 //!   an error. An app goes by its bundle id first and by its path second.
+//!   A shortcut's step doesn't open here: the app runs the same programs
+//!   ([`open_programs`]) as it runs any other, so it can end them.
 //! - Programs and system controls are built by `crate::mac_rules`; nothing
 //!   runs here.
 //! - Windows: Accessibility, declared by hand. The focused window (or else
@@ -26,23 +28,24 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::ptr::{self, NonNull};
+use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use dispatch2::run_on_main;
+use dispatch2::{run_on_main, DispatchQueue};
 use objc2::rc::autoreleasepool;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{NSModalResponseOK, NSOpenPanel, NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{CFGetTypeID, CFRetained, CFString, CFType, CFTypeID, CGPoint, CGSize};
 use objc2_foundation::{ns_string, NSArray, NSBundle, NSFileManager, NSString, NSURL};
 
-use super::actions::hand_back;
+use super::actions::{frontmost_other_app, hand_back};
 use super::activations::running_app;
 use super::{display, hand_back_activation, io_error, NO_CODE};
-use crate::mac_rules::{self, app_name, ax_frame, center, killable_group, open_programs};
+use crate::mac_rules::{self, app_name, ax_frame, center, killable_group, HopClaim};
 use crate::shortcuts::{
-    placement_frame, AppIdentity, OpenTarget, PickKind, Picked, Placement, Program, ProgramRequest,
-    SystemControl, SystemPlan,
+    placement_frame, AppIdentity, FrontApp, OpenTarget, PickKind, Picked, Placement, Program,
+    ProgramRequest, SystemControl, SystemPlan,
 };
 use crate::{PlatformError, Rect};
 
@@ -50,6 +53,8 @@ use crate::{PlatformError, Rect};
 const KILL_GRACE: Duration = Duration::from_millis(500);
 /// How often [`ensure_front`] looks at the app in front.
 const FRONT_POLL: Duration = Duration::from_millis(10);
+/// How long [`front_app`] waits for the main thread.
+const FRONT_APP_WAIT: Duration = Duration::from_secs(1);
 /// How long one Accessibility call waits for the other app, in seconds.
 const AX_TIMEOUT: f32 = 1.0;
 
@@ -106,6 +111,49 @@ pub(super) fn on_main<R: Send>(
     })
 }
 
+/// As [`on_main`], for a caller that can't wait as long as it takes: the
+/// main queue serves nothing while one of Grape's own modal panels is up.
+/// `None` when the main thread didn't start `work` within `patience`; the
+/// work then never runs, so nothing stale happens once the queue is served
+/// again. Work that has started is waited for, so it must be short.
+pub(super) fn on_main_within<R: Send + 'static>(
+    context: &'static str,
+    patience: Duration,
+    work: impl Send + 'static + FnOnce(MainThreadMarker) -> Result<R, PlatformError>,
+) -> Option<Result<R, PlatformError>> {
+    if MainThreadMarker::new().is_some() {
+        return Some(on_main(context, work));
+    }
+    let claim = Arc::new(HopClaim::default());
+    let theirs = Arc::clone(&claim);
+    let (tx, rx) = mpsc::sync_channel(1);
+    DispatchQueue::main().exec_async(move || {
+        // The caller gave up first: what it asked for is stale.
+        if !theirs.take() {
+            return;
+        }
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let answer = autoreleasepool(|_| {
+            objc2::exception::catch(AssertUnwindSafe(|| work(mtm))).unwrap_or(Err(
+                PlatformError::Os {
+                    context,
+                    code: NO_CODE,
+                },
+            ))
+        });
+        // Room for one, and the caller is waiting for it.
+        let _ = tx.send(answer);
+    });
+    match rx.recv_timeout(patience) {
+        Ok(answer) => Some(answer),
+        Err(_) if claim.take() => None,
+        // The work started just now, so the main thread is on it.
+        Err(_) => rx.recv().ok(),
+    }
+}
+
 /// Runs a program that takes nothing on its standard input and waits for
 /// it. An exit code other than 0 is an error with that code.
 pub(super) fn run(program: &Program, context: &'static str) -> Result<(), PlatformError> {
@@ -126,13 +174,17 @@ pub(super) fn run(program: &Program, context: &'static str) -> Result<(), Platfo
     }
 }
 
+pub(crate) fn open_programs(target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError> {
+    Ok(mac_rules::open_programs(target))
+}
+
 pub(crate) fn open_target(target: OpenTarget<'_>) -> Result<(), PlatformError> {
     let mut answer = Err(PlatformError::Os {
         context: "open",
         code: NO_CODE,
     });
     // An app is tried by its id first, then by its path.
-    for program in open_programs(target) {
+    for program in open_programs(target)? {
         answer = run(&program, "open");
         if answer.is_ok() {
             break;
@@ -360,8 +412,56 @@ fn set_value<T: AxStruct>(
 
 /// On the main thread, where the app queues it after the overlay's hide.
 /// Anywhere else it does nothing.
-pub(crate) fn give_back_front() {
-    let _ = hand_back_activation();
+///
+/// To the app the wheel opened over, not to "the app last used" as the
+/// toast's hand-back does: that rule changes nothing while a window of
+/// Grape's is key, and a click on the wheel makes Settings key again when
+/// it is open behind the other app.
+pub(crate) fn give_back_front(pid: Option<i32>) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let Some(pid) = pid.filter(|pid| *pid > 0) else {
+        // The wheel opened over Grape itself: the toast's rule hands the
+        // front to the app last used, if Grape is left with no key window.
+        let _ = hand_back_activation();
+        return;
+    };
+    autoreleasepool(|_| {
+        let found = objc2::exception::catch(AssertUnwindSafe(|| match running_app(pid) {
+            Some(app) => {
+                // Only while Grape is the active app (`hand_back`'s rule).
+                hand_back(mtm, &app);
+                true
+            }
+            None => false,
+        }));
+        if matches!(found, Ok(false)) {
+            // That app is gone: the toast's rule is the best left.
+            let _ = hand_back_activation();
+        }
+    });
+}
+
+/// The app in front other than Grape, as a hot key's press reports it.
+pub(super) fn front_app_now(mtm: MainThreadMarker) -> Option<FrontApp> {
+    frontmost_other_app(mtm).and_then(|app| {
+        let pid = app.processIdentifier();
+        (pid > 0).then(|| FrontApp {
+            pid,
+            id: app.bundleIdentifier().map(|id| id.to_string()),
+        })
+    })
+}
+
+pub(crate) fn front_app() -> Result<Option<FrontApp>, PlatformError> {
+    let context = "reading the app in front";
+    on_main_within(context, FRONT_APP_WAIT, |mtm| Ok(front_app_now(mtm))).unwrap_or(Err(
+        PlatformError::Os {
+            context,
+            code: NO_CODE,
+        },
+    ))
 }
 
 pub(crate) fn ensure_front(pid: i32, timeout: Duration) -> bool {
@@ -383,8 +483,11 @@ pub(crate) fn ensure_front(pid: i32, timeout: Duration) -> bool {
             return false;
         }
         if grape_active && pid > 0 {
-            // A courtesy that may fail: the loop just looks again.
-            let _ = on_main("handing the front back", move |mtm| {
+            // A courtesy that may fail: the loop just looks again. It waits
+            // for the main thread no longer than the caller waits for the
+            // app, and a hand-back that came too late is never made.
+            let left = timeout.saturating_sub(started.elapsed());
+            let _ = on_main_within("handing the front back", left, move |mtm| {
                 if let Some(app) = running_app(pid) {
                     hand_back(mtm, &app);
                 }
@@ -495,6 +598,7 @@ mod tests {
             program: PathBuf::from(path),
             args: args.iter().map(OsString::from).collect(),
             stdin: None,
+            script: None,
         }
     }
 
@@ -579,7 +683,54 @@ mod tests {
 
     #[test]
     fn handing_the_front_back_off_the_main_thread_does_nothing() {
-        give_back_front();
+        give_back_front(None);
+        give_back_front(i32::try_from(std::process::id()).ok());
+        // No app has these.
+        give_back_front(Some(0));
+        give_back_front(Some(-1));
+    }
+
+    #[test]
+    fn the_opener_runs_the_programs_the_app_is_handed() {
+        let path = Path::new("/Applications/Notes.app");
+        for target in [
+            OpenTarget::App {
+                path,
+                id: Some("com.example.notes"),
+            },
+            OpenTarget::App { path, id: None },
+            OpenTarget::Path(path),
+            OpenTarget::Url("https://example.com/"),
+        ] {
+            let programs = open_programs(target).unwrap();
+            assert_eq!(programs, mac_rules::open_programs(target));
+            assert!(!programs.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_hop_nobody_serves_gives_up_and_is_dropped() {
+        // Nothing serves the main queue under `cargo test`, as nothing does
+        // while a modal panel is up. Were this the main thread, the work
+        // would run inline.
+        if MainThreadMarker::new().is_some() {
+            return;
+        }
+        let started = Instant::now();
+        let answer = on_main_within("a test", Duration::from_millis(30), |_| Ok(7));
+        assert_eq!(answer, None);
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        // The same for the entry point built on it, which waits a second.
+        let started = Instant::now();
+        assert!(matches!(
+            front_app(),
+            Err(PlatformError::Os {
+                context: "reading the app in front",
+                ..
+            })
+        ));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

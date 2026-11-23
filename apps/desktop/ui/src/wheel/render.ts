@@ -16,6 +16,9 @@
  * - Highlight changes drive the synthesized tick (`tick.ts`).
  * - A Shortcuts segment may carry an icon over its label (an emoji as text,
  *   a glyph as stroked paths) and, for a group, a mark on the rim.
+ * - A Shortcuts wheel can stay open under a real pointer, so it carries no
+ *   `<title>`: the webview would pop a tooltip over it. Its names are in
+ *   `aria-label` alone. The drag wheels keep both.
  */
 
 import {
@@ -229,17 +232,22 @@ function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
   svg.style.setProperty("left", `${formatNumber(scene.left)}px`);
   svg.style.setProperty("top", `${formatNumber(scene.top)}px`);
 
-  const title = svgElement(doc, "title");
-  title.textContent = scene.label;
-  const children: SVGElement[] = [
-    title,
+  // No pointer rests on a drag wheel, so only those get a `<title>` (the header says why).
+  const titled = scene.kind !== "shortcuts";
+  const children: SVGElement[] = [];
+  if (titled) {
+    const title = svgElement(doc, "title");
+    title.textContent = scene.label;
+    children.push(title);
+  }
+  children.push(
     svgElement(doc, "circle", {
       class: "wheel-backdrop",
       cx: "0",
       cy: "0",
       r: formatNumber(scene.backdropR),
     }),
-  ];
+  );
 
   if (scene.placeholders.length > 0) {
     const pending = svgElement(doc, "g", { class: "wheel-pending", "aria-hidden": "true" });
@@ -261,9 +269,11 @@ function drawScene(svg: SVGSVGElement, scene: WheelScene): void {
       });
       path.classList.add("wheel-segment");
       path.classList.toggle("is-highlighted", segment.highlighted);
-      const tooltip = svgElement(doc, "title");
-      tooltip.textContent = segment.name;
-      path.append(tooltip);
+      if (titled) {
+        const tooltip = svgElement(doc, "title");
+        tooltip.textContent = segment.name;
+        path.append(tooltip);
+      }
       segments.append(path);
 
       if (segment.icon !== null) {

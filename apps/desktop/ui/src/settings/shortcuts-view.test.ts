@@ -257,6 +257,24 @@ function click(element: FakeElement): void {
   element.dispatch("click");
 }
 
+/** The second click of a double click: the OS counts it, whatever is under the pointer by then. */
+function clickAgain(element: FakeElement): void {
+  element.focus();
+  element.dispatch("click", { detail: 2 });
+}
+
+/** A press from the keyboard: the click it makes counts no clicks. */
+function press(element: FakeElement): void {
+  element.focus();
+  element.dispatch("click", { detail: 0 });
+}
+
+function isWaiting(element: FakeElement): boolean {
+  return element.getAttribute("aria-disabled") === "true";
+}
+
+const SET_SHORTCUT = "Set shortcut for the wheel";
+
 /** The nearest ancestor (or the element itself) with this class. */
 function closest(element: FakeElement, name: string): FakeElement {
   for (let node: FakeElement | null = element; node !== null; node = node.parent) {
@@ -321,10 +339,15 @@ function expectWellFormed(root: FakeElement): void {
   }
   for (const node of all) {
     for (const name of ["aria-describedby", "aria-labelledby"]) {
-      const target = node.getAttribute(name);
-      if (target !== null) {
+      const targets = node.getAttribute(name);
+      expect(targets, name).not.toBe("");
+      for (const target of targets?.split(" ") ?? []) {
         expect(ids, `${name}="${target}"`).toContain(target);
       }
+    }
+    // A button that waits keeps its place in the Tab order: it is never both.
+    if (node.localName === "button" && node.disabled) {
+      expect(node.hasAttribute("aria-disabled")).toBe(false);
     }
     if (node.getAttribute("role") === "group") {
       expect(node.getAttribute("aria-label")).not.toBe("");
@@ -525,7 +548,11 @@ describe("drawing the macOS view", () => {
     expect(text.localName).toBe("textarea");
     expect(text.value).toBe("Best,\nMax");
     expect(text.getAttribute("maxlength")).toBe("4000");
-    expect(byId(everywhere.root, text.getAttribute("aria-describedby") ?? "").textContent).toContain("{clipboard}");
+    // Its hint, then the line that says when its text wasn't saved: empty, and so not shown, until then.
+    expect(text.getAttribute("aria-describedby")).toBe("sc-step-5-text-hint sc-step-5-text-unsaved");
+    expect(byId(everywhere.root, "sc-step-5-text-hint").textContent).toContain("{clipboard}");
+    expect(byClass(everywhere.root, "sc-unsaved").map((line) => line.textContent).join("")).toBe("");
+    expect(text.hasAttribute("aria-invalid")).toBe(false);
     expect(byId(everywhere.root, "sc-step-6-shift").checked).toBe(true);
     expect(byId(everywhere.root, "sc-step-6-meta").checked).toBe(true);
     expect(byId(everywhere.root, "sc-step-6-ctrl").checked).toBe(false);
@@ -535,6 +562,7 @@ describe("drawing the macOS view", () => {
     expect(delay.value).toBe("250");
     expect(delay.getAttribute("min")).toBe("10");
     expect(delay.getAttribute("max")).toBe("60000");
+    expect(delay.getAttribute("aria-describedby")).toBe("sc-step-7-ms-unsaved");
     const app = stepBoxes(everywhere.root, 9)[0];
     expect(oneByClass(app ?? everywhere.root, "sc-picked").textContent).toBe("No app chosen yet");
     expect(byTag(app ?? everywhere.root, "input")).toEqual([]);
@@ -772,42 +800,98 @@ describe("the wheel's own settings", () => {
     expect(oneByClass(h.root, "sc-status").textContent).toBe("Choose a key combination for the wheel first.");
   });
 
-  it("sends the whole chord when a modifier or the key changes", async () => {
-    const h = await shown(macos);
-    change(byId(h.root, "sc-hotkey-meta"), { checked: true });
-    await h.page.idle();
-    change(byId(h.root, "sc-hotkey-key"), { value: "F5" });
-    await h.page.idle();
-    expect(commands(h)).toEqual([
-      ["shortcuts_set_hotkey", { chord: { key: "KeyG", shift: false, ctrl: true, alt: true, meta: true } }],
-      // Rust answered with the old chord, so Command is unticked again.
-      ["shortcuts_set_hotkey", { chord: { key: "F5", shift: false, ctrl: true, alt: true, meta: false } }],
-    ]);
-    expect(JSON.stringify(commands(h)[0]?.[1])).toBe(
-      '{"chord":{"key":"KeyG","shift":false,"ctrl":true,"alt":true,"meta":true}}',
-    );
+  it("shows Set shortcut in the key combination, off while the controls show what Rust holds", async () => {
+    const { root } = await shown(macos);
+    const set = buttonLabelled(root, SET_SHORTCUT);
+    expect(set.textContent).toBe("Set shortcut");
+    expect(closest(set, "sc-chord")).toBe(closest(byId(root, "sc-hotkey-key"), "sc-chord"));
+    expect(set.disabled).toBe(true);
+    // A Keys step still sends each chord as it is made: it has no button.
+    const step = await shown(sample);
+    expect(byTag(closest(byId(step.root, "sc-step-6-key"), "sc-chord"), "button")).toEqual([]);
   });
 
-  it("sends no chord for None, and draws what Rust answers", async () => {
+  it("sends nothing while a chord is being made, and the whole chord once from Set shortcut", async () => {
+    const chord = { key: "F5", shift: false, ctrl: true, alt: false, meta: true };
+    const h = await shown(macos, () =>
+      Promise.resolve({ ...macos, hotkey: { chord, label: "Control+Command+F5" } }),
+    );
+    const set = buttonLabelled(h.root, SET_SHORTCUT);
+    change(byId(h.root, "sc-hotkey-meta"), { checked: true });
+    expect(set.disabled).toBe(false);
+    change(byId(h.root, "sc-hotkey-alt"), { checked: false });
+    change(byId(h.root, "sc-hotkey-key"), { value: "F5" });
+    await h.page.idle();
+    // Control+Option+Command+G and the chords after it were never Grape's to bind.
+    expect(commands(h)).toEqual([]);
+    expect(oneByClass(h.root, "sc-chord-label").textContent).toBe("Control+Option+G");
+
+    click(set);
+    await h.page.idle();
+    expect(commands(h)).toEqual([["shortcuts_set_hotkey", { chord }]]);
+    expect(JSON.stringify(commands(h)[0]?.[1])).toBe(
+      '{"chord":{"key":"F5","shift":false,"ctrl":true,"alt":false,"meta":true}}',
+    );
+    expect(oneByClass(h.root, "sc-chord-label").textContent).toBe("Control+Command+F5");
+    // Rust holds the draft now: the button is off, and focus didn't stay on it.
+    expect(set.disabled).toBe(true);
+    expect(h.doc.activeElement).toBe(byId(h.root, "sc-hotkey-key"));
+  });
+
+  it("switches Set shortcut off again when the draft goes back to what Rust holds", async () => {
+    const h = await shown(macos);
+    const set = buttonLabelled(h.root, SET_SHORTCUT);
+    change(byId(h.root, "sc-hotkey-shift"), { checked: true });
+    expect(set.disabled).toBe(false);
+    change(byId(h.root, "sc-hotkey-shift"), { checked: false });
+    expect(set.disabled).toBe(true);
+    click(set);
+    await h.page.idle();
+    expect(commands(h)).toEqual([]);
+  });
+
+  it("sends one command for a double click on Set shortcut", async () => {
+    const reply = deferred();
+    const h = await shown(macos, () => reply.promise);
+    change(byId(h.root, "sc-hotkey-key"), { value: "KeyH" });
+    click(buttonLabelled(h.root, SET_SHORTCUT));
+    clickAgain(buttonLabelled(h.root, SET_SHORTCUT));
+    reply.resolve(macos);
+    await h.page.idle();
+    expect(commands(h)).toEqual([
+      ["shortcuts_set_hotkey", { chord: { key: "KeyH", shift: false, ctrl: true, alt: true, meta: false } }],
+    ]);
+  });
+
+  it("clears the key combination with None and Set shortcut, and draws what Rust answers", async () => {
     const off = { ...macos, hotkey: null };
     const h = await shown(macos, () => Promise.resolve(off));
     change(byId(h.root, "sc-hotkey-key"), { value: "" });
     await h.page.idle();
+    expect(commands(h)).toEqual([]);
+    click(buttonLabelled(h.root, SET_SHORTCUT));
+    await h.page.idle();
     expect(commands(h)).toEqual([["shortcuts_set_hotkey", { chord: null }]]);
     expect(byId(h.root, "sc-hotkey-key").value).toBe("");
     expect(oneByClass(h.root, "sc-binding").textContent).toContain("Choose a key");
+    expect(buttonLabelled(h.root, SET_SHORTCUT).disabled).toBe(true);
   });
 
-  it("holds modifiers ticked with no key until a key is chosen, then sends them together", async () => {
+  it("holds modifiers ticked with no key as part of the draft, through a redraw", async () => {
     const off = { ...macos, hotkey: null };
     const h = await shown(
       off,
-      answering({ shortcuts_set_opens_at: () => Promise.resolve({ ...off, opensAt: "center" }) }),
+      answering({
+        shortcuts_set_opens_at: () => Promise.resolve({ ...off, opensAt: "center" }),
+        shortcuts_set_hotkey: (_command, args) =>
+          Promise.resolve({ ...off, hotkey: { chord: args["chord"] as ChordWire, label: "Control+Shift+Space" } }),
+      }),
     );
+    const set = buttonLabelled(h.root, SET_SHORTCUT);
     change(byId(h.root, "sc-hotkey-ctrl"), { checked: true });
     change(byId(h.root, "sc-hotkey-shift"), { checked: true });
-    await h.page.idle();
-    expect(commands(h)).toEqual([]);
+    // No key is no chord, which is what Rust holds: there is nothing to set yet.
+    expect(set.disabled).toBe(true);
 
     // Another change redraws the page: the ticks stay.
     change(byId(h.root, "sc-opens-at"), { value: "center" });
@@ -817,22 +901,56 @@ describe("the wheel's own settings", () => {
     expect(byId(h.root, "sc-hotkey-key").value).toBe("");
 
     change(byId(h.root, "sc-hotkey-key"), { value: "Space" });
-    await flush();
+    expect(set.disabled).toBe(false);
+    click(set);
+    await h.page.idle();
     expect(commands(h)[1]).toEqual([
       "shortcuts_set_hotkey",
       { chord: { key: "Space", shift: true, ctrl: true, alt: false, meta: false } },
     ]);
+    expect(commands(h)).toHaveLength(2);
+  });
+
+  it("keeps a draft through a redraw and a re-read, while the line shows what Rust holds", async () => {
+    const h = await shown(macos, (command) =>
+      Promise.resolve(command === "shortcuts_set_opens_at" ? { ...macos, opensAt: "center" } : macos),
+    );
+    change(byId(h.root, "sc-hotkey-meta"), { checked: true });
+    change(byId(h.root, "sc-hotkey-key"), { value: "KeyJ" });
+    change(byId(h.root, "sc-opens-at"), { value: "center" });
+    await h.page.idle();
+    h.win.dispatch("focus");
+    await h.page.idle();
+    expect(commands(h).map(([command]) => command)).toEqual(["shortcuts_set_opens_at", "shortcuts_get"]);
+    expect(byId(h.root, "sc-hotkey-meta").checked).toBe(true);
+    expect(byId(h.root, "sc-hotkey-key").value).toBe("KeyJ");
+    expect(buttonLabelled(h.root, SET_SHORTCUT).disabled).toBe(false);
+    expect(oneByClass(h.root, "sc-chord-label").textContent).toBe("Control+Option+G");
+    expect(oneByClass(h.root, "sc-binding").textContent).toBe("The wheel is off.");
+    expectWellFormed(h.root);
+  });
+
+  it("does nothing with an unsent draft when Settings closes or hides: the stored one stays", async () => {
+    const h = await shown(macos);
+    change(byId(h.root, "sc-hotkey-meta"), { checked: true });
+    change(byId(h.root, "sc-hotkey-key"), { value: "KeyJ" });
+    h.win.dispatch("pagehide");
+    h.doc.visibilityState = "hidden";
+    h.doc.dispatch("visibilitychange");
+    await h.page.idle();
+    expect(commands(h)).toEqual([]);
   });
 
   it("sends nothing for a key the view doesn't offer, and puts the select back", async () => {
     const h = await shown(macos);
     change(byId(h.root, "sc-hotkey-key"), { value: "Fn" });
+    expect(byId(h.root, "sc-hotkey-key").value).toBe("KeyG");
+    expect(buttonLabelled(h.root, SET_SHORTCUT).disabled).toBe(true);
     await h.page.idle();
     expect(commands(h)).toEqual([]);
-    expect(byId(h.root, "sc-hotkey-key").value).toBe("KeyG");
   });
 
-  it("shows the old chord again, with Rust's sentence, when the new one is refused", async () => {
+  it("keeps the draft, with Rust's sentence, when the chord is refused", async () => {
     const h = await shown(
       macos,
       answering({
@@ -840,9 +958,24 @@ describe("the wheel's own settings", () => {
         shortcuts_get: () => Promise.resolve(macos),
       }),
     );
+    const set = buttonLabelled(h.root, SET_SHORTCUT);
+    change(byId(h.root, "sc-hotkey-meta"), { checked: true });
     change(byId(h.root, "sc-hotkey-key"), { value: "KeyQ" });
+    click(set);
     await h.page.idle();
-    expect(byId(h.root, "sc-hotkey-key").value).toBe("KeyG");
+    expect(commands(h)).toEqual([
+      [
+        "shortcuts_set_hotkey",
+        { chord: { key: "KeyQ", shift: false, ctrl: true, alt: true, meta: true } },
+      ],
+      ["shortcuts_get", {}],
+    ]);
+    // The draft is still there to mend, and can be sent again.
+    expect(byId(h.root, "sc-hotkey-key").value).toBe("KeyQ");
+    expect(byId(h.root, "sc-hotkey-meta").checked).toBe(true);
+    expect(set.disabled).toBe(false);
+    expect(h.doc.activeElement).toBe(set);
+    expect(oneByClass(h.root, "sc-chord-label").textContent).toBe("Control+Option+G");
     expect(oneByClass(h.root, "sc-status").textContent).toBe("Grape couldn't use that shortcut. Try another.");
   });
 
@@ -850,6 +983,47 @@ describe("the wheel's own settings", () => {
     const { root } = await shown({ ...macos, enabled: true, binding: "failed" });
     expect(oneByClass(root, "sc-binding").textContent).toContain("macOS wouldn't give Grape that shortcut");
     expect(oneByClass(root, "sc-binding").getAttribute("role")).toBe("status");
+  });
+
+  it("draws a Mac whose hot keys couldn't start as a Mac: the whole section, and what mends it", async () => {
+    // Rust reports it as available, with the binding failed.
+    const failed: ShortcutsView = { ...sample, enabled: false, binding: "failed" };
+    const h = await shown(
+      failed,
+      answering({
+        shortcuts_set_enabled: () => Promise.reject("macOS wouldn't give Grape that shortcut."),
+        shortcuts_get: () => Promise.resolve(failed),
+      }),
+    );
+    expect(oneByClass(h.root, "section-hint").textContent).toBe(SHORTCUTS_COPY.lead);
+    expect(h.root.textContent).not.toContain("on the Mac first");
+    expect(ringNames(h.root)).toEqual(["Copy", "Sign", "Apps"]);
+    expect(oneByClass(h.root, "sc-binding").textContent).toBe(
+      "macOS wouldn't give Grape that shortcut. Try another, or quit Grape and open it again.",
+    );
+    const enabled = byId(h.root, "sc-enabled");
+    expect(enabled.checked).toBe(false);
+    expect(enabled.disabled).toBe(false);
+
+    // Turning it on is Rust's to refuse: the switch goes back, under Rust's own sentence.
+    change(enabled, { checked: true });
+    await h.page.idle();
+    expect(enabled.checked).toBe(false);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("macOS wouldn't give Grape that shortcut.");
+    expect(oneByClass(h.root, "sc-binding").textContent).toContain("quit Grape and open it again");
+
+    // And it reads the view again on focus, as on every Mac.
+    h.win.dispatch("focus");
+    await h.page.idle();
+    expect(commands(h).at(-1)).toEqual(["shortcuts_get", {}]);
+    expectWellFormed(h.root);
+  });
+
+  it("reads the same line with the switch on", async () => {
+    const { root } = await shown({ ...sample, enabled: true, binding: "failed" });
+    expect(byId(root, "sc-enabled").checked).toBe(true);
+    expect(oneByClass(root, "sc-binding").textContent).toContain("quit Grape and open it again");
+    expect(oneByClass(root, "section-hint").textContent).toBe(SHORTCUTS_COPY.lead);
   });
 
   it("sends where the wheel opens", async () => {
@@ -919,6 +1093,23 @@ describe("menus", () => {
     expect(ringNames(h.root)).toEqual(["Copy", "Sign", "Apps"]);
     expect(isHidden(buttonLabelled(h.root, "Remove menu: Everywhere"))).toBe(true);
     expect(h.doc.activeElement).toBe(byId(h.root, "sc-menu"));
+  });
+
+  it("ignores a second click on Remove menu until the first has answered, and a double click's second", async () => {
+    const reply = deferred();
+    const h = await shownSafari(() => reply.promise);
+    const remove = buttonLabelled(h.root, "Remove menu: Safari");
+    clickAgain(remove);
+    await flush();
+    expect(commands(h)).toEqual([]);
+    click(remove);
+    click(remove);
+    await flush();
+    expect(commands(h)).toEqual([["shortcuts_remove_menu", { menu: 20 }]]);
+    expect(isWaiting(remove)).toBe(true);
+    reply.resolve(sample);
+    await h.page.idle();
+    expect(isWaiting(remove)).toBe(false);
   });
 
   it("sends the Everywhere switch for the chosen menu, and shows Rust's note", async () => {
@@ -1072,7 +1263,7 @@ describe("shortcuts and groups", () => {
     expect(oneByClass(itemBox(h.root, 2).children[0] ?? h.root, "sc-item-icon").textContent).toBe("🍇");
   });
 
-  it("keeps Emoji chosen through another redraw, and goes back when the field is left empty", async () => {
+  it("keeps Emoji chosen through a redraw and after the empty field is left, sending nothing", async () => {
     const h = await shown(sample);
     const icon = byId(h.root, "sc-item-2-icon");
     const emoji = byId(h.root, "sc-item-2-emoji");
@@ -1082,11 +1273,66 @@ describe("shortcuts and groups", () => {
     expect(icon.value).toBe("emoji");
     expect(isHidden(emoji)).toBe(false);
 
+    // The window stops being the key one (the system's emoji picker, another app): the field blurs.
     emoji.dispatch("blur");
+    emoji.dispatch("change");
     await h.page.idle();
+    expect(icon.value).toBe("emoji");
+    expect(isHidden(emoji)).toBe(false);
+    expect(h.doc.activeElement).toBe(emoji);
+
+    // So does a real move to another control, and a re-read when the window comes back.
+    byId(h.root, "sc-item-2-name").focus();
+    emoji.dispatch("blur");
+    h.win.dispatch("focus");
+    await h.page.idle();
+    expect(icon.value).toBe("emoji");
+    expect(isHidden(emoji)).toBe(false);
+    expect(commands(h)).toEqual([["shortcuts_set_enabled", { on: true }], ["shortcuts_get", {}]]);
+    // The shortcut keeps the icon it has until an emoji is typed: a rename sends that one.
+    change(byId(h.root, "sc-item-2-name"), { value: "Duplicate" });
+    await h.page.idle();
+    expect(commands(h).at(-1)).toEqual([
+      "shortcuts_set_item",
+      { item: 2, name: "Duplicate", icon: { kind: "glyph", value: "clipboard" } },
+    ]);
+    expectWellFormed(h.root);
+  });
+
+  it("gives Emoji up only when another icon is chosen", async () => {
+    const h = await shown(sample);
+    const icon = byId(h.root, "sc-item-2-icon");
+    const emoji = byId(h.root, "sc-item-2-emoji");
+    change(icon, { value: "emoji" });
+    emoji.dispatch("blur");
+    change(icon, { value: "glyph:clipboard" });
+    await h.page.idle();
+    expect(commands(h)).toEqual([
+      ["shortcuts_set_item", { item: 2, name: "Copy", icon: { kind: "glyph", value: "clipboard" } }],
+    ]);
     expect(icon.value).toBe("glyph:clipboard");
     expect(isHidden(emoji)).toBe(true);
-    expect(commands(h)).toEqual([["shortcuts_set_enabled", { on: true }]]);
+    expect(h.doc.activeElement).not.toBe(emoji);
+  });
+
+  it("leaves Emoji chosen, with the field empty again, when Rust refuses what was typed", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_item: () => Promise.reject("An emoji icon is one emoji, with no spaces."),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
+    );
+    const icon = byId(h.root, "sc-item-2-icon");
+    const emoji = byId(h.root, "sc-item-2-emoji");
+    change(icon, { value: "emoji" });
+    change(emoji, { value: "a b" });
+    await h.page.idle();
+    expect(icon.value).toBe("emoji");
+    expect(isHidden(emoji)).toBe(false);
+    // A short field goes back to what Rust holds: it travels with every rename.
+    expect(emoji.value).toBe("");
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("An emoji icon is one emoji, with no spaces.");
   });
 
   it("puts an emptied emoji back instead of sending it", async () => {
@@ -1109,6 +1355,54 @@ describe("shortcuts and groups", () => {
     expect(ringNames(h.root)).toEqual(["Copy", "Apps"]);
     expect(itemBox(h.root, 8)).toBe(apps);
     expect(h.doc.activeElement).toBe(buttonLabelled(h.root, "Add shortcut"));
+  });
+
+  it("ignores the second click of a double click on Remove, whichever row it lands on", async () => {
+    const without = changed(sample, (view) => {
+      menuOf(view, EVERYWHERE).items.splice(0, 1);
+    });
+    const h = await shown(sample, answering({ shortcuts_remove_item: () => Promise.resolve(without) }));
+    click(buttonLabelled(h.root, "Remove: Copy"));
+    await h.page.idle();
+    expect(ringNames(h.root)).toEqual(["Sign", "Apps"]);
+    // Sign slid up under the pointer, and the second click of the pair lands on its Remove.
+    clickAgain(buttonLabelled(h.root, "Remove: Sign"));
+    await h.page.idle();
+    expect(commands(h)).toEqual([["shortcuts_remove_item", { item: 2 }]]);
+    expect(ringNames(h.root)).toEqual(["Sign", "Apps"]);
+
+    // A click of its own, or a press from the keyboard, still removes.
+    press(buttonLabelled(h.root, "Remove: Sign"));
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(2);
+    expect(commands(h)[1]).toEqual(["shortcuts_remove_item", { item: 4 }]);
+  });
+
+  it("does nothing more with a Remove whose command hasn't answered, and wakes it if Rust refuses", async () => {
+    const reply = deferred();
+    const h = await shown(
+      sample,
+      answering({ shortcuts_remove_item: () => reply.promise, shortcuts_get: () => Promise.resolve(sample) }),
+    );
+    const remove = buttonLabelled(h.root, "Remove: Sign");
+    click(remove);
+    expect(isWaiting(remove)).toBe(true);
+    // It keeps the focus and its place in the Tab order.
+    expect(remove.disabled).toBe(false);
+    expect(h.doc.activeElement).toBe(remove);
+    click(remove);
+    press(remove);
+    await flush();
+    expect(commands(h)).toEqual([["shortcuts_remove_item", { item: 4 }]]);
+    // Other rows' buttons are their own.
+    expect(isWaiting(buttonLabelled(h.root, "Remove: Copy"))).toBe(false);
+
+    reply.reject("Couldn't save your shortcuts.");
+    await h.page.idle();
+    expect(isWaiting(remove)).toBe(false);
+    click(remove);
+    await flush();
+    expect(commands(h).filter(([command]) => command === "shortcuts_remove_item")).toHaveLength(2);
   });
 
   it("removes a group's shortcut and moves focus to the group's Add shortcut", async () => {
@@ -1165,12 +1459,75 @@ describe("shortcuts and groups", () => {
   it("moves a shortcut inside its group, by its place in the group", async () => {
     const h = await shown(sample);
     click(buttonLabelled(h.root, "Move up: Notes"));
+    await h.page.idle();
     click(buttonLabelled(h.root, "Move down: Browser"));
     await h.page.idle();
     expect(commands(h)).toEqual([
       ["shortcuts_move_item", { item: 12, to: 0 }],
       ["shortcuts_move_item", { item: 9, to: 1 }],
     ]);
+  });
+
+  it("holds a list's Move buttons until its move has answered: the next click counts from the new order", async () => {
+    const order = (ids: readonly number[]): ShortcutsView =>
+      changed(sample, (view) => {
+        const menu = menuOf(view, EVERYWHERE);
+        menu.items = ids.map((id) => itemOf(sample, id));
+      });
+    const first = deferred();
+    const replies = [first.promise, Promise.resolve(order([4, 8, 2]))];
+    const h = await shown(sample, () => replies.shift() ?? Promise.reject("unexpected"));
+    const down = buttonLabelled(h.root, "Move down: Copy");
+    click(down);
+    // Key repeat, or a second click before the first answer: from the old order it would be place 1 again.
+    click(down);
+    press(down);
+    click(buttonLabelled(h.root, "Move up: Apps"));
+    await flush();
+    expect(commands(h)).toEqual([["shortcuts_move_item", { item: 2, to: 1 }]]);
+    // Every Move button of the ring that was on waits. None is disabled for it: the pressed one keeps the focus.
+    const ringMoves = ["Copy", "Sign", "Apps"].flatMap((name) => [
+      buttonLabelled(h.root, `Move up: ${name}`),
+      buttonLabelled(h.root, `Move down: ${name}`),
+    ]);
+    expect(ringMoves.map((node) => isWaiting(node) || node.disabled)).toEqual(Array(6).fill(true));
+    expect(ringMoves.filter(isWaiting)).toHaveLength(4);
+    expect(down.disabled).toBe(false);
+    expect(isWaiting(down)).toBe(true);
+    // Another list is its own: the group's shortcuts and a shortcut's steps can still move.
+    expect(isWaiting(buttonLabelled(h.root, "Move up: Notes"))).toBe(false);
+    expect(isWaiting(buttonLabelled(h.root, "Move down: step 1 of Sign"))).toBe(false);
+    expect(isWaiting(buttonLabelled(h.root, "Remove: Copy"))).toBe(false);
+    expectWellFormed(h.root);
+
+    first.resolve(order([4, 2, 8]));
+    await h.page.idle();
+    expect(ringNames(h.root)).toEqual(["Sign", "Copy", "Apps"]);
+    expect(byTag(h.root, "button").filter(isWaiting)).toEqual([]);
+    expect(h.doc.activeElement).toBe(down);
+
+    // The next click is counted from the order Rust answered with.
+    click(down);
+    await h.page.idle();
+    expect(commands(h)).toEqual([
+      ["shortcuts_move_item", { item: 2, to: 1 }],
+      ["shortcuts_move_item", { item: 2, to: 2 }],
+    ]);
+    expect(ringNames(h.root)).toEqual(["Sign", "Apps", "Copy"]);
+  });
+
+  it("frees the Move buttons again when the move is refused", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_move_item: () => Promise.reject("That shortcut can't move there."),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
+    );
+    click(buttonLabelled(h.root, "Move down: Copy"));
+    await h.page.idle();
+    expect(byTag(h.root, "button").filter(isWaiting)).toEqual([]);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("That shortcut can't move there.");
   });
 });
 
@@ -1400,6 +1757,51 @@ describe("steps", () => {
     expect(commands(h)[1]).toEqual(["shortcuts_move_step", { step: 7, to: 0 }]);
   });
 
+  it("holds a shortcut's step Move buttons until its move has answered", async () => {
+    const moved = changed(sample, (view) => {
+      const steps = stepsOf(view, 4).steps;
+      steps.push(...steps.splice(0, 1));
+    });
+    const first = deferred();
+    const replies = [first.promise, Promise.resolve(moved)];
+    const h = await shown(sample, () => replies.shift() ?? Promise.reject("unexpected"));
+    const down = buttonLabelled(h.root, "Move down: step 1 of Sign");
+    click(down);
+    click(down);
+    await flush();
+    expect(commands(h)).toEqual([["shortcuts_move_step", { step: 5, to: 1 }]]);
+    // Four of the six: Move up of the first step and Move down of the last are off as it is.
+    expect(stepBoxes(h.root, 4).flatMap((box) => byTag(box, "button").filter(isWaiting))).toHaveLength(4);
+    // Another shortcut's steps, and this shortcut's own row, are free.
+    expect(isWaiting(buttonLabelled(h.root, "Move down: step 1 of Browser"))).toBe(false);
+    expect(isWaiting(buttonLabelled(h.root, "Move up: Sign"))).toBe(false);
+
+    first.resolve(
+      changed(sample, (view) => {
+        const steps = stepsOf(view, 4).steps;
+        steps.splice(1, 0, ...steps.splice(0, 1));
+      }),
+    );
+    await h.page.idle();
+    expect(byTag(h.root, "button").filter(isWaiting)).toEqual([]);
+    click(buttonLabelled(h.root, "Move down: step 2 of Sign"));
+    await h.page.idle();
+    expect(commands(h)[1]).toEqual(["shortcuts_move_step", { step: 5, to: 2 }]);
+  });
+
+  it("ignores the second click of a double click on a step's Remove", async () => {
+    const without = changed(sample, (view) => {
+      stepsOf(view, 4).steps.splice(0, 1);
+    });
+    const h = await shown(sample, answering({ shortcuts_remove_step: () => Promise.resolve(without) }));
+    click(buttonLabelled(h.root, "Remove: step 1 of Sign"));
+    await h.page.idle();
+    clickAgain(buttonLabelled(h.root, "Remove: step 1 of Sign"));
+    await h.page.idle();
+    expect(commands(h)).toEqual([["shortcuts_remove_step", { step: 5 }]]);
+    expect(stepBoxes(h.root, 4)).toHaveLength(2);
+  });
+
   it("builds a new row when Rust reuses an id for a step of another kind", async () => {
     const other = changed(sample, (view) => {
       stepsOf(view, 2).steps = [{ id: 3, kind: "notify", text: "Copied" }];
@@ -1522,26 +1924,245 @@ describe("text fields", () => {
     expect(text.value).toBe("Kind regards");
   });
 
-  it("go back to the stored value, with Rust's sentence, when the text is refused", async () => {
+  const LINK_REFUSED = "A link starts with its kind, like https: or mailto:, and has no spaces.";
+
+  it("keep the text Rust refused, marked as not saved under Rust's sentence", async () => {
     const h = await shown(
       sample,
       answering({
-        shortcuts_set_step: () =>
-          Promise.reject("A link starts with its kind, like https: or mailto:, and has no spaces."),
+        shortcuts_set_step: () => Promise.reject(LINK_REFUSED),
+        shortcuts_set_enabled: () => Promise.resolve(sample),
         shortcuts_get: () => Promise.resolve(sample),
       }),
     );
     const url = byId(h.root, "sc-step-11-url");
-    change(url, { value: "not a link" });
+    const line = byId(h.root, "sc-step-11-url-unsaved");
+    change(url, { value: "example.com/some/long/path?with=query" });
     await h.page.idle();
     expect(commands(h)).toEqual([
-      ["shortcuts_set_step", { step: 11, value: { kind: "openUrl", url: "not a link" } }],
+      ["shortcuts_set_step", { step: 11, value: { kind: "openUrl", url: "example.com/some/long/path?with=query" } }],
       ["shortcuts_get", {}],
     ]);
-    expect(url.value).toBe("https://example.com");
-    expect(oneByClass(h.root, "sc-status").textContent).toBe(
-      "A link starts with its kind, like https: or mailto:, and has no spaces.",
+    // The typing isn't thrown away: it is there to mend.
+    expect(url.value).toBe("example.com/some/long/path?with=query");
+    expect(url.getAttribute("aria-invalid")).toBe("true");
+    expect(url.getAttribute("aria-describedby")?.split(" ")).toContain("sc-step-11-url-unsaved");
+    expect(line.textContent).toBe(`Not saved. ${LINK_REFUSED}`);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe(LINK_REFUSED);
+    expectWellFormed(h.root);
+
+    // It outlives the status line, a redraw and a re-read.
+    change(byId(h.root, "sc-enabled"), { checked: true });
+    await h.page.idle();
+    h.win.dispatch("focus");
+    await h.page.idle();
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("");
+    expect(url.value).toBe("example.com/some/long/path?with=query");
+    expect(url.getAttribute("aria-invalid")).toBe("true");
+    expect(line.textContent).toBe(`Not saved. ${LINK_REFUSED}`);
+  });
+
+  it("send refused text again only once the user has changed it", async () => {
+    const mended = changed(sample, (view) => {
+      const step = stepsOf(view, 9).steps[1];
+      if (step?.kind === "openUrl") step.url = "https://example.com/inbox";
+    });
+    const h = await shown(sample, (command, args) => {
+      if (command === "shortcuts_get") return Promise.resolve(sample);
+      const value = args["value"] as { url: string };
+      return value.url.startsWith("https:") ? Promise.resolve(mended) : Promise.reject(LINK_REFUSED);
+    });
+    const url = byId(h.root, "sc-step-11-url");
+    change(url, { value: "example.com/inbox" });
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(2);
+
+    // Leaving it again, Enter, and closing or hiding Settings don't repeat the command or its error.
+    url.dispatch("change");
+    url.dispatch("keydown", { key: "Enter" });
+    h.win.dispatch("pagehide");
+    h.doc.visibilityState = "hidden";
+    h.doc.dispatch("visibilitychange");
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(2);
+    expect(url.value).toBe("example.com/inbox");
+
+    // While it is being mended the line stays, so the sentence can be read.
+    type(url, "https://example.com/inbox");
+    expect(url.getAttribute("aria-invalid")).toBe("true");
+    url.dispatch("change");
+    await h.page.idle();
+    expect(commands(h)[2]).toEqual([
+      "shortcuts_set_step",
+      { step: 11, value: { kind: "openUrl", url: "https://example.com/inbox" } },
+    ]);
+    expect(commands(h)).toHaveLength(3);
+    expect(url.value).toBe("https://example.com/inbox");
+    expect(url.hasAttribute("aria-invalid")).toBe(false);
+    expect(byId(h.root, "sc-step-11-url-unsaved").textContent).toBe("");
+  });
+
+  it("drop the mark, and send nothing, when refused text is changed back to what Rust holds", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_step: () => Promise.reject("Grape can't keep some of those characters."),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
     );
+    const text = byId(h.root, "sc-step-5-text");
+    change(text, { value: "Best,\u000bMax" });
+    await h.page.idle();
+    expect(text.value).toBe("Best,\u000bMax");
+    expect(text.getAttribute("aria-invalid")).toBe("true");
+    change(text, { value: "Best,\nMax" });
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(2);
+    expect(text.hasAttribute("aria-invalid")).toBe(false);
+    expect(byId(h.root, "sc-step-5-text-unsaved").textContent).toBe("");
+  });
+
+  it("keep a refused number too, and a text whose answer couldn't be read", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_step: (_command, args) =>
+          (args["value"] as { kind: string }).kind === "delay"
+            ? Promise.reject("A wait is 10 to 60000 milliseconds.")
+            : Promise.resolve({ not: "a view" }),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
+    );
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const delay = byId(h.root, "sc-step-7-ms");
+    change(delay, { value: "5" });
+    await h.page.idle();
+    expect(delay.value).toBe("5");
+    expect(delay.getAttribute("aria-invalid")).toBe("true");
+    expect(byId(h.root, "sc-step-7-ms-unsaved").textContent).toBe("Not saved. A wait is 10 to 60000 milliseconds.");
+
+    const text = byId(h.root, "sc-step-5-text");
+    change(text, { value: "Kind regards" });
+    await h.page.idle();
+    expect(text.value).toBe("Kind regards");
+    expect(byId(h.root, "sc-step-5-text-unsaved").textContent).toBe(`Not saved. ${SHORTCUTS_ERROR}`);
+  });
+
+  it("show Rust's value, unmarked, when only the save failed: the change is in", async () => {
+    const tidy = changed(sample, (view) => {
+      const step = stepsOf(view, 4).steps[0];
+      if (step?.kind === "typeText") step.text = "Kind regards";
+    });
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_step: () => Promise.reject("Couldn't save your shortcuts."),
+        shortcuts_get: () => Promise.resolve(tidy),
+      }),
+    );
+    const text = byId(h.root, "sc-step-5-text");
+    change(text, { value: "Kind regards\r\n" });
+    await h.page.idle();
+    expect(text.value).toBe("Kind regards");
+    expect(text.hasAttribute("aria-invalid")).toBe(false);
+    expect(byId(h.root, "sc-step-5-text-unsaved").textContent).toBe("");
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("Couldn't save your shortcuts.");
+    // Rust holds it, so leaving the field again sends nothing.
+    text.dispatch("change");
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(2);
+  });
+
+  it("put a refused name back, with Rust's sentence: it travels with every icon change", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_item: (_command, args) =>
+          args["name"] === "" ? Promise.reject("A name needs 1 to 24 characters.") : Promise.resolve(sample),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
+    );
+    const name = byId(h.root, "sc-item-2-name");
+    change(name, { value: "" });
+    await h.page.idle();
+    expect(name.value).toBe("Copy");
+    expect(name.hasAttribute("aria-invalid")).toBe(false);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("A name needs 1 to 24 characters.");
+    // So the next icon change isn't refused for the name's sake.
+    change(byId(h.root, "sc-item-2-icon"), { value: "glyph:star" });
+    await h.page.idle();
+    expect(commands(h).at(-1)).toEqual([
+      "shortcuts_set_item",
+      { item: 2, name: "Copy", icon: { kind: "glyph", value: "star" } },
+    ]);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("");
+  });
+
+  it("send an edit back to the old value when Rust has moved on under typed text", async () => {
+    const named = (name: string): ShortcutsView =>
+      changed(sample, (view) => {
+        itemOf(view, 2).name = name;
+      });
+    const first = deferred();
+    const replies = [first.promise, Promise.resolve(named("Copy"))];
+    const h = await shown(sample, () => replies.shift() ?? Promise.reject("unexpected"));
+    const name = byId(h.root, "sc-item-2-name");
+    type(name, "B");
+    name.dispatch("keydown", { key: "Enter" });
+    // One more letter before the answer: the redraw leaves it alone, but Rust holds "B" now.
+    type(name, "Bx");
+    first.resolve(named("B"));
+    await h.page.idle();
+    expect(name.value).toBe("Bx");
+    expect(itemBox(h.root, 2).getAttribute("aria-label")).toBe("Shortcut: B");
+
+    change(name, { value: "Copy" });
+    await h.page.idle();
+    expect(commands(h).map((call) => (call[1] as { name: string }).name)).toEqual(["B", "Copy"]);
+    expect(name.value).toBe("Copy");
+    expect(itemBox(h.root, 2).getAttribute("aria-label")).toBe("Shortcut: Copy");
+  });
+
+  it("send an edit back to the old value while the newer one is still on its way", async () => {
+    const named = (name: string): ShortcutsView =>
+      changed(sample, (view) => {
+        itemOf(view, 2).name = name;
+      });
+    const first = deferred();
+    const replies = [first.promise, Promise.resolve(named("Copy"))];
+    const h = await shown(sample, () => replies.shift() ?? Promise.reject("unexpected"));
+    const name = byId(h.root, "sc-item-2-name");
+    change(name, { value: "B" });
+    // Rust will hold "B" once it lands: "Copy" is a change again, and is sent once.
+    change(name, { value: "Copy" });
+    name.dispatch("change");
+    first.resolve(named("B"));
+    await h.page.idle();
+    expect(commands(h).map((call) => (call[1] as { name: string }).name)).toEqual(["B", "Copy"]);
+    expect(name.value).toBe("Copy");
+  });
+
+  it("send nothing for typed text that equals what Rust came to hold", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_enabled: () =>
+          Promise.resolve(
+            changed(sample, (view) => {
+              itemOf(view, 2).name = "Bx";
+            }),
+          ),
+      }),
+    );
+    const name = byId(h.root, "sc-item-2-name");
+    type(name, "B");
+    change(byId(h.root, "sc-enabled"), { checked: false });
+    await h.page.idle();
+    expect(name.value).toBe("B");
+    type(name, "Bx");
+    name.dispatch("change");
+    await h.page.idle();
+    expect(commands(h)).toEqual([["shortcuts_set_enabled", { on: false }]]);
   });
 
   it("are all sent when the window closes, each once", async () => {
@@ -1560,6 +2181,59 @@ describe("text fields", () => {
       ["shortcuts_set_step", { step: 7, value: { kind: "delay", ms: 500 } }],
       ["shortcuts_set_step", { step: 11, value: { kind: "openUrl", url: "https://example.com/inbox" } }],
     ]);
+  });
+
+  it("go to Rust at once when the window closes, not behind a command that hasn't answered", async () => {
+    const first = deferred();
+    const h = await shown(sample, (command) =>
+      command === "shortcuts_set_enabled" ? first.promise : Promise.resolve(sample),
+    );
+    change(byId(h.root, "sc-enabled"), { checked: false });
+    change(byId(h.root, "sc-opens-at"), { value: "center" });
+    await flush();
+    // One at a time: the second waits for the first's answer.
+    expect(commands(h)).toEqual([["shortcuts_set_enabled", { on: false }]]);
+    type(byId(h.root, "sc-item-2-name"), "Duplicate");
+    type(byId(h.root, "sc-step-5-text"), "Kind regards");
+
+    h.win.dispatch("pagehide");
+    // No answer has come, and none may: everything is with Rust before the handler returns, in order.
+    expect(commands(h)).toEqual([
+      ["shortcuts_set_enabled", { on: false }],
+      ["shortcuts_set_opens_at", { at: "center" }],
+      ["shortcuts_set_item", { item: 2, name: "Duplicate", icon: { kind: "glyph", value: "clipboard" } }],
+      ["shortcuts_set_step", { step: 5, value: { kind: "typeText", text: "Kind regards" } }],
+    ]);
+
+    // If the page lives on (it was only hidden), each answer is read in turn and nothing is sent twice.
+    first.resolve(sample);
+    await h.page.idle();
+    expect(commands(h)).toHaveLength(4);
+    expect(h.root.hasAttribute("aria-busy")).toBe(false);
+  });
+
+  it("go to Rust inside the handler when the page is hidden, and a refusal among them is still read", async () => {
+    const h = await shown(
+      sample,
+      answering({
+        shortcuts_set_item: () => Promise.reject("A name needs 1 to 24 characters."),
+        shortcuts_set_step: () => Promise.resolve(sample),
+        shortcuts_get: () => Promise.resolve(sample),
+      }),
+    );
+    type(byId(h.root, "sc-item-2-name"), "Duplicate");
+    type(byId(h.root, "sc-step-11-url"), "https://example.com");
+    type(byId(h.root, "sc-step-7-ms"), "500");
+    h.doc.visibilityState = "hidden";
+    h.doc.dispatch("visibilitychange");
+    expect(commands(h).map(([command]) => command)).toEqual(["shortcuts_set_item", "shortcuts_set_step"]);
+    await h.page.idle();
+    expect(commands(h).map(([command]) => command)).toEqual([
+      "shortcuts_set_item",
+      "shortcuts_set_step",
+      "shortcuts_get",
+    ]);
+    expect(oneByClass(h.root, "sc-status").textContent).toBe("A name needs 1 to 24 characters.");
   });
 
   it("are sent when the page is hidden, without a re-read", async () => {

@@ -16,7 +16,9 @@
 //! (`crate::mac_rules::hotkey_event_id`), so the handler looks nothing up.
 //! When a key goes down it reads the pressed buttons, the cursor and the app
 //! in front, before anything of Grape's shows, then `try_send`s: a full
-//! channel drops the signal.
+//! channel drops the signal. An Open press while one of Grape's modal
+//! windows is up is not sent at all (`crate::mac_rules::passes_press`): the
+//! chord stays Grape's, and no wheel opens over the panel.
 //!
 //! Carbon matches modifiers exactly, and a chord fires one thing: a chord
 //! another id already holds is left to it. A bind registers its new chords
@@ -37,18 +39,17 @@ use std::sync::mpsc::SyncSender;
 use dispatch2::DispatchQueue;
 use objc2::rc::autoreleasepool;
 use objc2::MainThreadMarker;
-use objc2_app_kit::NSEvent;
+use objc2_app_kit::{NSApplication, NSEvent};
 use objc2_core_graphics::{CGDisplayBounds, CGMainDisplayID};
 
-use super::actions::frontmost_other_app;
-use super::shortcuts::on_main;
+use super::shortcuts::{front_app_now, on_main};
 use super::{display, NO_CODE};
 use crate::keys::Chord;
 use crate::mac_rules::{
     bind_plan, carbon_modifiers, cursor_to_grape, hotkey_event_id, hotkey_for_event_id,
-    virtual_key, HeldChord, HOTKEY_SIGNATURE,
+    passes_press, virtual_key, HeldChord, HOTKEY_SIGNATURE,
 };
-use crate::shortcuts::{FrontApp, HotkeyId, HotkeyMonitor, HotkeySignal, PressContext};
+use crate::shortcuts::{HotkeyId, HotkeyMonitor, HotkeySignal, PressContext};
 use crate::PlatformError;
 
 /// Carbon's `OSStatus`.
@@ -484,6 +485,12 @@ fn handle(event: EventRef) -> bool {
     let Some(tx) = sender() else {
         return true;
     };
+    // Only an Open press asks: the answer matters to nothing else.
+    if pressed && !passes_press(id, id == HotkeyId::Open && modal_window_up()) {
+        log::debug!("hot keys: Open ignored while a modal window is up");
+        // Still Grape's: the panel must not get the chord as a key.
+        return true;
+    }
     let signal = if pressed {
         HotkeySignal::Pressed(id, press_context(id))
     } else {
@@ -506,6 +513,23 @@ fn sender() -> Option<SyncSender<HotkeySignal>> {
         })
         .ok()
         .flatten()
+}
+
+/// `true` while Grape runs a modal window: a picker, Move's panel or its
+/// alert. `false` off the main thread, where nobody can know, and after an
+/// Objective-C exception.
+fn modal_window_up() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    autoreleasepool(|_| {
+        objc2::exception::catch(AssertUnwindSafe(|| {
+            NSApplication::sharedApplication(mtm)
+                .modalWindow()
+                .is_some()
+        }))
+        .unwrap_or(false)
+    })
 }
 
 /// What the OS says as a hot key goes down. An Objective-C exception
@@ -534,13 +558,7 @@ fn read_press(id: HotkeyId) -> PressContext {
         let at = NSEvent::mouseLocation();
         cursor_to_grape(at.x, at.y, primary_height)
     });
-    let front = main_thread.and_then(frontmost_other_app).and_then(|app| {
-        let pid = app.processIdentifier();
-        (pid > 0).then(|| FrontApp {
-            pid,
-            id: app.bundleIdentifier().map(|id| id.to_string()),
-        })
-    });
+    let front = main_thread.and_then(front_app_now);
     PressContext {
         cursor,
         front,
@@ -592,5 +610,11 @@ mod tests {
     #[test]
     fn a_thread_that_is_not_the_main_one_has_no_channel() {
         assert!(sender().is_none());
+    }
+
+    #[test]
+    fn no_modal_window_is_up_under_a_test() {
+        // Off the main thread nobody asks AppKit; on it, no panel is open.
+        assert!(!modal_window_up());
     }
 }

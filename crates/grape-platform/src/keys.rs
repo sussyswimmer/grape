@@ -184,6 +184,62 @@ const RESERVED_WITH_COMMAND: [KeyCode; 12] = [
     KeyCode::KeyS,
 ];
 
+/// Command and Shift, as the system's screenshot chords hold them.
+const COMMAND_SHIFT: Modifiers = Modifiers {
+    shift: true,
+    meta: true,
+    ..Modifiers::NONE
+};
+
+/// The chords Grape's own steps press on the Mac, by their place on the US
+/// layout: Copy, Paste, Lock screen and Screenshot area.
+const POSTED_ON_MAC: [Chord; 4] = [
+    Chord {
+        key: KeyCode::KeyC,
+        mods: Modifiers::META,
+    },
+    Chord {
+        key: KeyCode::KeyV,
+        mods: Modifiers::META,
+    },
+    Chord {
+        key: KeyCode::KeyQ,
+        mods: Modifiers {
+            ctrl: true,
+            meta: true,
+            ..Modifiers::NONE
+        },
+    },
+    Chord {
+        key: KeyCode::Digit4,
+        mods: COMMAND_SHIFT,
+    },
+];
+
+/// The chords Grape's own steps press on the Mac (Copy, Paste, Lock screen,
+/// Screenshot area), by their place on the US layout. None of them may open
+/// the wheel: the hot key stays bound while a shortcut runs, so the step
+/// would press it and the system would never see the chord.
+///
+/// The steps go by character, so on another layout the key may sit
+/// elsewhere; this list can't know where.
+pub fn chords_posted_on_mac() -> &'static [Chord] {
+    &POSTED_ON_MAC
+}
+
+/// The system's other two screenshot chords, Command+Shift+3 and 5, kept
+/// with Screenshot area's Command+Shift+4.
+const MAC_SCREENSHOTS: [Chord; 2] = [
+    Chord {
+        key: KeyCode::Digit3,
+        mods: COMMAND_SHIFT,
+    },
+    Chord {
+        key: KeyCode::Digit5,
+        mods: COMMAND_SHIFT,
+    },
+];
+
 /// A key with the modifiers held with it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Chord {
@@ -199,7 +255,9 @@ pub enum HotkeyProblem {
     /// It needs Control, Option/Alt or Command/Meta, unless its key is F1 to
     /// F20. Shift alone isn't enough: it would eat capital letters.
     NeedsModifier,
-    /// Every app uses it (Command+Q and the like, on the Mac).
+    /// Every app uses it (Command+Q and the like, on the Mac), the system
+    /// does (Lock screen, the screenshots), or one of Grape's own steps
+    /// presses it ([`chords_posted_on_mac`]).
     Reserved,
 }
 
@@ -216,7 +274,12 @@ impl Chord {
         if !(ctrl || alt || meta || self.key.is_function_key()) {
             return Some(HotkeyProblem::NeedsModifier);
         }
-        if mac && meta && !ctrl && !alt && RESERVED_WITH_COMMAND.contains(&self.key) {
+        if !mac {
+            return None;
+        }
+        let every_apps = meta && !ctrl && !alt && RESERVED_WITH_COMMAND.contains(&self.key);
+        // Exactly these modifiers: the OS matches a hot key's exactly.
+        if every_apps || POSTED_ON_MAC.contains(&self) || MAC_SCREENSHOTS.contains(&self) {
             return Some(HotkeyProblem::Reserved);
         }
         None
@@ -477,14 +540,73 @@ mod tests {
                 );
                 assert_eq!(chord(key, held).hotkey_problem(false), None, "{}", key.id());
             }
-            // With Control or Option too, the chord is the user's to take.
+            // With Control or Option too, the chord is the user's to take,
+            // except Lock screen's own.
             for held in [
                 mods(false, true, false, true),
                 mods(false, false, true, true),
                 ALL_FOUR,
             ] {
-                assert_eq!(chord(key, held).hotkey_problem(true), None, "{}", key.id());
+                let lock = key == KeyCode::KeyQ && held == mods(false, true, false, true);
+                assert_eq!(
+                    chord(key, held).hotkey_problem(true),
+                    lock.then_some(HotkeyProblem::Reserved),
+                    "{}",
+                    key.id()
+                );
             }
+        }
+    }
+
+    #[test]
+    fn the_chords_grapes_own_steps_press_cannot_open_the_wheel() {
+        let control_command = mods(false, true, false, true);
+        let command_shift = mods(true, false, false, true);
+        let posted = [
+            chord(KeyCode::KeyC, Modifiers::META),
+            chord(KeyCode::KeyV, Modifiers::META),
+            chord(KeyCode::KeyQ, control_command),
+            chord(KeyCode::Digit4, command_shift),
+        ];
+        assert_eq!(chords_posted_on_mac(), posted);
+        for chord in posted {
+            assert_eq!(
+                chord.hotkey_problem(true),
+                Some(HotkeyProblem::Reserved),
+                "{}",
+                chord.label(true)
+            );
+            // Nothing is posted off the Mac yet.
+            assert_eq!(chord.hotkey_problem(false), None);
+        }
+    }
+
+    #[test]
+    fn lock_screen_and_the_screenshots_are_reserved_with_exactly_their_modifiers() {
+        let control_command = mods(false, true, false, true);
+        let command_shift = mods(true, false, false, true);
+        let system = [
+            chord(KeyCode::KeyQ, control_command),
+            chord(KeyCode::Digit3, command_shift),
+            chord(KeyCode::Digit4, command_shift),
+            chord(KeyCode::Digit5, command_shift),
+        ];
+        for taken in system {
+            assert_eq!(taken.hotkey_problem(true), Some(HotkeyProblem::Reserved));
+            assert_eq!(taken.hotkey_problem(false), None);
+            // One modifier more or fewer is another chord, and the user's
+            // unless it is every app's (Command+Q, Command+Shift+Q).
+            for held in every_mods() {
+                let reserved =
+                    chord(taken.key, held).hotkey_problem(true) == Some(HotkeyProblem::Reserved);
+                let every_apps = taken.key == KeyCode::KeyQ
+                    && (held == Modifiers::META || held == command_shift);
+                assert_eq!(reserved, held == taken.mods || every_apps, "{held:?}");
+            }
+        }
+        // The digits next to them stay free.
+        for key in [KeyCode::Digit2, KeyCode::Digit6] {
+            assert_eq!(chord(key, command_shift).hotkey_problem(true), None);
         }
     }
 
@@ -497,8 +619,9 @@ mod tests {
                 .filter(|chord| chord.hotkey_problem(mac) == Some(HotkeyProblem::Reserved))
                 .count()
         };
-        // Twelve keys, with Command and with Command+Shift.
-        assert_eq!(count(true), 24);
+        // Twelve keys, with Command and with Command+Shift, then Lock
+        // screen and the three screenshots.
+        assert_eq!(count(true), 24 + 4);
         assert_eq!(count(false), 0);
         assert_eq!(
             chord(KeyCode::KeyG, Modifiers::META).hotkey_problem(true),

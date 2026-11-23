@@ -29,7 +29,7 @@ use std::time::Duration;
 
 use grape_core::Platform;
 
-use super::model::{self, Config, MAX_LOAD_BYTES};
+use super::model::{self, Config, MAX_FILE_BYTES, MAX_LOAD_BYTES};
 
 /// The file's name in the app data folder.
 pub const FILE: &str = "shortcuts.json";
@@ -101,6 +101,11 @@ enum Keep {
 pub struct Store {
     dir: PathBuf,
     keep: Keep,
+    /// The most bytes a save may write: the file's limit, or what the
+    /// config held when it was loaded or last saved, if that is more. A
+    /// config that loaded over the limit can then shrink and still be
+    /// saved, and never grows.
+    largest: usize,
 }
 
 impl fmt::Debug for Store {
@@ -135,13 +140,14 @@ fn load_with(
     platform: Platform,
     rename: impl FnOnce(&Path, &Path) -> io::Result<()>,
 ) -> Loaded {
-    let loaded = |config, note, keep| Loaded {
-        config,
-        note,
+    let loaded = |config: Config, note, keep| Loaded {
         store: Store {
             dir: dir.to_owned(),
             keep,
+            largest: room_for(&config),
         },
+        config,
+        note,
     };
     if !model::available(platform) {
         return loaded(Config::defaults(platform), None, Keep::Unavailable);
@@ -186,6 +192,12 @@ fn load_with(
         }
     };
     loaded(config, Some(model::STARTED_FRESH), keep)
+}
+
+/// The most bytes a save may write once `config` is what's stored.
+fn room_for(config: &Config) -> usize {
+    let stored = model::stored_form(config).map_or(0, |bytes| bytes.len());
+    stored.max(MAX_FILE_BYTES)
 }
 
 /// The file's bytes, reading no more than one past what a load takes: a
@@ -267,7 +279,7 @@ fn copy_aside(path: &Path, stem: &str) -> io::Result<Option<PathBuf>> {
 }
 
 /// A new file only its owner can read (on Unix). Fails if `path` exists.
-fn private_file(path: &Path) -> io::Result<fs::File> {
+pub(super) fn private_file(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -281,7 +293,9 @@ fn private_file(path: &Path) -> io::Result<fs::File> {
 impl Store {
     /// Saves `config`. The first save after a load that left something
     /// out copies the file aside first; if that copy can't be made,
-    /// nothing is written and the next save tries again.
+    /// nothing is written and the next save tries again. A config past
+    /// the file's limit is saved only when it is no larger than what was
+    /// loaded or last saved.
     ///
     /// # Errors
     /// See [`SaveError`]. The caller's change still applies in memory.
@@ -289,32 +303,46 @@ impl Store {
         match self.keep {
             Keep::Unavailable => return Err(SaveError::Unavailable),
             Keep::Blocked => return Err(SaveError::Blocked),
-            Keep::Nothing => {}
-            Keep::CopyFirst => {
-                // Checked first, so a refused save leaves no copy behind.
-                model::stored_bytes(config).map_err(|_| SaveError::TooLarge)?;
-                if let Some(aside) = copy_aside(&file_path(&self.dir), UNREADABLE_STEM)? {
-                    let name = aside.file_name().unwrap_or_default().to_string_lossy();
-                    log::info!("shortcuts: kept the file as it was read in {name}");
-                }
-                self.keep = Keep::Nothing;
-            }
+            Keep::Nothing | Keep::CopyFirst => {}
         }
-        save_to(&self.dir, config)
+        if self.keep == Keep::CopyFirst {
+            // Checked first, so a refused save leaves no copy behind.
+            within(config, self.largest)?;
+            if let Some(aside) = copy_aside(&file_path(&self.dir), UNREADABLE_STEM)? {
+                let name = aside.file_name().unwrap_or_default().to_string_lossy();
+                log::info!("shortcuts: kept the file as it was read in {name}");
+            }
+            self.keep = Keep::Nothing;
+        }
+        let written = save_to(&self.dir, config, self.largest)?;
+        // Once under the limit, it stays under.
+        self.largest = written.max(MAX_FILE_BYTES);
+        Ok(())
     }
 }
 
-/// Writes `config` to `shortcuts.json` in `dir`, all of it or none: the
-/// folder is created, the bytes go to `shortcuts.json.tmp`, are synced,
-/// and the rename over the file is tried a few times while Windows says
-/// the file is in use.
+/// What the file holds for `config`, if that is `largest` bytes at most.
+fn within(config: &Config, largest: usize) -> Result<Vec<u8>, SaveError> {
+    match model::stored_form(config) {
+        Ok(bytes) if bytes.len() <= largest => Ok(bytes),
+        _ => Err(SaveError::TooLarge),
+    }
+}
+
+/// Writes `config` to `shortcuts.json` in `dir`, all of it or none, and
+/// answers with how many bytes that was: the folder is created, the bytes
+/// go to `shortcuts.json.tmp`, are synced, and the rename over the file is
+/// tried a few times while Windows says the file is in use. `largest` is
+/// the most bytes it may write: [`MAX_FILE_BYTES`], unless the file loaded
+/// with more ([`Store::save`]).
 ///
 /// # Errors
-/// [`SaveError::TooLarge`] past 1 MiB, with nothing written, and
+/// [`SaveError::TooLarge`] past `largest`, with nothing written, and
 /// [`SaveError::Io`] with the disk's reason.
-pub fn save_to(dir: &Path, config: &Config) -> Result<(), SaveError> {
-    let bytes = model::stored_bytes(config).map_err(|_| SaveError::TooLarge)?;
-    write_whole(dir, &bytes, |from, to| fs::rename(from, to), RENAME_WAIT)
+pub fn save_to(dir: &Path, config: &Config, largest: usize) -> Result<usize, SaveError> {
+    let bytes = within(config, largest)?;
+    write_whole(dir, &bytes, |from, to| fs::rename(from, to), RENAME_WAIT)?;
+    Ok(bytes.len())
 }
 
 /// [`save_to`]'s write, renaming through `rename` and waiting `wait`
@@ -362,8 +390,8 @@ fn write_whole(
 mod tests {
     use super::*;
     use crate::shortcuts::model::{
-        add_item, add_step, set_enabled, set_step, NewItem, StepEdit, StepKindId, LEFT_OUT,
-        MAX_SCRIPT, STARTED_FRESH,
+        add_item, add_step, remove_item, remove_step, set_enabled, set_step, ItemKind, NewItem,
+        StepEdit, StepKindId, LEFT_OUT, MAX_SCRIPT, STARTED_FRESH,
     };
 
     const MAC: Platform = Platform::MacOs;
@@ -718,15 +746,63 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_loaded_over_the_limit_can_be_saved_smaller_and_never_larger() {
+        let scratch = Scratch::new("over-the-limit");
+        let original = model::stored_form(&huge()).unwrap();
+        assert!(original.len() > MAX_FILE_BYTES && original.len() < MAX_LOAD_BYTES);
+        scratch.write(FILE, &original);
+        let mut loaded = load_from(&scratch.0, MAC);
+        assert_eq!(loaded.note, None);
+        assert_eq!(loaded.store.keep, Keep::Nothing);
+        let mut config = loaded.config;
+        let size = |config: &Config| model::stored_form(config).unwrap().len();
+        assert_eq!(size(&config), original.len());
+        let menu = config.menus[0].id;
+        // The four with the scripts come after the starter set.
+        let scripted: Vec<_> = config.everywhere().iter().rev().take(4).cloned().collect();
+        let ItemKind::Steps(steps) = &scripted[0].kind else {
+            panic!("a shortcut");
+        };
+
+        // One more shortcut would make it larger still: refused, untouched.
+        let mut larger = config.clone();
+        add_item(&mut larger, menu, None, NewItem::Steps).unwrap();
+        assert_eq!(loaded.store.save(&larger), Err(SaveError::TooLarge));
+        assert_eq!(scratch.read(FILE), original);
+
+        // A step removed: still over the limit, but smaller, so it's saved.
+        remove_step(&mut config, steps[0].id).unwrap();
+        assert!(size(&config) > MAX_FILE_BYTES && size(&config) < original.len());
+        loaded.store.save(&config).unwrap();
+        assert_eq!(scratch.read(FILE).len(), size(&config));
+        // What it was before no longer fits.
+        assert_eq!(loaded.store.save(&huge()), Err(SaveError::TooLarge));
+
+        // Under the limit at last, the limit is the rule again.
+        remove_item(&mut config, scripted[0].id).unwrap();
+        assert!(size(&config) < MAX_FILE_BYTES);
+        loaded.store.save(&config).unwrap();
+        assert_eq!(loaded.store.save(&larger), Err(SaveError::TooLarge));
+        assert_eq!(scratch.read(FILE).len(), size(&config));
+        assert_eq!(scratch.names(), [FILE]);
+    }
+
+    #[test]
     fn a_config_past_the_limit_is_not_saved() {
         let scratch = Scratch::new("too-large");
         let dir = scratch.0.join("data");
-        assert_eq!(save_to(&dir, &huge()), Err(SaveError::TooLarge));
+        assert_eq!(
+            save_to(&dir, &huge(), MAX_FILE_BYTES),
+            Err(SaveError::TooLarge)
+        );
         assert!(!dir.exists(), "nothing is made for a refused save");
         // And what was there stays.
-        save_to(&dir, &changed()).unwrap();
+        save_to(&dir, &changed(), MAX_FILE_BYTES).unwrap();
         let before = fs::read(dir.join(FILE)).unwrap();
-        assert_eq!(save_to(&dir, &huge()), Err(SaveError::TooLarge));
+        assert_eq!(
+            save_to(&dir, &huge(), MAX_FILE_BYTES),
+            Err(SaveError::TooLarge)
+        );
         assert_eq!(fs::read(dir.join(FILE)).unwrap(), before);
     }
 
@@ -737,7 +813,7 @@ mod tests {
         // A leftover from a save that was cut short.
         scratch.write(TMP_FILE, b"half a file");
         let config = changed();
-        save_to(&scratch.0, &config).unwrap();
+        save_to(&scratch.0, &config, MAX_FILE_BYTES).unwrap();
         assert_eq!(scratch.names(), [FILE]);
         assert_eq!(scratch.read(FILE), model::stored_bytes(&config).unwrap());
     }
@@ -751,7 +827,7 @@ mod tests {
         // A leftover with wider permissions doesn't pass them on.
         let tmp = scratch.write(TMP_FILE, b"old");
         fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
-        save_to(&scratch.0, &changed()).unwrap();
+        save_to(&scratch.0, &changed(), MAX_FILE_BYTES).unwrap();
         assert_eq!(mode(scratch.0.join(FILE)), 0o600);
         // The copy of a file read in part, too.
         let scratch = Scratch::new("mode-copy");
@@ -823,7 +899,10 @@ mod tests {
         let scratch = Scratch::new("no-folder");
         // A file where the data folder should be.
         let dir = scratch.write("data", b"a file");
-        assert!(matches!(save_to(&dir, &changed()), Err(SaveError::Io(_))));
+        assert!(matches!(
+            save_to(&dir, &changed(), MAX_FILE_BYTES),
+            Err(SaveError::Io(_))
+        ));
         assert_eq!(scratch.read("data"), b"a file");
         assert_eq!(scratch.names(), ["data"]);
     }

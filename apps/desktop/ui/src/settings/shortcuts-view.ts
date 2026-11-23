@@ -14,7 +14,13 @@
  *
  * Text is sent when the user leaves a field (`change`), never while they
  * type. A field holding text Rust hasn't answered yet is left alone by a
- * redraw, and such text is sent when the window closes or hides.
+ * redraw, and such text is sent when the window closes or hides: at once
+ * then, with every command still waiting its turn, because a page that is
+ * going away gets no answer to wait for. Text Rust refuses in a step's field
+ * stays there, marked as not saved, until the user changes it.
+ *
+ * The wheel's key combination is a draft: nothing is sent until the user
+ * presses "Set shortcut".
  *
  * Rows are keyed by Rust's ids and built once: a redraw updates them in
  * place, so focus stays where it is. Only a row Rust no longer lists is
@@ -62,6 +68,7 @@ import {
   removeStepArgs,
   ringFullText,
   ringTitle,
+  sameChord,
   setEnabledArgs,
   setHotkeyArgs,
   setItemArgs,
@@ -97,6 +104,7 @@ import {
   stepsFullText,
   type StepsItem,
   type StepView,
+  unsavedText,
 } from "./shortcuts-model";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -119,16 +127,26 @@ export interface ShortcutsPage {
 /** A command and its args. */
 type Message = readonly [command: string, args: Args];
 
+/** A command in the page's queue. `reply` is `null` until it has gone to Rust. */
+interface Job {
+  readonly command: string;
+  readonly args: Args;
+  reply: Promise<unknown> | null;
+}
+
+/** What a command's `answered` gets: `null` when Rust took it, or the sentence the page shows when it didn't. */
+type Problem = string | null;
+
 /** A text control whose value goes to Rust when the user leaves it. */
 interface TextField {
   readonly control: HTMLInputElement | HTMLTextAreaElement;
-  /** Shows the view's value, unless the user's own text is unsent or unanswered. */
+  /** Shows the view's value, unless the user's own text is unsent, unanswered or refused. */
   show(value: string): void;
-  /** Sends the user's text, if it differs from the view's and isn't on its way already. */
+  /** Sends the user's text, unless Rust holds it, is being sent it, or has refused it. */
   flush(): void;
 }
 
-/** Four modifier checkboxes and a key select. */
+/** Four modifier checkboxes and a key select, and for a draft the button that sends it. */
 interface ChordEditor {
   readonly box: HTMLElement;
   readonly key: HTMLSelectElement;
@@ -171,6 +189,8 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
   let pending = 0;
   let picking = false;
   let queue: Promise<void> = Promise.resolve();
+  /** Queued commands that haven't gone to Rust yet, oldest first. */
+  const waiting: Job[] = [];
   /** The menu whose shortcuts show. `null` until a view picks Everywhere. */
   let menuId: number | null = null;
   /** Where focus should go after the next redraw: a new row, or a moved one. */
@@ -254,6 +274,62 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     setHidden(node, hidden);
   }
 
+  /**
+   * Marks a button whose press hasn't answered yet. It does nothing until
+   * then, but it isn't `disabled`: it keeps the focus and its place in the
+   * Tab order.
+   */
+  function setWaiting(node: HTMLButtonElement, on: boolean): void {
+    if (on) {
+      node.setAttribute("aria-disabled", "true");
+    } else {
+      node.removeAttribute("aria-disabled");
+    }
+  }
+
+  function isWaiting(node: HTMLButtonElement): boolean {
+    return node.getAttribute("aria-disabled") === "true";
+  }
+
+  /**
+   * The second click of a double click. The first one's row may be gone
+   * already, with its neighbour's button under the pointer in its place.
+   * (A press from the keyboard counts no clicks.)
+   */
+  function isRepeat(event: Event): boolean {
+    return (event as MouseEvent).detail > 1;
+  }
+
+  /** A row's Remove button: one press, one command, and nothing more until Rust has answered it. */
+  function wireRemove(node: HTMLButtonElement, message: () => Message | null): void {
+    node.addEventListener("click", (event: Event) => {
+      const next = isRepeat(event) || isWaiting(node) ? null : message();
+      if (next === null) {
+        return;
+      }
+      setWaiting(node, true);
+      void send(next[0], next[1], () => setWaiting(node, false));
+    });
+  }
+
+  /**
+   * Holds or frees the Move buttons of one list. While a move there hasn't
+   * answered, a second one would count its place from the old order. (A
+   * button that is off, at an end of the list, needs no mark.)
+   */
+  function holdMoves(rows: readonly (Pick<ItemRow, "up" | "down"> | undefined)[], on: boolean): void {
+    for (const row of rows) {
+      for (const node of row === undefined ? [] : [row.up, row.down]) {
+        setWaiting(node, on && !node.disabled);
+      }
+    }
+  }
+
+  /** True while a move in this row's list hasn't answered. */
+  function movesHeld(row: Pick<ItemRow, "up" | "down">): boolean {
+    return isWaiting(row.up) || isWaiting(row.down);
+  }
+
   /** One of Grape's glyphs, stroked by `settings.css`, or `null` for an id the page can't draw. */
   function glyph(id: string): SVGElement | null {
     const paths = glyphPaths(id);
@@ -308,41 +384,70 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
   /**
    * Tracks one text control. `message` turns its text into a command, or
-   * `null` for text Rust couldn't read, which puts the view's value back.
-   * `answered` runs when a command of this field has answered.
+   * `null` for text Rust couldn't read, which puts Rust's value back.
+   *
+   * With `unsaved` (a line under the control), text Rust refuses stays in
+   * the control, marked, with Rust's sentence in that line, and isn't sent
+   * again until the user changes it. Without one, Rust's value goes back in.
    */
   function textField(
     control: HTMLInputElement | HTMLTextAreaElement,
     message: (value: string) => Message | null,
-    answered?: () => void,
+    unsaved: HTMLElement | null = null,
   ): TextField {
-    // What the page last wrote into the control.
-    let drawn = control.value;
-    // The text of the newest command on its way.
+    // What Rust holds, by the last view. Not always what the control shows.
+    let held = control.value;
+    // The text of the newest command on its way, while one is.
     let sent: string | null = null;
-    // The text of the last answered command, until the next redraw.
-    let settled: string | null = null;
     let unanswered = 0;
+    // The newest answered command, until the next redraw.
+    let settled: { readonly text: string; readonly problem: Problem } | null = null;
+    // Text Rust refused, while the control still shows it.
+    let refused: string | null = null;
+    let marked = false;
+
+    /** Marks the control's text as not saved, with Rust's sentence, or takes the mark away. */
+    function mark(problem: Problem): void {
+      if (unsaved === null || (problem === null && !marked)) {
+        return;
+      }
+      marked = problem !== null;
+      if (problem === null) {
+        control.removeAttribute("aria-invalid");
+      } else {
+        control.setAttribute("aria-invalid", "true");
+      }
+      unsaved.textContent = problem === null ? "" : unsavedText(problem);
+    }
 
     function flush(): void {
       const value = control.value;
-      if (value === drawn || (unanswered > 0 && value === sent)) {
+      if (value === refused) {
         return;
       }
-      const next = message(value);
+      // What Rust holds, or will once the command on its way has landed.
+      const known = sent ?? held;
+      const next = value === known ? null : message(value);
       if (next === null) {
-        control.value = drawn;
+        if (value !== known) {
+          control.value = known;
+        }
+        if (sent === null) {
+          // The control shows what Rust holds again.
+          refused = null;
+          mark(null);
+        }
         return;
       }
+      refused = null;
       sent = value;
       unanswered += 1;
-      void send(next[0], next[1], () => {
+      void send(next[0], next[1], (problem) => {
         unanswered -= 1;
         if (unanswered === 0) {
-          settled = sent;
+          settled = { text: value, problem };
           sent = null;
         }
-        answered?.();
       });
     }
 
@@ -350,18 +455,32 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
       if (unanswered > 0) {
         return;
       }
-      const current = control.value;
-      // Typed since the last view and not answered: the user's text stays.
-      const typed = current !== drawn && current !== settled;
+      const answer = settled;
       settled = null;
-      if (typed && current !== value) {
+      const current = control.value;
+      // The field's own command has answered, and the user hasn't typed since.
+      const own = answer !== null && current === answer.text;
+      if (own && answer.problem !== null && unsaved !== null && value === held && current !== value) {
+        // Refused, and Rust holds what it held (a failed save would have changed it): the text stays.
+        refused = current;
+        mark(answer.problem);
+        return;
+      }
+      if (!own && current !== held && current !== value) {
+        // Typed and not sent yet: the text stays, and only what Rust holds moves on.
+        held = value;
+        if (answer !== null && answer.problem === null) {
+          mark(null);
+        }
         return;
       }
       if (current !== value) {
         control.value = value;
       }
       // Read back: a control may keep less than it was given (a one-line field drops line breaks).
-      drawn = control.value;
+      held = control.value;
+      refused = null;
+      mark(null);
     }
 
     control.addEventListener("change", flush);
@@ -378,10 +497,23 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     return field;
   }
 
-  /** Closing or hiding Settings must not lose text the user typed and hasn't left yet. */
+  /** Queues every text the user typed and hasn't left yet. */
   function flushAll(): void {
     for (const field of [...fields]) {
       field.flush();
+    }
+  }
+
+  /**
+   * Closing or hiding Settings must not lose text the user typed. It goes to
+   * Rust now, after every command still waiting its turn and in the order
+   * they were made: the page may be gone before an answer comes. The answers
+   * are read one at a time all the same, if the page lives to see them.
+   */
+  function flushNow(): void {
+    flushAll();
+    for (const job of [...waiting]) {
+      void begin(job);
     }
   }
 
@@ -389,10 +521,23 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
   /**
    * Builds a chord editor whose controls get ids starting with `prefix`.
-   * `pick` gets each chord the user makes, or `null` when they choose no
-   * key. Modifiers ticked while no key is chosen wait, unsent, for the key.
+   *
+   * Without `apply`, `pick` gets each chord the user makes, or `null` when
+   * they choose no key. Modifiers ticked while no key is chosen wait, unsent,
+   * for the key.
+   *
+   * With `apply` (a button's text and name), the controls are a draft:
+   * nothing is sent until the user presses that button, and then `pick`
+   * gets the chord once, or `null` with no key chosen. The button is on only
+   * while the draft differs from the chord Rust holds. A draft Rust refuses
+   * stays as it is.
    */
-  function chordEditor(prefix: string, title: string, pick: (chord: ChordWire | null) => void): ChordEditor {
+  function chordEditor(
+    prefix: string,
+    title: string,
+    pick: (chord: ChordWire | null) => Promise<void>,
+    apply: { readonly text: string; readonly label: string } | null = null,
+  ): ChordEditor {
     const box = element("div", "sc-chord");
     box.setAttribute("role", "group");
     box.setAttribute("aria-label", title);
@@ -417,39 +562,100 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     key.addEventListener("change", () => changed(true));
     const keyPair = element("span", "sc-chord-key");
     keyPair.append(labelFor(keyId, COPY.key, "sc-check-label"), key);
+    const set = apply === null ? null : button(apply.text, apply.label);
     const current = element("span", "sc-chord-label");
-    box.append(boxes, keyPair, current);
+    box.append(boxes, keyPair, ...(set === null ? [] : [set]), current);
 
-    // The user ticked modifiers with no key chosen: a redraw leaves them alone.
+    // The chord Rust holds, by the last view.
+    let held: ChordWire | null = null;
+    // Without a button: the user ticked modifiers with no key chosen, and a redraw leaves them alone.
     let draft = false;
     let drawnKeys: string | null = null;
+    // The button's command is on its way.
+    let setting = false;
+
+    const ticked = (modifier: ModifierId): boolean => checks.get(modifier)?.checked ?? false;
+
+    /** The chord the controls spell, or `null` with no key chosen. */
+    function chosen(): ChordWire | null {
+      if (key.value === "") {
+        return null;
+      }
+      return chordWire(key.value, {
+        shift: ticked("shift"),
+        ctrl: ticked("ctrl"),
+        alt: ticked("alt"),
+        meta: ticked("meta"),
+      });
+    }
+
+    /** True while the controls show exactly `chord`: its key and modifiers, or no key and no tick. */
+    function shows(chord: ChordWire | null): boolean {
+      return (
+        key.value === (chord?.key ?? "") &&
+        MODIFIER_IDS.every((modifier) => ticked(modifier) === (chord?.[modifier] ?? false))
+      );
+    }
+
+    /** Switches the button on while there is a draft to send. Focus never stays on a button that is off. */
+    function drawButton(): void {
+      if (set === null) {
+        return;
+      }
+      const off = sameChord(chosen(), held);
+      if (off && doc.activeElement === set) {
+        key.focus();
+      }
+      set.disabled = off;
+    }
 
     function changed(fromKey: boolean): void {
       const view = shown;
       if (view === null) {
         return;
       }
+      const offered = key.value === "" || view.keys.some((choice) => choice.id === key.value);
+      if (set !== null) {
+        if (!offered) {
+          key.value = held?.key ?? "";
+        }
+        drawButton();
+        return;
+      }
       if (key.value === "") {
         draft = true;
         if (fromKey) {
-          pick(null);
+          void pick(null);
         }
         return;
       }
-      if (!view.keys.some((choice) => choice.id === key.value)) {
+      if (!offered) {
         redraw();
         return;
       }
       draft = false;
-      const held = (modifier: ModifierId): boolean => checks.get(modifier)?.checked ?? false;
-      pick(chordWire(key.value, { shift: held("shift"), ctrl: held("ctrl"), alt: held("alt"), meta: held("meta") }));
+      void pick(chosen());
     }
+
+    set?.addEventListener("click", () => {
+      const chord = chosen();
+      if (setting || shown === null || sameChord(chord, held)) {
+        return;
+      }
+      setting = true;
+      void pick(chord).then(() => {
+        setting = false;
+      });
+    });
 
     function show(view: ShortcutsView, chord: ChordWire | null, label: string | null): void {
       const signature = choicesSignature(view.keys.map((choice) => [choice.id, choice.label]));
       if (signature !== drawnKeys) {
+        const picked = key.value;
         const keys = view.keys.map((choice) => option(choice.id, choice.label));
         key.replaceChildren(option("", COPY.noKey), ...keys);
+        // New options must not undo a draft's key.
+        key.value = picked;
         drawnKeys = signature;
       }
       for (const modifier of MODIFIER_IDS) {
@@ -458,7 +664,10 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
           name.textContent = view.modifiers[modifier];
         }
       }
-      if (chord !== null || !draft) {
+      // A draft the user is making stays: only what Rust holds moves on.
+      const follows = set === null ? chord !== null || !draft : shows(held);
+      held = chord;
+      if (follows) {
         draft = false;
         for (const modifier of MODIFIER_IDS) {
           const check = checks.get(modifier);
@@ -469,6 +678,7 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
         key.value = chord?.key ?? "";
       }
       current.textContent = label ?? COPY.notSet;
+      drawButton();
     }
 
     return { box, key, show };
@@ -569,6 +779,13 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
   // --- Steps -----------------------------------------------------------------
 
+  /** The line under a step's field that says its text wasn't saved, and why. Empty until then. */
+  function unsavedLine(id: string): HTMLElement {
+    const line = element("p", "sc-unsaved");
+    line.setAttribute("id", id);
+    return line;
+  }
+
   function buildStep(first: StepView): StepRow {
     const id = first.id;
     const kind = first.kind;
@@ -586,9 +803,7 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     const remove = button(COPY.remove);
     up.addEventListener("click", () => move(-1));
     down.addEventListener("click", () => move(1));
-    remove.addEventListener("click", () => {
-      void send(SHORTCUTS_REMOVE_STEP, removeStepArgs(id));
-    });
+    wireRemove(remove, () => [SHORTCUTS_REMOVE_STEP, removeStepArgs(id)]);
     const drawing = glyph(STEP_GLYPHS[kind]);
     head.append(...(drawing === null ? [] : [drawing]), title, up, down, remove);
     const body = element("div", "sc-step-body");
@@ -596,10 +811,13 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
     function move(by: number): void {
       const place = shown === null ? null : findStep(shown, id);
-      if (place === null) {
+      if (place === null || movesHeld({ up, down })) {
         return;
       }
+      const list = place.item.steps.map((step) => stepRows.get(step.id));
+      holdMoves(list, true);
       void send(SHORTCUTS_MOVE_STEP, moveStepArgs(id, place.index + by), () => {
+        holdMoves(list, false);
         focusMoved(() => stepRows.get(id), by);
       });
     }
@@ -608,9 +826,9 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     let showField: (step: StepView, view: ShortcutsView) => void;
     switch (field.control) {
       case "chord": {
-        const editor = chordEditor(prefix, field.label, (chord) => {
-          void send(SHORTCUTS_SET_STEP, setStepArgs(id, stepEdit.keys(chord)));
-        });
+        const editor = chordEditor(prefix, field.label, (chord) =>
+          send(SHORTCUTS_SET_STEP, setStepArgs(id, stepEdit.keys(chord))),
+        );
         body.append(editor.box);
         focusFirst = editor.key;
         showField = (step, view) => {
@@ -638,13 +856,22 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
           control.setAttribute("autocorrect", "off");
         }
         body.append(labelFor(controlId, field.label), control);
+        const described: string[] = [];
         if (field.hint !== null) {
           const hint = element("p", "sc-hint", field.hint);
           hint.setAttribute("id", `${controlId}-hint`);
-          control.setAttribute("aria-describedby", `${controlId}-hint`);
+          described.push(`${controlId}-hint`);
           body.append(hint);
         }
-        const tracker = textField(control, (value) => [SHORTCUTS_SET_STEP, setStepArgs(id, field.edit(value))]);
+        const unsaved = unsavedLine(`${controlId}-unsaved`);
+        described.push(`${controlId}-unsaved`);
+        control.setAttribute("aria-describedby", described.join(" "));
+        body.append(unsaved);
+        const tracker = textField(
+          control,
+          (value) => [SHORTCUTS_SET_STEP, setStepArgs(id, field.edit(value))],
+          unsaved,
+        );
         tracked.push(tracker);
         focusFirst = control;
         showField = (step, view) => {
@@ -678,11 +905,17 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
         control.setAttribute("type", "number");
         control.setAttribute("inputmode", "numeric");
         control.setAttribute("id", controlId);
-        body.append(labelFor(controlId, field.label), control);
-        const tracker = textField(control, (value) => {
-          const edit = field.edit(value);
-          return edit === null ? null : [SHORTCUTS_SET_STEP, setStepArgs(id, edit)];
-        });
+        const unsaved = unsavedLine(`${controlId}-unsaved`);
+        control.setAttribute("aria-describedby", `${controlId}-unsaved`);
+        body.append(labelFor(controlId, field.label), control, unsaved);
+        const tracker = textField(
+          control,
+          (value) => {
+            const edit = field.edit(value);
+            return edit === null ? null : [SHORTCUTS_SET_STEP, setStepArgs(id, edit)];
+          },
+          unsaved,
+        );
         tracked.push(tracker);
         focusFirst = control;
         showField = (step, view) => {
@@ -778,9 +1011,7 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     const remove = button(COPY.remove);
     up.addEventListener("click", () => move(-1));
     down.addEventListener("click", () => move(1));
-    remove.addEventListener("click", () => {
-      void send(SHORTCUTS_REMOVE_ITEM, removeItemArgs(id));
-    });
+    wireRemove(remove, () => [SHORTCUTS_REMOVE_ITEM, removeItemArgs(id)]);
     head.append(picture, labelFor(nameId, COPY.name, "visually-hidden"), nameInput, up, down, remove);
     const summary = element("p", "sc-item-summary");
 
@@ -800,16 +1031,20 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     box.append(head, summary, editor);
 
     // The user chose "Emoji…" and hasn't typed one yet: nothing is sent until they do.
+    // It stays chosen, however long they take, until Rust holds an emoji or they choose another icon.
     let wantsEmoji = false;
     let drawnGlyphs: string | null = null;
     let drawnIcon: string | null = null;
 
     function move(by: number): void {
       const place = shown === null ? null : findItem(shown, id);
-      if (place === null) {
+      if (place === null || movesHeld({ up, down })) {
         return;
       }
+      const list = (place.group?.items ?? place.menu.items).map((item) => itemRows.get(item.id));
+      holdMoves(list, true);
       void send(SHORTCUTS_MOVE_ITEM, moveItemArgs(id, place.index + by), () => {
+        holdMoves(list, false);
         focusMoved(() => itemRows.get(id), by);
       });
     }
@@ -824,23 +1059,11 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
     // Both halves go in one command, so each sends the other's newest value.
     const nameField = textField(nameInput, (value) => [SHORTCUTS_SET_ITEM, setItemArgs(id, value, iconNow())]);
-    const emojiField = textField(
-      emojiInput,
-      (value) =>
-        value.length > 0
-          ? [SHORTCUTS_SET_ITEM, setItemArgs(id, nameInput.value, { kind: "emoji", value })]
-          : null,
-      () => {
-        wantsEmoji = false;
-      },
+    // Leaving the field empty sends nothing and cancels nothing: a blur also comes
+    // when the window stops being the key one, as it does for the system's emoji picker.
+    const emojiField = textField(emojiInput, (value) =>
+      value.length > 0 ? [SHORTCUTS_SET_ITEM, setItemArgs(id, nameInput.value, { kind: "emoji", value })] : null,
     );
-    emojiInput.addEventListener("blur", () => {
-      // Left empty: the select goes back to the icon the shortcut has.
-      if (wantsEmoji && emojiInput.value === "") {
-        wantsEmoji = false;
-        redraw();
-      }
-    });
     iconSelect.addEventListener("change", () => {
       const view = shown;
       if (view === null) {
@@ -992,9 +1215,12 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
   const hotkeyBox = element("div", "sc-block");
   const hotkeyTitle = element("h3", "sc-title", COPY.hotkey);
-  const hotkey = chordEditor("sc-hotkey", COPY.hotkey, (chord) => {
-    void send(SHORTCUTS_SET_HOTKEY, setHotkeyArgs(chord));
-  });
+  const hotkey = chordEditor(
+    "sc-hotkey",
+    COPY.hotkey,
+    (chord) => send(SHORTCUTS_SET_HOTKEY, setHotkeyArgs(chord)),
+    { text: COPY.setHotkey, label: COPY.setHotkeyLabel },
+  );
   const binding = liveLine("sc-binding");
   hotkeyBox.append(hotkeyTitle, hotkey.box, binding);
 
@@ -1058,12 +1284,10 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     });
   });
   const removeMenu = button(COPY.removeMenu);
-  removeMenu.addEventListener("click", () => {
+  wireRemove(removeMenu, () => {
     const menu = shown === null ? null : menuOrEverywhere(shown, menuId);
-    if (menu === null || menu.scope.kind === "everywhere") {
-      return;
-    }
-    void send(SHORTCUTS_REMOVE_MENU, removeMenuArgs(menu.id));
+    const isApp = menu !== null && menu.scope.kind !== "everywhere";
+    return isApp ? [SHORTCUTS_REMOVE_MENU, removeMenuArgs(menu.id)] : null;
   });
   const menuButtons = element("div", "sc-buttons");
   menuButtons.append(addMenu, removeMenu);
@@ -1117,11 +1341,11 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
   // Settings. (The test DOM has no window unless a test gives it one.)
   const win = doc.defaultView;
   if (win !== null) {
-    win.addEventListener("pagehide", flushAll);
+    win.addEventListener("pagehide", flushNow);
     win.addEventListener("focus", reread);
     doc.addEventListener("visibilitychange", () => {
       if (doc.visibilityState === "hidden") {
-        flushAll();
+        flushNow();
       } else {
         reread();
       }
@@ -1132,16 +1356,19 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
 
   /**
    * Queues one command behind the others; resolves once it has answered.
-   * `answered` runs then, before the page redraws. A `quiet` command is a
-   * re-read nobody asked for: it leaves the status line alone.
+   * `answered` runs then, before the page redraws, and is told how it went.
+   * A `quiet` command is a re-read nobody asked for: it leaves the status
+   * line alone.
    */
-  function send(command: string, args: Args, answered?: () => void, quiet = false): Promise<void> {
+  function send(command: string, args: Args, answered?: (problem: Problem) => void, quiet = false): Promise<void> {
     if (!quiet) {
       error = null;
     }
     pending += 1;
     root.setAttribute("aria-busy", "true");
-    const done = queue.then(() => run(command, args, quiet)).then(() => answered?.());
+    const job: Job = { command, args, reply: null };
+    waiting.push(job);
+    const done = queue.then(() => run(job, quiet)).then((problem) => answered?.(problem));
     queue = done.then(() => {
       pending -= 1;
       if (pending === 0) {
@@ -1183,15 +1410,44 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
     return shortcutsErrorText(reason);
   }
 
-  /** Calls Rust and keeps a good reply. Never rejects. */
-  async function run(command: string, args: Args, quiet: boolean): Promise<void> {
+  /**
+   * Sends `job` to Rust, unless it has gone already (`flushNow`), and
+   * answers with Rust's reply.
+   */
+  function begin(job: Job): Promise<unknown> {
+    if (job.reply !== null) {
+      return job.reply;
+    }
+    const at = waiting.indexOf(job);
+    if (at >= 0) {
+      waiting.splice(at, 1);
+    }
+    let reply: Promise<unknown>;
     try {
-      const reply = await callRust(command, args);
+      reply = Promise.resolve(callRust(job.command, job.args));
+    } catch (reason: unknown) {
+      reply = Promise.reject(reason);
+    }
+    // `run` reads how it went when the job's turn comes. Until then a refusal isn't an unhandled one.
+    reply.catch(() => undefined);
+    job.reply = reply;
+    return reply;
+  }
+
+  /**
+   * Calls Rust and keeps a good reply. Never rejects: it answers `null`, or
+   * the sentence for a command Rust refused or answered unreadably.
+   */
+  async function run(job: Job, quiet: boolean): Promise<Problem> {
+    const command = job.command;
+    try {
+      const reply = await begin(job);
       if (!isShortcutsView(reply)) {
         warnShape(command);
         if (!quiet) {
           error = SHORTCUTS_ERROR;
         }
+        return SHORTCUTS_ERROR;
       } else if (!quiet) {
         shown = reply;
       } else if (shown === null) {
@@ -1202,15 +1458,17 @@ export function mountShortcuts(root: HTMLElement, options: ShortcutsPageOptions 
         // A note belongs to the change that made it: a re-read keeps the one on show.
         shown = { ...reply, note: reply.note ?? shown.note };
       }
+      return null;
     } catch (reason: unknown) {
       const text = rejectionText(command, reason);
       if (quiet) {
-        return;
+        return text;
       }
       error = text;
       if (command !== SHORTCUTS_GET) {
         await refresh();
       }
+      return text;
     }
   }
 

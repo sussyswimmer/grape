@@ -93,8 +93,8 @@ pub(crate) use input::{
     local_date_time, pointer_watch, request_input_access, send_char_chord, send_chord, type_text,
 };
 pub(crate) use shortcuts::{
-    ensure_front, give_back_front, kill_group, open_target, pick_target, place_window, program_for,
-    system_plan,
+    ensure_front, front_app, give_back_front, kill_group, open_programs, open_target, pick_target,
+    place_window, program_for, system_plan,
 };
 
 use crate::{DisplayBounds, DragMonitor, PlatformError};

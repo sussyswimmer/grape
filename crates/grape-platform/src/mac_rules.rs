@@ -18,6 +18,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::file_actions::TerminalApp;
 use crate::keys::{Chord, KeyCode};
@@ -730,17 +731,65 @@ impl std::fmt::Debug for TextPiece {
 const ZERO_WIDTH_JOINER: char = '\u{200D}';
 
 /// `true` when `ch` changes the character before it: a combining mark
-/// (U+0300 to U+036F), a variation selector (U+FE00 to U+FE0F) or a
-/// zero-width joiner.
+/// ([`is_combining_mark`]), a variation selector, a zero-width joiner, an
+/// emoji's skin tone (U+1F3FB to U+1F3FF) or a tag character (the letters
+/// of a flag such as Scotland's).
 fn joins_previous(ch: char) -> bool {
-    matches!(ch, '\u{0300}'..='\u{036F}' | '\u{FE00}'..='\u{FE0F}' | ZERO_WIDTH_JOINER)
+    matches!(
+        ch,
+        ZERO_WIDTH_JOINER
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{E0100}'..='\u{E01EF}'
+            | '\u{1F3FB}'..='\u{1F3FF}'
+            | '\u{E0020}'..='\u{E007F}'
+    ) || is_combining_mark(ch)
+}
+
+/// `true` for the combining marks (Unicode's categories Mn, Mc and Me) of
+/// the general blocks (U+0300, U+1AB0, U+1DC0, U+20D0 with the keycap mark
+/// U+20E3, U+FE20) and of Cyrillic, Hebrew, Arabic, the Indic scripts from
+/// Devanagari to Sinhala, Thai, Lao and kana. Only the marks: a letter
+/// listed here could start no chunk. A range may run over code points that
+/// name no character. Other scripts' marks are not here.
+fn is_combining_mark(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x0300..=0x036F | 0x0483..=0x0489
+            // Hebrew, Arabic.
+            | 0x0591..=0x05BD | 0x05BF | 0x05C1..=0x05C2 | 0x05C4..=0x05C5 | 0x05C7
+            | 0x0610..=0x061A | 0x064B..=0x065F | 0x0670 | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4 | 0x06E7..=0x06E8 | 0x06EA..=0x06ED
+            // Devanagari, Bengali, Gurmukhi, Gujarati, Oriya.
+            | 0x0900..=0x0903 | 0x093A..=0x093C | 0x093E..=0x094F | 0x0951..=0x0957
+            | 0x0962..=0x0963 | 0x0981..=0x0983 | 0x09BC | 0x09BE..=0x09CD | 0x09D7
+            | 0x09E2..=0x09E3 | 0x09FE..=0x0A03 | 0x0A3C..=0x0A51 | 0x0A70..=0x0A71
+            | 0x0A75 | 0x0A81..=0x0A83 | 0x0ABC | 0x0ABE..=0x0ACD | 0x0AE2..=0x0AE3
+            | 0x0AFA..=0x0B03 | 0x0B3C | 0x0B3E..=0x0B57 | 0x0B62..=0x0B63
+            // Tamil, Telugu, Kannada, Malayalam, Sinhala.
+            | 0x0B82 | 0x0BBE..=0x0BCD | 0x0BD7 | 0x0C00..=0x0C04 | 0x0C3C
+            | 0x0C3E..=0x0C56 | 0x0C62..=0x0C63 | 0x0C81..=0x0C83 | 0x0CBC
+            | 0x0CBE..=0x0CD6 | 0x0CE2..=0x0CE3 | 0x0CF3..=0x0D03 | 0x0D3B..=0x0D3C
+            | 0x0D3E..=0x0D4D | 0x0D57 | 0x0D62..=0x0D63 | 0x0D81..=0x0D83
+            | 0x0DCA..=0x0DDF | 0x0DF2..=0x0DF3
+            // Thai and Lao, with the vowel that is written as a mark.
+            | 0x0E31 | 0x0E33..=0x0E3A | 0x0E47..=0x0E4E
+            | 0x0EB1 | 0x0EB3..=0x0EBC | 0x0EC8..=0x0ECE
+            | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF
+            | 0x3099..=0x309A | 0xFE20..=0xFE2F
+    )
+}
+
+/// `true` for a regional indicator: two of them in a row are one flag.
+fn is_regional_indicator(ch: char) -> bool {
+    matches!(ch, '\u{1F1E6}'..='\u{1F1FF}')
 }
 
 /// `text` as the pieces `type_text` sends, in order. Line ends and tabs are
 /// keys of their own. The rest goes in chunks of at most
 /// [`TEXT_CHUNK_UNITS`] UTF-16 units that never end inside a surrogate pair,
-/// nor just before a combining mark, a variation selector or a zero-width
-/// joiner, nor just after a joiner: an app that takes each event as one
+/// nor just before something that joins the character before it
+/// ([`joins_previous`]), nor just after a joiner, nor between the two
+/// regional indicators of a flag: an app that takes each event as one
 /// insertion would otherwise show the halves apart. Only a run of such
 /// characters longer than a chunk is cut, and then between two characters.
 pub(crate) fn text_chunks(text: &str) -> Vec<TextPiece> {
@@ -778,15 +827,25 @@ fn chunk_run(run: &[char], pieces: &mut Vec<TextPiece>) {
         // would part a character from what joins it.
         let mut fits = 0;
         let mut clean = None;
+        // Regional indicators in a row, up to and with `ch`.
+        let mut indicators = 0_usize;
         for (index, ch) in rest.iter().enumerate() {
             if units + ch.len_utf16() > TEXT_CHUNK_UNITS {
                 break;
             }
             units += ch.len_utf16();
             fits = index + 1;
-            let parts_a_character = rest
-                .get(fits)
-                .is_some_and(|next| joins_previous(*next) || *ch == ZERO_WIDTH_JOINER);
+            indicators = if is_regional_indicator(*ch) {
+                indicators + 1
+            } else {
+                0
+            };
+            let parts_a_character = rest.get(fits).is_some_and(|next| {
+                joins_previous(*next)
+                    || *ch == ZERO_WIDTH_JOINER
+                    // An odd one is the first half of a flag.
+                    || (indicators % 2 == 1 && is_regional_indicator(*next))
+            });
             if !parts_a_character {
                 clean = Some(fits);
             }
@@ -835,17 +894,20 @@ const DARK_MODE_SCRIPT: &str = "tell application \"System Events\" to tell appea
 const INPUT_ACCESS_URL: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
 
-/// A program with these arguments and nothing on its standard input.
+/// A program with these arguments, nothing on its standard input and no
+/// script file.
 fn program<const N: usize>(path: &str, args: [&OsStr; N]) -> Program {
     Program {
         program: PathBuf::from(path),
         args: args.into_iter().map(OsStr::to_owned).collect(),
         stdin: None,
+        script: None,
     }
 }
 
 /// `osascript -` with `source` on its standard input: a script never shows
-/// in the process list.
+/// in the process list. `osascript` reads all of it before it runs any of
+/// it, so nothing the script starts can read the script.
 fn applescript(source: &str) -> Program {
     Program {
         stdin: Some(source.to_owned()),
@@ -854,11 +916,16 @@ fn applescript(source: &str) -> Program {
 }
 
 /// The program that does `request`. Each word the user typed is one
-/// argument or goes to standard input; nothing is spliced into a script.
+/// argument, or goes to standard input or into a script file; nothing is
+/// spliced into a script.
 ///
 /// - AppleScript: `osascript -`, the source on standard input.
-/// - Shell: `zsh -l -s`, the source on standard input. A login shell, so
-///   the user's own `PATH`.
+/// - Shell: `zsh -l <file>`, the source in a private file the runner writes
+///   ([`Program::script`]). A login shell, so the user's own `PATH`. Never
+///   `zsh -s` with the source on standard input: a shell reads that a
+///   command at a time, and the commands inherit it, so one that reads its
+///   input (`cat`, `read`, `ssh`, `ffmpeg`) would swallow the rest of the
+///   script. This way they read `/dev/null`.
 /// - Apple Shortcut: `shortcuts run <name>`.
 /// - Keyboard Maestro: an `osascript` whose script reads the macro's name
 ///   from its arguments.
@@ -868,8 +935,8 @@ pub(crate) fn program_for(request: ProgramRequest<'_>) -> Program {
     match request {
         ProgramRequest::AppleScript(source) => applescript(source),
         ProgramRequest::Shell(source) => Program {
-            stdin: Some(source.to_owned()),
-            ..program("/bin/zsh", ["-l".as_ref(), "-s".as_ref()])
+            script: Some(source.to_owned()),
+            ..program("/bin/zsh", ["-l".as_ref()])
         },
         ProgramRequest::AppleShortcut(name) => {
             program("/usr/bin/shortcuts", ["run".as_ref(), name.as_ref()])
@@ -898,9 +965,10 @@ pub(crate) fn program_for(request: ProgramRequest<'_>) -> Program {
     }
 }
 
-/// The programs that open `target`, to try in order until one succeeds. An
-/// app with an id gets `open -b <id>` and then `open -a <path>`; anything
-/// else is one `open`. Each path, id and URL is one argument.
+/// The programs that open `target`, to try in order until one succeeds:
+/// never none. An app with an id gets `open -b <id>` and then
+/// `open -a <path>`; anything else is one `open`. Each path, id and URL is
+/// one argument.
 pub(crate) fn open_programs(target: OpenTarget<'_>) -> Vec<Program> {
     match target {
         OpenTarget::App { path, id } => {
@@ -955,6 +1023,31 @@ pub(crate) fn system_plan(control: SystemControl) -> SystemPlan {
 /// user gives Grape input access.
 pub(crate) fn input_access_settings_program() -> Program {
     program(OPEN, [INPUT_ACCESS_URL.as_ref()])
+}
+
+/// Whether a hot key going down is passed on to the app. An Open press
+/// while one of Grape's modal windows is up (a picker, Move's panel or
+/// alert) is not: the wheel would cover the panel, and binding its Esc
+/// would wait for the main queue, which serves nothing until the panel
+/// closes. Esc and Return always pass: they close a wheel that is open.
+pub(crate) fn passes_press(id: HotkeyId, modal_up: bool) -> bool {
+    !(modal_up && id == HotkeyId::Open)
+}
+
+/// Who got to a hop to the main thread first: the main thread, which then
+/// does the work, or the caller, whose patience ran out. Each side calls
+/// [`take`](Self::take) once.
+#[derive(Debug, Default)]
+pub(crate) struct HopClaim(AtomicBool);
+
+impl HopClaim {
+    /// `true` for the first to ask, and only for it. The main thread does
+    /// the work only when it gets `true`. A caller that gets `true` when it
+    /// gives up knows the work will never run; with `false` the work has
+    /// started, so its answer is coming.
+    pub(crate) fn take(&self) -> bool {
+        !self.0.swap(true, Ordering::AcqRel)
+    }
 }
 
 /// The four-character code on every hot key Grape registers.
@@ -1984,6 +2077,191 @@ mod tests {
         );
     }
 
+    /// `cluster` right after as many letters as put its first character
+    /// at a chunk's very end.
+    fn at_the_edge(cluster: &str) -> (String, String) {
+        let first = cluster.chars().next().unwrap().len_utf16();
+        let lead = "x".repeat(TEXT_CHUNK_UNITS - first);
+        (format!("{lead}{cluster}"), lead)
+    }
+
+    #[test]
+    fn a_chunk_never_parts_an_emoji_from_its_skin_tone_keycap_or_tags() {
+        // Each would fit up to its first character; the whole goes on.
+        for cluster in [
+            // A thumb and an astronaut with a skin tone.
+            "\u{1F44D}\u{1F3FD}",
+            "\u{1F469}\u{1F3FD}\u{200D}\u{1F680}",
+            // The keycap 1: a digit, a variation selector, the keycap mark.
+            "1\u{FE0F}\u{20E3}",
+            // Scotland's flag: a black flag and six tag characters.
+            "\u{1F3F4}\u{E0067}\u{E0062}\u{E0073}\u{E0063}\u{E0074}\u{E007F}",
+            // An ideograph with a variation selector of the second plane.
+            "\u{845B}\u{E0100}",
+        ] {
+            let (text, lead) = at_the_edge(cluster);
+            assert_eq!(
+                text_chunks(&text),
+                vec![units(&lead), units(cluster)],
+                "{}",
+                cluster.escape_unicode()
+            );
+        }
+        // The keycap mark alone would be the twenty-first unit.
+        let keycap = "1\u{FE0F}\u{20E3}";
+        let lead = "x".repeat(TEXT_CHUNK_UNITS - 2);
+        assert_eq!(
+            text_chunks(&format!("{lead}{keycap}")),
+            vec![units(&lead), units(keycap)]
+        );
+    }
+
+    #[test]
+    fn a_chunk_never_parts_a_letter_from_its_marks_in_other_scripts() {
+        for cluster in [
+            // Devanagari ki, and ka with a nukta and a vowel sign.
+            "\u{0915}\u{093F}",
+            "\u{0915}\u{093C}\u{0940}",
+            // Bengali, Tamil and Malayalam vowel signs.
+            "\u{0995}\u{09BF}",
+            "\u{0B95}\u{0BCA}",
+            "\u{0D15}\u{0D4A}",
+            // Thai: a vowel above and a tone mark; then sara am.
+            "\u{0E01}\u{0E35}\u{0E49}",
+            "\u{0E19}\u{0E49}\u{0E33}",
+            // Lao.
+            "\u{0E81}\u{0EB5}\u{0EC9}",
+            // Hebrew bet with a sheva and a dagesh; Arabic beh with a fatha.
+            "\u{05D1}\u{05B0}\u{05BC}",
+            "\u{0628}\u{064E}",
+            // Cyrillic with a titlo; kana with a combining voiced mark.
+            "\u{0430}\u{0483}",
+            "\u{304B}\u{3099}",
+            // The general blocks past U+036F.
+            "a\u{1AB0}",
+            "a\u{1DC4}",
+            "a\u{20D7}",
+            "a\u{FE20}",
+        ] {
+            let (text, lead) = at_the_edge(cluster);
+            assert_eq!(
+                text_chunks(&text),
+                vec![units(&lead), units(cluster)],
+                "{}",
+                cluster.escape_unicode()
+            );
+        }
+    }
+
+    #[test]
+    fn a_flag_is_never_cut_in_two() {
+        let (norway, sweden) = ("\u{1F1F3}\u{1F1F4}", "\u{1F1F8}\u{1F1EA}");
+        // The first indicator would be units 19 and 20.
+        let (text, lead) = at_the_edge(norway);
+        assert_eq!(text_chunks(&text), vec![units(&lead), units(norway)]);
+        // Between two flags is a fine place to cut, and only there.
+        let pair = format!("{norway}{sweden}");
+        for (lead, first, second) in [
+            (16, norway.to_owned(), sweden.to_owned()),
+            (17, String::new(), pair.clone()),
+            (18, String::new(), pair.clone()),
+            (19, String::new(), pair.clone()),
+        ] {
+            let letters = "x".repeat(lead);
+            assert_eq!(
+                text_chunks(&format!("{letters}{pair}")),
+                vec![units(&format!("{letters}{first}")), units(&second)],
+                "lead {lead}"
+            );
+        }
+        // More flags than fit: five to a chunk, never four and a half.
+        let flags = norway.repeat(12);
+        assert_eq!(
+            text_chunks(&flags),
+            vec![
+                units(&norway.repeat(5)),
+                units(&norway.repeat(5)),
+                units(&norway.repeat(2))
+            ]
+        );
+        let offset = format!("x{flags}");
+        let pieces = text_chunks(&offset);
+        assert_eq!(typed(&pieces), offset);
+        assert_eq!(pieces[0], units(&format!("x{}", norway.repeat(4))));
+    }
+
+    #[test]
+    fn letters_next_to_the_marks_in_the_table_still_start_a_chunk() {
+        // A letter taken for a mark would stick to the chunk before it.
+        let twenty = "abcdefghijklmnopqrst";
+        for letter in [
+            // Devanagari ka and avagraha, Bengali khanda ta, Tamil visarga,
+            // Kannada's sign at U+0C80, Malayalam's dot reph.
+            '\u{0915}',
+            '\u{093D}',
+            '\u{09CE}',
+            '\u{0B83}',
+            '\u{0C80}',
+            '\u{0D4E}',
+            // Thai ko kai and sara aa, Lao ko.
+            '\u{0E01}',
+            '\u{0E32}',
+            '\u{0E81}',
+            // Hebrew alef and maqaf, Arabic alef and beh, Cyrillic a, kana.
+            '\u{05D0}',
+            '\u{05BE}',
+            '\u{0627}',
+            '\u{0628}',
+            '\u{0430}',
+            '\u{304B}',
+            // A digit, a thumb and a black flag before what joins them.
+            '1',
+            '\u{1F44D}',
+            '\u{1F3F4}',
+        ] {
+            assert_eq!(
+                text_chunks(&format!("{twenty}{letter}")),
+                vec![units(twenty), units(&letter.to_string())],
+                "{}",
+                letter.escape_unicode()
+            );
+        }
+    }
+
+    #[test]
+    fn indic_text_is_cut_near_the_limit_between_its_syllables() {
+        // "Namaste duniya, yah ek pariksha hai." with its vowel signs,
+        // viramas and anusvaras, over and over.
+        let sentence = "\u{0928}\u{092E}\u{0938}\u{094D}\u{0924}\u{0947} \
+                        \u{0926}\u{0941}\u{0928}\u{093F}\u{092F}\u{093E}, \
+                        \u{092F}\u{0939} \u{090F}\u{0915} \
+                        \u{092A}\u{0930}\u{0940}\u{0915}\u{094D}\u{0937}\u{093E} \
+                        \u{0939}\u{0948}\u{0902}\u{0964} ";
+        let marks = [
+            '\u{0902}', '\u{093E}', '\u{093F}', '\u{0940}', '\u{0941}', '\u{0947}', '\u{0948}',
+            '\u{094D}',
+        ];
+        let text = sentence.repeat(12);
+        let pieces = text_chunks(&text);
+        assert_eq!(typed(&pieces), text);
+        let (last, full) = pieces.split_last().unwrap();
+        for piece in full.iter().chain([last]) {
+            let TextPiece::Units(chunk) = piece else {
+                panic!("only text here");
+            };
+            let chunk = String::from_utf16(chunk).unwrap();
+            assert!(!chunk.starts_with(marks), "a chunk starts with a mark");
+        }
+        // No mark run here is longer than two, so every chunk but the last
+        // is nearly full: the letters are places to cut.
+        for piece in full {
+            let TextPiece::Units(chunk) = piece else {
+                panic!("only text here");
+            };
+            assert!(chunk.len() >= TEXT_CHUNK_UNITS - 2, "{}", chunk.len());
+        }
+    }
+
     #[test]
     fn a_family_stays_one_chunk() {
         // Four people and three joiners: eleven units.
@@ -2074,16 +2352,12 @@ mod tests {
     const TYPED: &str = "display dialog \"hi\"; $(rm -rf ~) 'x' -- && s3cret";
 
     #[test]
-    fn scripts_go_in_on_standard_input() {
+    fn an_applescript_goes_in_on_standard_input() {
         let apple = program_for(ProgramRequest::AppleScript(TYPED));
         assert_eq!(apple.program, Path::new("/usr/bin/osascript"));
         assert_eq!(args(&apple), ["-"]);
         assert_eq!(apple.stdin.as_deref(), Some(TYPED));
-
-        let shell = program_for(ProgramRequest::Shell(TYPED));
-        assert_eq!(shell.program, Path::new("/bin/zsh"));
-        assert_eq!(args(&shell), ["-l", "-s"]);
-        assert_eq!(shell.stdin.as_deref(), Some(TYPED));
+        assert_eq!(apple.script, None);
 
         // Even an empty script goes to standard input, so nothing waits for
         // a terminal.
@@ -2093,11 +2367,27 @@ mod tests {
     }
 
     #[test]
+    fn a_shell_script_goes_in_a_file_and_never_on_standard_input() {
+        // On standard input its own commands could read it: `cat` on the
+        // first line would swallow the second.
+        let shell = program_for(ProgramRequest::Shell(TYPED));
+        assert_eq!(shell.program, Path::new("/bin/zsh"));
+        // The runner appends the file's path: no `-s`, no `-c`.
+        assert_eq!(args(&shell), ["-l"]);
+        assert_eq!(shell.stdin, None);
+        assert_eq!(shell.script.as_deref(), Some(TYPED));
+
+        let empty = program_for(ProgramRequest::Shell(""));
+        assert_eq!(empty.script.as_deref(), Some(""));
+        assert_eq!(empty.stdin, None);
+    }
+
+    #[test]
     fn names_are_one_argument_each() {
         let shortcut = program_for(ProgramRequest::AppleShortcut(TYPED));
         assert_eq!(shortcut.program, Path::new("/usr/bin/shortcuts"));
         assert_eq!(args(&shortcut), ["run", TYPED]);
-        assert_eq!(shortcut.stdin, None);
+        assert_eq!((shortcut.stdin, shortcut.script), (None, None));
 
         let macro_run = program_for(ProgramRequest::KeyboardMaestro(TYPED));
         assert_eq!(macro_run.program, Path::new("/usr/bin/osascript"));
@@ -2114,7 +2404,10 @@ mod tests {
                 TYPED,
             ]
         );
-        assert_eq!(macro_run.stdin, None);
+        assert_eq!(
+            (macro_run.stdin.clone(), macro_run.script.clone()),
+            (None, None)
+        );
         // The name is the last argument and in no script line.
         let lines = &macro_run.args[..macro_run.args.len() - 1];
         assert!(lines
@@ -2127,7 +2420,7 @@ mod tests {
         let plain = program_for(ProgramRequest::Speak("Build finished"));
         assert_eq!(plain.program, Path::new("/usr/bin/say"));
         assert_eq!(args(&plain), ["Build finished"]);
-        assert_eq!(plain.stdin, None);
+        assert_eq!((plain.stdin.clone(), plain.script.clone()), (None, None));
         assert_eq!(
             args(&program_for(ProgramRequest::Speak("-v Fred hello"))),
             [" -v Fred hello"]
@@ -2152,15 +2445,18 @@ mod tests {
                 .args
                 .iter()
                 .all(|arg| !arg.to_string_lossy().contains("s3cret")));
-            assert_eq!(program.stdin.as_deref(), Some(TYPED));
-            assert!(program.program.is_absolute());
+            // In one place only: standard input or the file.
+            let places = [program.stdin.as_deref(), program.script.as_deref()];
+            assert_eq!(places.iter().flatten().collect::<Vec<_>>(), [&TYPED]);
+            assert!(program.program.has_root());
         }
-        // Grape's own scripts go the same way.
+        // Grape's own scripts go in on standard input.
         for control in SYSTEM_CONTROLS {
             let SystemPlan::Program(program) = system_plan(control) else {
                 continue;
             };
-            assert!(program.program.is_absolute());
+            assert!(program.program.has_root());
+            assert_eq!(program.script, None);
             if program.program == Path::new("/usr/bin/osascript") {
                 assert_eq!(args(&program), ["-"]);
                 assert!(program.stdin.is_some_and(|source| !source.is_empty()));
@@ -2168,6 +2464,40 @@ mod tests {
                 assert_eq!(program.stdin, None);
             }
         }
+    }
+
+    #[test]
+    fn only_a_shell_script_asks_for_a_file() {
+        // The file is for a program that reads its script as it runs it.
+        let with_file: Vec<bool> = [
+            ProgramRequest::AppleScript(TYPED),
+            ProgramRequest::Shell(TYPED),
+            ProgramRequest::AppleShortcut(TYPED),
+            ProgramRequest::KeyboardMaestro(TYPED),
+            ProgramRequest::Speak(TYPED),
+        ]
+        .into_iter()
+        .map(|request| program_for(request).script.is_some())
+        .collect();
+        assert_eq!(with_file, [false, true, false, false, false]);
+        let path = Path::new("/Applications/Notes.app");
+        let openers = [
+            OpenTarget::App {
+                path,
+                id: Some("com.example.notes"),
+            },
+            OpenTarget::App { path, id: None },
+            OpenTarget::Path(path),
+            OpenTarget::Url("https://example.com/"),
+        ];
+        for target in openers {
+            let programs = open_programs(target);
+            assert!(!programs.is_empty());
+            for program in programs {
+                assert_eq!((program.stdin, program.script), (None, None));
+            }
+        }
+        assert_eq!(input_access_settings_program().script, None);
     }
 
     #[test]
@@ -2312,6 +2642,71 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(chords, vec!['q', '4']);
         assert!(chords.iter().all(|ch| us_key_for_char(*ch).is_some()));
+    }
+
+    #[test]
+    fn no_chord_grape_posts_by_character_can_open_the_wheel() {
+        use crate::keys::{chords_posted_on_mac, HotkeyProblem};
+
+        // The system controls' chords, and Copy and Paste's.
+        let mut posted: Vec<(char, Modifiers)> = SYSTEM_CONTROLS
+            .into_iter()
+            .filter_map(|control| match system_plan(control) {
+                SystemPlan::CharChord { ch, mods } => Some((ch, mods)),
+                SystemPlan::Program(_) => None,
+            })
+            .collect();
+        posted.extend([('c', Modifiers::META), ('v', Modifiers::META)]);
+        assert_eq!(posted.len(), chords_posted_on_mac().len());
+        for (ch, mods) in posted {
+            // The place the character has on the US layout.
+            let virtual_code = us_key_for_char(ch).unwrap();
+            let key = KeyCode::ALL
+                .iter()
+                .copied()
+                .find(|key| virtual_key(*key) == virtual_code)
+                .unwrap();
+            let chord = Chord { key, mods };
+            assert!(chords_posted_on_mac().contains(&chord), "{ch}");
+            assert_eq!(
+                chord.hotkey_problem(true),
+                Some(HotkeyProblem::Reserved),
+                "{ch}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_open_press_is_dropped_while_a_modal_window_is_up() {
+        assert!(!passes_press(HotkeyId::Open, true));
+        assert!(passes_press(HotkeyId::Open, false));
+        // Esc and Return still close a wheel that is open.
+        for id in [HotkeyId::Escape, HotkeyId::Confirm] {
+            assert!(passes_press(id, true));
+            assert!(passes_press(id, false));
+        }
+    }
+
+    #[test]
+    fn a_hop_belongs_to_whoever_asks_first() {
+        // The main thread got there first: the caller waits for the answer.
+        let claim = HopClaim::default();
+        assert!(claim.take());
+        assert!(!claim.take());
+        // The caller gave up first: the work never runs.
+        let claim = std::sync::Arc::new(HopClaim::default());
+        assert!(claim.take());
+        let theirs = std::sync::Arc::clone(&claim);
+        let ran = std::thread::spawn(move || theirs.take()).join().unwrap();
+        assert!(!ran);
+        // Asked from two threads at once, exactly one gets it.
+        for _ in 0..200 {
+            let claim = std::sync::Arc::new(HopClaim::default());
+            let theirs = std::sync::Arc::clone(&claim);
+            let other = std::thread::spawn(move || theirs.take());
+            let mine = claim.take();
+            assert_ne!(mine, other.join().unwrap());
+        }
     }
 
     #[test]

@@ -324,8 +324,6 @@ describe("a Shortcuts wheel", () => {
 
     const paths = byClass(svg, "wheel-segment");
     expect(paths.map((p) => p.getAttribute("aria-label"))).toEqual(["Save", "Tidy up, group", "Select all"]);
-    expect(paths.map((p) => p.children[0]?.localName)).toEqual(["title", "title", "title"]);
-    expect(paths.map((p) => p.children[0]?.textContent)).toEqual(["Save", "Tidy up, group", "Select all"]);
     expect(paths.map((p) => p.getAttribute("data-index"))).toEqual(["0", "1", "2"]);
     expect(paths.every((p) => (p.getAttribute("d") ?? "").startsWith("M "))).toBe(true);
 
@@ -358,6 +356,24 @@ describe("a Shortcuts wheel", () => {
     expect(texts(oneByClass(svg, "wheel-center"))).toEqual(["Edit"]);
     expect(byClass(svg, "wheel-message")).toHaveLength(0);
     expect(byClass(svg, "wheel-placeholder")).toHaveLength(0);
+  });
+
+  it("carries no <title> at all, so no tooltip pops over a wheel that stays open", () => {
+    const { root, view } = harness();
+    view.open(shortcuts);
+    expect(byTag(svgOf(root), "title")).toEqual([]);
+    expect(svgOf(root).getAttribute("role")).toBe("img");
+    // A highlight and a group's redraw are drawn the same way.
+    view.highlight({ seq: 4, index: 0 });
+    view.open(shortcutsPayload(8, { seq: 4, groups: [3] }));
+    expect(byTag(svgOf(root), "title")).toEqual([]);
+    view.open(noShortcuts);
+    expect(byTag(svgOf(root), "title")).toEqual([]);
+    expect(svgOf(root).getAttribute("aria-label")).not.toBe("");
+
+    // The drag wheels keep theirs: on the wheel and on every segment.
+    view.open(entriesPayload(4, { seq: 9 }));
+    expect(byTag(svgOf(root), "title")).toHaveLength(5);
   });
 
   it("paints and ticks on a highlight, and marks the icon and the group's mark with the segment", () => {
@@ -407,7 +423,7 @@ describe("a Shortcuts wheel", () => {
     const spoken = titles.map((title, index) => (index === 3 ? `${title}, group` : title));
     const paths = byClass(svg, "wheel-segment");
     expect(paths.map((p) => p.getAttribute("aria-label"))).toEqual(spoken);
-    expect(paths.map((p) => p.children[0]?.textContent)).toEqual(spoken);
+    expect(byTag(svg, "title")).toEqual([]);
     expect(byClass(svg, "wheel-center")).toHaveLength(0);
     view.highlight({ seq: 6, index: 3 });
     expect(texts(oneByClass(svgOf(root), "wheel-center"))).toEqual(["Open the", "report 3"]);

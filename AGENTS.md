@@ -11,6 +11,6 @@ The six rules you must not break are summarized here (full text in `CLAUDE.md`):
 5. One shared behavior spec (`docs/`); only drag detection, overlay and file actions differ per OS.
 6. No GPL code linked into Grape's binaries. GPL tools ship only as separate sidecar executables, with licenses and source links.
 
-**Current phase: Windows first** (`docs/DECISIONS.md` D8). Don't write macOS platform code until milestone M8.
+**Current phase: Windows first** (`docs/DECISIONS.md` D8). Since 2026-10-23 the macOS port (M8) runs alongside it (D18), and the Shortcuts wheel is macOS first (D47). Mac code lives in `grape-platform`'s `macos` module and Mac-gated app code. Nothing on the Mac is tested by hand until Maxwell runs a CI build, so say which OS you ran your change on.
 
 Work lanes and milestone ownership are in `docs/ROADMAP.md` → "Agent lanes". Stay in your lane's crates unless the task says otherwise, so the two agents don't edit the same files at once.

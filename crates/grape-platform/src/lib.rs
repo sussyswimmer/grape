@@ -292,8 +292,9 @@ pub enum PlatformError {
     /// This OS (or this milestone) has no implementation yet.
     #[error("not supported on this platform yet")]
     Unsupported,
-    /// `DragMonitor::start` was called on a running monitor.
-    #[error("the drag monitor is already running")]
+    /// `start` was called on a monitor or a watch that is already running,
+    /// or another one holds what this one needs (the Mac's hot key table).
+    #[error("already running")]
     AlreadyRunning,
     /// A window was touched from a thread that does not own it.
     #[error("the window belongs to another thread; call this on the UI thread")]

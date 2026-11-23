@@ -34,6 +34,7 @@ import {
   removeStepArgs,
   ringFullText,
   ringTitle,
+  sameChord,
   setEnabledArgs,
   setHotkeyArgs,
   setItemArgs,
@@ -70,6 +71,7 @@ import {
   stepPhrase,
   stepsFullText,
   type StepView,
+  unsavedText,
 } from "./shortcuts-model";
 
 // The golden views and step edits the Rust model's tests build too, so both
@@ -645,6 +647,18 @@ describe("value checks before a command", () => {
     expect(isOpensAt(null)).toBe(false);
   });
 
+  it("tells two chords apart by the key and every modifier, and none from one", () => {
+    const chord = chordWire("KeyG", { shift: false, ctrl: true, alt: true, meta: false });
+    expect(sameChord(chord, { ...chord })).toBe(true);
+    expect(sameChord(null, null)).toBe(true);
+    expect(sameChord(chord, null)).toBe(false);
+    expect(sameChord(null, chord)).toBe(false);
+    expect(sameChord(chord, { ...chord, key: "KeyH" })).toBe(false);
+    for (const modifier of MODIFIER_IDS) {
+      expect(sameChord(chord, { ...chord, [modifier]: !chord[modifier] }), modifier).toBe(false);
+    }
+  });
+
   it("lists the modifiers in page order", () => {
     expect(MODIFIER_IDS).toEqual(["shift", "ctrl", "alt", "meta"]);
   });
@@ -666,6 +680,8 @@ describe("copy", () => {
   });
 
   it("puts each button's text inside its longer accessible name", () => {
+    expect(SHORTCUTS_COPY.setHotkey).toBe("Set shortcut");
+    expect(SHORTCUTS_COPY.setHotkeyLabel).toContain(SHORTCUTS_COPY.setHotkey);
     expect(SHORTCUTS_COPY.askAccessLabel).toContain(SHORTCUTS_COPY.askAccess);
     expect(SHORTCUTS_COPY.addMenuLabel).toContain(SHORTCUTS_COPY.addMenu.replace("…", ""));
     for (const kind of ["openApp", "openFile"] as const) {
@@ -752,8 +768,20 @@ describe("copy", () => {
     expect(bindingText(macos)).toBe("The wheel is off.");
     expect(bindingText({ ...macos, enabled: true, binding: "bound" })).toBe("Control+Option+G opens the wheel.");
     expect(bindingText({ ...macos, enabled: true, binding: "failed" })).toContain("macOS wouldn't give Grape");
+    // A Mac whose hot keys couldn't start reads the same line, switch on or off: it says what mends it.
+    for (const enabled of [true, false]) {
+      const failed = bindingText({ ...macos, enabled, binding: "failed" });
+      expect(failed).toContain("quit Grape and open it again");
+      expect(failed).not.toContain("on the Mac first");
+    }
     expect(bindingText({ ...macos, enabled: true, binding: "off" })).not.toBe("The wheel is off.");
     expect(bindingText({ ...macos, hotkey: null })).toContain("Choose a key");
+  });
+
+  it("starts a refused field's line with Not saved, then Rust's sentence", () => {
+    expect(unsavedText("Grape can't keep some of those characters.")).toBe(
+      "Not saved. Grape can't keep some of those characters.",
+    );
   });
 
   it("words the limits with the view's numbers", () => {

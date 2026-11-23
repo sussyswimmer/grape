@@ -196,20 +196,20 @@ fn start_monitor(tx: &SyncSender<Input>) -> Option<Box<dyn DragMonitor>> {
 
 /// Starts the Shortcuts wheel's hot key monitor and pointer watch, sends
 /// the controller the shortcuts as loaded and binds the hot key if the
-/// wheel is on. Where the wheel isn't available this does nothing.
+/// wheel is on. Where the wheel isn't available this does nothing; where
+/// it is but the sources couldn't start, the shortcuts still go out.
 fn start_shortcuts(app: &AppHandle, tx: &SyncSender<Input>) {
     let (hotkey_tx, hotkey_rx) = mpsc::sync_channel::<HotkeySignal>(SOURCE_CAPACITY);
     let (pointer_tx, pointer_rx) = mpsc::sync_channel::<PointerSignal>(SOURCE_CAPACITY);
-    if !shortcuts::start_sources(app, hotkey_tx, pointer_tx) {
-        return;
+    if shortcuts::start_sources(app, hotkey_tx, pointer_tx) {
+        forward(hotkey_rx, tx.clone(), Input::Hotkey, "grape-hotkey-forward");
+        forward(
+            pointer_rx,
+            tx.clone(),
+            Input::Pointer,
+            "grape-pointer-forward",
+        );
     }
-    forward(hotkey_rx, tx.clone(), Input::Hotkey, "grape-hotkey-forward");
-    forward(
-        pointer_rx,
-        tx.clone(),
-        Input::Pointer,
-        "grape-pointer-forward",
-    );
     shortcuts::publish(app);
 }
 
@@ -298,7 +298,7 @@ fn apply(app: &AppHandle, effect: Effect, haptics: &AtomicBool) -> Option<Input>
                 return Some(escape_pressed());
             }
         }
-        Effect::GiveBack => give_back(app),
+        Effect::GiveBack(pid) => give_back(app, pid),
         Effect::RunShortcut(run) => return shortcuts::start_run(app, run),
         Effect::StillRunning { anchor, display } => {
             shortcuts::show_still_running(app, anchor, &display);
@@ -321,10 +321,14 @@ fn escape_pressed() -> Input {
     ))
 }
 
-/// Gives the front back to the app the user was in, on the main thread
-/// after the overlay's hide (the same queue), if Grape took it.
-fn give_back(app: &AppHandle) {
-    if let Err(err) = app.run_on_main_thread(grape_platform::shortcuts::give_back_front) {
+/// Gives the front back to the app `pid`, the one the wheel opened over,
+/// on the main thread after the overlay's hide (the same queue), if Grape
+/// is the active app then. With `None` (no click, or the wheel opened over
+/// Grape itself) the platform falls back to the toast's rule: the app last
+/// used, and only if Grape is active with no key window.
+fn give_back(app: &AppHandle, pid: Option<i32>) {
+    let queued = app.run_on_main_thread(move || grape_platform::shortcuts::give_back_front(pid));
+    if let Err(err) = queued {
         log::error!("could not give the front back: no main thread: {err}");
     }
 }
@@ -730,7 +734,7 @@ mod tests {
                     }),
                     Effect::HideOverlay,
                     Effect::Track(false),
-                    Effect::GiveBack,
+                    Effect::GiveBack(None),
                 ]
             ),
             "{done:?}"

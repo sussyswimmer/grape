@@ -1313,8 +1313,13 @@ pub fn set_menu_everywhere(
         return Err(EVERYWHERE_SWITCH);
     }
     menu.with_everywhere = on;
-    let fits = menu.items.len() < MAX_ITEMS;
-    Ok((on && !fits).then_some(EVERYWHERE_DID_NOT_FIT))
+    Ok(everywhere_left_out(menu).then_some(EVERYWHERE_DID_NOT_FIT))
+}
+
+/// `true` when `menu` asks for the Everywhere group but its ring is too
+/// full to show it ([`menu_for`] leaves it out then).
+fn everywhere_left_out(menu: &Menu) -> bool {
+    menu.with_everywhere && menu.scope != Scope::Everywhere && menu.items.len() >= MAX_ITEMS
 }
 
 /// What `shortcuts_add_item` adds.
@@ -1369,6 +1374,25 @@ pub fn add_item(
         kind,
     });
     Ok(id)
+}
+
+/// [`add_item`] for the Settings window: answers with a note for the view
+/// when the new item filled an app menu's ring, so its Everywhere group
+/// no longer fits. The same sentence the switch gives.
+pub fn add_item_noting(
+    config: &mut Config,
+    menu: Id,
+    group: Option<Id>,
+    kind: NewItem,
+) -> Result<Option<&'static str>, &'static str> {
+    add_item(config, menu, group, kind)?;
+    // Only an item in the ring itself takes the group's place.
+    let filled = group.is_none()
+        && config
+            .menus
+            .iter()
+            .any(|own| own.id == menu && everywhere_left_out(own));
+    Ok(filled.then_some(EVERYWHERE_DID_NOT_FIT))
 }
 
 /// Renames a shortcut or a group and sets its icon. The name is trimmed.
@@ -2179,9 +2203,34 @@ struct StoredFile {
 }
 
 /// What `shortcuts.json` holds for `config`: one line of JSON and a
-/// newline. Refused past [`MAX_FILE_BYTES`], so check a change with this
-/// before applying it.
+/// newline. Refused past [`MAX_FILE_BYTES`].
 pub fn stored_bytes(config: &Config) -> Result<Vec<u8>, &'static str> {
+    let bytes = stored_form(config)?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(TOO_BIG);
+    }
+    Ok(bytes)
+}
+
+/// Whether `new` may take `old`'s place, going by its size: it fits the
+/// file, or it is no larger than `old` is. Check a change with this before
+/// applying it.
+///
+/// A file made by hand, or merged from two, can load with more in it than
+/// Grape would write: [`MAX_LOAD_BYTES`] is the larger limit. Such a
+/// config may still shrink, or nothing could be removed from it.
+pub fn size_allows(old: &Config, new: &Config) -> Result<(), &'static str> {
+    let Err(too_big) = stored_bytes(new) else {
+        return Ok(());
+    };
+    if stored_form(new)?.len() > stored_form(old)?.len() {
+        return Err(too_big);
+    }
+    Ok(())
+}
+
+/// [`stored_bytes`], however long.
+pub fn stored_form(config: &Config) -> Result<Vec<u8>, &'static str> {
     let file = StoredFile {
         version: VERSION,
         enabled: config.enabled,
@@ -2207,9 +2256,6 @@ pub fn stored_bytes(config: &Config) -> Result<Vec<u8>, &'static str> {
     // same if it ever does.
     let mut bytes = serde_json::to_vec(&file).map_err(|_| TOO_BIG)?;
     bytes.push(b'\n');
-    if bytes.len() > MAX_FILE_BYTES {
-        return Err(TOO_BIG);
-    }
     Ok(bytes)
 }
 
@@ -3898,6 +3944,13 @@ mod tests {
                 MAC,
                 HOTKEY_RESERVED,
             ),
+            // Lock screen and Screenshot press these themselves.
+            (wire("KeyQ", false, true, false, true), MAC, HOTKEY_RESERVED),
+            (
+                wire("Digit4", true, false, false, true),
+                MAC,
+                HOTKEY_RESERVED,
+            ),
             (wire("keyg", false, true, false, false), MAC, UNKNOWN_KEY),
             (wire("", false, true, false, false), MAC, UNKNOWN_KEY),
             (wire(MARKER, false, true, false, false), MAC, UNKNOWN_KEY),
@@ -3906,7 +3959,7 @@ mod tests {
             let why = refused(&mut config, |c| set_hotkey(c, Some(chord), *platform));
             assert_eq!(why, *expected);
         }
-        // Nothing is reserved off the Mac, and Control makes Command+Q fine.
+        // Nothing is reserved off the Mac, and Control makes Command+W fine.
         set_hotkey(
             &mut config,
             Some(&wire("KeyQ", false, false, false, true)),
@@ -3915,7 +3968,7 @@ mod tests {
         .unwrap();
         set_hotkey(
             &mut config,
-            Some(&wire("KeyQ", false, true, false, true)),
+            Some(&wire("KeyW", false, true, false, true)),
             MAC,
         )
         .unwrap();
@@ -4044,6 +4097,8 @@ mod tests {
         assert!(config.menus[1].with_everywhere);
         assert_eq!(set_menu_everywhere(&mut config, app, false), Ok(None));
         assert_sentence(EVERYWHERE_DID_NOT_FIT);
+        // Full, and the switch off: nothing to say.
+        assert_eq!(set_menu_everywhere(&mut config, app, false), Ok(None));
 
         let on_everywhere = |c: &mut Config| set_menu_everywhere(c, everywhere, true);
         assert_eq!(refused(&mut config, on_everywhere), EVERYWHERE_SWITCH);
@@ -5341,6 +5396,28 @@ mod tests {
     }
 
     #[test]
+    fn no_chord_grapes_own_steps_press_can_be_the_hot_key() {
+        // One list, the platform's: an edit refuses each chord, and a file
+        // that names one loads with no hot key and the wheel off.
+        let posted = grape_platform::keys::chords_posted_on_mac();
+        assert!(!posted.is_empty());
+        for chord in posted {
+            let wire = ChordWire::from(*chord);
+            let (mut config, _) = empty();
+            let why = refused(&mut config, |c| set_hotkey(c, Some(&wire), MAC));
+            assert_eq!(why, HOTKEY_RESERVED, "{chord:?}");
+
+            let mut top = file(json!([]));
+            top["hotkey"] = serde_json::to_value(&wire).unwrap();
+            top["enabled"] = json!(true);
+            let (config, report) = loaded(&top);
+            assert_eq!(config.hotkey, None, "{chord:?}");
+            assert!(!config.enabled, "{chord:?}");
+            assert!(report.dropped(), "{chord:?}");
+        }
+    }
+
+    #[test]
     fn a_top_level_key_grape_does_not_know_is_counted() {
         let mut top = file(json!([]));
         top["theme"] = json!(MARKER);
@@ -5785,6 +5862,103 @@ mod tests {
         let (again, report) = load(&stored_bytes(&none).unwrap(), MAC);
         assert_eq!(report, clean());
         assert!(again == none);
+    }
+
+    #[test]
+    fn the_shortcut_that_fills_an_apps_ring_says_everywhere_no_longer_fits() {
+        let (mut config, everywhere) = empty();
+        let app = add_app_menu(&mut config, "com.example.app", "App", OWN_ID).unwrap();
+        set_menu_everywhere(&mut config, app, true).unwrap();
+        let steps = NewItem::Steps;
+        let group = add_item(&mut config, app, None, NewItem::Group).unwrap();
+        for _ in 0..MAX_ITEMS - 2 {
+            assert_eq!(add_item_noting(&mut config, app, None, steps), Ok(None));
+        }
+        // Eleven and the group still fit. One in a group changes nothing.
+        let snapshot = Snapshot::of(&config);
+        assert_eq!(
+            menu_for(&snapshot, Some("com.example.app")).len(),
+            MAX_ITEMS
+        );
+        assert_eq!(
+            add_item_noting(&mut config, app, Some(group), steps),
+            Ok(None)
+        );
+        // The twelfth takes the group's place, and says so.
+        assert_eq!(
+            add_item_noting(&mut config, app, None, steps),
+            Ok(Some(EVERYWHERE_DID_NOT_FIT))
+        );
+        let ring = menu_for(&Snapshot::of(&config), Some("com.example.app"));
+        assert_eq!(ring.len(), MAX_ITEMS);
+        assert!(ring.iter().all(|item| item.name != EVERYWHERE_NAME));
+        // Later adds to a group of the full ring don't repeat it, and a
+        // refused add says only why.
+        assert_eq!(
+            add_item_noting(&mut config, app, Some(group), steps),
+            Ok(None)
+        );
+        assert_eq!(
+            add_item_noting(&mut config, app, None, steps),
+            Err(RING_FULL)
+        );
+
+        // With the switch off, and in the Everywhere menu, there's no note.
+        let other = add_app_menu(&mut config, "com.example.other", "Other", OWN_ID).unwrap();
+        for menu in [other, everywhere] {
+            for _ in 0..MAX_ITEMS {
+                assert_eq!(add_item_noting(&mut config, menu, None, steps), Ok(None));
+            }
+        }
+    }
+
+    #[test]
+    fn a_config_that_loaded_over_the_limit_can_still_shrink() {
+        // A file made by hand: every value within its own limit, and more
+        // of them than Grape would write.
+        let script = "a".repeat(MAX_SCRIPT);
+        let step = json!({"kind": "shell", "source": script});
+        let shortcut = |name: &str| {
+            json!({"name": name, "icon": {"kind": "none"}, "kind": "steps",
+                   "steps": vec![step.clone(); MAX_STEPS]})
+        };
+        let items: Vec<Value> = ["One", "Two", "Three", "Four"].map(shortcut).into();
+        let bytes = serde_json::to_vec(&file(json!([everywhere(json!(items))]))).unwrap();
+        assert!(bytes.len() > MAX_FILE_BYTES && bytes.len() < MAX_LOAD_BYTES);
+        let (config, report) = load(&bytes, MAC);
+        assert_eq!(report, clean());
+        assert_eq!(stored_bytes(&config), Err(TOO_BIG));
+        let size = |config: &Config| stored_form(config).unwrap().len();
+        let ids: Vec<Id> = config.everywhere().iter().map(|item| item.id).collect();
+
+        // A step goes: still over the limit, but smaller than it was.
+        let first_step = config.steps()[0].id;
+        let mut smaller = config.clone();
+        remove_step(&mut smaller, first_step).unwrap();
+        assert!(size(&smaller) > MAX_FILE_BYTES && size(&smaller) < size(&config));
+        assert_eq!(size_allows(&config, &smaller), Ok(()));
+        // So does a whole shortcut, and one that brings it under the limit.
+        let mut fewer = config.clone();
+        remove_item(&mut fewer, ids[0]).unwrap();
+        assert_eq!(size_allows(&config, &fewer), Ok(()));
+        assert!(stored_bytes(&fewer).is_ok());
+        // The same size is no growth: a move.
+        let mut moved = config.clone();
+        move_item(&mut moved, ids[0], 3).unwrap();
+        assert_eq!(size(&moved), size(&config));
+        assert_eq!(size_allows(&config, &moved), Ok(()));
+
+        // Anything that makes it larger is refused, as before.
+        let mut larger = config.clone();
+        add_item(&mut larger, config.menus[0].id, None, NewItem::Steps).unwrap();
+        assert_eq!(size_allows(&config, &larger), Err(TOO_BIG));
+        // Also from the smaller one back to where it was.
+        assert_eq!(size_allows(&smaller, &config), Err(TOO_BIG));
+        // Under the limit, the limit is all that counts.
+        let mut grown = fewer.clone();
+        add_item(&mut grown, config.menus[0].id, None, NewItem::Steps).unwrap();
+        assert_eq!(size_allows(&fewer, &grown), Ok(()));
+        assert_eq!(size_allows(&fewer, &config), Err(TOO_BIG));
     }
 
     #[test]

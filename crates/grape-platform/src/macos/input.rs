@@ -43,7 +43,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{ns_string, NSActivityOptions, NSProcessInfo};
 
 use super::drag::LEFT_BUTTON;
-use super::shortcuts::{on_main, run};
+use super::shortcuts::{on_main_within, run};
 use super::{io_error, NO_CODE};
 use crate::keys::{Chord, KeyCode};
 use crate::mac_rules::{
@@ -53,6 +53,9 @@ use crate::mac_rules::{
 use crate::shortcuts::{InputAccess, LocalTime, PointerSignal, PointerWatch};
 use crate::{Modifiers, PlatformError};
 
+/// How long a character chord waits for the main thread to read the
+/// keyboard layout.
+const LAYOUT_WAIT: Duration = Duration::from_secs(1);
 /// The wait between a chord's key down and its key up.
 const KEY_GAP: Duration = Duration::from_millis(4);
 /// The wait between two key events while typing.
@@ -163,16 +166,23 @@ pub(crate) fn send_chord(chord: Chord) -> Result<(), PlatformError> {
 
 pub(crate) fn send_char_chord(ch: char, mods: Modifiers) -> Result<(), PlatformError> {
     let command = mods.meta;
-    // Text Input Sources belongs to the main thread. If it can't be asked,
-    // the US table still knows the key.
-    let key = on_main("reading the keyboard layout", move |_| {
-        Ok(layout_key(ch, command))
-    })
-    .unwrap_or_else(|_| us_key_for_char(ch))
-    .ok_or(PlatformError::Os {
-        context: "finding the key for a character",
-        code: NO_CODE,
-    })?;
+    let context = "reading the keyboard layout";
+    // Text Input Sources belongs to the main thread. A main thread that
+    // doesn't answer (one of Grape's modal panels is up) fails the chord:
+    // a guess from the US table could press another key on this layout.
+    let read = on_main_within(context, LAYOUT_WAIT, move |_| Ok(layout_key(ch, command))).ok_or(
+        PlatformError::Os {
+            context,
+            code: NO_CODE,
+        },
+    )?;
+    // If it can't be asked at all, the US table still knows the key.
+    let key = read
+        .unwrap_or_else(|_| us_key_for_char(ch))
+        .ok_or(PlatformError::Os {
+            context: "finding the key for a character",
+            code: NO_CODE,
+        })?;
     press(key, mods)
 }
 

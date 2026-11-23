@@ -301,14 +301,26 @@ impl fmt::Debug for OpenTarget<'_> {
     }
 }
 
-/// Opens `target`. Waits for the opener to answer, so a target that can't
-/// be opened is an error. Call it from a worker thread.
+/// Opens `target`. Waits for the opener to answer, with no limit and no way
+/// to cancel, so a target that can't be opened is an error. Call it from a
+/// worker thread. A step of a shortcut runs [`open_programs`] instead.
 ///
 /// # Errors
 /// [`PlatformError::Unsupported`] except on macOS, or an OS error when the
 /// opener couldn't start or said no.
 pub fn open_target(target: OpenTarget<'_>) -> Result<(), PlatformError> {
     imp::open_target(target)
+}
+
+/// The programs that open `target`, to try in order: the first that exits
+/// with 0 has opened it, and the rest aren't run. Never empty. Nothing runs
+/// here: the app runs them as it runs any [`Program`], so an open can be
+/// cancelled and has a time limit.
+///
+/// # Errors
+/// [`PlatformError::Unsupported`] except on macOS.
+pub fn open_programs(target: OpenTarget<'_>) -> Result<Vec<Program>, PlatformError> {
+    imp::open_programs(target)
 }
 
 /// A program to run, with what goes to its standard input.
@@ -318,18 +330,28 @@ pub struct Program {
     pub program: PathBuf,
     /// Its arguments, each one its own: nothing goes through a shell.
     pub args: Vec<OsString>,
-    /// What to write to its standard input before closing it. A script goes
-    /// here, never in `args`, so it doesn't show in the process list.
+    /// What to write to its standard input before closing it; `None` is
+    /// no input at all (`/dev/null`). A script the program reads whole
+    /// before it runs any of it goes here, never in `args`, so it doesn't
+    /// show in the process list.
     pub stdin: Option<String>,
+    /// A script the program runs from a file. Whoever runs the program
+    /// writes this text to a new file only the user can read (mode 0600) in
+    /// a folder of its own that only the user can enter, appends the file's
+    /// absolute path as the last argument, and deletes both when the
+    /// program has ended. So the script is in no argument, and the commands
+    /// in it don't share their standard input with it.
+    pub script: Option<String>,
 }
 
-/// Prints how many arguments there are and whether there is input, never
-/// what they say.
+/// Prints how many arguments there are and whether there is input or a
+/// script, never what they say.
 impl fmt::Debug for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Program")
             .field("args", &self.args.len())
             .field("stdin", &self.stdin.is_some())
+            .field("script", &self.script.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -502,11 +524,28 @@ pub fn place_window(pid: i32, placement: Placement) -> Result<(), PlatformError>
     imp::place_window(pid, placement)
 }
 
-/// Gives the front back to the app the user was in, if Grape took it. Queue
-/// it on the main thread after the overlay's hide. Does nothing except on
+/// Gives the front back to the app `pid`, the one the wheel opened over, if
+/// Grape is the active app, whichever of Grape's windows is key. With
+/// `None` (nothing was clicked, or the wheel opened over Grape itself), or
+/// if that app has quit, the app the user was last in gets the front, and
+/// only when no window of Grape's is key. Queue it on the main thread after the
+/// overlay's hide: anywhere else it does nothing, as it does except on
 /// macOS.
-pub fn give_back_front() {
-    imp::give_back_front();
+pub fn give_back_front(pid: Option<i32>) {
+    imp::give_back_front(pid);
+}
+
+/// The app in front right now. `None` when that is Grape itself, or
+/// nothing.
+///
+/// On macOS it asks the main thread and waits for it, a second at most:
+/// call it from a worker thread, never one the main thread is waiting for.
+///
+/// # Errors
+/// [`PlatformError::Unsupported`] except on macOS, or an OS error when the
+/// main thread didn't answer.
+pub fn front_app() -> Result<Option<FrontApp>, PlatformError> {
+    imp::front_app()
 }
 
 /// Waits up to `timeout` for the app `pid` to be the one in front, handing
@@ -878,6 +917,7 @@ mod tests {
                     program: path.clone(),
                     args: vec![MARKER.into(), "-e".into()],
                     stdin: Some(MARKER.to_owned()),
+                    script: Some(MARKER.to_owned()),
                 })
             ),
             format!(
@@ -909,12 +949,25 @@ mod tests {
             format!(
                 "{:?}",
                 Program {
-                    program: path,
+                    program: path.clone(),
                     args: vec![MARKER.into(), "-e".into()],
                     stdin: None,
+                    script: None,
                 }
             ),
-            "Program { args: 2, stdin: false, .. }"
+            "Program { args: 2, stdin: false, script: false, .. }"
+        );
+        assert_eq!(
+            format!(
+                "{:?}",
+                Program {
+                    program: path,
+                    args: Vec::new(),
+                    stdin: None,
+                    script: Some(MARKER.to_owned()),
+                }
+            ),
+            "Program { args: 0, stdin: false, script: true, .. }"
         );
     }
 
@@ -955,6 +1008,7 @@ mod tests {
             OpenTarget::Url("https://example.com/"),
         ] {
             assert_eq!(open_target(target), Err(UNSUPPORTED));
+            assert_eq!(open_programs(target), Err(UNSUPPORTED));
         }
         for request in [
             ProgramRequest::AppleScript("beep"),
@@ -983,7 +1037,9 @@ mod tests {
         for placement in PLACEMENTS {
             assert_eq!(place_window(1, placement), Err(UNSUPPORTED));
         }
-        give_back_front();
+        give_back_front(None);
+        give_back_front(Some(1));
+        assert_eq!(front_app(), Err(UNSUPPORTED));
         assert!(!ensure_front(1, Duration::from_secs(5)));
         for kind in [PickKind::App, PickKind::FileOrFolder] {
             assert_eq!(pick_target(kind, None), Err(UNSUPPORTED));

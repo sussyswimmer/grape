@@ -193,6 +193,14 @@ export function chordWire(key: string, mods: Readonly<Record<ModifierId, boolean
   return { key, shift: mods.shift, ctrl: mods.ctrl, alt: mods.alt, meta: mods.meta };
 }
 
+/** True when both are the same chord, or both are none. */
+export function sameChord(a: ChordWire | null, b: ChordWire | null): boolean {
+  if (a === null || b === null) {
+    return a === b;
+  }
+  return a.key === b.key && MODIFIER_IDS.every((modifier) => a[modifier] === b[modifier]);
+}
+
 export function setEnabledArgs(on: boolean): Args {
   return { on };
 }
@@ -640,6 +648,11 @@ export const SHORTCUTS_COPY = {
   key: "Key",
   noKey: "None",
   notSet: "Not set",
+  /** Sends the key combination the controls spell. Nothing is sent before it. */
+  setHotkey: "Set shortcut",
+  setHotkeyLabel: "Set shortcut for the wheel",
+  /** Starts the line under a field whose text Rust refused. Rust's sentence follows. */
+  notSaved: "Not saved.",
   opensAt: "The wheel opens",
   accessDenied:
     "Grape needs Accessibility access to press keys, type and move windows. Turn it on in System Settings.",
@@ -768,10 +781,16 @@ export function bindingText(view: ShortcutsView): string {
     case "bound":
       return `${view.hotkey.label} opens the wheel.`;
     case "failed":
-      return "macOS wouldn't give Grape that shortcut. Try another.";
+      // Also a Mac whose hot keys couldn't start: only opening Grape again mends that.
+      return "macOS wouldn't give Grape that shortcut. Try another, or quit Grape and open it again.";
     case "off":
       return view.enabled ? "The wheel isn't listening right now." : "The wheel is off.";
   }
+}
+
+/** The line under a field that keeps text Rust refused: that it isn't saved, then Rust's sentence. */
+export function unsavedText(sentence: string): string {
+  return `${SHORTCUTS_COPY.notSaved} ${sentence}`;
 }
 
 /** A menu's name: "Everywhere", or its app's. */

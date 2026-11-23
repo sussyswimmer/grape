@@ -18,7 +18,9 @@
 //! **Hot keys.** Open is bound only while the wheel is on, Grape isn't
 //! paused and the wheel is available here ([`open_chord`]). Escape and
 //! Return are bound only while a wheel is open, once for every subset of
-//! the hot key's modifiers ([`track_chords`]).
+//! the hot key's modifiers ([`track_chords`]). Where the wheel is built
+//! but its hot keys couldn't start, the shortcuts are still loaded, shown
+//! and changed; only switching the wheel on is refused ([`bind_step`]).
 //!
 //! **Locks.** `shared` (the menus and their file) is taken before `keys`
 //! (the hot keys and the pointer). The controller's thread takes `keys`
@@ -66,6 +68,10 @@ use store::Store;
 const HOTKEY_REFUSED: &str = "Grape couldn't use that shortcut. Try another.";
 /// The same refusal when the switch, not the chord, was what changed.
 const OS_REFUSED: &str = "macOS wouldn't give Grape that shortcut.";
+/// What switching the wheel on is answered with when the hot keys couldn't
+/// start in this launch.
+const HOTKEYS_DOWN: &str =
+    "Grape couldn't start the wheel's key combination. Quit Grape and open it again.";
 const PICKER_FAILED: &str = "Couldn't open the picker.";
 const ACCESS_FAILED: &str = "Couldn't ask for Accessibility access.";
 
@@ -82,6 +88,43 @@ fn open_chord(
     hotkey: Option<Chord>,
 ) -> Option<Chord> {
     hotkey.filter(|_| enabled && !paused && available)
+}
+
+/// What the view says of Open: off where the wheel isn't built, failed
+/// where it is but the hot keys couldn't start (only opening Grape again
+/// mends that), and otherwise what the keys say.
+fn shown_binding(available: bool, hot_keys: bool, binding: Binding) -> Binding {
+    match (available, hot_keys) {
+        (false, _) => Binding::Off,
+        (true, false) => Binding::Failed,
+        (true, true) => binding,
+    }
+}
+
+/// What a change has to do about the Open hot key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BindStep {
+    /// Nothing: neither the switch nor the chord changed, or there are no
+    /// hot keys to bind in this launch and the change doesn't need one.
+    Skip,
+    /// Bind Open as the change wants it, and refuse the change if the OS
+    /// refuses.
+    Bind,
+    /// Refuse: the wheel can't be switched on without hot keys.
+    Refuse,
+}
+
+/// The step for a change from `was` to `now`, each the switch and the
+/// chord. `hot_keys` is whether the hot key monitor is running. Without
+/// it only switching the wheel on is refused: the chord, like everything
+/// else, can still change, and is bound at the next launch.
+fn bind_step(hot_keys: bool, was: (bool, Option<Chord>), now: (bool, Option<Chord>)) -> BindStep {
+    match (hot_keys, was == now) {
+        (_, true) => BindStep::Skip,
+        (true, false) => BindStep::Bind,
+        (false, false) if now.0 && !was.0 => BindStep::Refuse,
+        (false, false) => BindStep::Skip,
+    }
 }
 
 /// The chords Escape and Confirm get while a wheel is open: Esc and Return
@@ -127,6 +170,12 @@ impl Keys {
         };
         monitor.start(hotkeys)?;
         watch.start(pointer)
+    }
+
+    /// `false` when the hot keys couldn't be made or started: nothing can
+    /// be bound until Grape starts again.
+    fn has_hot_keys(&self) -> bool {
+        self.monitor.is_some()
     }
 
     /// What the view says of Open.
@@ -396,8 +445,9 @@ impl Shared {
 
 /// The Shortcuts wheel's state, managed by Tauri.
 pub struct ShortcutsState {
-    /// `false` where the wheel isn't built, or its hot keys couldn't start.
-    available: AtomicBool,
+    /// Whether the wheel is built for this OS. Whether its hot keys
+    /// started is the keys' own business.
+    available: bool,
     shared: Mutex<Shared>,
     keys: Mutex<Keys>,
     /// Set while a picker is open, so a second one doesn't stack.
@@ -408,8 +458,10 @@ pub struct ShortcutsState {
 impl ShortcutsState {
     /// Makes the hot key monitor and the pointer watch and, where the
     /// wheel is available, loads the shortcuts. Call in setup, before the
-    /// wheel starts. Never fails: without hot keys the wheel is reported
-    /// as not available and nothing is read or written.
+    /// wheel starts. Never fails: where the wheel isn't built nothing is
+    /// read or written, and where it is but the hot keys couldn't be made,
+    /// the shortcuts are loaded all the same and the view says the hot key
+    /// failed.
     pub fn load(app: &AppHandle) -> Self {
         let sources = match (platform::hotkey_monitor(), platform::pointer_watch()) {
             (Ok(monitor), Ok(watch)) => Some((monitor, watch)),
@@ -422,7 +474,7 @@ impl ShortcutsState {
                 None
             }
         };
-        let available = model::available(THIS_OS) && sources.is_some();
+        let available = model::available(THIS_OS);
         let (monitor, watch) = sources.filter(|_| available).unzip();
         let mut shared = Shared {
             config: Config::defaults(THIS_OS),
@@ -430,6 +482,10 @@ impl ShortcutsState {
             note: None,
         };
         if available {
+            let swept = run::sweep_script_folders(&std::env::temp_dir());
+            if swept > 0 {
+                log::info!("shortcuts: removed {swept} script folder(s) left by an earlier run");
+            }
             let folder = app
                 .path()
                 .resolve(store::FILE, BaseDirectory::AppData)
@@ -454,7 +510,7 @@ impl ShortcutsState {
             }
         }
         Self {
-            available: AtomicBool::new(available),
+            available,
             shared: Mutex::new(shared),
             keys: Mutex::new(Keys::new(monitor, watch)),
             picking: AtomicBool::new(false),
@@ -463,7 +519,7 @@ impl ShortcutsState {
     }
 
     fn is_available(&self) -> bool {
-        self.available.load(Ordering::Acquire)
+        self.available
     }
 
     fn shared(&self) -> MutexGuard<'_, Shared> {
@@ -502,17 +558,12 @@ impl ShortcutsState {
 
     /// The view of `config`. Call with `shared` locked.
     fn view_of(&self, config: &Config, note: Option<&'static str>) -> ShortcutsView {
-        let available = self.is_available();
-        let binding = if available {
-            self.keys().binding()
-        } else {
-            Binding::Off
+        let binding = {
+            let keys = self.keys();
+            shown_binding(self.is_available(), keys.has_hot_keys(), keys.binding())
         };
         let access = platform::input_access().into();
-        let mut view = model::view(config, THIS_OS, binding, access, note.map(str::to_owned));
-        // Also off on a Mac whose hot keys couldn't start.
-        view.available = available;
-        view
+        model::view(config, THIS_OS, binding, access, note.map(str::to_owned))
     }
 
     fn view(&self) -> ShortcutsView {
@@ -539,19 +590,33 @@ impl ShortcutsState {
         if new == shared.config {
             return Ok(self.view_of(&shared.config, note));
         }
-        // Nothing the file couldn't hold is kept in memory either.
-        model::stored_bytes(&new)?;
+        // Nothing the file couldn't hold is kept in memory either. A file
+        // that loaded over the limit may still shrink.
+        model::size_allows(&shared.config, &new)?;
         let hotkey_changed = new.hotkey != shared.config.hotkey;
-        if hotkey_changed || new.enabled != shared.config.enabled {
-            if let Err(err) = self.rebind(app, &new, true) {
-                log::warn!("shortcuts: the hot key wasn't bound ({err}); nothing changed");
-                let why = if hotkey_changed {
-                    HOTKEY_REFUSED
-                } else {
-                    OS_REFUSED
-                };
-                return Err(why.to_owned());
+        let was = (shared.config.enabled, shared.config.hotkey);
+        let hot_keys = self.keys().has_hot_keys();
+        match bind_step(hot_keys, was, (new.enabled, new.hotkey)) {
+            BindStep::Skip => {}
+            BindStep::Refuse => {
+                log::warn!("shortcuts: the hot keys never started; the wheel stays off");
+                return Err(HOTKEYS_DOWN.to_owned());
             }
+            BindStep::Bind => {
+                if let Err(err) = self.rebind(app, &new, true) {
+                    log::warn!("shortcuts: the hot key wasn't bound ({err}); nothing changed");
+                    let why = if hotkey_changed {
+                        HOTKEY_REFUSED
+                    } else {
+                        OS_REFUSED
+                    };
+                    return Err(why.to_owned());
+                }
+            }
+        }
+        if !hot_keys {
+            // Nothing binds it in this launch, but it is the hot key now.
+            self.keys().hotkey = new.hotkey;
         }
         shared.config = new;
         let saved = shared.save();
@@ -618,7 +683,8 @@ fn owner_of(_window: &WebviewWindow) -> Option<isize> {
 
 /// Starts the hot key monitor and the pointer watch, which send into
 /// `hotkeys` and `pointer`. `false` when the wheel isn't available, or
-/// when they couldn't start (it isn't available from then on).
+/// when they couldn't start: the wheel then can't open in this launch, and
+/// the view says the hot key failed.
 pub fn start_sources(
     app: &AppHandle,
     hotkeys: SyncSender<HotkeySignal>,
@@ -638,16 +704,16 @@ pub fn start_sources(
         }
         Err(err) => {
             log::error!("shortcuts: could not start the hot keys: {err}");
+            // Both go: what's left has no hot keys from here on.
             keys.stop();
-            state.available.store(false, Ordering::Release);
             false
         }
     }
 }
 
 /// Sends the controller the shortcuts as loaded and binds the hot key if
-/// the wheel is on. Call once at start, after [`start_sources`], on the
-/// thread that runs setup.
+/// the wheel is on. Call once at start, after [`start_sources`] (also when
+/// that failed), on the thread that runs setup.
 pub fn publish(app: &AppHandle) {
     let Some(state) = app.try_state::<ShortcutsState>() else {
         return;
@@ -1025,7 +1091,7 @@ pub async fn shortcuts_add_item(
     kind: NewItem,
 ) -> Result<ShortcutsView, String> {
     state.change(&app, "a shortcut or group added", |config| {
-        model::add_item(config, menu, group, kind).map(|_| None)
+        model::add_item_noting(config, menu, group, kind)
     })
 }
 
@@ -1249,6 +1315,56 @@ mod tests {
         assert_eq!((escape.len(), confirm.len()), (16, 16));
         assert!(escape.iter().all(|chord| chord.key == KeyCode::Escape));
         assert!(confirm.iter().all(|chord| chord.key == KeyCode::Enter));
+    }
+
+    #[test]
+    fn a_mac_whose_hot_keys_never_started_says_failed_not_unavailable() {
+        for binding in [Binding::Off, Binding::Bound, Binding::Failed] {
+            // Not built for this OS: off, whatever else.
+            assert_eq!(shown_binding(false, false, binding), Binding::Off);
+            assert_eq!(shown_binding(false, true, binding), Binding::Off);
+            // Built, but no hot keys in this launch.
+            assert_eq!(shown_binding(true, false, binding), Binding::Failed);
+            assert_eq!(shown_binding(true, true, binding), binding);
+        }
+        // A monitor that is gone is one that never started.
+        let mut keys = keys(
+            ScriptedHotkeys::new(Vec::new()),
+            ScriptedPointer::new(Vec::new()),
+        );
+        assert!(keys.has_hot_keys());
+        keys.stop();
+        assert!(!keys.has_hot_keys());
+        assert!(!Keys::new(None, None).has_hot_keys());
+    }
+
+    #[test]
+    fn without_hot_keys_only_switching_the_wheel_on_is_refused() {
+        let (g, f5) = (Some(hotkey()), Some(chord(KeyCode::F5, Modifiers::NONE)));
+        // Switching on, with the chord as it was or a new one.
+        assert_eq!(bind_step(false, (false, g), (true, g)), BindStep::Refuse);
+        assert_eq!(bind_step(false, (false, g), (true, f5)), BindStep::Refuse);
+        // Everything else goes through with nothing bound: off, a new
+        // chord (on or off), no chord, and what touches neither.
+        assert_eq!(bind_step(false, (true, g), (false, g)), BindStep::Skip);
+        assert_eq!(bind_step(false, (true, g), (true, f5)), BindStep::Skip);
+        assert_eq!(bind_step(false, (false, g), (false, f5)), BindStep::Skip);
+        assert_eq!(bind_step(false, (true, g), (false, None)), BindStep::Skip);
+        assert_eq!(bind_step(false, (true, g), (true, g)), BindStep::Skip);
+        assert_eq!(bind_step(false, (false, g), (false, g)), BindStep::Skip);
+
+        // With hot keys, any change to the switch or the chord binds.
+        assert_eq!(bind_step(true, (false, g), (true, g)), BindStep::Bind);
+        assert_eq!(bind_step(true, (true, g), (false, g)), BindStep::Bind);
+        assert_eq!(bind_step(true, (true, g), (true, f5)), BindStep::Bind);
+        assert_eq!(bind_step(true, (true, g), (false, None)), BindStep::Bind);
+        assert_eq!(bind_step(true, (true, g), (true, g)), BindStep::Skip);
+
+        for sentence in [HOTKEYS_DOWN, OS_REFUSED, HOTKEY_REFUSED] {
+            assert!(sentence.ends_with('.'), "{sentence}");
+        }
+        assert!(HOTKEYS_DOWN.contains("Quit Grape and open it again"));
+        assert_ne!(HOTKEYS_DOWN, model::UNAVAILABLE);
     }
 
     fn keys(monitor: ScriptedHotkeys, watch: ScriptedPointer) -> Keys {
