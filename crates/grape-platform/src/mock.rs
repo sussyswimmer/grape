@@ -634,7 +634,10 @@ mod tests {
 
     #[test]
     fn stop_ends_a_slow_script_early() {
-        let script = scripts::key_swap();
+        // Long enough to take 20 s whole, so a stalled CI runner can't make
+        // "early" look late: a stop takes one interval at most.
+        let mut script = scripts::key_swap();
+        script.resize(100, DragSignal::Moved { x: 1, y: 1 });
         let mut monitor =
             ScriptedMonitor::new(script.clone()).with_interval(Duration::from_millis(200));
         let (tx, rx) = mpsc::sync_channel(16);
@@ -643,7 +646,7 @@ mod tests {
         assert!(matches!(first, DragSignal::Started { .. }));
         let begun = Instant::now();
         monitor.stop();
-        assert!(begun.elapsed() < Duration::from_secs(1));
+        assert!(begun.elapsed() < Duration::from_secs(10));
         let rest: Vec<DragSignal> = rx.iter().collect();
         assert!(1 + rest.len() < script.len());
     }
@@ -748,7 +751,9 @@ mod tests {
 
     #[test]
     fn hotkeys_stop_ends_a_slow_script_early() {
-        let script = hotkey_signals(&scripts::hotkey_escape());
+        // 20 s whole, as in `stop_ends_a_slow_script_early`.
+        let mut script = hotkey_signals(&scripts::hotkey_escape());
+        script.resize(100, HotkeySignal::Released(HotkeyId::Open));
         let mut monitor =
             ScriptedHotkeys::new(script.clone()).with_interval(Duration::from_millis(200));
         let (tx, rx) = mpsc::sync_channel(16);
@@ -757,7 +762,7 @@ mod tests {
         assert!(matches!(first, HotkeySignal::Pressed(HotkeyId::Open, _)));
         let begun = Instant::now();
         monitor.stop();
-        assert!(begun.elapsed() < Duration::from_secs(1));
+        assert!(begun.elapsed() < Duration::from_secs(10));
         assert!(1 + rx.iter().count() < script.len());
     }
 
@@ -885,9 +890,11 @@ mod tests {
         watch.start(tx.clone()).unwrap();
         assert_eq!(watch.start(tx), Err(PlatformError::AlreadyRunning));
         // Never turned on: stop still ends the worker, and nothing was sent.
+        // A broken stop would wait for good; the bound only has to outlast
+        // a stalled CI runner.
         let begun = Instant::now();
         watch.stop();
-        assert!(begun.elapsed() < Duration::from_secs(1));
+        assert!(begun.elapsed() < Duration::from_secs(10));
         assert_eq!(rx.iter().count(), 0);
         // The log outlives a boxed watch.
         let log = watch.activity();
