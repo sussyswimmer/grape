@@ -13,7 +13,7 @@ We are in **Phase 1: Windows** (`docs/ROADMAP.md`, DECISIONS D8). Development an
 
 ## Golden rules (never break these)
 
-1. **Clean room.** Do not copy Tangerine's code, icons, sounds, images, wording, colors or name. Their demo was read only to learn *behavior*. If a task seems to need their assets, stop and ask.
+1. **Clean room.** Do not copy Tangerine's code, icons, sounds, images, wording, colors or name. Their demo was read only to learn *behavior*. If a task seems to need their assets, stop and ask. The same rule covers Radial: only its public website was read, for the Shortcuts wheel's behavior, and none of its code, icons, wording or names go into Grape (`docs/RADIAL_FINDINGS.md`, DECISIONS D47).
 2. **Originals are sacred.** Never modify, overwrite, move or delete a source file. The only exception is the explicit **Move** file action. Outputs get new names (see `docs/FORMAT_MATRIX.md` → Output naming).
 3. **Offline only.** No network calls in the conversion path, ever. No telemetry and no remote config. The only possible exception is an update check, and that needs an entry in `docs/DECISIONS.md` first.
 4. **Never break the user's drag.** If Grape can't show the wheel, it must get out of the way. The OS drag continues as if Grape weren't installed. Esc always closes the wheel.
@@ -39,6 +39,8 @@ crates/grape-platform/    Drag detection, modifiers, file actions per OS    (has
 crates/grape-webp/        libwebp's encoder for WebP Compress: the only unsafe for images (D28) (has CLAUDE.md)
 tools/grape-heif/         grape-heif.exe, the Windows image helper (HEIC, AVIF): its own workspace, GPL as built (D33, D41)
 docs/                     Specs — the source of truth for behavior
+docs/RADIAL_FINDINGS.md   What was learned from Radial's website for the Shortcuts wheel, and how (D47)
+docs/design/              Design notes the code is written against: m1-drag-wheel.md (the drag wheels), m10-shortcuts-wheel.md (the Shortcuts wheel)
 .claude/commands/         Slash commands for recurring tasks
 ```
 
@@ -86,6 +88,8 @@ cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Carg
 | make a choice that's hard to reverse            | `docs/DECISIONS.md`          |
 | write or run tests / manual QA                  | `docs/TESTING.md`            |
 | wonder "how does Tangerine actually do X?"      | `docs/REA_FINDINGS.md`       |
+| wonder what Radial's website says, or what Grape decided instead | `docs/RADIAL_FINDINGS.md` |
+| touch the Shortcuts wheel: hot keys, shortcuts, steps, `shortcuts.json` | `docs/design/m10-shortcuts-wheel.md`, then `docs/INTERACTION_SPEC.md` §12 |
 | need the product overview                       | `docs/PRODUCT.md`            |
 | are starting fresh on this repo                 | `docs/START_HERE.md`         |
 
@@ -110,3 +114,5 @@ cargo about generate --locked --fail --manifest-path apps/desktop/src-tauri/Carg
 | File actions | Control  | Alt     |
 
 Keys are user-remappable in Settings. See `docs/INTERACTION_SPEC.md`.
+
+The Shortcuts wheel needs no drag and has its own hotkey: Control+Option+G by default, macOS only for now, off until the user turns it on in Settings (DECISIONS D47).

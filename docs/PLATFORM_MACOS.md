@@ -4,7 +4,7 @@ Target: macOS 13+ on **Apple silicon and Intel**. Ship a universal binary, since
 
 ## Detecting a file drag without special permissions
 
-Goal: no Accessibility or Input Monitoring prompt. **[Grape design]** It's *inferred*, not observed, that Tangerine works similarly, since it ships sandboxed on the Mac App Store.
+Goal: a drag never needs an Accessibility or Input Monitoring prompt, and neither does launching Grape. The one part of Grape that asks for a permission is the Shortcuts wheel, and only when a shortcut is about to press keys ("Shortcuts wheel" below, D47). **[Grape design]** It's *inferred*, not observed, that Tangerine works similarly, since it ships sandboxed on the Mac App Store.
 
 Built as `grape_platform::macos::MacDragMonitor` (D18):
 
@@ -14,7 +14,7 @@ Built as `grape_platform::macos::MacDragMonitor` (D18):
 4. **Modifiers:** poll `NSEvent.modifierFlags()` (class property, no permission needed) on the same thread. Map `.shift`, `.control`, `.option` and `.command` to shift, ctrl, alt and meta.
 5. **Cursor:** `NSEvent.mouseLocation()` is in *bottom-left-origin* points. Grape's global coordinates on macOS are **points with the origin at the top-left of the primary (menu-bar) screen**, y down, the same space as `CGDisplayBounds`. With H the primary screen's height: cursor = (x, H − y), and a screen frame F becomes {F.x, H − (F.y + F.h), F.w, F.h}. `DisplayBounds.scale` is 1.0, so 1 unit = 1 point = 1 CSS pixel in the overlay. Screens left of or above the primary one have negative coordinates.
 6. **Drag ends** when the button goes up → `DragSignal::Ended`.
-7. **Esc** can't be read without Input Monitoring (D7), so `Escape` is never sent. Esc cancels the AppKit drag session, which the overlay sees as a drop `Leave` while the button is still down; the controller treats that as Esc (below). That only works while a wheel is open and the cursor is over it on the wheel's display. Esc before any wheel opens can't be seen at all: a key tap while still holding the button then shows an empty ring, which closes on the next move or on release. Esc on another display leaves the ring up until the button goes up. The drag itself is cancelled either way, so nothing is dropped.
+7. **Esc** can't be read during a drag without Input Monitoring (D7), so `Escape` is never sent. (The Shortcuts wheel reads Esc another way, as a hot key it holds only while its own wheel is open: "Shortcuts wheel" below. That doesn't help here, because it would take Esc from the drag's source.) Esc cancels the AppKit drag session, which the overlay sees as a drop `Leave` while the button is still down; the controller treats that as Esc (below). That only works while a wheel is open and the cursor is over it on the wheel's display. Esc before any wheel opens can't be seen at all: a key tap while still holding the button then shows an empty ring, which closes on the next move or on release. Esc on another display leaves the ring up until the button goes up. The drag itself is cancelled either way, so nothing is dropped.
 8. **App Nap:** with every window hidden, macOS may nap a menu-bar app and stretch its timers. The drag thread holds an `NSProcessInfo` activity (user-initiated, idle system sleep allowed) for as long as it runs, so its polls stay on time.
 
 If the drag pasteboard has no file URL type (text, browser images, promised files), the wheel never opens.
@@ -78,6 +78,107 @@ The model, placement, snap, commands, page and toasts are D21's and shared with 
 - **No wheel during a shelf drag:** the drag poller ignores a press in which Grape started a drag out (above, "Detecting a file drag").
 - **The Trash:** a drop on the Dock's Trash asks the source for Delete, and on macOS the *source* does the deleting. Two guards: the mask never has Delete or Move, and Grape has no code that deletes. Whether the Trash even highlights is the first Mac Float check.
 - Logs: counts and outcomes, the stale and unexpected-operation lines; never a path or a name.
+
+## Shortcuts wheel
+
+The wheel a hotkey opens with no drag (D47; behavior in `INTERACTION_SPEC.md` §12; the contract, with every signature, in `docs/design/m10-shortcuts-wheel.md`). The Mac side is `grape_platform::macos::{hotkey, input, shortcuts}`, with its pure rules in `mac_rules.rs`. **Nothing here has run on a Mac.** It compiles and lints for `aarch64-apple-darwin` from Linux, and the pure rules are unit-tested on Linux; whether it links against Carbon and ApplicationServices is CI's macOS jobs' to show. Every "should" below is a line in `TESTING.md` → "Shortcuts wheel, M10".
+
+No new package: Carbon, the Accessibility calls and the keyboard-layout calls are declared by hand, and `objc2-core-graphics` and `objc2-foundation` only gain features (`CGEvent`, `CGEventSource`, `CGEventTypes`, `CGRemoteOperation`; `NSBundle`).
+
+**Hot keys: Carbon**
+- `RegisterEventHotKey`, declared by hand with `#[link(name = "Carbon", kind = "framework")]` (`macos/hotkey.rs`). It asks for no permission and is no key monitor (D7 stands): Grape hears only the exact key combinations it registered.
+- One `InstallEventHandler` on `GetApplicationEventTarget()` hears class `'keyb'`, kinds 5 (pressed) and 6 (released). Each registration's id carries Grape's signature `'GRPE'` and says what it's for (Open, Escape or Confirm), so the handler looks nothing up.
+- Everything Carbon runs on the main thread, and the `EventHotKeyRef`s live in a table only the main thread has. `start` and `bind` hop there and wait; `stop` queues its work there and doesn't wait, so Quit can't hang on it.
+- **The handler** reads the pressed mouse buttons, the cursor and the app in front (`NSWorkspace.frontmostApplication`: its pid and bundle id, `None` when Grape itself is in front), before anything of Grape's shows. Then it `try_send`s one signal: a full channel drops it. On an Open press it also refreshes the screen cache. It never unwinds into Carbon, and an event that isn't Grape's goes back as not handled.
+- **Carbon matches modifiers exactly**, and a registration almost never fails even when another app uses the same combination. A real refusal is `PlatformError::Os { context: "RegisterEventHotKey", … }`, which Settings words "Grape couldn't use that shortcut. Try another." (a new combination) or "macOS wouldn't give Grape that shortcut." (the switch).
+- **A bind** registers its new chords first, rolls them back if one is refused, and lets go of the old ones only after that worked: a refused combination leaves the old one bound. A chord another id already holds is skipped, not an error.
+- **A failed unregister** is logged (`hot keys: an unregister failed (OSStatus N); trying again at the next bind`) and tried again at the next bind.
+- Open is registered only while the wheel is on and Grape isn't paused, so the combination reaches other apps the rest of the time.
+
+**Esc and Return, for as long as a wheel is open**
+- They are hot keys too (virtual keys 53 and 36), registered when a Shortcuts wheel opens and let go when it closes. That is how Grape reads Esc without a key monitor.
+- Because Carbon matches exactly and the user may still hold the hotkey's modifiers, each is registered once for **every subset of the hotkey's modifiers** (`Chord::with_modifier_subsets`): four each for Control+Option+G.
+- While registered they are Grape's: the app in front doesn't get Esc or Return. Command+Option+Esc stays the system's.
+- If Esc can't be registered, the wheel closes at once (`shortcuts: Esc couldn't be bound (…); closing the wheel`). A Return that can't be is only logged; clicks and Esc still work.
+- A bare Esc or Return left registered would be dead in every app until Grape quits. That's why an unregister that fails is retried, and why the wheel has a paint deadline (`INTERACTION_SPEC.md` §12).
+
+**The pointer**
+- A "grape-pointer" thread polls `NSEvent.mouseLocation` and `NSEvent.pressedMouseButtons` every 8 ms while a Shortcuts wheel is open, the drag poller's own trick ("Detecting a file drag", above): no permission, and it sees a click the overlay swallows. The thread is parked while no wheel is open and holds an `NSProcessInfo` activity only while one is.
+- Positions are flipped to Grape's top-left points (`mac_rules::cursor_to_grape`). The watch sends one `Moved` when it turns on, then only changes, and `Down` / `Up` for the primary button (bit 0). A button already down when it turns on sends no `Down`, but its release sends `Up`.
+- If tap-to-click proves shorter than one poll on a real trackpad, the fallback is a local `NSEvent` mouse monitor on the main thread, which needs no permission either.
+
+**Accessibility, and exactly what needs it**
+- macOS lets an app post keys to other apps, and move their windows, only with Accessibility access. The check is `AXIsProcessTrusted`; the ask is `AXIsProcessTrustedWithOptions` with `kAXTrustedCheckOptionPrompt`, both declared by hand against ApplicationServices.
+- **Needs it:** a Press keys step, Type text, Clipboard's Copy and Paste (they press Command+C and Command+V), Move the window, and the two System controls that are key combinations (Lock the screen, Screenshot an area).
+- **Doesn't:** the hot keys, Esc and Return, the pointer, opening the wheel at all, Open an app / a file or folder / a link, every script step, Clipboard's Clear, Show a notice, Speak, Wait, and the System controls that run a program.
+- **When Grape asks.** Never at launch and never during a drag. A run that reaches a step from the first list without access stops with "Grape needs Accessibility access to press keys. Turn it on in System Settings, then try again.", and the first time in a launch macOS shows its own prompt (which also puts Grape in the list). The Settings section's "Ask for access" button makes the same call; when Grape has already asked once in this launch (the button or a run), it also opens the Accessibility list (`/usr/bin/open x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility`). With access already granted the button does nothing. Settings reads the answer again when its window gets the focus back.
+- **Without access, posted keys vanish silently:** macOS drops the events and reports no error. So the runner always checks first and never relies on a failure. `place_window` does fail (AX error -25211).
+- **The ad-hoc signing consequence.** The DMG is signed ad hoc (D45), and macOS ties an ad-hoc app's grant to that exact build. After an update the Accessibility list most likely still shows Grape switched on while the check says no. Settings says so under the access line: "If Grape is already in that list, remove it with − and add it again." A Developer ID signature (M9) keeps the grant across updates. Both halves are unverified until a Mac runs two builds in a row.
+
+**Posting keys** (`macos/input.rs`)
+- `CGEvent`s from a private source (`CGEventSource` with `CGEventSourceStateID::Private`), posted at the HID tap: key down, 4 ms, key up. No modifier key events are posted: the modifiers ride as flags on the key's own events.
+- An event keeps its own flags except Shift, Control, Option and Command (`0x20000`, `0x40000`, `0x80000`, `0x100000`), which are set to exactly the chord's, so a modifier the user still holds never joins in. The runner also waits up to 500 ms for every modifier to be up first.
+- A Press keys step is a **place on the keyboard** (`KeyCode`, the W3C `code` names, mapped to virtual keys by `mac_rules::virtual_key`). It is replayed from the same place on every layout; only its label in Settings assumes the US layout.
+- A posted key that equals a hot key Grape holds would fire Grape's own handler. Settings refuses a Press keys step equal to the hotkey, and Esc and Return are let go before a run starts.
+
+**Character chords and keyboard layouts**
+- The combinations Grape itself authors by letter (Copy, Paste, Lock the screen, Screenshot an area) must land on the key that types that letter on the user's layout. `send_char_chord` reads the current layout (`TISCopyCurrentKeyboardLayoutInputSource`, `kTISPropertyUnicodeKeyLayoutData`, `UCKeyTranslate` over virtual keys 0 to 127, no dead keys; on the main thread, where Text Input Sources must run).
+- For a chord with Command it looks first at what each key types **with Command held**, then with nothing held, then falls back to the US table (`mac_rules::char_key`, `us_key_for_char`). The Command layer is what makes Dvorak-QWERTY and Cyrillic layouts come out right: there Command+C is on the QWERTY C key.
+- The number pad is never used: on AZERTY only the pad types a bare `4`, and Command+Shift+pad-4 isn't the screenshot.
+- An input source with no layout data (some input methods) gets the US table.
+
+**Typing** (`type_text`)
+- The text goes out in chunks of at most 20 UTF-16 units (`mac_rules::text_chunks`), each as the Unicode string of one key down and key up on virtual key 0, with all four modifier flags cleared, 3 ms between events. About 6 ms a chunk, so 4,000 units take about 1.2 s.
+- A chunk never ends inside a surrogate pair, just before a combining mark or a zero-width joiner, or just after a joiner, so an accented letter or a family emoji stays whole.
+- `\n` is a real Return and `\t` a real Tab (virtual keys 36 and 48).
+- A cancel (Pause, Quit) is seen between chunks.
+- `{clipboard}` is read from the general pasteboard only when the text has it, and control characters in it become spaces or go, so copied text typed into a terminal can't run as commands (the rule is in the design note §7).
+
+**Another app's window** (`place_window`, AX by hand)
+- `AXUIElementCreateApplication(pid)` with a 1 s messaging timeout, then `"AXFocusedWindow"`, else `"AXMainWindow"`.
+- It reads `"AXPosition"` and `"AXSize"`, works out the target on the display that holds the window's center (`placement_frame`, pure, on that display's visible frame), then sets position, size, position. AX points have a top-left origin, as Grape's do.
+- When the window is already the target size, only the position is set, so a fixed-size window can still be centered. A window that refuses is a failed step: "That window wouldn't move."
+- The size isn't read back, so an app with a minimum size counts as moved.
+
+**The front app**
+- A click on the wheel can make Grape the active app with no key window (the toast's story, "Overlay window" above). After the overlay hides, the app queues `give_back_front` on the main thread, behind the hide: `hand_back_activation`, a no-op unless Grape is active with no key window.
+- Before the first step that presses keys, the runner calls `ensure_front(pid, 400 ms)` from its own thread: every 10 ms it looks at `frontmostApplication`, and while Grape is the active app it hands the front to that pid itself. `false` → "The app you were in didn't come back to the front."
+
+**The programs each step runs** (`mac_rules`, pure builders with tests). The app starts them in the user's home folder, in their own process group, with stdout and stderr to `/dev/null`, for at most 60 s; a non-zero exit fails the step. A script goes in on stdin, so it never shows in the process list.
+
+| Step | Program |
+|---|---|
+| Run AppleScript | `/usr/bin/osascript -`, the source on stdin |
+| Run a shell script | `/bin/zsh -l -s`, the source on stdin (a login shell, so the user's own `PATH`) |
+| Run an Apple Shortcut | `/usr/bin/shortcuts run <name>` |
+| Run a Keyboard Maestro macro | `/usr/bin/osascript -e 'on run argv' -e 'tell application "Keyboard Maestro Engine" to do script (item 1 of argv)' -e 'end run' -- <name>`: the name is an argument, never spliced into the script |
+| Speak | `/usr/bin/say <text>`; a text that starts with `-` gets a space in front |
+| Open an app | `/usr/bin/open -b <bundle id>`, then `/usr/bin/open -a <path>` if that fails or there's no id |
+| Open a file or folder, Open a link | `/usr/bin/open <path>`, `/usr/bin/open <url>` |
+| System: Sleep the display | `/usr/bin/pmset displaysleepnow` |
+| System: Start the screen saver | `/usr/bin/open -a ScreenSaverEngine` |
+| System: Mission Control | `/usr/bin/open -a "Mission Control"` |
+| System: Mute or unmute, Volume up, Volume down | `/usr/bin/osascript -` with Grape's own script on stdin (`set volume …`; volume moves by 6 of 100 and is clamped). No prompt |
+| System: Switch between light and dark | `/usr/bin/osascript -`, a script that tells System Events: one Automation prompt, once |
+| System: Lock the screen, Screenshot an area | no program: the character chords Control+Command+`q` and Command+Shift+`4` |
+
+- Opening waits for `open` to exit, so a target that can't be opened fails the step. There's no timeout on `open` itself.
+- **Ending a program** (Pause, Quit, the 60 s limit): `kill_group` sends SIGTERM to the process group, and a "grape-kill" thread sends SIGKILL 500 ms later if it's still there. It never signals pid 0, pid 1 or Grape's own group. A script's own children go with it.
+- A run killed while macOS is asking the user to allow automation should work on the next try.
+- The clock for `{date}` and `{time}` is `libc`'s `localtime_r`, already linked.
+
+**Pickers** (`pick_target`)
+- `NSOpenPanel` on the main thread, as Move's folder picker, called from a blocking worker; one at a time. The app picker opens in `/Applications`, allows only `.app` (`setAllowedFileTypes`, deprecated; the newer call would add a package) and says "Choose an app". The other takes a file or a folder: "Choose a file or a folder". The button is "Choose".
+- A picked app's identity is `NSBundle`'s `bundleIdentifier` and `NSFileManager`'s display name, with a trailing `.app` taken off. An app with no bundle id can't have a menu: "Grape can't make a menu for that app."
+- The Settings page never gets the path, only the name. A picked file in Desktop, Documents or Downloads may bring that folder's prompt when the step first opens it ("Folder prompts", above).
+
+**`Info.plist` and M9**
+- `NSAppleEventsUsageDescription` is new: "Grape controls another app only when a shortcut you made on its Shortcuts wheel tells it to." macOS shows it under the Automation prompt, which names the other app itself. The prompt comes the first time an AppleScript step, the light and dark switch or a Keyboard Maestro step talks to another app.
+- When M9 turns the hardened runtime on, Grape needs the `com.apple.security.automation.apple-events` entitlement, or those steps fail without a prompt. It needs none for the hot keys or for Accessibility.
+
+**The file** is `shortcuts.json` in the app's data folder, which should be `~/Library/Application Support/io.github.sussyswimmer.grape/`, beside `settings.json` (a Mac check), written with mode 0600 (`ARCHITECTURE.md` → Settings). It holds typed text and scripts in plain text: Settings says "Shortcuts are saved as plain text on this Mac. Don't put passwords in them."
+
+**Logs** name step kinds, counts, pids and OS status codes. Never a key combination, a name, a bundle id, a path or anything typed.
 
 ## Launch at login
 `tauri-plugin-autostart` 2.7.0 in LaunchAgent mode (D19): auto-launch 0.6.0 writes `~/Library/LaunchAgents/Grape.plist` (named after the product), whose `ProgramArguments` are the executable the plugin found at launch (`current_exe`, made canonical: `…/Grape.app/Contents/MacOS/Grape`) and `--at-login`, with `RunAtLoad`. auto-launch's "is it on" only checks that the file is there, and it writes the path unescaped.
@@ -179,7 +280,7 @@ A released version comes from GitHub Releases instead, as `Grape-macOS-universal
 ## Distribution
 - **Direct download first:** a DMG signed with **Developer ID**, hardened runtime, **notarized** and stapled. Every sidecar binary must be signed with the same identity and hardened runtime, or notarization fails. `libpdfium.dylib` needs the same identity too, for library validation. Today's ad-hoc DMG has the hardened runtime off (PDFium, above; D29).
 - **Until a Developer ID exists,** releases carry the same ad-hoc DMG as CI, `Grape-macOS-universal.dmg` (D45), and the release notes give the first-open steps above.
-- Entitlements: none needed for drag/modifier polling. Add `com.apple.security.cs.disable-library-validation` **only** if a sidecar loads unsigned dylibs (avoid this).
+- Entitlements: none needed for drag/modifier polling, the Shortcuts wheel's hot keys or its posted keys (Accessibility is a user grant, not an entitlement). Once M9 turns the hardened runtime on, its AppleScript steps need `com.apple.security.automation.apple-events` ("Shortcuts wheel" below). Add `com.apple.security.cs.disable-library-validation` **only** if a sidecar loads unsigned dylibs (avoid this).
 - Mac App Store is **later**. The sandbox complicates writing outputs next to sources: a dropped file grants access to that file, not its folder. It would need security-scoped bookmarks or a user-chosen output folder. Tracked in `DECISIONS.md`.
 - Auto-update: `tauri-plugin-updater` with signed update manifests on GitHub Releases. It's the *only* allowed network call (rule 3), and it's opt-in.
 
@@ -193,3 +294,4 @@ A version tag builds the DMG with the Windows installer and puts both on one dra
 - Full-screen app in front. Two displays with different scale factors. Stage Manager on.
 - Drop outside the ring cancels and Finder does **not** move the file.
 - The full list is in `TESTING.md` → "macOS, first build (D18)".
+- The Shortcuts wheel has its own list, safety checks first: `TESTING.md` → "Shortcuts wheel, M10".

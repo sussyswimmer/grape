@@ -422,6 +422,13 @@ export interface ToastHidePayload { id: number }
 ```
 (The Rust test for the entries payload builds `UiSegment` by hand with these round numbers, not from `wheel_layout`.)
 
+**Since D47: the Shortcuts wheel's kind.** The types above are as M1 wrote them. The Shortcuts wheel (`INTERACTION_SPEC.md` §12) uses the same three `wheel://` events and adds to them; `docs/design/m10-shortcuts-wheel.md` §6 is the contract for what it adds, and isn't repeated here:
+- `content` gains a fourth kind, `"shortcuts"` (`UiContent::Shortcuts { dense, trail, segments }`): segments with the user's `title`, an `icon` and a `group` flag, and no `entry`. `segments` may be empty.
+- `mode` gains `"shortcuts"`, sent exactly when the content kind is `"shortcuts"`. On the Rust side that is a new `UiMode`, used only in `WheelOpen.mode`; `grape_core::WheelMode` keeps its three values.
+- `reason` gains `"picked"` (`CloseReason::Picked`): the wheel closed because a shortcut was picked.
+- Fixtures: `wheel-open-shortcuts.json`, `wheel-open-shortcuts-empty.json` and `wheel-close-picked.json`, tested from both sides like the ones above. The three older `wheel-open-*` fixtures still serialize byte for byte.
+- The page's part doesn't change: it draws what `wheel://open` sends and calls only `wheel_painted`.
+
 **UI → Rust commands** (app commands are allowed for all windows by default when no app manifest restricts them; keep it that way):
 - `wheel_painted(seq: u64)`: the overlay calls it after the first `requestAnimationFrame` following a render. Rust logs `wheel seq=N painted +X ms after key edge`. That's the M1 latency measurement.
 - `toast_clicked(id: u64)`: Rust reveals the first output of that batch if it's `revealable`. **The UI never sends paths.**

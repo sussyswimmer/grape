@@ -4,7 +4,7 @@ This repo is built by both Claude Code and Codex. **`CLAUDE.md` is the canonical
 
 The six rules you must not break are summarized here (full text in `CLAUDE.md`):
 
-1. Clean room: no Tangerine code, assets, wording, colors or name.
+1. Clean room: no Tangerine code, assets, wording, colors or name, and none of Radial's either (the Shortcuts wheel, `docs/DECISIONS.md` D47).
 2. Never modify, overwrite, move or delete source files, except the explicit Move action.
 3. Offline only: no network calls in the conversion path.
 4. Never break the user's OS drag. Esc always closes the wheel.

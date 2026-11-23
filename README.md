@@ -14,6 +14,17 @@ Grape is a free, open-source file converter that lives in the tray. Start draggi
 
 So far, the wheel opens at the cursor when you tap a key while dragging from Explorer or the Desktop. It converts images (JPG, PNG, WEBP, TIFF, BMP, HEIC and AVIF) to each other and to PDF, SVGs to all of those, audio and video, subtitles, archives (RAR too) and PDFs to images or text: all 178 conversions planned for v1. Most v1 tools run too: Compress, Remove Metadata, Remove Audio, Normalize Volume and Audio Channels on the formats they take, and Extract Archive, Split PDF, Merge PDFs and Create PDF. The rest say "Not in this build yet". The six file actions (Copy, Copy Path, Terminal, Move, Share and Float) and Settings work. CI checks all of it on Windows and macOS, and testing by hand on a real PC is next ([docs/TESTING.md](docs/TESTING.md)).
 
+## The Shortcuts wheel (Mac)
+
+Grape also has a wheel that needs no drag, on the Mac first. Press a key combination in any app (Control+Option+G by default) and a wheel of your own shortcuts opens at the pointer. A shortcut is a few steps run in order: press keys, type text, open an app, a file or a link, run a script, place a window. Each app can have its own menu.
+
+- It's **off until you turn it on** in Settings.
+- Opening the wheel needs no permission. macOS asks for **Accessibility** only when a shortcut presses keys, types or moves a window, the first time one does. Dragging files never needs it. Until Grape is signed with a Developer ID, that permission has to be given again after each update.
+- **Scripts and links are your own.** Grape runs only what you typed. It saves your shortcuts as plain text on your Mac, so don't put passwords in them.
+- **Grape itself still makes no network call.** A link step hands its URL to your browser. AI steps and an online library of shortcuts were left out because of the offline rule.
+
+It's built and its tests pass on Linux. Nobody has run it on a Mac yet, and it isn't on Windows ([docs/ROADMAP.md](docs/ROADMAP.md) → M10, [docs/DECISIONS.md](docs/DECISIONS.md) D47).
+
 ## Install
 
 ### Windows
@@ -95,7 +106,7 @@ A version tag (`vX.Y.Z`) runs the Release workflow. It checks that the tag match
 
 ## Offline, always
 
-Grape converts files on your own computer. Nothing is uploaded: no accounts, no telemetry, no remote configuration, and the conversion code never touches the network. The only network feature on the roadmap is an update check, and it will be opt-in.
+Grape converts files on your own computer. Nothing is uploaded: no accounts, no telemetry, no remote configuration, and the conversion code never touches the network. The only network feature on the roadmap is an update check, and it will be opt-in. The Shortcuts wheel doesn't change this (see "The Shortcuts wheel" above).
 
 The Windows installer is the one exception, and it isn't Grape: on a PC without Microsoft's WebView2 runtime, which Grape's windows use, it downloads WebView2 first. Windows 11 and current Windows 10 already have it.
 

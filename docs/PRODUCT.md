@@ -24,6 +24,17 @@ Each wheel opens when the user taps one modifier key mid-drag. Keys are remappab
 
 Full behavior is in `INTERACTION_SPEC.md`. Formats are in `FORMAT_MATRIX.md`, and tools and actions are in `TOOLS_AND_ACTIONS.md`.
 
+## The Shortcuts wheel (macOS first)
+
+Grape also has a fourth wheel, and it needs no drag (`DECISIONS.md` D47, ROADMAP M10). The user presses a key combination in any app (Control+Option+G by default) and a wheel of their own **shortcuts** opens at the pointer. A shortcut is a name, an icon and a few steps run in order: press keys, type text, open an app, a file or a link, run a script, place a window. An app can have its own menu, and the Everywhere menu covers the rest.
+
+- **Off until turned on.** The switch is in Settings, and an update never takes a key by itself.
+- **One permission, asked late.** Opening the wheel needs none. macOS asks for Accessibility only when a shortcut's step presses keys, types or moves a window, the first time one runs. Drags and the three wheels above never need it.
+- **Scripts and links are the user's own.** Grape runs only what the user typed, and keeps it as plain text on that Mac.
+- **Still offline.** Grape itself makes no network call. A link step hands its URL to the user's browser. AI steps and an online library of menus were left out because of that rule (golden rule 3).
+
+It's on the Mac first, by Maxwell's choice; Windows says so in Settings. Behavior is in `INTERACTION_SPEC.md` §12. It's modeled on the behavior of Radial as its website describes it (`RADIAL_FINDINGS.md`); the words, glyphs and copy are Grape's own. Tested on Linux only so far: nothing has run on a Mac.
+
 ## Parity target (Tangerine, as advertised and as observed in its demo)
 
 - **275** conversion pairs across 45 input formats. Verified by reproducing the demo's matrix; see `REA_FINDINGS.md`.

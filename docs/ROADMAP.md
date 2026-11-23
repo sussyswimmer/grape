@@ -136,6 +136,33 @@ Shared contract: the public API of `grape-core` (see `ARCHITECTURE.md`). Changes
 - [ ] Universal DMG, signed + notarized if a Developer ID is available (DECISIONS D4), otherwise unsigned with README instructions.
 - [ ] Release workflow builds Windows + macOS together from then on. *Status 2026-10-28:* built (D45). `release.yml`'s `build-macos` calls `macos-app.yml`, the same build and checks as CI's DMG, from the tag, and the draft gets `Grape-macOS-universal.dmg` with its line in `SHA256SUMS.txt`, next to the installer. It hasn't run yet; the first real tag tests it (`TESTING.md` → "Release, M9"). Until the Mac checks pass, the DMG comes off the draft before it's published.
 
+## M10: The Shortcuts wheel (lane A)
+A fourth wheel that needs no drag: a global hotkey opens it, and its segments are shortcuts the user made in Settings (DECISIONS D47; behavior in `INTERACTION_SPEC.md` §12; the code's contract in `docs/design/m10-shortcuts-wheel.md`; what was learned from Radial's website in `RADIAL_FINDINGS.md`). **macOS first**, by Maxwell's choice on 2026-11-23; Windows gets stubs now. `grape-core` doesn't change, so lane B has nothing to do here.
+- [ ] `grape-platform`: keys and chords (`keys.rs`), the portable entry points (`shortcuts.rs`), and on macOS Carbon hot keys, posted keys and typing, the 8 ms pointer poll, window moves through Accessibility, and the app and file pickers. Every entry point returns `Unsupported` on Windows and other systems. Scripted hot key and pointer twins in `mock.rs`. *(Built; check on a Mac.)*
+- [ ] The wheel: the hotkey (Control+Option+G by default) opens it at the pointer or mid-screen. Held → letting go picks what's highlighted. Tapped → it stays, and a click or Return picks. Esc closes it, groups open a second ring, the menu follows the app in front, and a drag always wins. *(Built; check on a Mac.)*
+- [ ] The overlay draws the new content kind: a title, an emoji or one of Grape's 24 glyphs, a mark on groups, the trail's name in the center, and "No shortcuts here yet. Add some in Settings." *(Built; check on a Mac.)*
+- [ ] Steps, 15 kinds: press keys, type text (with `{date}`, `{time}` and `{clipboard}`), clipboard copy, paste and clear, open an app, a file or folder, or a link, run an Apple Shortcut, an AppleScript, a shell script or a Keyboard Maestro macro, place a window, a system control, a notice, speak, wait. One run at a time; the first failure stops it with a toast; Pause and Quit stop it. *(Built; check on a Mac.)*
+- [ ] `shortcuts.json`: its own file, loaded totally, saved atomically, moved aside when unreadable, with six starter shortcuts in memory until the first change. *(Built; check on a Mac.)*
+- [ ] The Settings section: the switch (off until turned on), the hotkey, where the wheel opens, a menu per app, shortcuts, groups and steps, and "Ask for access". *(Built; check on a Mac.)*
+- [ ] Accessibility asked on first use, and only by steps that press keys, type, copy, paste or move a window (D47's amendment to D7). Drags still need no permission. *(Built; check on a Mac.)*
+- [ ] AI steps. Not built: Grape itself would call the network (golden rule 3). Needs Maxwell's decision and a DECISIONS entry first.
+- [ ] An online library of ready-made menus. Not built, for the same reason.
+- [ ] Other ways to open the wheel: a screen corner, a shake of the pointer, a mouse button, a bare modifier key, an activation delay, a double press. Not built: one hotkey first; each needs its own detection that stays inside D7.
+- [ ] An app switcher with window previews. Not built: a feature of its own, and pictures of other apps' windows need the Screen Recording permission.
+- [ ] Screen effects and multi-window layouts as steps. Not built: later, by demand. A Window step places one window.
+- [ ] Appearance options: shape, size, labels under icons, animation speed. Not built: the ring is the drag wheels' own (`INTERACTION_SPEC.md` §4), and only where it opens is a setting.
+- [ ] App icons, system symbols and the user's own images as icons. Not built: emoji and Grape's own glyphs only (the UI's clean-room rule has no SF Symbols; images would have to reach the page).
+- [ ] Preset files, to save and share menus. Not built: a file from someone else holds scripts, so opening one needs a screen that shows what it would run.
+- [ ] Media keys. Not built: they aren't ordinary key codes; later.
+- [ ] A keydown recorder for chords. Not built: the webview can't see a chord Carbon already took, and Command+W would close the window. Settings has four checkboxes and a list of keys.
+- [ ] A check against the system's own shortcuts. Not built: Carbon almost never refuses a chord something else has, so Grape can't tell from the bind; later.
+- [ ] Moving a shortcut into or out of a group in Settings. Not built: remove and add for now.
+- [ ] The Shortcuts wheel on Windows. Not built: macOS first (D47). Settings there says "The Shortcuts wheel is on the Mac first. It isn't on this computer yet."
+
+**Accept:** on a Mac, turn the wheel on in Settings and press Control+Option+G in another app → the wheel opens at the pointer and that app keeps the keyboard. Open Mission Control from it without any permission. Make a shortcut that types a line of text → after Accessibility is granted once, it types into the app that was in front. Esc always closes the wheel, and with the wheel on, a file drag opens the three drag wheels as before.
+
+*Status 2026-11-23:* built for macOS (D47), with stubs on Windows. Tested on Linux only: `cargo test -p grape-platform` (160) and `cargo test -p grape --lib` (587) for the pure parts (keys, the Mac rules, the model, the store, the session, the controller, the runner), clippy for Linux with cross-checks for the Mac and Windows targets, and the UI's typecheck and Vitest suite (1905). CI's macOS jobs link the Carbon and Accessibility declarations and run the Mac-only tests; they haven't run on this yet. Nothing has run on a Mac or the PC: `TESTING.md` → "Shortcuts wheel, M10".
+
 ## v2 (after both ship)
 Documents, spreadsheets, slides and PDF → office formats, plus all panel/editor tools from `TOOLS_AND_ACTIONS.md`, OCR for scanned PDFs, file promises on macOS, and multi-part RAR archives (D27: piping every volume into bsdtar in order works). Order by user demand.
 
